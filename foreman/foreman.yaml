@@ -1,0 +1,98 @@
+# Foreman configuration. Any field omitted here falls back to the built-in
+# defaults in src/config.ts. This file is read from the *project* directory
+# passed to `foreman start`, so each project can tune its own policy.
+
+permissions:
+  # Bash commands are auto-approved only when EVERY segment (split on && || ; |)
+  # starts with one of these prefixes.
+  allowBash:
+    - npm test
+    - npm run
+    - npm install
+    - npm ci
+    - npx tsc
+    - "node "
+    - "pnpm "
+    - "yarn "
+    - git status
+    - git diff
+    - git add
+    - git commit
+    - git log
+    - git branch
+    - git checkout
+    - git restore
+    - git stash
+    - ls
+    - "cat "
+    - "mkdir "
+    - foreman tickets
+    - pytest
+    - "python "
+    - "python3 "
+    - "make "
+    - "cargo "
+    - go test
+    - go build
+
+  # If a command contains any of these substrings it always escalates,
+  # regardless of the allow list.
+  escalateBash:
+    - rm -rf
+    - rm -r
+    - sudo
+    - git push
+    - git reset --hard
+    - git clean
+    - curl
+    - wget
+    - ssh
+    - scp
+    - docker
+    - kubectl
+    - chmod 777
+    - "> /dev"
+    - ":(){"
+    - mkfs
+    - "dd if="
+
+  # Non-Bash tools auto-approved (file writes are still confined to the worktree).
+  allowTools:
+    - Read
+    - Glob
+    - Grep
+    - Edit
+    - Write
+    - MultiEdit
+    - NotebookEdit
+    - TodoWrite
+
+  # Tools that always escalate (e.g. network access).
+  escalateTools:
+    - WebFetch
+    - WebSearch
+
+notifications:
+  # When enabled, a desktop notification fires whenever the builder emits
+  # STEP_STATUS: needs_input — useful if you've walked away and need a nudge
+  # to come back to the terminal to answer.
+  #
+  # Platform support:
+  #   macOS   — built-in (osascript)
+  #   Linux   — requires notify-send (libnotify)
+  #   WSL     — Windows toast via powershell.exe (no install required)
+  #
+  # Default: false. Set to true to enable.
+  enabled: false
+
+qa:
+  # After every STEP_STATUS: done (and plan_complete), foreman runs a free QA
+  # pass: the builder triple-checks accuracy, test existence, test execution,
+  # ticket satisfaction, and confidence. If QA reports issues, foreman drives
+  # a fix → re-QA cycle until the builder emits qa_pass (capped at 3 cycles).
+  # QA turns do NOT count against --steps.
+  #
+  # The CLI flag --no-qa overrides this per-run.
+  #
+  # Default: true.
+  enabled: true

@@ -1,0 +1,70 @@
+/**
+ * Agent-agnostic interface over a coding agent ("builder").
+ */
+
+/** A permission request surfaced by a builder before it runs a tool. */
+export interface PermissionRequest {
+  toolName: string;
+  input: Record<string, unknown>;
+  /** Human-readable prompt from the agent, when available. */
+  title?: string;
+}
+
+/** The foreman's verdict on a permission request. */
+export type PermissionDecision =
+  | { behavior: "allow" }
+  | { behavior: "deny"; message: string };
+
+/** Decides each permission request. Supplied by the foreman, called by the adapter. */
+export type PermissionHandler = (
+  req: PermissionRequest,
+) => Promise<PermissionDecision>;
+
+/** Result of a single completed turn. */
+export interface TurnResult {
+  /** Final assistant message text — where the STEP_STATUS marker lives. */
+  text: string;
+  isError: boolean;
+  numTurns: number;
+  costUsd: number;
+}
+
+/** Observability events emitted while a builder works. */
+export type BuilderEvent =
+  | { kind: "text"; text: string }
+  | { kind: "tool"; name: string; input: unknown }
+  | { kind: "turn-complete"; result: TurnResult }
+  | { kind: "error"; message: string };
+
+export type EffortLevel = "low" | "medium" | "high" | "xhigh";
+
+export interface BuilderAdapterOptions {
+  /** Working directory the builder operates in. */
+  cwd: string;
+  /** Permission decision callback. */
+  permission: PermissionHandler;
+  /** Resume a prior session instead of starting fresh. */
+  resumeSessionId?: string;
+  /** Override the model; omit for the agent's default. */
+  model?: string;
+  /** Reasoning effort level. Claude also accepts "max"; Codex supports up to "xhigh". */
+  effort?: EffortLevel;
+  /** Fast mode: lower latency at the cost of some quality. */
+  fast?: boolean;
+}
+
+export interface BuilderAdapter {
+  readonly agent: "claude" | "codex";
+
+  /** Send one instruction; resolves when that turn completes. */
+  sendTurn(text: string): Promise<TurnResult>;
+
+  /** Current session id, once known — used for resume. */
+  sessionId(): string | undefined;
+
+  /** Stream of observability events. Iterate to drive a live view. */
+  events(): AsyncIterable<BuilderEvent>;
+
+  /** Shut the builder down and release resources. */
+  close(): Promise<void>;
+}

@@ -1,0 +1,7 @@
+{"ts":"2026-05-22T16:29:50.492Z","event":"batch-start","requested":3,"agent":"claude"}
+{"ts":"2026-05-22T16:30:00.732Z","event":"permission","tool":"Read","decision":"allow","reason":"Read is allow-listed"}
+{"ts":"2026-05-22T16:30:00.733Z","event":"permission","tool":"Bash","decision":"allow","reason":"every command segment is allow-listed"}
+{"ts":"2026-05-22T16:30:05.417Z","event":"permission","tool":"Read","decision":"allow","reason":"Read is allow-listed"}
+{"ts":"2026-05-22T16:30:17.117Z","event":"permission","tool":"Write","decision":"allow","reason":"Write inside the worktree"}
+{"ts":"2026-05-22T16:30:26.876Z","event":"step","index":1,"statusKind":"blocked","reason":"The Write tool (and Bash/Read) are denied by foreman policy with a ZodError permission failure. Cannot create hello.txt without file-write access.","costUsd":0.11523920000000001,"isError":false}
+{"ts":"2026-05-22T16:30:26.876Z","event":"batch-end","completed":0,"requested":3,"outcome":"blocked","detail":"The Write tool (and Bash/Read) are denied by foreman policy with a ZodError permission failure. Cannot create hello.txt without file-write access."}
