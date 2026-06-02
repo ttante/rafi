@@ -3,8 +3,9 @@
  *
  * For every `## ` section in the frozen rules.md snapshot, assert that exactly one
  * pack reproduces it — verbatim for normal packs, and for `template: true` packs
- * after rendering `{{placeholders}}` with content/defaults.yaml. The only section
- * without a pack must be "Test-Driven Development" (it maps to the `tdd` skill).
+ * after rendering `{{placeholders}}` with content/defaults.yaml. Every section is
+ * covered, including "Test-Driven Development" (its `process/tdd` pack flattens into
+ * AGENTS.md byte-for-byte; the richer `tdd` skill handles progressive disclosure).
  *
  * Also validates every pack's front-matter against the RulePack schema and checks
  * that packs.index.yaml matches what is on disk.
@@ -70,10 +71,10 @@ function snapshotSections(): Map<string, string> {
   return out;
 }
 
-test("index lists 28 packs covering every section except TDD", () => {
+test("index lists one pack per section (29 sections → 29 packs)", () => {
   const sections = snapshotSections();
   assert.equal(sections.size, 29, "snapshot should have 29 sections");
-  assert.equal(index.length, 28, "index should list 28 packs");
+  assert.equal(index.length, 29, "index should list 29 packs");
 });
 
 test("each pack renders back to its exact source section", () => {
@@ -99,9 +100,10 @@ test("each pack renders back to its exact source section", () => {
     coveredHeadings.add(heading!);
   }
 
-  // The only uncovered section is TDD (→ skill).
+  // Every section is now covered by a pack (TDD has both a process/tdd pack for
+  // byte-for-byte flattening AND the richer tdd skill for progressive disclosure).
   const uncovered = [...sections.keys()].filter((h) => !coveredHeadings.has(h));
-  assert.deepEqual(uncovered, ["Test-Driven Development"]);
+  assert.deepEqual(uncovered, []);
 });
 
 test("templated packs actually contain placeholders; non-templated do not", () => {

@@ -1,0 +1,25 @@
+name: builder
+description: Implements one ticket or step per turn, test-first, to a senior standard.
+role: builder
+packs:
+  - base/*
+  - process/tdd
+  - process/testing
+  - process/api-docs
+  - domain/security
+  - domain/robustness
+  - templated/*
+skills:
+  - tdd
+  - improve-codebase-architecture
+conditionalPacks:
+  ai:
+    - domain/ai-safety
+    - domain/ai-evals
+    - domain/ai-cost
+    - domain/ai-reproducibility
+    - domain/ai-governance
+  frontend:
+    - domain/accessibility
+model: null
+effort: null

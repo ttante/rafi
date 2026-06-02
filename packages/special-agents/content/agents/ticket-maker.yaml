@@ -1,0 +1,11 @@
+name: ticket-maker
+description: Populates the ticket backlog with well-formed tickets (ID, value, acceptance criteria, test expectations); asks the user for format/style preferences.
+role: ticket-maker
+packs:
+  - base/*
+  - process/tickets
+  - process/project-docs
+  - process/architecture
+skills: []
+model: null
+effort: null

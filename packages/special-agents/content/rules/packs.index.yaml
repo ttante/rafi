@@ -31,6 +31,12 @@ packs:
     template: false
     supersededByForeman: true
     order: 5000
+  - name: tdd
+    category: process
+    path: process/tdd.md
+    condition: always
+    template: false
+    order: 6000
   - name: testing
     category: process
     path: process/testing.md

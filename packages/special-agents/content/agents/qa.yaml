@@ -1,0 +1,16 @@
+name: qa
+description: Reviews the just-completed ticket or step for accuracy, tests, and security. Skeptical, not a rubber stamp.
+role: qa
+packs:
+  - base/*
+  - process/tdd
+  - process/testing
+  - domain/security
+skills:
+  - grill-me
+  - tdd
+conditionalPacks:
+  frontend:
+    - domain/accessibility
+model: null
+effort: null

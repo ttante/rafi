@@ -1,8 +1,50 @@
 /**
- * special-agents — the Rafi library. Re-exports the neutral schema and (in later
- * phases) the composition API (getAgent, getSkill, compile).
+ * special-agents — the Rafi library. Re-exports the neutral schema, the templating
+ * engine, and the content loaders. The higher-level composition API (getAgent,
+ * getSkill, compile) is layered on these in the rest of Phase 3.
  */
 export * from "rafi-spec";
-
-/** Absolute path helpers for the bundled content directory are added in Phase 3. */
-export const CONTENT_DIR = "content";
+export { render, type TemplateContext } from "./template.js";
+export {
+  CONTENT_DIR,
+  parseRulePack,
+  loadDefaults,
+  loadPreamble,
+  loadPacksIndex,
+  loadPack,
+  loadAllPacks,
+  packFilesOnDisk,
+  type Defaults,
+  type PackIndexEntry,
+  type LoadedPack,
+} from "./content.js";
+export {
+  composeRulesMarkdown,
+  composeAgentSystem,
+  getAgent,
+  renderPackBody,
+  type CompileOptions,
+  type AgentComposeOptions,
+  type ComposedAgent,
+} from "./compile.js";
+export {
+  resolvePackRefs,
+  resolveAgentPacks,
+  type ConditionFlags,
+  type ResolveContext,
+  type ResolvableManifest,
+} from "./resolve.js";
+export {
+  SKILLS_DIR,
+  parseSkillManifest,
+  loadSkill,
+  loadAllSkills,
+  skillNames,
+} from "./skills.js";
+export {
+  AGENTS_DIR,
+  AGENT_ROLES,
+  parseAgentManifest,
+  loadAgent,
+  loadAllAgents,
+} from "./agents.js";

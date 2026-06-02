@@ -1,0 +1,13 @@
+name: planner
+description: Plans the next N tickets or steps before any implementation. Outputs an ordered list, implements nothing.
+role: planner
+packs:
+  - base/*
+  - process/architecture
+  - process/tickets
+  - process/project-docs
+skills:
+  - write-a-prd
+  - prd-to-issues
+model: null
+effort: null

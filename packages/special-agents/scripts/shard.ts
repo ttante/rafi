@@ -1,24 +1,26 @@
 /**
- * One-time-ish generator: shard the frozen rules.md snapshot into rule packs
- * under content/rules/<category>/<name>.md (verbatim bodies + front-matter) and
- * write content/rules/packs.index.yaml.
+ * Shard the frozen rules.md snapshot into rule packs under
+ * content/rules/<category>/<name>.md (verbatim bodies + front-matter) and the
+ * registry content/rules/packs.index.yaml.
+ *
+ * The generator is split into a pure function {@link shard} (snapshot text in →
+ * file contents out, no I/O) and a thin {@link main} that reads the snapshot and
+ * writes the result. The pure split lets tests assert the on-disk packs reproduce
+ * exactly what the generator would emit, without touching the filesystem.
  *
  * Re-runnable and deterministic. Bodies are sliced contiguously from the snapshot,
  * so concatenating them (in index order) reproduces the source exactly — except
  * the three `template: true` packs, where literal stack values are swapped for
  * `{{placeholders}}` that render back to the originals via content/defaults.yaml.
  *
- * The "Test-Driven Development" section is intentionally NOT a pack — it maps to
- * the existing `tdd` skill.
+ * Every section maps to a pack. "Test-Driven Development" gets a `process/tdd` pack
+ * (so it flattens into AGENTS.md byte-for-byte for Codex) in addition to the richer
+ * standalone `tdd` skill that Claude lazy-loads. A `null` MAP value would drop a
+ * section from the packs; none currently do.
  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const PKG = join(HERE, "..");
-const SNAPSHOT = join(PKG, "test/fixtures/rules.snapshot.md");
-const RULES_DIR = join(PKG, "content/rules");
 
 type Sub = [from: string, to: string];
 interface Meta {
@@ -83,12 +85,11 @@ const MAP: Record<string, Meta | null> = {
   "AI Reproducibility, Replayability, And Prompt Tuning": { dir: "domain", name: "ai-reproducibility", condition: "ai", description: "Replayability, prompt versioning, and prompt tuning." },
   "AI Cost Tracking And Learning Loop": { dir: "domain", name: "ai-cost", condition: "ai", description: "AI cost tracking and the correction/learning loop." },
 
-  "Test-Driven Development": null, // → tdd skill, not a pack
+  "Test-Driven Development": { dir: "process", name: "tdd", condition: "always", description: "Test-driven development discipline: identify behavior, write tests first, then minimal code." },
 };
 
-const text = readFileSync(SNAPSHOT, "utf8");
-const headingRe = /^## (.+)$/gm;
-const matches = [...text.matchAll(headingRe)];
+/** Expected number of packs emitted (one per section of the snapshot). */
+export const EXPECTED_PACK_COUNT = 29;
 
 interface IndexEntry {
   name: string;
@@ -99,74 +100,127 @@ interface IndexEntry {
   supersededByForeman?: boolean;
   order: number;
 }
-const index: IndexEntry[] = [];
-let order = 0;
-let written = 0;
-const seenNames = new Set<string>();
 
-for (let i = 0; i < matches.length; i++) {
-  const heading = matches[i][1];
-  const start = matches[i].index!;
-  const end = i + 1 < matches.length ? matches[i + 1].index! : text.length;
-  const chunk = text.slice(start, end); // contiguous: "## Heading\n...\n" through just before next heading
+/** A single generated pack file: path relative to content/rules + full contents. */
+export interface ShardedFile {
+  /** e.g. `base/core.md` */
+  path: string;
+  /** Full file contents (front-matter + body). */
+  content: string;
+}
 
-  if (!(heading in MAP)) throw new Error(`Unmapped section heading: ${JSON.stringify(heading)}`);
-  const meta = MAP[heading];
-  order += 1000;
-  if (meta === null) continue; // TDD → skill
+export interface ShardResult {
+  /** Pack files in source order. */
+  files: ShardedFile[];
+  /** The rendered packs.index.yaml contents (trailing newline included). */
+  indexYaml: string;
+  /** The document preamble: everything before the first `## ` heading. */
+  preamble: string;
+}
 
-  if (seenNames.has(meta.name)) throw new Error(`Duplicate pack name: ${meta.name}`);
-  seenNames.add(meta.name);
+/**
+ * Pure transform: snapshot markdown → pack files + index. No filesystem access, so
+ * it is safe to call from tests and is byte-for-byte deterministic for a given input.
+ */
+export function shard(snapshotText: string): ShardResult {
+  const matches = [...snapshotText.matchAll(/^## (.+)$/gm)];
+  if (matches.length === 0) throw new Error("snapshot has no `## ` sections");
 
-  let body = chunk;
-  for (const [from, to] of meta.subs ?? []) {
-    if (!body.includes(from)) throw new Error(`Sub not found in ${meta.name}: ${JSON.stringify(from)}`);
-    body = body.replace(from, to);
+  // Everything before the first heading is the doc preamble (the "@AGENTS.md"
+  // header). It belongs to no pack but is needed to reproduce AGENTS.md.
+  const preamble = snapshotText.slice(0, matches[0].index!);
+
+  const index: IndexEntry[] = [];
+  const files: ShardedFile[] = [];
+  let order = 0;
+  const seenNames = new Set<string>();
+
+  for (let i = 0; i < matches.length; i++) {
+    const heading = matches[i][1];
+    const start = matches[i].index!;
+    const end = i + 1 < matches.length ? matches[i + 1].index! : snapshotText.length;
+    const chunk = snapshotText.slice(start, end); // contiguous: "## Heading\n...\n" through just before next heading
+
+    if (!(heading in MAP)) throw new Error(`Unmapped section heading: ${JSON.stringify(heading)}`);
+    const meta = MAP[heading];
+    order += 1000;
+    if (meta === null) continue; // TDD → skill
+
+    if (seenNames.has(meta.name)) throw new Error(`Duplicate pack name: ${meta.name}`);
+    seenNames.add(meta.name);
+
+    let body = chunk;
+    for (const [from, to] of meta.subs ?? []) {
+      if (!body.includes(from)) throw new Error(`Sub not found in ${meta.name}: ${JSON.stringify(from)}`);
+      body = body.replace(from, to);
+    }
+
+    const fm: string[] = [
+      "---",
+      `name: ${meta.name}`,
+      `category: ${meta.dir}`,
+      `description: ${JSON.stringify(meta.description)}`,
+      `condition: ${meta.condition}`,
+      `template: ${meta.template ? "true" : "false"}`,
+    ];
+    if (meta.supersededByForeman) fm.push("supersededByForeman: true");
+    fm.push("---", "");
+
+    const relPath = `${meta.dir}/${meta.name}.md`;
+    files.push({ path: relPath, content: fm.join("\n") + body });
+
+    index.push({
+      name: meta.name,
+      category: meta.dir,
+      path: relPath,
+      condition: meta.condition,
+      template: Boolean(meta.template),
+      ...(meta.supersededByForeman ? { supersededByForeman: true } : {}),
+      order,
+    });
   }
 
-  const fm: string[] = [
-    "---",
-    `name: ${meta.name}`,
-    `category: ${meta.dir}`,
-    `description: ${JSON.stringify(meta.description)}`,
-    `condition: ${meta.condition}`,
-    `template: ${meta.template ? "true" : "false"}`,
+  if (files.length !== EXPECTED_PACK_COUNT) {
+    throw new Error(`Expected ${EXPECTED_PACK_COUNT} packs, produced ${files.length}`);
+  }
+
+  // packs.index.yaml (hand-emitted for stable, readable output)
+  const indexLines: string[] = [
+    "# Generated by scripts/shard.ts — registry of rule packs in source order.",
+    "packs:",
   ];
-  if (meta.supersededByForeman) fm.push("supersededByForeman: true");
-  fm.push("---", "");
+  for (const e of index) {
+    indexLines.push(`  - name: ${e.name}`);
+    indexLines.push(`    category: ${e.category}`);
+    indexLines.push(`    path: ${e.path}`);
+    indexLines.push(`    condition: ${e.condition}`);
+    indexLines.push(`    template: ${e.template}`);
+    if (e.supersededByForeman) indexLines.push(`    supersededByForeman: true`);
+    indexLines.push(`    order: ${e.order}`);
+  }
 
-  const relPath = `${meta.dir}/${meta.name}.md`;
-  const outPath = join(RULES_DIR, relPath);
-  mkdirSync(dirname(outPath), { recursive: true });
-  writeFileSync(outPath, fm.join("\n") + body);
-  written += 1;
-
-  index.push({
-    name: meta.name,
-    category: meta.dir,
-    path: relPath,
-    condition: meta.condition,
-    template: Boolean(meta.template),
-    ...(meta.supersededByForeman ? { supersededByForeman: true } : {}),
-    order,
-  });
+  return { files, indexYaml: indexLines.join("\n") + "\n", preamble };
 }
 
-// packs.index.yaml (hand-emitted for stable, readable output)
-const indexLines: string[] = [
-  "# Generated by scripts/shard.ts — registry of rule packs in source order.",
-  "packs:",
-];
-for (const e of index) {
-  indexLines.push(`  - name: ${e.name}`);
-  indexLines.push(`    category: ${e.category}`);
-  indexLines.push(`    path: ${e.path}`);
-  indexLines.push(`    condition: ${e.condition}`);
-  indexLines.push(`    template: ${e.template}`);
-  if (e.supersededByForeman) indexLines.push(`    supersededByForeman: true`);
-  indexLines.push(`    order: ${e.order}`);
-}
-writeFileSync(join(RULES_DIR, "packs.index.yaml"), indexLines.join("\n") + "\n");
+/** Read the snapshot, shard it, and write packs + index to content/rules. */
+function main(): void {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pkg = join(here, "..");
+  const snapshot = join(pkg, "test/fixtures/rules.snapshot.md");
+  const rulesDir = join(pkg, "content/rules");
 
-console.log(`Wrote ${written} packs (+ packs.index.yaml). TDD section mapped to skill.`);
-if (written !== 28) throw new Error(`Expected 28 packs, wrote ${written}`);
+  const { files, indexYaml, preamble } = shard(readFileSync(snapshot, "utf8"));
+  for (const f of files) {
+    const outPath = join(rulesDir, f.path);
+    mkdirSync(dirname(outPath), { recursive: true });
+    writeFileSync(outPath, f.content);
+  }
+  writeFileSync(join(rulesDir, "packs.index.yaml"), indexYaml);
+  writeFileSync(join(pkg, "content/preamble.md"), preamble);
+  console.log(`Wrote ${files.length} packs (+ packs.index.yaml, preamble.md).`);
+}
+
+// Run only when invoked directly (e.g. `tsx scripts/shard.ts`), not when imported by tests.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
