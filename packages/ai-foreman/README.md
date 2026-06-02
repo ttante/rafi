@@ -515,7 +515,7 @@ Package output:
 
 - **`special-agents`** — library (rules + skills + agents + composition)
 - **`ai-foreman`** — this runtime
-- **`@rafi/cli`** — CLI for `rafi create` and `rafi compile`
+- **`@rafi-ai/cli`** — CLI for `rafi create` and `rafi compile`
 
 
 

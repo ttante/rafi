@@ -66,4 +66,4 @@ content/
 
 - **`special-agents`** — this library
 - **`ai-foreman`** — runtime that drives agents through a ticket loop
-- **`@rafi/cli`** — CLI for `rafi create` and `rafi compile`
+- **`@rafi-ai/cli`** — CLI for `rafi create` and `rafi compile`

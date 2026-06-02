@@ -1,4 +1,4 @@
-# @rafi/cli
+# @rafi-ai/cli
 
 Scaffold and compile AI agent configs for your repo.
 
@@ -7,7 +7,7 @@ Scaffold and compile AI agent configs for your repo.
 ## Install
 
 ```sh
-npm install -g @rafi/cli
+npm install -g @rafi-ai/cli
 ```
 
 ## Use
@@ -58,4 +58,4 @@ rafi compile ./my-repo --force
 
 - **`special-agents`** — library (rules + skills + agents + composition)
 - **`ai-foreman`** — runtime that drives agents through a ticket loop
-- **`@rafi/cli`** — this CLI
+- **`@rafi-ai/cli`** — this CLI

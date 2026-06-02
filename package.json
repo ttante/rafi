@@ -2,7 +2,7 @@
   "name": "rafi-monorepo",
   "version": "0.0.0",
   "private": true,
-  "description": "Rafi — Refined AI Framework & Implementor. Monorepo for special-agents (library), @rafi/cli, and ai-foreman (runtime).",
+  "description": "Rafi — Refined AI Framework & Implementor. Monorepo for special-agents (library), @rafi-ai/cli, and ai-foreman (runtime).",
   "type": "module",
   "engines": {
     "node": ">=20"

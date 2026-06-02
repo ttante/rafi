@@ -32,7 +32,7 @@ Rafi shines even brighter when building apps that leverage LLMs. Enable `usesAI`
 ## Install
 
 ```sh
-npm install -g @rafi/cli
+npm install -g @rafi-ai/cli
 ```
 
 ## Use
@@ -150,7 +150,7 @@ ai-foreman start ./my-repo --steps 5
 
 | Package | Install | Description |
 |---|---|---|
-| `@rafi/cli` | `npm install -g @rafi/cli` | `rafi create` / `rafi compile` — scaffold and compile |
+| `@rafi-ai/cli` | `npm install -g @rafi-ai/cli` | `rafi create` / `rafi compile` — scaffold and compile |
 | `special-agents` | `npm install special-agents` | Rules, skills, and agent library |
 | `ai-foreman` | `npm install -g ai-foreman` | Ticket-loop runtime |
 
@@ -159,7 +159,7 @@ ai-foreman start ./my-repo --steps 5
 ```
 packages/
   special-agents/   library (content + composition logic)
-  rafi/             @rafi/cli
+  rafi/             @rafi-ai/cli
   ai-foreman/       runtime
   spec/             internal schema (unpublished)
 examples/
