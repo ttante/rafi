@@ -14,6 +14,32 @@ import type {
 } from "./types.js";
 
 /**
+ * Pure function: build the `options` object passed to `query()`.
+ * Extracted so tests can assert on the shape without making a live SDK call.
+ * `canUseTool` is omitted here — it's a closure that the constructor adds.
+ */
+export function buildClaudeQueryOptions(
+  opts: Omit<BuilderAdapterOptions, "permission">,
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    cwd: opts.cwd,
+    model: opts.model,
+    resume: opts.resumeSessionId,
+    permissionMode: "acceptEdits",
+    effort: opts.effort,
+    extraArgs: opts.fast ? { fast: null } : undefined,
+  };
+  if (opts.systemPromptAppend) {
+    base.systemPrompt = { type: "preset", preset: "claude_code", append: opts.systemPromptAppend };
+  }
+  if (opts.skills !== undefined) {
+    base.skills = opts.skills;
+    base.settingSources = ["project"];
+  }
+  return base;
+}
+
+/**
  * Drives Claude Code through the Claude Agent SDK in streaming-input mode:
  * one persistent session, follow-up turns pushed as user messages, permission
  * requests routed to the foreman's handler via `canUseTool`.
@@ -37,13 +63,8 @@ export class ClaudeAdapter implements BuilderAdapter {
     this.query = query({
       prompt: this.inbox,
       options: {
-        cwd: opts.cwd,
-        model: opts.model,
-        resume: opts.resumeSessionId,
-        permissionMode: "acceptEdits",
+        ...buildClaudeQueryOptions(opts),
         abortController: this.abort,
-        effort: opts.effort,
-        extraArgs: opts.fast ? { fast: null } : undefined,
         canUseTool: async (
           toolName: string,
           input: Record<string, unknown>,

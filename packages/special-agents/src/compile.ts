@@ -9,6 +9,8 @@
  *
  * Per-role and lean-Claude emission build on this and the resolver (see resolve.ts).
  */
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { render } from "./template.js";
 import {
   loadAllPacks,
@@ -20,8 +22,8 @@ import {
   type LoadedPack,
 } from "./content.js";
 import { resolveAgentPacks, type ConditionFlags, type ResolvableManifest } from "./resolve.js";
-import { loadAgent } from "./agents.js";
-import type { AgentManifest, EffortLevel } from "rafi-spec";
+import { loadAgent, AGENT_ROLES } from "./agents.js";
+import type { AgentManifest, AgentRole, EffortLevel } from "rafi-spec";
 
 export interface CompileOptions {
   /** Stack/flags to render with. Defaults to the bundled `defaults.yaml`. */
@@ -99,4 +101,77 @@ export function getAgent(role: string, opts: AgentComposeOptions = {}): Composed
     model: manifest.model ?? null,
     effort: manifest.effort ?? null,
   };
+}
+
+/**
+ * Build the generated header comment that records which conditional pack groups
+ * are active. Written at the top of `AGENTS.md` and `CLAUDE.md` so the choice
+ * is never invisible.
+ */
+export function buildConditionsHeader(flags: {
+  usesAI: boolean;
+  hasFrontend: boolean;
+  runsInCloud: boolean;
+}): string {
+  return (
+    `# rafi: ai=${flags.usesAI ? "on" : "off"}` +
+    ` frontend=${flags.hasFrontend ? "on" : "off"}` +
+    ` cloud=${flags.runsInCloud ? "on" : "off"}\n`
+  );
+}
+
+/**
+ * Write `<targetDir>/AGENTS.md` — the flattened Codex rules document.
+ * Format: one-line conditions header + preamble + all packs rendered with defaults.
+ */
+export function emitAgentsMd(targetDir: string, opts: CompileOptions = {}): void {
+  const defaults = opts.defaults ?? loadDefaults();
+  const header = buildConditionsHeader(defaults.flags as { usesAI: boolean; hasFrontend: boolean; runsInCloud: boolean });
+  writeFileSync(join(targetDir, "AGENTS.md"), header + composeRulesMarkdown({ defaults }), "utf8");
+}
+
+/**
+ * Write `<targetDir>/CLAUDE.md` — the lean Claude entrypoint that imports `AGENTS.md`.
+ */
+export function emitClaudeMd(targetDir: string, opts: CompileOptions = {}): void {
+  const defaults = opts.defaults ?? loadDefaults();
+  const header = buildConditionsHeader(defaults.flags as { usesAI: boolean; hasFrontend: boolean; runsInCloud: boolean });
+  writeFileSync(join(targetDir, "CLAUDE.md"), header + "@AGENTS.md\n", "utf8");
+}
+
+export interface EmitOptions extends AgentComposeOptions {
+  /** Roles to emit. Defaults to all four. */
+  roles?: AgentRole[];
+}
+
+/**
+ * Write `.rafi/compiled/<role>/system.md` + `meta.json` for each role.
+ * Foreman's `roles.ts` reads these at runtime to load the composed bundle.
+ */
+export function emitCompiledBundles(targetDir: string, opts: EmitOptions = {}): void {
+  const roles = opts.roles ?? AGENT_ROLES;
+  for (const role of roles) {
+    const bundle = getAgent(role, opts);
+    const dir = join(targetDir, ".rafi", "compiled", role);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "system.md"), bundle.system, "utf8");
+    const meta = { skills: bundle.skills, model: bundle.model, effort: bundle.effort };
+    writeFileSync(join(dir, "meta.json"), JSON.stringify(meta, null, 2) + "\n", "utf8");
+  }
+}
+
+/**
+ * Write lean Claude subagent files to `<targetDir>/.claude/agents/<role>.md`.
+ * Each file has YAML front-matter (name, description) followed by the role's
+ * composed system text.
+ */
+export function emitClaudeAgents(targetDir: string, opts: EmitOptions = {}): void {
+  const roles = opts.roles ?? AGENT_ROLES;
+  const agentsDir = join(targetDir, ".claude", "agents");
+  mkdirSync(agentsDir, { recursive: true });
+  for (const role of roles) {
+    const bundle = getAgent(role, opts);
+    const frontMatter = `---\nname: ${bundle.manifest.name}\ndescription: ${bundle.manifest.description}\n---\n\n`;
+    writeFileSync(join(agentsDir, `${role}.md`), frontMatter + bundle.system, "utf8");
+  }
 }

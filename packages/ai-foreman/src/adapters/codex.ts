@@ -80,6 +80,17 @@ export class CodexAdapter implements BuilderAdapter {
 
   constructor(private readonly opts: BuilderAdapterOptions) {}
 
+  /**
+   * Prepend role system text to a turn instruction when `systemPromptAppend` is
+   * set. Codex reads everything from the prompt (no persistent system prompt), so
+   * role guidance must ride along with each turn.
+   */
+  buildInstruction(instruction: string): string {
+    return this.opts.systemPromptAppend
+      ? `${this.opts.systemPromptAppend}\n\n${instruction}`
+      : instruction;
+  }
+
   /** Build the `codex exec` argument list for the given instruction. */
   buildArgs(instruction: string): string[] {
     const args: string[] = ["exec", "--json", "--sandbox", "workspace-write", "-C", this.opts.cwd];
@@ -103,7 +114,7 @@ export class CodexAdapter implements BuilderAdapter {
   sendTurn(instruction: string): Promise<TurnResult> {
     if (this._closed) return Promise.reject(new Error("builder is closed"));
 
-    const args = this.buildArgs(instruction);
+    const args = this.buildArgs(this.buildInstruction(instruction));
     const textParts: string[] = [];
     const stderrChunks: Buffer[] = [];
 

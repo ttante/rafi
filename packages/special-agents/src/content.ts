@@ -84,6 +84,25 @@ export function loadAllPacks(): LoadedPack[] {
   }));
 }
 
+/** Absolute path to the bundled `content/docs/` directory. */
+export const DOCS_DIR = join(CONTENT_DIR, "docs");
+
+/** One entry from content/docs/docs.index.yaml. */
+export interface DocIndexEntry {
+  /** Path relative to content/docs/ (and will be placed under targetDir/docs/). */
+  path: string;
+  /** Copy gate: always | ai | frontend. */
+  gate: "always" | "ai" | "frontend";
+}
+
+/** Read content/docs/docs.index.yaml. */
+export function loadDocsIndex(): DocIndexEntry[] {
+  const parsed = parseYaml(readFileSync(join(DOCS_DIR, "docs.index.yaml"), "utf8")) as {
+    docs: DocIndexEntry[];
+  };
+  return parsed.docs;
+}
+
 /** Names of the pack files physically present under content/rules (for drift checks). */
 export function packFilesOnDisk(): string[] {
   const out: string[] = [];

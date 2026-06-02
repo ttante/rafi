@@ -15,6 +15,7 @@ import { buildTicketsCommand } from "./cli/tickets.js";
 import { printEvents } from "./cli/events.js";
 import { isTicketsInitialized } from "./tickets/config.js";
 import { cmdValidate } from "./tickets/commands.js";
+import { loadRoleBundle } from "./roles.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -98,6 +99,7 @@ program
     const log = new Log(logPath);
     const policy = new PermissionPolicy(config.permissions, cwd);
 
+    const roleBundle = loadRoleBundle("builder", { projectDir: cwd });
     const adapterOpts = {
       cwd,
       model: opts.model as string | undefined,
@@ -105,6 +107,8 @@ program
       permission: createPermissionHandler(policy, log),
       effort: opts.effort as EffortLevel | undefined,
       fast: opts.fast as boolean | undefined,
+      systemPromptAppend: roleBundle.system || undefined,
+      skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
     };
     const builder: BuilderAdapter =
       opts.agent === "codex"

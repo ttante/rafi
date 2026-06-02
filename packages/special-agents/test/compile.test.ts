@@ -1,12 +1,8 @@
 /**
  * Phase 3 — the golden gate. `composeRulesMarkdown()` rebuilds the flattened rules
  * doc (the Codex `AGENTS.md` form) from the bundled preamble + packs, rendering
- * templated packs with the defaults.
- *
- * The frozen snapshot is byte-identical to the original `aiTools/agent-files/AGENTS.md`
- * (verified out of band), so asserting `compose() === snapshot` is the byte-for-byte
- * reproduction gate — and it stays valid after `aiTools/` is deleted in Phase 7,
- * unlike a fixture that reaches outside the package.
+ * templated packs with the defaults. Asserting against the frozen snapshot fixture
+ * is the byte-for-byte reproduction gate.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -1,10 +1,11 @@
 {
-  "name": "special-agents",
+  "name": "@rafi/cli",
   "version": "0.0.0",
-  "description": "Rafi library: composable best-practice rules, skills, and agents for Claude Code and Codex.",
+  "description": "Rafi CLI — scaffold and compile AI framework configs for a target repo.",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "bin": {
+    "rafi": "./dist/index.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -13,7 +14,6 @@
   },
   "files": [
     "dist",
-    "content",
     "README.md"
   ],
   "scripts": {
@@ -25,7 +25,10 @@
     "node": ">=20"
   },
   "dependencies": {
+    "special-agents": "workspace:*",
     "rafi-spec": "workspace:*",
+    "@clack/prompts": "^1.4.0",
+    "commander": "^12.1.0",
     "yaml": "^2.5.1"
   },
   "devDependencies": {

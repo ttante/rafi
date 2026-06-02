@@ -32,11 +32,11 @@ Use these when the app includes LLMs, AI generation, model calls, AI-assisted de
 
 ## Usage
 
-The easiest path is the bootstrap script:
+The easiest path is the `rafi` CLI:
 
 ```sh
-/path/to/aiToolsShared/scripts/bootstrap-project.sh /path/to/new-repo
+rafi create /path/to/new-repo
 ```
 
-By default, the script skips files that already exist. Use `--force` only when you intentionally want to overwrite existing target files.
+By default, `rafi create` skips doc files that already exist. Use `--force` to overwrite existing files.
 

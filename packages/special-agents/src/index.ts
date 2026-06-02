@@ -7,8 +7,10 @@ export * from "rafi-spec";
 export { render, type TemplateContext } from "./template.js";
 export {
   CONTENT_DIR,
+  DOCS_DIR,
   parseRulePack,
   loadDefaults,
+  loadDocsIndex,
   loadPreamble,
   loadPacksIndex,
   loadPack,
@@ -17,15 +19,22 @@ export {
   type Defaults,
   type PackIndexEntry,
   type LoadedPack,
+  type DocIndexEntry,
 } from "./content.js";
 export {
   composeRulesMarkdown,
   composeAgentSystem,
   getAgent,
+  buildConditionsHeader,
+  emitAgentsMd,
+  emitClaudeMd,
+  emitCompiledBundles,
+  emitClaudeAgents,
   renderPackBody,
   type CompileOptions,
   type AgentComposeOptions,
   type ComposedAgent,
+  type EmitOptions,
 } from "./compile.js";
 export {
   resolvePackRefs,
