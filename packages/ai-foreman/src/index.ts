@@ -22,7 +22,7 @@ const PACKAGE_VERSION = JSON.parse(
 
 const program = new Command();
 program
-  .name("foreman")
+  .name("ai-foreman")
   .description("Keep Codex / Claude Code builders moving through their step list.")
   .version(PACKAGE_VERSION);
 
@@ -130,7 +130,7 @@ program
 
     try {
       // Pre-flight: builder lists the next N tickets or steps; user confirms before any step runs
-      console.log("foreman: asking builder to plan the next tickets or steps...\n");
+      console.log("ai-foreman: asking builder to plan the next tickets or steps...\n");
       await foreman.runPreflight(steps, ticketsContent);
 
       if (!opts.yes) {
@@ -146,7 +146,7 @@ program
           });
 
           if (isCancel(action) || action === "cancel") {
-            console.log("foreman: cancelled");
+            console.log("ai-foreman: cancelled");
             await builder.close();
             await viewer;
             process.exit(0);
@@ -161,7 +161,7 @@ program
             validate: (v) => (v?.trim() ? undefined : "Please enter some feedback"),
           });
           if (isCancel(fb)) {
-            console.log("foreman: cancelled");
+            console.log("ai-foreman: cancelled");
             await builder.close();
             await viewer;
             process.exit(0);
@@ -216,7 +216,7 @@ program
       console.log(`foreman: outcome — ${batchEnd.outcome} (${batchEnd.completed}/${batchEnd.requested})`);
       if (batchEnd.detail) console.log(`foreman: ${batchEnd.detail}`);
     } else {
-      console.log("foreman: run is still in progress or did not finish");
+      console.log("ai-foreman: run is still in progress or did not finish");
     }
     for (const esc of escalations) {
       console.log(`  escalated: ${esc.tool} — ${esc.reason}`);

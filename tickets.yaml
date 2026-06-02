@@ -1,0 +1,844 @@
+# Rafi implementation tickets — derived from PLAN.md.
+# Schema follows foreman's .tickets/tickets.yaml format (see foreman/README.md).
+# Status fields are intentionally absent (they live in ticket-state.sqlite once tracked).
+# Epics map to PLAN.md phases:
+#   E0 Monorepo (Phase 0) · E1 Spec (Phase 1) · E2 Library+Rules (Phase 2)
+#   E3 Composition (Phase 3) · E4 Agents+Skills (Phase 4) · E5 Runtime (Phase 5)
+#   E6 CLI/Scaffold (Phase 6) · E7 Cleanup/Publish (Phase 7)
+
+tickets:
+  # ───────────────────────────── E0 · Monorepo skeleton (no behavior change) ─────────────────────────────
+  - id: T001
+    order: 1000
+    title: Initialize pnpm workspace and repo root config
+    area: Monorepo
+    priority: P0
+    size: S
+    risk: Low
+    depends_on: []
+    summary: Add pnpm-workspace.yaml, a private root package.json with workspace scripts, root tsconfig base, and a consolidated root .gitignore.
+    acceptance:
+      - pnpm-workspace.yaml declares packages/* (and examples/* if used as workspaces).
+      - Root package.json is private:true with -r build/test/typecheck scripts.
+      - Root .gitignore ignores node_modules, dist, and .rafi/compiled.
+    required_tests:
+      - pnpm install resolves the workspace with no errors.
+    likely_files:
+      - pnpm-workspace.yaml
+      - package.json
+      - tsconfig.base.json
+      - .gitignore
+    rollback: null
+    notes: Pure scaffolding; no package moved yet.
+
+  - id: T002
+    order: 2000
+    title: Move foreman into packages/ai-foreman and dummy-project into examples/
+    area: Monorepo
+    priority: P0
+    size: M
+    risk: Medium
+    depends_on: [T001]
+    summary: git mv ./foreman to packages/ai-foreman and ./foreman/dummy-project to examples/dummy-project; fix relative paths, tsconfig references, and test fixtures broken by the move.
+    acceptance:
+      - packages/ai-foreman contains the former foreman package.
+      - examples/dummy-project exists and is referenced by tests/dev scripts at the new path.
+      - No source file references the old ./foreman/* paths.
+    required_tests:
+      - packages/ai-foreman build + test + typecheck pass at the new location.
+    likely_files:
+      - packages/ai-foreman/**
+      - examples/dummy-project/**
+      - packages/ai-foreman/tsconfig.json
+    rollback: git mv the directories back to ./foreman and ./foreman/dummy-project and revert path edits.
+    notes: Use git mv to preserve history.
+
+  - id: T003
+    order: 3000
+    title: Untrack build artifacts and consolidate native-build/lockfile at root
+    area: Monorepo
+    priority: P0
+    size: S
+    risk: Medium
+    depends_on: [T002]
+    summary: Remove any git-tracked node_modules/dist, move pnpm.onlyBuiltDependencies (better-sqlite3) to the root package.json, delete the per-package lockfile, and regenerate a single root lockfile.
+    acceptance:
+      - git ls-files shows no node_modules or dist entries.
+      - Root package.json carries pnpm.onlyBuiltDependencies including better-sqlite3.
+      - Exactly one pnpm-lock.yaml exists, at the repo root.
+    required_tests:
+      - Fresh pnpm install rebuilds better-sqlite3 successfully.
+      - ai-foreman test suite (which uses better-sqlite3) passes.
+    likely_files:
+      - .gitignore
+      - package.json
+      - pnpm-lock.yaml
+    rollback: Restore the per-package pnpm block and lockfile from git history.
+    notes: Verify tracking with `git ls-files | grep node_modules` before deleting.
+
+  - id: T004
+    order: 4000
+    title: Rename runtime package foreman-cli to ai-foreman (name + bin)
+    area: Runtime
+    priority: P0
+    size: S
+    risk: Medium
+    depends_on: [T002]
+    summary: In packages/ai-foreman/package.json set name=ai-foreman and bin={"ai-foreman":"./dist/index.js"}, bump version, keep files. Update README and any user-facing command strings from `foreman` to `ai-foreman`. Internal identifiers (Foreman class, foreman.ts, foreman.yaml) may stay.
+    acceptance:
+      - package.json name is ai-foreman with an ai-foreman bin.
+      - README and help/usage text invoke `ai-foreman` not `foreman`.
+      - Building and linking the package exposes an `ai-foreman` command.
+    required_tests:
+      - "`ai-foreman --help` prints usage after build+link."
+    likely_files:
+      - packages/ai-foreman/package.json
+      - packages/ai-foreman/README.md
+      - packages/ai-foreman/src/index.ts
+    rollback: Revert package.json name/bin and README to foreman-cli/foreman.
+    notes: npm publish + `npm deprecate foreman-cli` are deferred to T072. No behavior change.
+
+  - id: T005
+    order: 5000
+    title: Phase 0 gate — workspace parity verification
+    area: Monorepo
+    priority: P0
+    size: XS
+    risk: Low
+    depends_on: [T003, T004]
+    summary: Confirm the monorepo move and rename produced zero behavior change versus pre-move foreman.
+    acceptance:
+      - pnpm install is clean from a fresh checkout.
+      - pnpm -r build, test, and typecheck all pass.
+      - ai-foreman behaves identically to pre-move foreman on the dummy-project smoke run.
+    required_tests:
+      - pnpm -r build && pnpm -r test && pnpm -r typecheck green.
+      - ai-foreman start examples/dummy-project --steps 1 completes.
+    likely_files:
+      - packages/ai-foreman/**
+    rollback: null
+    notes: Verification-only ticket; blocks all later epics.
+
+  # ───────────────────────────── E1 · Spec package (internal) ─────────────────────────────
+  - id: T010
+    order: 10000
+    title: Define neutral schema TS types in spec package
+    area: Spec
+    priority: P0
+    size: M
+    risk: Low
+    depends_on: [T005]
+    summary: Create packages/spec with TS types for RulePack, SkillManifest (incl. optional pins and Codex inline-priority), AgentManifest (role/packs/skills/conditionalPacks/model/effort), and ProjectConfig (project.yaml).
+    acceptance:
+      - Types exist for RulePack, SkillManifest, AgentManifest, ProjectConfig.
+      - SkillManifest includes optional pins[] and a Codex inline-vs-reference priority field.
+      - AgentManifest supports pack globs, conditionalPacks (ai/frontend/cloud), and null model/effort.
+    required_tests:
+      - tsc typecheck of the spec package passes.
+    likely_files:
+      - packages/spec/package.json
+      - packages/spec/src/types.ts
+      - packages/spec/src/index.ts
+    rollback: null
+    notes: Internal package; not published. Bundled into special-agents later.
+
+  - id: T011
+    order: 11000
+    title: Add JSON Schemas + ajv validation and fixtures for spec
+    area: Spec
+    priority: P0
+    size: S
+    risk: Low
+    depends_on: [T010]
+    summary: Provide JSON Schema for each type, an ajv-based validate() helper (reuse ajv/ajv-formats already used by foreman), and one valid + one invalid fixture per type.
+    acceptance:
+      - validate() accepts each valid fixture and rejects each invalid fixture with a useful message.
+      - Schemas are exported for reuse by special-agents and ai-foreman.
+    required_tests:
+      - Unit tests covering valid + invalid fixtures for all four types.
+    likely_files:
+      - packages/spec/src/schemas/*.json
+      - packages/spec/src/validate.ts
+      - packages/spec/test/*.test.ts
+    rollback: null
+    notes: This is the contract both the library and runtime depend on.
+
+  # ───────────────────────────── E2 · special-agents library + rule shard ─────────────────────────────
+  - id: T020
+    order: 20000
+    title: Scaffold special-agents package skeleton
+    area: Library
+    priority: P0
+    size: S
+    risk: Low
+    depends_on: [T011]
+    summary: Create packages/special-agents with content/ (rules,skills,agents,docs), src/ (composition), build to dist/, package.json (files/exports for source + dist + JS API), and bundle spec at build.
+    acceptance:
+      - Directory layout matches PLAN §1 (content/src/dist).
+      - package.json exports the JS API entry and includes content/ + dist/ in files.
+      - Build inlines spec so special-agents has no runtime dep on the internal spec package.
+    required_tests:
+      - special-agents builds and a trivial exported function is importable.
+    likely_files:
+      - packages/special-agents/package.json
+      - packages/special-agents/tsconfig.json
+      - packages/special-agents/src/index.ts
+    rollback: null
+    notes: Empty content dirs are filled by later tickets.
+
+  - id: T021
+    order: 21000
+    title: Shard rules.md into verbatim rule packs (3a)
+    area: Library
+    priority: P0
+    size: M
+    risk: Medium
+    depends_on: [T020]
+    summary: Mechanically split each of the 29 rules.md sections into its own pack file under content/rules/{base,process,domain,templated}, bodies copied verbatim. TDD section maps to the existing skill, not a pack.
+    acceptance:
+      - 28 pack files exist across base(5)/process(9)/domain(11)/templated(3) per PLAN §3.
+      - Each pack body is byte-identical to its rules.md section (pre-templating).
+      - No rules.md content is dropped or duplicated.
+    required_tests:
+      - A concat-and-compare script shows every section body is present across the packs.
+    likely_files:
+      - packages/special-agents/content/rules/base/*.md
+      - packages/special-agents/content/rules/process/*.md
+      - packages/special-agents/content/rules/domain/*.md
+      - packages/special-agents/content/rules/templated/*.md
+    rollback: Delete content/rules/** and keep using rules.md until re-sharded.
+    notes: Pure cut; metadata + templating added in T022/T023.
+
+  - id: T022
+    order: 22000
+    title: Add pack front-matter and build packs.index.yaml
+    area: Library
+    priority: P0
+    size: M
+    risk: Low
+    depends_on: [T021]
+    summary: Add name/category/condition/template/supersededByForeman front-matter to each pack (security etc. always; accessibility=frontend; ai-* =ai; infra=cloud; tickets supersededByForeman=true) and generate the packs.index.yaml registry validated against the front-matter.
+    acceptance:
+      - Every pack has valid front-matter conforming to the RulePack schema.
+      - Conditions are set exactly per PLAN §3 table (frontend/ai/cloud/always).
+      - packs.index.yaml lists all packs and matches the front-matter (CI-checkable).
+    required_tests:
+      - Validation test asserts each pack parses and the index matches front-matter.
+    likely_files:
+      - packages/special-agents/content/rules/**/*.md
+      - packages/special-agents/content/rules/packs.index.yaml
+    rollback: Remove front-matter and index; revert to T021 state.
+    notes: Conditions are what gate the adoption/flag behavior later.
+
+  - id: T023
+    order: 23000
+    title: Template the stack packs and add defaults.yaml
+    area: Library
+    priority: P0
+    size: S
+    risk: Medium
+    depends_on: [T022]
+    summary: Replace hardcoded stack strings in templated/stack, templated/infra, templated/database with {{frontend}}/{{backend}}/{{database}}/{{cloud}}/{{packageManager}} and {{#if flag}} blocks; write content/defaults.yaml whose values equal today's hardcoded rules.md values.
+    acceptance:
+      - The 3 templated packs use placeholders + {{#if}} only (no other logic).
+      - defaults.yaml reproduces current values (React+TS, Node.js, PostgreSQL, AWS, pnpm; hasFrontend/usesAI/runsInCloud defaults).
+      - Rendering with defaults yields the original wording.
+    required_tests:
+      - Render-with-defaults test equals the original section text.
+    likely_files:
+      - packages/special-agents/content/rules/templated/*.md
+      - packages/special-agents/content/defaults.yaml
+    rollback: Inline the default strings back into the templated packs.
+    notes: usesAI default is false (AI packs excluded unless chosen).
+
+  - id: T024
+    order: 24000
+    title: Phase 2 gate — rule shard parity diff vs rules.md
+    area: Library
+    priority: P0
+    size: S
+    risk: Low
+    depends_on: [T023]
+    summary: Script concatenates all packs with defaults applied and all conditional flags on, then diffs against the original aiTools/rules.md; only intended placeholder/structure differences may remain.
+    acceptance:
+      - The diff contains only expected templating/structure changes, reviewed and recorded.
+      - No rule guidance is lost relative to rules.md.
+    required_tests:
+      - Parity script runs in CI and the curated diff is checked in for review.
+    likely_files:
+      - packages/special-agents/test/parity.test.ts
+      - packages/special-agents/content/**
+    rollback: null
+    notes: Original rules.md stays until T070 deletes it.
+
+  - id: T025
+    order: 25000
+    title: Move starter docs into the library
+    area: Library
+    priority: P1
+    size: XS
+    risk: Low
+    depends_on: [T020]
+    summary: Move aiTools/docs (19 templates incl. decisions/) into packages/special-agents/content/docs and add a small index of which docs are gated by hasFrontend/usesAI.
+    acceptance:
+      - content/docs contains all 19 templates + decisions/ subtree.
+      - An index marks ai.md/ai-evals.md/ai-costs.md as usesAI-gated.
+    required_tests:
+      - Presence test enumerates the expected doc files.
+    likely_files:
+      - packages/special-agents/content/docs/**
+    rollback: Restore docs to aiTools/docs.
+    notes: Consumed by rafi create doc scaffolding (T063).
+
+  # ───────────────────────────── E3 · Composition logic ─────────────────────────────
+  - id: T030
+    order: 30000
+    title: Implement pack/skill/agent loader and validator
+    area: Composition
+    priority: P0
+    size: M
+    risk: Low
+    depends_on: [T024, T025]
+    summary: In special-agents/src, load packs (front-matter+body), skills (SKILL.md), and agent manifests, validating all against spec schemas; surface clear errors for unknown pins/packs.
+    acceptance:
+      - Loader returns typed in-memory models for packs, skills, agents.
+      - Invalid references (missing pinned pack, unknown skill) fail with actionable errors.
+    required_tests:
+      - Unit tests for valid load and each failure mode.
+    likely_files:
+      - packages/special-agents/src/load.ts
+      - packages/special-agents/test/load.test.ts
+    rollback: null
+    notes: Foundation for resolution + emit.
+
+  - id: T031
+    order: 31000
+    title: Implement minimal templating pass
+    area: Composition
+    priority: P0
+    size: S
+    risk: Low
+    depends_on: [T030]
+    summary: Implement a tiny renderer supporting only {{var}} substitution (from stack) and {{#if flag}}...{{/if}} stripping (from flags); no other logic.
+    acceptance:
+      - "{{var}} resolves from ProjectConfig.stack; unknown vars error."
+      - "{{#if flag}} blocks are kept/removed per flags; nesting handled or explicitly disallowed."
+    required_tests:
+      - Unit tests for substitution, true/false flag blocks, and unknown-var error.
+    likely_files:
+      - packages/special-agents/src/template.ts
+      - packages/special-agents/test/template.test.ts
+    rollback: null
+    notes: Chosen over handlebars per PLAN decision.
+
+  - id: T032
+    order: 32000
+    title: Implement role resolution (compose packs+skills into a role bundle)
+    area: Composition
+    priority: P0
+    size: M
+    risk: Medium
+    depends_on: [T031]
+    summary: For a given agent manifest + ProjectConfig, expand pack globs and conditionalPacks (honoring conditions + supersededByForeman), order and concatenate rendered packs into the role system text, and collect the skill list.
+    acceptance:
+      - Resolution honors condition flags (frontend/ai/cloud) and drops supersededByForeman packs when foreman tracker is active.
+      - Pack order is deterministic and stable.
+      - Output is { systemText, skills, meta } per role.
+    required_tests:
+      - Unit tests with a fixture agent across flag combinations (ai on/off, frontend on/off).
+    likely_files:
+      - packages/special-agents/src/resolve.ts
+      - packages/special-agents/test/resolve.test.ts
+    rollback: Revert resolve.ts; the runtime falls back to hardcoded role prompts until resolution is fixed.
+    notes: Tested with a fixture agent; real role manifests land in T041.
+
+  - id: T033
+    order: 33000
+    title: Implement Claude target emitter
+    area: Composition
+    priority: P0
+    size: M
+    risk: Low
+    depends_on: [T032]
+    summary: Emit lean Claude config — copy skills to .claude/skills, write .claude/agents/<role>.md subagents, a CLAUDE.md, and .rafi/compiled/<role>/{system.md,meta.json} for runtime consumption.
+    acceptance:
+      - .claude/ output is lean (base always-on, specialized via skills) and valid for the Agent SDK.
+      - .rafi/compiled/<role>/system.md and meta.json (skills, model, effort) are written per role.
+    required_tests:
+      - Emit test asserts files/shape; a sample .claude/ is loadable by the SDK.
+    likely_files:
+      - packages/special-agents/src/emit/claude.ts
+      - packages/special-agents/test/emit-claude.test.ts
+    rollback: null
+    notes: Determinism (stable bytes, no timestamps) is required.
+
+  - id: T034
+    order: 34000
+    title: Implement Codex target emitter (flattened)
+    area: Composition
+    priority: P0
+    size: M
+    risk: Low
+    depends_on: [T032]
+    summary: Emit a single flattened AGENTS.md (base + all applicable packs inlined, honoring per-skill inline-vs-reference priority) plus per-role .rafi/compiled/<role>/system.md for per-turn injection.
+    acceptance:
+      - AGENTS.md inlines applicable pack bodies; low-priority skills become references.
+      - A generated header records conditional groups on/off (ai/frontend/cloud).
+      - Per-role system.md exists for runtime prompt injection.
+    required_tests:
+      - Emit test asserts inlining + header + per-role files.
+    likely_files:
+      - packages/special-agents/src/emit/codex.ts
+      - packages/special-agents/test/emit-codex.test.ts
+    rollback: null
+    notes: Header satisfies the AI-pack documentation requirement (also surfaced in T064).
+
+  - id: T035
+    order: 35000
+    title: Expose JS API and build prebuilt-default artifacts into dist
+    area: Composition
+    priority: P0
+    size: M
+    risk: Low
+    depends_on: [T033, T034]
+    summary: Expose getAgent/getSkill/compile from special-agents and, at library build time, render prebuilt-default .claude/ + AGENTS.md (using defaults.yaml) into dist for zero-config copy-in.
+    acceptance:
+      - getAgent('builder'), getSkill(name), and compile(projectConfig,targets) work.
+      - dist contains prebuilt-default .claude/ and AGENTS.md.
+      - package files include source content + dist.
+    required_tests:
+      - API unit tests; build produces the prebuilt artifacts.
+    likely_files:
+      - packages/special-agents/src/index.ts
+      - packages/special-agents/src/api.ts
+      - packages/special-agents/package.json
+    rollback: null
+    notes: Implements the ship-both decision.
+
+  - id: T036
+    order: 36000
+    title: Phase 3 gate — golden AGENTS.md reproduction + Claude load
+    area: Composition
+    priority: P0
+    size: S
+    risk: Low
+    depends_on: [T035]
+    summary: Prove the composition reproduces the existing aiTools/agent-files/AGENTS.md byte-for-byte (modulo intended templating) and that prebuilt .claude/ loads in a real Claude Code session.
+    acceptance:
+      - Golden test reproduces AGENTS.md within intended-diff tolerance.
+      - getAgent('builder') returns a composed bundle.
+      - Prebuilt .claude/ loads without error in Claude Code.
+    required_tests:
+      - Golden comparison test in CI.
+      - Manual Claude Code load recorded in the ticket evidence.
+    likely_files:
+      - packages/special-agents/test/golden.test.ts
+      - packages/special-agents/test/fixtures/AGENTS.golden.md
+    rollback: null
+    notes: Manual Claude load is the one non-CI check.
+
+  # ───────────────────────────── E4 · Agents + skills move ─────────────────────────────
+  - id: T040
+    order: 40000
+    title: Move skills into the library and add optional pins
+    area: Agents
+    priority: P0
+    size: S
+    risk: Low
+    depends_on: [T020]
+    summary: Move ./skills (tdd, grill-me, improve-codebase-architecture, prd-to-issues, write-a-prd, better-sqlite3-rebuild) into content/skills; delete the stray root .agents/skills/grill-me duplicate; add optional pins + Codex priority to skills where useful.
+    acceptance:
+      - All existing skills live under content/skills with unchanged SKILL.md format.
+      - Stray root .agents/skills/grill-me is removed.
+      - tdd pins code-quality (and any other appropriate pins) without breaking standalone use.
+    required_tests:
+      - Skill load test enumerates all moved skills and validates front-matter.
+    likely_files:
+      - packages/special-agents/content/skills/**
+    rollback: Restore skills/ to repo root.
+    notes: Skills remain usable standalone (pins are enrichment only).
+
+  - id: T041
+    order: 41000
+    title: Author role manifests (builder, qa, planner, ticket-maker)
+    area: Agents
+    priority: P0
+    size: M
+    risk: Medium
+    depends_on: [T032, T040]
+    summary: Write content/agents/{builder,qa,planner,ticket-maker}.yaml whose composed output reproduces today's hardcoded foreman prose, using pinned packs + skills + conditionalPacks per PLAN §4.
+    acceptance:
+      - Four role manifests validate against AgentManifest.
+      - Composed builder/qa/planner content is a superset of the current foreman prompt prose for that turn-type.
+      - conditionalPacks.ai adds the five ai-* packs to builder + qa when usesAI.
+    required_tests:
+      - Resolution snapshot test per role; manual diff vs current foreman prose.
+    likely_files:
+      - packages/special-agents/content/agents/builder.yaml
+      - packages/special-agents/content/agents/qa.yaml
+      - packages/special-agents/content/agents/planner.yaml
+      - packages/special-agents/content/agents/ticket-maker.yaml
+    rollback: Remove manifests; runtime falls back to hardcoded strings (T051).
+    notes: Marker spec/STEP_STATUS text stays in the runtime, not in manifests.
+
+  - id: T042
+    order: 42000
+    title: Define ticket-maker role guidance for tickets populate
+    area: Agents
+    priority: P1
+    size: S
+    risk: Low
+    depends_on: [T041]
+    summary: Flesh out the ticket-maker role so `ai-foreman tickets populate` runs with ticket-writing guidance (multi-format input, ask-the-user-for-style, foreman ticket schema) instead of the generic builder prompt.
+    acceptance:
+      - ticket-maker composes ticket/process/architecture packs and produces guidance covering multi-format conversion and style questions.
+      - Guidance references foreman's ticket schema fields.
+    required_tests:
+      - Resolution test asserts ticket-maker system text includes the multi-format + ask-style guidance.
+    likely_files:
+      - packages/special-agents/content/agents/ticket-maker.yaml
+    rollback: null
+    notes: Wired into the populate command in T054.
+
+  - id: T043
+    order: 43000
+    title: Phase 4 gate — all four role bundles emit and cover prose
+    area: Agents
+    priority: P0
+    size: XS
+    risk: Low
+    depends_on: [T041, T035]
+    summary: Verify compile/API emits .rafi/compiled/<role>/system.md for builder, qa, planner, ticket-maker and that each covers the corresponding hardcoded foreman prose.
+    acceptance:
+      - system.md exists for all four roles.
+      - Manual review confirms each role's content includes the current foreman guidance.
+    required_tests:
+      - Emit test enumerates the four role bundles.
+    likely_files:
+      - packages/special-agents/test/roles.test.ts
+    rollback: null
+    notes: Verification-only.
+
+  # ───────────────────────────── E5 · Runtime consumes the library ─────────────────────────────
+  - id: T050
+    order: 50000
+    title: Add special-agents dependency and new adapter options
+    area: Runtime
+    priority: P0
+    size: S
+    risk: Low
+    depends_on: [T035, T004]
+    summary: Add special-agents as an ai-foreman dependency and extend BuilderAdapterOptions with systemPromptAppend and skills.
+    acceptance:
+      - ai-foreman depends on special-agents (workspace:* in repo).
+      - BuilderAdapterOptions includes optional systemPromptAppend and skills.
+    required_tests:
+      - Typecheck passes with the new options threaded through both adapters' types.
+    likely_files:
+      - packages/ai-foreman/package.json
+      - packages/ai-foreman/src/adapters/types.ts
+    rollback: Remove the dependency and option fields.
+    notes: No wiring yet; just the seam.
+
+  - id: T051
+    order: 51000
+    title: Implement roles.ts bundle loader with layered fallback
+    area: Runtime
+    priority: P0
+    size: M
+    risk: Medium
+    depends_on: [T050, T043]
+    summary: Add roles.ts that resolves a role bundle by precedence — target-repo .rafi/compiled bundle, else special-agents library defaults, else today's hardcoded prompt strings.
+    acceptance:
+      - Loader returns systemPromptAppend + skills for a given role + repo.
+      - Each fallback layer is exercised and logged.
+    required_tests:
+      - Unit tests for all three resolution layers.
+    likely_files:
+      - packages/ai-foreman/src/roles.ts
+      - packages/ai-foreman/test/roles.test.ts
+    rollback: Hardcode the legacy strings path only.
+    notes: Backward compatible with repos that never compiled.
+
+  - id: T052
+    order: 52000
+    title: Wire Claude adapter to inject role system prompt and skills
+    area: Runtime
+    priority: P0
+    size: S
+    risk: Medium
+    depends_on: [T051]
+    summary: Map systemPromptAppend/skills onto the Agent SDK query options (systemPrompt append, skills, settingSources:['project']) so compiled .claude/skills are discoverable.
+    acceptance:
+      - The SDK query is configured with append systemPrompt and the role skill list.
+      - settingSources includes project so project skills load.
+    required_tests:
+      - Adapter test asserts options are passed; dummy-project run shows the role text.
+    likely_files:
+      - packages/ai-foreman/src/adapters/claude.ts
+    rollback: Revert to the prior fixed options object.
+    notes: Options confirmed present in installed SDK 0.3.148.
+
+  - id: T053
+    order: 53000
+    title: Wire Codex adapter to prepend role system text per turn
+    area: Runtime
+    priority: P0
+    size: S
+    risk: Medium
+    depends_on: [T051]
+    summary: Since codex exec only reads AGENTS.md, prepend the role's system.md to the turn instruction for qa/planner/ticket-maker; builder relies on the flattened AGENTS.md.
+    acceptance:
+      - Non-builder roles get their system text prepended to the turn prompt.
+      - Builder path is unchanged beyond using the compiled AGENTS.md.
+    required_tests:
+      - Adapter test asserts the prepended text for a qa turn.
+    likely_files:
+      - packages/ai-foreman/src/adapters/codex.ts
+    rollback: Revert to sending the raw instruction only.
+    notes: Documented degraded composition for Codex.
+
+  - id: T054
+    order: 54000
+    title: Replace hardcoded prompt builders with role-bundle loading
+    area: Runtime
+    priority: P0
+    size: M
+    risk: Medium
+    depends_on: [T052, T053, T042]
+    summary: Make buildPrimer/buildQaInstruction/buildPlanningTurn thin (keep STEP_STATUS marker spec + protocol) and source role behavior from bundles; route builder/qa/planner turn-types and wire tickets populate to the ticket-maker role. Keep hardcoded prose as the fallback default.
+    acceptance:
+      - Each turn-type loads its role bundle; marker spec/STEP_STATUS contract is unchanged.
+      - tickets populate runs under the ticket-maker role.
+      - With no bundle available, the legacy hardcoded prompts still drive a run.
+    required_tests:
+      - Tests cover bundle-driven and fallback paths for each turn-type.
+    likely_files:
+      - packages/ai-foreman/src/foreman.ts
+      - packages/ai-foreman/src/cli/tickets.ts
+    rollback: Re-point turn-types at the hardcoded builders.
+    notes: STEP_STATUS parsing and QA cycling are untouched.
+
+  - id: T055
+    order: 55000
+    title: Phase 5 gate — runtime three-way bundle verification
+    area: Runtime
+    priority: P0
+    size: S
+    risk: Medium
+    depends_on: [T054]
+    summary: Run ai-foreman start examples/dummy-project --steps 2 with (a) a compiled target bundle, (b) only library defaults, (c) the library forcibly absent (hardcoded fallback); all complete and the composed runs show role system text in the log.
+    acceptance:
+      - All three configurations complete a 2-step run.
+      - Compiled/default runs show role system text in the session/log; fallback run still works.
+    required_tests:
+      - Scripted three-way run captured as evidence.
+    likely_files:
+      - packages/ai-foreman/test/integration.test.ts
+      - examples/dummy-project/**
+    rollback: Disable bundle loading via a feature flag, keeping legacy behavior.
+    notes: Proves no regression and the new path together.
+
+  # ───────────────────────────── E6 · rafi CLI + scaffold ─────────────────────────────
+  - id: T060
+    order: 60000
+    title: Scaffold the rafi CLI package (@rafi/cli)
+    area: CLI
+    priority: P0
+    size: S
+    risk: Low
+    depends_on: [T035]
+    summary: Create packages/rafi published as @rafi/cli with a `rafi` bin (commander), wiring subcommand stubs create and compile over the special-agents API.
+    acceptance:
+      - "@rafi/cli builds and exposes a `rafi` command with create/compile stubs."
+      - The package depends on special-agents.
+    required_tests:
+      - "`rafi --help` lists create and compile."
+    likely_files:
+      - packages/rafi/package.json
+      - packages/rafi/src/index.ts
+    rollback: null
+    notes: Scope chosen because bare rafi is taken; org registered in T072.
+
+  - id: T061
+    order: 61000
+    title: Implement rafi compile
+    area: CLI
+    priority: P0
+    size: M
+    risk: Low
+    depends_on: [T060]
+    summary: Implement `rafi compile` to render a target repo's configs via the special-agents API using its project.yaml (or defaults.yaml when absent), emitting .claude/ + AGENTS.md + .rafi/compiled; support --check for drift.
+    acceptance:
+      - rafi compile produces deterministic outputs from project.yaml.
+      - --check exits non-zero on drift.
+      - Missing project.yaml falls back to defaults.
+    required_tests:
+      - Compile + --check tests against a fixture repo.
+    likely_files:
+      - packages/rafi/src/commands/compile.ts
+      - packages/rafi/test/compile.test.ts
+    rollback: null
+    notes: Reuses composition; no duplicate logic.
+
+  - id: T062
+    order: 62000
+    title: Implement rafi create walkthrough
+    area: CLI
+    priority: P0
+    size: M
+    risk: Low
+    depends_on: [T061]
+    summary: Implement the 9-question walkthrough (app/timezone, frontend, backend, database, cloud, package manager, usesAI, harness targets, qa) with defaults and --defaults/--yes, writing a committed project.yaml then running the first compile.
+    acceptance:
+      - Each question is defaulted and skippable; --defaults writes the default project.yaml.
+      - project.yaml records stack + flags (hasFrontend/usesAI/runsInCloud) + harness targets + qa.
+      - First compile runs after answers are written.
+    required_tests:
+      - Non-interactive --defaults run produces the expected project.yaml and compiled output.
+    likely_files:
+      - packages/rafi/src/commands/create.ts
+      - packages/rafi/test/create.test.ts
+    rollback: null
+    notes: usesAI question gates the ai-* packs and AI docs.
+
+  - id: T063
+    order: 63000
+    title: Add flag-gated doc scaffolding to create/compile
+    area: CLI
+    priority: P1
+    size: S
+    risk: Low
+    depends_on: [T061, T025]
+    summary: Copy content/docs into the target docs/ based on flags (AI docs only when usesAI; UI guidance only when hasFrontend), skipping existing files by default with a --force override.
+    acceptance:
+      - Default run never clobbers existing files; --force overwrites.
+      - AI docs are copied only when usesAI; UI-only docs only when hasFrontend.
+    required_tests:
+      - Tests for skip-existing, --force, and flag gating.
+    likely_files:
+      - packages/rafi/src/docs.ts
+      - packages/rafi/test/docs.test.ts
+    rollback: null
+    notes: Preserves bootstrap-project.sh behavior.
+
+  - id: T064
+    order: 64000
+    title: Surface the AI-pack choice in outputs and summary
+    area: CLI
+    priority: P1
+    size: XS
+    risk: Low
+    depends_on: [T061]
+    summary: Ensure the conditional-pack choice is visible — project.yaml flags, a generated header in AGENTS.md/CLAUDE.md (ai/frontend/cloud on/off), and a post-compile summary noting how to add AI rules later.
+    acceptance:
+      - Generated config carries the on/off header.
+      - rafi create/compile prints a summary of included/excluded conditional groups.
+    required_tests:
+      - Test asserts header + summary reflect usesAI true/false.
+    likely_files:
+      - packages/rafi/src/commands/compile.ts
+      - packages/special-agents/src/emit/*.ts
+    rollback: null
+    notes: Satisfies the documented-choice requirement for AI packs.
+
+  - id: T065
+    order: 65000
+    title: Phase 6 gate — scaffold parity and substitution
+    area: CLI
+    priority: P0
+    size: XS
+    risk: Low
+    depends_on: [T062, T063, T064]
+    summary: rafi create --defaults on a fresh temp repo yields guidance byte-equivalent to current rules.md; custom answers substitute stack strings throughout.
+    acceptance:
+      - --defaults output matches current rules.md guidance.
+      - Custom stack answers appear substituted in the generated config.
+    required_tests:
+      - Temp-repo create test for defaults and a custom-stack case.
+    likely_files:
+      - packages/rafi/test/e2e.test.ts
+    rollback: null
+    notes: Verification-only.
+
+  # ───────────────────────────── E7 · Cleanup + publish prep ─────────────────────────────
+  - id: T070
+    order: 70000
+    title: Delete retired sources after parity proven
+    area: Cleanup
+    priority: P1
+    size: S
+    risk: Medium
+    depends_on: [T024, T036, T055, T065]
+    summary: Once parity gates pass, delete aiTools/rules.md, aiTools/agent-files/, aiTools/scripts/bootstrap-project.sh, aiTools/skillsPlan.md, aiTools/nextAdditions.md; confirm ralph/ removal.
+    acceptance:
+      - The listed legacy files are removed.
+      - ralph/ is gone.
+      - Nothing in the repo imports/links the deleted files.
+    required_tests:
+      - Repo grep finds no references to the deleted paths.
+    likely_files:
+      - aiTools/**
+    rollback: git revert the deletion commit.
+    notes: Gated on T024/T036/T055/T065 to avoid premature deletion.
+
+  - id: T071
+    order: 71000
+    title: Write top-level README and adoption-ladder docs
+    area: Cleanup
+    priority: P1
+    size: S
+    risk: Low
+    depends_on: [T070]
+    summary: Author the repo-root README documenting the library/CLI/runtime split and the four-rung adoption ladder, with install/use for special-agents, @rafi/cli, and ai-foreman.
+    acceptance:
+      - README explains special-agents, @rafi/cli (command rafi), and ai-foreman.
+      - The adoption ladder (rule/skill/agent/runtime) is documented.
+    required_tests:
+      - Doc review; links resolve.
+    likely_files:
+      - README.md
+    rollback: null
+    notes: First contact for new users.
+
+  - id: T072
+    order: 72000
+    title: Publish-readiness for all three packages
+    area: Publish
+    priority: P1
+    size: S
+    risk: Low
+    depends_on: [T070]
+    summary: Verify files/exports for special-agents, ai-foreman, @rafi/cli; ensure ai-foreman resolves special-agents from the registry; register the rafi npm org for the @rafi scope; plan `npm deprecate foreman-cli` for after first ai-foreman publish.
+    acceptance:
+      - npm pack dry-run of each published package contains the intended files only.
+      - The rafi npm org is registered/owned (or an alternative scope chosen).
+      - A deprecation step for foreman-cli is documented to run post-publish.
+    required_tests:
+      - npm pack --dry-run for special-agents, ai-foreman, @rafi/cli.
+    likely_files:
+      - packages/special-agents/package.json
+      - packages/ai-foreman/package.json
+      - packages/rafi/package.json
+    rollback: null
+    notes: Org registration is the one item not verifiable from code.
+
+  - id: T073
+    order: 73000
+    title: Phase 7 gate — full workspace green and pack dry-run
+    area: Publish
+    priority: P0
+    size: XS
+    risk: Low
+    depends_on: [T071, T072]
+    summary: Final verification across the workspace before declaring the migration complete.
+    acceptance:
+      - Repo grep finds no references to deleted files.
+      - pnpm -r build && pnpm -r test pass.
+      - npm pack --dry-run succeeds for all three published packages.
+    required_tests:
+      - CI run of build/test + pack dry-runs.
+    likely_files:
+      - packages/**
+    rollback: null
+    notes: Closes the implementation.

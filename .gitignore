@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.rafi/compiled/
+
+# env files
+.env
+.env.local
+.env.development
+.env.development.local
+.env.test
+.env.test.local
+.env.production
+.env.production.local
+
+# logs / misc
+*.log
+.DS_Store

@@ -1,0 +1,25 @@
+# Starter documentation templates. `rafi create` copies these into a target repo's
+# docs/ folder, honoring `gate` against the project flags (see ProjectFlags).
+#   gate: always   -> always copied
+#   gate: ai       -> copied only when flags.usesAI
+#   gate: frontend -> copied only when flags.hasFrontend
+docs:
+  - { path: README.md, gate: always }
+  - { path: architecture.md, gate: always }
+  - { path: features.md, gate: always }
+  - { path: api.md, gate: always }
+  - { path: users.md, gate: always }
+  - { path: admins.md, gate: always }
+  - { path: business.md, gate: always }
+  - { path: operations.md, gate: always }
+  - { path: security.md, gate: always }
+  - { path: data-governance.md, gate: always }
+  - { path: local-cloud.md, gate: always }
+  - { path: scalability.md, gate: always }
+  - { path: tickets.md, gate: always }
+  - { path: release-checklist.md, gate: always }
+  - { path: decisions/README.md, gate: always }
+  - { path: decisions/0000-template.md, gate: always }
+  - { path: ai.md, gate: ai }
+  - { path: ai-evals.md, gate: ai }
+  - { path: ai-costs.md, gate: ai }

@@ -1,0 +1,13 @@
+# Default stack values + flags. These reproduce the original hardcoded rules.md
+# guidance: rendering the templated packs with these defaults equals the source.
+# `rafi create` writes a project.yaml that overrides these per project.
+stack:
+  frontend: "React with TypeScript"
+  backend: "Node.js, Python, or both, based on the project needs"
+  database: "PostgreSQL"
+  cloud: "AWS"
+  packageManager: "pnpm"
+flags:
+  hasFrontend: true
+  usesAI: false
+  runsInCloud: true

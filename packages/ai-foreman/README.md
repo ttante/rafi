@@ -13,25 +13,25 @@ Loop Claude Code or Codex through tickets.
 Global install:
 
 ```bash
-npm install -g foreman-cli
+npm install -g ai-foreman
 ```
 
 Helpful when:
 
-- You want `foreman` available from any repo.
+- You want `ai-foreman` available from any repo.
 - You use Foreman across multiple projects.
 - You do not need each repo to pin its own Foreman version.
 
 Per-project install:
 
 ```bash
-npm install --save-dev foreman-cli
-npx foreman doctor .
+npm install --save-dev ai-foreman
+npx ai-foreman doctor .
 ```
 
 Helpful when:
 
-- You prefer `npx foreman` over a global CLI.
+- You prefer `npx ai-foreman` over a global CLI.
 - You want Foreman tracked in `package.json`.
 - You want teammates or CI to use the repo's installed version.
 
@@ -47,10 +47,10 @@ Requires:
 - Run foreman for 5 tickets (and QA each one when done)
 
 ```bash
-foreman doctor ./my-project
-foreman tickets init --project ./my-project --app-name "My App"
-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
-foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 5
+ai-foreman doctor ./my-project
+ai-foreman tickets init --project ./my-project --app-name "My App"
+ai-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
+ai-foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 5
 ```
 
 What each part does:
@@ -70,7 +70,7 @@ What each part does:
 
 ## Primary Options
 
-### `foreman start`
+### `ai-foreman start`
 
 | Option | Common values | Default | Notes |
 | --- | --- | --- | --- |
@@ -96,7 +96,7 @@ Resume rule:
 - Use either `--continue` or `--resume`.
 - Do not use both in the same command.
 
-### `foreman tickets populate`
+### `ai-foreman tickets populate`
 
 | Option | Common values | Default | Notes |
 | --- | --- | --- | --- |
@@ -145,7 +145,7 @@ Codex:
 Task file:
 
 ```bash
-foreman start ./my-project --steps 5 --tickets ./my-project/TICKETS.md
+ai-foreman start ./my-project --steps 5 --tickets ./my-project/TICKETS.md
 ```
 
 With `--tickets`:
@@ -175,13 +175,13 @@ Use them when you want the repo itself to contain:
 From anywhere:
 
 ```bash
-foreman tickets init --project ./my-project --app-name "My App"
+ai-foreman tickets init --project ./my-project --app-name "My App"
 ```
 
 From inside the project:
 
 ```bash
-foreman tickets init --app-name "My App"
+ai-foreman tickets init --app-name "My App"
 ```
 
 Init options:
@@ -224,11 +224,11 @@ Supported source material can include:
 
 ```bash
 # Claude Code
-foreman tickets populate --project ./my-project
+ai-foreman tickets populate --project ./my-project
 
 # Codex
-foreman tickets populate --project ./my-project --agent codex
-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
+ai-foreman tickets populate --project ./my-project --agent codex
+ai-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
 ```
 
 `populate` tells the builder to:
@@ -250,7 +250,7 @@ Storage model:
 
 - Ticket definitions live in YAML.
 - Mutable status lives in SQLite.
-- Status changes should use `foreman tickets` commands.
+- Status changes should use `ai-foreman tickets` commands.
 
 Minimal valid example:
 
@@ -335,9 +335,9 @@ validation_result
 ### 3. Validate And Render
 
 ```bash
-foreman tickets validate --project ./my-project
-foreman tickets render --project ./my-project
-foreman tickets queue --project ./my-project
+ai-foreman tickets validate --project ./my-project
+ai-foreman tickets render --project ./my-project
+ai-foreman tickets queue --project ./my-project
 ```
 
 Generated output:
@@ -352,86 +352,86 @@ Generated output:
 Claude Code:
 
 ```bash
-foreman start ./my-project --steps 10
+ai-foreman start ./my-project --steps 10
 ```
 
 Codex:
 
 ```bash
-foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 10
+ai-foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 10
 ```
 
 ## Common Commands
 
 ```bash
 # Check environment and config
-foreman doctor ./my-project
+ai-foreman doctor ./my-project
 
 # Disable per-step QA
-foreman start ./my-project --steps 5 --no-qa
+ai-foreman start ./my-project --steps 5 --no-qa
 
 # Resume the latest session
-foreman start ./my-project --steps 5 --continue
+ai-foreman start ./my-project --steps 5 --continue
 
 # Resume a specific session
-foreman start ./my-project --steps 5 --resume <session-id>
+ai-foreman start ./my-project --steps 5 --resume <session-id>
 
 # Show the latest run summary
-foreman status ./my-project
+ai-foreman status ./my-project
 
 # Show the next ticket queue
-foreman tickets queue --project ./my-project
+ai-foreman tickets queue --project ./my-project
 ```
 
 ## Ticket Commands
 
 ```bash
 # Initialize the project ticket tracker
-foreman tickets init --project ./my-project --app-name "My App"
+ai-foreman tickets init --project ./my-project --app-name "My App"
 
 # Ask Claude/Codex to populate .tickets/tickets.yaml from existing project docs
-foreman tickets populate --project ./my-project
-foreman tickets populate --project ./my-project --agent codex
-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
+ai-foreman tickets populate --project ./my-project
+ai-foreman tickets populate --project ./my-project --agent codex
+ai-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
 
 # Validate ticket files and generated output
-foreman tickets validate --project ./my-project
+ai-foreman tickets validate --project ./my-project
 
 # Regenerate docs/ticket-progress.md
-foreman tickets render --project ./my-project
+ai-foreman tickets render --project ./my-project
 
 # Print the current queue
-foreman tickets queue --project ./my-project
-foreman tickets queue --project ./my-project --limit 10
+ai-foreman tickets queue --project ./my-project
+ai-foreman tickets queue --project ./my-project --limit 10
 
 # Update a ticket note or status
-foreman tickets update T001 --project ./my-project --next-action "Add tests"
+ai-foreman tickets update T001 --project ./my-project --next-action "Add tests"
 
 # Mark a ticket complete manually
-foreman tickets complete T001 --project ./my-project --evidence "pnpm test passed"
+ai-foreman tickets complete T001 --project ./my-project --evidence "pnpm test passed"
 
 # Block or unblock work
-foreman tickets block T001 --project ./my-project --blocked-by external-api --summary "Waiting on API key"
-foreman tickets unblock T001 --project ./my-project --summary "API key received"
+ai-foreman tickets block T001 --project ./my-project --blocked-by external-api --summary "Waiting on API key"
+ai-foreman tickets unblock T001 --project ./my-project --summary "API key received"
 
 # Capture future work discovered during implementation
-foreman tickets discover --project ./my-project --summary "Add retry metrics" --rationale "Needed for operations"
+ai-foreman tickets discover --project ./my-project --summary "Add retry metrics" --rationale "Needed for operations"
 
 # Cancel a ticket
-foreman tickets cancel T001 --project ./my-project --summary "Superseded by T002"
+ai-foreman tickets cancel T001 --project ./my-project --summary "Superseded by T002"
 
 # Promote discovered future work into tickets.yaml
-foreman tickets accept-future-work 1 --project ./my-project --ticket-id T051 --order 51000
+ai-foreman tickets accept-future-work 1 --project ./my-project --ticket-id T051 --order 51000
 
 # Reorder a ticket
-foreman tickets reorder T051 --project ./my-project --after T050
-foreman tickets reorder T051 --project ./my-project --order 51000
+ai-foreman tickets reorder T051 --project ./my-project --after T050
+ai-foreman tickets reorder T051 --project ./my-project --order 51000
 
 # Archive old completed tickets
-foreman tickets archive --project ./my-project --older-than-days 30
+ai-foreman tickets archive --project ./my-project --older-than-days 30
 
 # Import is a placeholder
-foreman tickets import --project ./my-project --progress docs/ticket-progress.md
+ai-foreman tickets import --project ./my-project --progress docs/ticket-progress.md
 ```
 
 ## How The Loop Works
@@ -507,19 +507,19 @@ pnpm test
 pnpm typecheck
 pnpm build
 
-pnpm dev -- start ./dummy-project --steps 2
+pnpm dev -- start ../../examples/dummy-project --steps 2
 ```
 
 Package output:
 
-- The package publishes a `foreman` binary from `dist/index.js`.
+- The package publishes a `ai-foreman` binary from `dist/index.js`.
 
 ## Current Limitations
 
 - One builder at a time.
 - No daemon or dashboard.
 - Codex tool calls are not intercepted by Foreman's permission policy.
-- `foreman tickets import` is currently a stub.
+- `ai-foreman tickets import` is currently a stub.
 - Escalated actions are denied and stop the batch.
 - There is no approve/deny queue yet.
 
