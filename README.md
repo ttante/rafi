@@ -1,85 +1,167 @@
-# Rafi — Refined AI Framework & Implementor
+# Rafi (Refined AI Framework & Implementor)
 
-Rafi is a harness-engineering toolkit that turns best-practice guidelines into composable, machine-readable configs for Claude Code and Codex. It is structured as three independently useful layers:
+A lightweight + powerful modern harness engineering framework.
 
-```
-special-agents (library)  ←  rafi create / rafi compile (CLI)
-        ↑
-   ai-foreman (runtime)
-```
+Features:
+- Composes best-practice rule packs into skills
+- Compses skills into specialized agaents tailored to your stack (builder, QA, planner, ticket-maker)
+- Gates AI, frontend, cloud, and backend rules on your actual stack so agents get exactly what they need.
+- `ai-foreman` defines a robust ticketing/tracking solution
+- Populates upcoming tickets via specialized-agent
+- Drives agents unattended through tickets with built-in QA cycling per step
+- Pro level AI App features
 
-## Adoption ladder
+## Why
+Rafi is your best bet for everything from one-shot app building to small feature implementation by:
+- enforcing strict test driven development (TDD) practices
+- prescribing enterprise level stability & security features from square one
+- using a rich ticket system with curated prompts to ensure it stays updated
+- tracking future work that results from completed tickets
+- coupling ticket implementation with QA that ensures code quality, test passing & regression protection
 
-You can stop at any rung:
+## AI App Superbuilder
 
-1. **A rule** — grab one rule pack from `special-agents/content/rules/` and paste it into your project.
-2. **A skill** — copy a skill from `special-agents/content/skills/` into `.claude/skills/`. Works in plain Claude Code today.
-3. **An agent** — use a composed `builder`/`qa`/`planner`/`ticket-maker` agent in Claude Code or Codex via `rafi create`.
-4. **The runtime** — `ai-foreman` drives those agents through a ticket loop, unattended.
+Rafi shines even brighter when building apps that leverage LLMs. Enable `usesAI` and your agents get five additional rule packs that enforce enterprise-grade AI engineering from the first line of code:
 
-## Packages
+- **Adversarial safety** — agents plan prompt injection defense, jailbreak protection, content safety checks, tool scoping, and abuse monitoring before writing any AI feature. Red-teaming is built into release criteria. An incident plan for harmful, wrong, expensive, or policy-violating outputs is required.
+- **Confidence & evals** — every AI generation step gets quality gates, confidence scoring, and acceptance thresholds. Models check their own work three times by default (configurable). Eval suites with golden examples and adversarial cases are required before promoting any prompt change.
+- **Full replayability** — every meaningful AI generation is recorded with prompt version, rendered prompt, input references, model/provider, parameters, tool calls, output, validation results, cost, latency, and decisions. Prompts are versioned, reviewed, tested, and rollback-capable.
+- **Cost tracking & learning loop** — cost per task is tracked across tokens, retries, tool calls, and latency. Failed generations feed a structured correction workflow; approved corrections are preserved in a format suitable for future evals, fine-tuning, or custom model training — all planned from day one.
+- **Model & dataset governance** — approved models, fallbacks, and change rules are documented. Model changes require evals. Dataset consent, labeling quality, retention, and training eligibility are defined before data is collected.
 
-| Package | npm | Command | Role |
-|---|---|---|---|
-| `special-agents` | `npm install special-agents` | — | Library: rules, skills, agents, composition logic |
-| `ai-foreman` | `npm install -g ai-foreman` | `ai-foreman` | Runtime: orchestrates agents through ticket queues |
-| `@rafi/cli` | `npm install -g @rafi/cli` | `rafi` | CLI: scaffold and compile configs for a target repo |
-
-## Quick start
+## Install
 
 ```sh
-# Install the CLI
 npm install -g @rafi/cli
-
-# Scaffold a new project (interactive walkthrough)
-rafi create /path/to/my-repo
-
-# Or use defaults (byte-equivalent to the built-in defaults)
-rafi create /path/to/my-repo --defaults
-
-# Re-compile after editing project.yaml
-rafi compile /path/to/my-repo
 ```
 
-## What `rafi create` writes
+## Use
 
-```
-<project>/
-  AGENTS.md                        Codex flat rules doc
-  CLAUDE.md                        Claude Code entrypoint
-  project.yaml                     your stack config (committed, editable)
-  .claude/agents/<role>.md         Claude Code subagent files
-  .rafi/compiled/<role>/system.md  role system text (read by ai-foreman)
-  docs/                            starter doc templates (flag-gated by stack)
-```
-
-## Conditional packs
-
-`rafi create` asks whether your app uses AI (`usesAI`), has a frontend (`hasFrontend`), and runs in the cloud (`runsInCloud`). The answers gate which rule packs are included. The choices are recorded in `project.yaml` and visible in the `# rafi:` header at the top of `AGENTS.md`.
+- Answer 9 questions about your stack (or skip with `--defaults`)
+- Get `AGENTS.md`, `CLAUDE.md`, subagents, and starter docs written to your repo
+- Re-run `rafi compile` whenever you update `project.yaml`
 
 ```sh
-# Add AI rules after the fact
-# Edit project.yaml: flags.usesAI: true
-rafi compile /path/to/my-repo
+rafi create ./my-repo             # interactive walkthrough
+rafi create ./my-repo --defaults  # skip walkthrough, use built-in defaults
+rafi compile ./my-repo            # re-render after editing project.yaml
 ```
 
-## Running the runtime
+## Defaults
+
+`--defaults` (and the starting point for the walkthrough) uses these values:
+
+| Setting | Default |
+|---|---|
+| Frontend | React with TypeScript |
+| Backend | Node.js, Python, or both |
+| Database | PostgreSQL |
+| Cloud | AWS |
+| Package manager | pnpm |
+| Has frontend | ✓ |
+| Uses AI | ✗ (opt-in — enables the AI App Superbuilder packs) |
+| Runs in cloud | ✓ |
+
+Edit `project.yaml` and run `rafi compile` to change anything.
+
+## What gets written
+
+```
+my-repo/
+  AGENTS.md                        Codex rules doc (your stack + best practices, flat)
+  CLAUDE.md                        Claude Code entrypoint
+  project.yaml                     your stack config — commit this, edit to update
+  .claude/agents/builder.md        Claude subagent — implements tickets
+  .claude/agents/qa.md             Claude subagent — reviews completed work
+  .claude/agents/planner.md        Claude subagent — plans and writes tickets
+  .rafi/compiled/<role>/           role bundles read by ai-foreman at runtime
+  docs/                            starter docs (architecture, API, ops, etc.)
+```
+
+## Suggested Use
+
+### New Projects
+
+- Create an empty repo and scaffold with rafi
+  ```sh
+  rafi create ./my-repo
+  ```
+- Open Claude Code and use the `planner` subagent — it will grill you on goals, users, and requirements before writing a full PRD (more detail than your average planner)
+  ```sh
+  claude ./my-repo
+  ```
+- Use the ticket-maker agent to convert the plan into a structured, ordered ticket queue
+  ```sh
+  ai-foreman tickets init --project ./my-repo --app-name "My App"
+  ai-foreman tickets populate --project ./my-repo
+  ```
+- Run the builder to implement tickets one by one, with QA after each step
+  ```sh
+  ai-foreman start ./my-repo --steps 10
+  ```
+
+### Existing Projects
+
+- Add rafi to an existing repo — answer questions about your current stack, or use `--defaults` and edit `project.yaml` to match reality
+  ```sh
+  rafi create ./my-repo
+  ```
+- Enable the flags that match your stack (`usesAI`, `hasFrontend`, `runsInCloud`) and re-compile to get the right rule packs
+  ```sh
+  # edit project.yaml, then:
+  rafi compile ./my-repo
+  ```
+- Import your existing backlog — populate from planning docs, a ticket file, or a markdown roadmap
+  ```sh
+  ai-foreman tickets init --project ./my-repo --app-name "My App"
+  ai-foreman tickets populate --project ./my-repo
+  ```
+- Run the builder against your backlog; QA cycles and future-work tracking keep the queue clean as work completes
+  ```sh
+  ai-foreman start ./my-repo --steps 10
+  ```
+
+## Rule packs
+
+All 29 packs are assembled from your stack config. Most are always included; three groups are conditional:
+
+- **Always** — code quality, git safety, testing, TDD, CI, security, observability, robustness, scalability, data governance, API docs, release, architecture, and templated stack rules (frontend framework, backend, database, package manager substituted from your answers)
+- **`usesAI`** — AI safety, evals, cost tracking, reproducibility, and AI governance rules
+- **`hasFrontend`** — accessibility and UX rules
+- **`runsInCloud`** — cloud infra and IaC rules
+
+Choices are saved in `project.yaml`. The top of `AGENTS.md` shows a `# rafi: ai=off frontend=on cloud=on` header so the active set is always visible.
+
+## Unattended ticket loop
+
+`ai-foreman` drives your agents through a ticket queue — no human needed between steps:
 
 ```sh
 npm install -g ai-foreman
-ai-foreman start /path/to/my-repo --steps 5
+ai-foreman tickets init --project ./my-repo --app-name "My App"
+ai-foreman start ./my-repo --steps 5
 ```
 
-`ai-foreman` loads the compiled role bundles from `.rafi/compiled/`, falls back to the `special-agents` library defaults, and falls back further to built-in hardcoded prompts — so it works with or without a compiled project.
+- Reads compiled role bundles from `.rafi/compiled/` so each turn gets the right guidance.
+- Builder, QA, planner, and ticket-maker roles are each composed from the relevant rule packs.
+- Falls back to library defaults if no compiled bundle is present.
 
-## Monorepo structure
+## Packages
+
+| Package | Install | Description |
+|---|---|---|
+| `@rafi/cli` | `npm install -g @rafi/cli` | `rafi create` / `rafi compile` — scaffold and compile |
+| `special-agents` | `npm install special-agents` | Rules, skills, and agent library |
+| `ai-foreman` | `npm install -g ai-foreman` | Ticket-loop runtime |
+
+## Monorepo
 
 ```
 packages/
   special-agents/   library (content + composition logic)
   rafi/             @rafi/cli
   ai-foreman/       runtime
-  spec/             internal schema package (unpublished)
+  spec/             internal schema (unpublished)
 examples/
-  dummy-project/    smoke-test target for ai-foreman
+  dummy-project/    smoke-test target
 ```

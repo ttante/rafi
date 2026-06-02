@@ -1,8 +1,8 @@
 # special-agents
 
-Rafi library — composable best-practice rules, skills, and agents for Claude Code and Codex.
+29 composable best-practice rule packs, 6 skills, and 4 agent roles for Claude Code and Codex.
 
-`special-agents` is the content layer of the [Rafi](https://github.com/ttante/foreman) toolkit. It holds the raw rule packs, skill manifests, agent role definitions, and the composition logic that assembles them into harness-ready configs.
+The content layer of [Rafi](https://github.com/ttante/foreman). Ships both the authoring source (`content/`) and prebuilt composition logic so it can be used as a library, consumed by `rafi compile`, or extended directly.
 
 ## Install
 
@@ -10,19 +10,22 @@ Rafi library — composable best-practice rules, skills, and agents for Claude C
 npm install special-agents
 ```
 
-## API
+## Usage
 
 ```ts
-import { getAgent, getSkill, composeRulesMarkdown, emitCompiledBundles } from "special-agents";
+import { getAgent, getSkill, emitCompiledBundles } from "special-agents";
 
 // Get a composed role bundle (system prompt + skills list)
-const builder = getAgent("builder");
-console.log(builder.system);   // assembled system prompt
-console.log(builder.skills);   // ["tdd", "improve-codebase-architecture"]
+const { system, skills } = getAgent("builder");
+// system → assembled prompt with all applicable rule packs rendered
+// skills → ["tdd", "improve-codebase-architecture"]
 
-// Compile configs into a target repo
-emitCompiledBundles("/path/to/repo", {
-  defaults: { stack: { frontend: "React", backend: "Node.js", ... }, flags: { ... } },
+// Write compiled role bundles + AGENTS.md + CLAUDE.md to a target repo
+emitCompiledBundles("./my-repo", {
+  defaults: {
+    stack: { frontend: "React", backend: "Node.js", database: "PostgreSQL", cloud: "AWS", packageManager: "pnpm" },
+    flags:  { usesAI: false, hasFrontend: true, runsInCloud: true },
+  },
 });
 ```
 
@@ -35,28 +38,32 @@ emitCompiledBundles("/path/to/repo", {
 | `planner` | Produces the project plan and ticket list |
 | `ticket-maker` | Converts requirements into structured tickets |
 
-## Adoption ladder
+## Rule packs
 
-You can stop at any rung — each is independently useful:
+29 packs across four categories. Conditional packs are only included when the matching flag is on.
 
-1. **A rule** — grab one rule pack from `content/rules/`.
-2. **A skill** — copy a skill from `content/skills/` into `.claude/skills/`.
-3. **An agent** — use a composed role in plain Claude Code or Codex.
-4. **The runtime** — `ai-foreman` drives agents through a ticket loop.
+| Category | Packs | Condition |
+|---|---|---|
+| base | core, git-safety, code-quality, definition-of-done, response-expectations | always |
+| process | testing, tdd, ci, tickets, api-docs, release, dependencies, architecture, project-docs, business-docs | always |
+| domain | security, robustness, scalability, observability, data-governance | always |
+| domain | accessibility | `hasFrontend` |
+| domain | ai-safety, ai-governance, ai-evals, ai-reproducibility, ai-cost | `usesAI` |
+| templated | stack, database, infra | always / `runsInCloud` |
 
 ## Content structure
 
 ```
 content/
-  rules/          rule packs (base, process, domain, templated)
-  skills/         SKILL.md units (tdd, grill-me, ...)
-  agents/         role manifests (builder, qa, planner, ticket-maker)
-  docs/           starter doc templates for new repos
-  defaults.yaml   default stack values
+  rules/         rule packs (base/, process/, domain/, templated/)
+  skills/        SKILL.md units (tdd, grill-me, improve-codebase-architecture, ...)
+  agents/        role manifests (builder, qa, planner, ticket-maker .yaml)
+  docs/          starter doc templates for new repos
+  defaults.yaml  default stack values
 ```
 
 ## Part of Rafi
 
-- **`special-agents`** — this library (rules + skills + agents + composition)
-- **`ai-foreman`** — runtime that drives agents through tickets
+- **`special-agents`** — this library
+- **`ai-foreman`** — runtime that drives agents through a ticket loop
 - **`@rafi/cli`** — CLI for `rafi create` and `rafi compile`

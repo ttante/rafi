@@ -1,4 +1,4 @@
-# Foreman
+# ai-foreman
 
 Loop Claude Code or Codex through tickets.
 
@@ -7,6 +7,14 @@ Loop Claude Code or Codex through tickets.
 - Uses its own smart local ticket tracking system (support for other systems possible later)
 - Project plans still work when you do not want a tracker.
 - One-off task files still work too.
+
+## Why
+
+- **Enforces TDD** — the builder role is compiled from rule packs that require tests before implementation, red-green-refactor discipline, and test coverage gates on every ticket.
+- **Enterprise stability from day one** — security, observability, robustness, and scalability rules are baked into every builder turn, not bolted on later.
+- **Rich ticket system** — tickets carry acceptance criteria, required tests, dependencies, priority, size, and risk level. The agent reads the full context before starting each step.
+- **Future work tracking** — when the builder discovers out-of-scope work during a run, `ai-foreman tickets discover` captures it without derailing the current ticket. Discovered items live in a separate inbox until you promote them.
+- **QA that actually gates** — QA runs after every completed ticket and checks code quality, test passing, and regression protection. The ticket only closes after QA passes. QA turns do not count against `--steps`.
 
 ## Install
 
@@ -367,71 +375,42 @@ ai-foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --ste
 # Check environment and config
 ai-foreman doctor ./my-project
 
-# Disable per-step QA
-ai-foreman start ./my-project --steps 5 --no-qa
-
-# Resume the latest session
-ai-foreman start ./my-project --steps 5 --continue
-
-# Resume a specific session
-ai-foreman start ./my-project --steps 5 --resume <session-id>
-
 # Show the latest run summary
 ai-foreman status ./my-project
 
-# Show the next ticket queue
-ai-foreman tickets queue --project ./my-project
+# Disable per-step QA
+ai-foreman start ./my-project --steps 5 --no-qa
+
+# Resume the latest session / a specific session
+ai-foreman start ./my-project --steps 5 --continue
+ai-foreman start ./my-project --steps 5 --resume <session-id>
 ```
 
-## Ticket Commands
+## Ticket Lifecycle Commands
+
+After `init`, `populate`, `validate`, and `render` (covered in Ticket Setup above), these commands manage tickets day-to-day:
 
 ```bash
-# Initialize the project ticket tracker
-ai-foreman tickets init --project ./my-project --app-name "My App"
-
-# Ask Claude/Codex to populate .tickets/tickets.yaml from existing project docs
-ai-foreman tickets populate --project ./my-project
-ai-foreman tickets populate --project ./my-project --agent codex
-ai-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
-
-# Validate ticket files and generated output
-ai-foreman tickets validate --project ./my-project
-
-# Regenerate docs/ticket-progress.md
-ai-foreman tickets render --project ./my-project
-
-# Print the current queue
-ai-foreman tickets queue --project ./my-project
-ai-foreman tickets queue --project ./my-project --limit 10
-
-# Update a ticket note or status
+# Update a ticket's next action
 ai-foreman tickets update T001 --project ./my-project --next-action "Add tests"
 
 # Mark a ticket complete manually
 ai-foreman tickets complete T001 --project ./my-project --evidence "pnpm test passed"
 
-# Block or unblock work
+# Block / unblock
 ai-foreman tickets block T001 --project ./my-project --blocked-by external-api --summary "Waiting on API key"
 ai-foreman tickets unblock T001 --project ./my-project --summary "API key received"
 
-# Capture future work discovered during implementation
+# Capture future work discovered during a run
 ai-foreman tickets discover --project ./my-project --summary "Add retry metrics" --rationale "Needed for operations"
 
-# Cancel a ticket
-ai-foreman tickets cancel T001 --project ./my-project --summary "Superseded by T002"
-
-# Promote discovered future work into tickets.yaml
+# Promote discovered work into tickets.yaml
 ai-foreman tickets accept-future-work 1 --project ./my-project --ticket-id T051 --order 51000
 
-# Reorder a ticket
+# Cancel / reorder / archive
+ai-foreman tickets cancel T001 --project ./my-project --summary "Superseded by T002"
 ai-foreman tickets reorder T051 --project ./my-project --after T050
-ai-foreman tickets reorder T051 --project ./my-project --order 51000
-
-# Archive old completed tickets
 ai-foreman tickets archive --project ./my-project --older-than-days 30
-
-# Import is a placeholder
-ai-foreman tickets import --project ./my-project --progress docs/ticket-progress.md
 ```
 
 ## How The Loop Works
@@ -501,8 +480,17 @@ Default config:
 
 ## Development
 
+From the monorepo root:
+
 ```bash
 pnpm install
+pnpm -r build
+pnpm -r test
+```
+
+From this package:
+
+```bash
 pnpm test
 pnpm typecheck
 pnpm build
@@ -512,7 +500,7 @@ pnpm dev -- start ../../examples/dummy-project --steps 2
 
 Package output:
 
-- The package publishes a `ai-foreman` binary from `dist/index.js`.
+- The package publishes an `ai-foreman` binary from `dist/index.js`.
 
 ## Current Limitations
 
@@ -522,6 +510,12 @@ Package output:
 - `ai-foreman tickets import` is currently a stub.
 - Escalated actions are denied and stop the batch.
 - There is no approve/deny queue yet.
+
+## Part of Rafi
+
+- **`special-agents`** — library (rules + skills + agents + composition)
+- **`ai-foreman`** — this runtime
+- **`@rafi/cli`** — CLI for `rafi create` and `rafi compile`
 
 
 
