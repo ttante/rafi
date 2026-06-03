@@ -1,10 +1,23 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
 import type {
   Query,
   SDKMessage,
   SDKUserMessage,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
+
+/** Lazy-load the Claude Agent SDK. Throws an actionable error if not installed. */
+export async function requireClaudeSDK() {
+  try {
+    return await import("@anthropic-ai/claude-agent-sdk");
+  } catch {
+    throw new Error(
+      "Claude Agent SDK not installed.\n" +
+      "To use Claude Code as your agent runtime, run:\n" +
+      "  npm install @anthropic-ai/claude-agent-sdk\n" +
+      "Or use Codex only: ai-foreman start --agent codex",
+    );
+  }
+}
 import { AsyncQueue } from "../util/asyncQueue.js";
 import type {
   BuilderAdapter,
@@ -59,7 +72,13 @@ export class ClaudeAdapter implements BuilderAdapter {
   };
   private closed = false;
 
-  constructor(opts: BuilderAdapterOptions) {
+  static async create(opts: BuilderAdapterOptions): Promise<ClaudeAdapter> {
+    const { query } = await requireClaudeSDK();
+    return new ClaudeAdapter(opts, query);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private constructor(opts: BuilderAdapterOptions, query: (o: any) => Query) {
     this.query = query({
       prompt: this.inbox,
       options: {

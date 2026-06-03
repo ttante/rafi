@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { resolve, join } from "node:path";
 import { existsSync } from "node:fs";
 import { readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import { assertProjectConfig } from "rafi-spec";
 import { compile, writeProjectYaml } from "./compiler.js";
@@ -82,6 +83,9 @@ program
       const usesAI = await confirm({ message: "Will this app call LLMs / do AI generation?", initialValue: false });
       if (isCancel(usesAI)) process.exit(0);
 
+      const useClaude = await confirm({ message: "Will you use Claude Code as your agent runtime? (No = Codex only, skips the Claude Agent SDK)", initialValue: true });
+      if (isCancel(useClaude)) process.exit(0);
+
       answers = {
         appName: String(appName),
         timezone: String(timezone),
@@ -91,7 +95,7 @@ program
         cloud: String(cloudRaw),
         packageManager: String(packageManager),
         usesAI: Boolean(usesAI),
-        targets: ["claude", "codex"],
+        useClaude: Boolean(useClaude),
         qa: true,
       };
 
@@ -105,6 +109,14 @@ program
     const aiStatus = config.flags.usesAI ? "on" : "off";
     console.log(`rafi: compiled ${targetDir}`);
     console.log(`rafi: AI rules: ${aiStatus === "off" ? "excluded — re-run \`rafi compile\` after setting usesAI: true to add them" : "included"}`);
+
+    if (answers.useClaude) {
+      console.log("rafi: installing Claude Agent SDK...");
+      execSync("npm install @anthropic-ai/claude-agent-sdk", { cwd: targetDir, stdio: "inherit" });
+      console.log("rafi: Claude Agent SDK installed.");
+    } else {
+      console.log("rafi: skipping Claude Agent SDK (Codex only).");
+    }
   });
 
 program.parseAsync(process.argv).catch((err) => {

@@ -13,7 +13,7 @@ export interface WalkthroughAnswers {
   cloud: string;
   packageManager: string;
   usesAI: boolean;
-  targets: HarnessTarget[];
+  useClaude: boolean;
   qa: boolean;
 }
 
@@ -29,7 +29,7 @@ export function defaultAnswers(): WalkthroughAnswers {
     cloud: d.stack.cloud,
     packageManager: d.stack.packageManager,
     usesAI: Boolean(d.flags.usesAI),
-    targets: ["claude", "codex"],
+    useClaude: true,
     qa: true,
   };
 }
@@ -38,6 +38,7 @@ export function defaultAnswers(): WalkthroughAnswers {
 export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
   const hasFrontend = answers.frontend !== NO_UI;
   const runsInCloud = answers.cloud !== LOCAL_ONLY;
+  const targets: HarnessTarget[] = answers.useClaude ? ["claude", "codex"] : ["codex"];
   return {
     appName: answers.appName,
     timezone: answers.timezone,
@@ -54,7 +55,7 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
       runsInCloud,
     },
     harness: {
-      targets: answers.targets,
+      targets,
       qa: answers.qa,
     },
   };

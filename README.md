@@ -37,14 +37,18 @@ npm install -g @rafi-ai/cli
 
 ## Use
 
+Run `rafi` from inside the target repo:
+
 - Answer 9 questions about your stack (or skip with `--defaults`)
 - Get `AGENTS.md`, `CLAUDE.md`, subagents, and starter docs written to your repo
+- If you say yes to Claude Code, the Claude Agent SDK is installed automatically
 - Re-run `rafi compile` whenever you update `project.yaml`
 
 ```sh
-rafi create ./my-repo             # interactive walkthrough
-rafi create ./my-repo --defaults  # skip walkthrough, use built-in defaults
-rafi compile ./my-repo            # re-render after editing project.yaml
+cd my-repo
+rafi create .             # interactive walkthrough
+rafi create . --defaults  # skip walkthrough, use built-in defaults
+rafi compile .            # re-render after editing project.yaml
 ```
 
 ## Defaults
@@ -82,43 +86,45 @@ my-repo/
 
 ### New Projects
 
-- Create an empty repo and scaffold with rafi
+- Create an empty repo and run rafi from inside it
   ```sh
-  rafi create ./my-repo
+  mkdir my-repo && cd my-repo
+  rafi create .
   ```
 - Open Claude Code and use the `planner` subagent — it will grill you on goals, users, and requirements before writing a full PRD (more detail than your average planner)
   ```sh
-  claude ./my-repo
+  claude .
   ```
 - Use the ticket-maker agent to convert the plan into a structured, ordered ticket queue
   ```sh
-  ai-foreman tickets init --project ./my-repo --app-name "My App"
-  ai-foreman tickets populate --project ./my-repo
+  ai-foreman tickets init --app-name "My App"
+  ai-foreman tickets populate
   ```
 - Run the builder to implement tickets one by one, with QA after each step
   ```sh
-  ai-foreman start ./my-repo --steps 10
+  ai-foreman start . --steps 10
   ```
 
 ### Existing Projects
 
-- Add rafi to an existing repo — answer questions about your current stack, or use `--defaults` and edit `project.yaml` to match reality
+- Navigate into the repo and run rafi — answer questions about your current stack, or use `--defaults` and edit `project.yaml` to match reality
   ```sh
-  rafi create ./my-repo
+  cd my-repo
+  rafi create .
   ```
 - Enable the flags that match your stack (`usesAI`, `hasFrontend`, `runsInCloud`) and re-compile to get the right rule packs
   ```sh
   # edit project.yaml, then:
-  rafi compile ./my-repo
+  rafi compile .
   ```
 - Import your existing backlog — populate from planning docs, a ticket file, or a markdown roadmap
   ```sh
-  ai-foreman tickets init --project ./my-repo --app-name "My App"
-  ai-foreman tickets populate --project ./my-repo
+  ai-foreman tickets init --app-name "My App"
+  ai-foreman tickets populate
   ```
 - Run the builder against your backlog; QA cycles and future-work tracking keep the queue clean as work completes
   ```sh
-  ai-foreman start ./my-repo --steps 10
+  ai-foreman start . --steps 10
   ```
 
 ## Rule packs

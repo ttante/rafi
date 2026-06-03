@@ -175,7 +175,7 @@ export function buildTicketsCommand(): Command {
       const builder: BuilderAdapter =
         agent === "codex"
           ? new CodexAdapter(adapterOpts)
-          : new ClaudeAdapter(adapterOpts);
+          : await ClaudeAdapter.create(adapterOpts);
       const viewer = printEvents(builder.events());
       const foreman = new Foreman(builder, log, config.notifications.enabled, false, 3, dir);
 

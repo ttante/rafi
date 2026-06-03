@@ -12,33 +12,36 @@ npm install -g @rafi-ai/cli
 
 ## Use
 
+Run `rafi` from inside the target repo:
+
 ```sh
-rafi create ./my-repo             # interactive walkthrough
-rafi create ./my-repo --defaults  # skip walkthrough, use built-in defaults
-rafi compile ./my-repo            # re-render from an existing project.yaml
+cd my-repo
+rafi create .             # interactive walkthrough
+rafi create . --defaults  # skip walkthrough, use built-in defaults
+rafi compile .            # re-render after editing project.yaml
 ```
 
 ## Commands
 
-### `rafi create <project>`
+### `rafi create .`
 
 Runs the walkthrough (or `--defaults` to skip it), writes `project.yaml`, and compiles all configs.
 
 ```sh
-rafi create ./my-repo
-rafi create ./my-repo --defaults  # built-in defaults; byte-equivalent to the bundled rule set
-rafi create ./my-repo --force     # overwrite existing doc files
+rafi create .
+rafi create . --defaults  # built-in defaults; byte-equivalent to the bundled rule set
+rafi create . --force     # overwrite existing doc files
 ```
 
-The walkthrough collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. These gate which rule packs are included. Answers are saved to `project.yaml`.
+The walkthrough collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Answers are saved to `project.yaml`.
 
-### `rafi compile <project>`
+### `rafi compile .`
 
 Re-renders all configs from an existing `project.yaml`. Run this after editing the config or upgrading `special-agents`.
 
 ```sh
-rafi compile ./my-repo
-rafi compile ./my-repo --force
+rafi compile .
+rafi compile . --force
 ```
 
 ## What gets written

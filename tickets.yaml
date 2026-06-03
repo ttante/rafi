@@ -842,3 +842,245 @@ tickets:
       - packages/**
     rollback: null
     notes: Closes the implementation.
+
+  # ───────────────────────────── E8 · Codex Docker sandbox (Codex/Claude parity) ─────────────────────────────
+  # Goal: wrap Codex CLI runs in a Docker container so ai-foreman gets blast-radius containment
+  # comparable to what the Claude Agent SDK provides natively. Full tool-call interception is
+  # not achievable without an OpenAI SDK, but container boundaries give filesystem isolation,
+  # network control, and process containment — enough for autonomous/CI use with Codex.
+
+  - id: T080
+    order: 80000
+    title: Design Docker execution wrapper for the Codex adapter
+    area: Runtime
+    priority: P1
+    size: M
+    risk: Medium
+    depends_on: [T053]
+    summary: Design how the Codex adapter optionally wraps `codex exec` in a Docker container. Define volume mount strategy (project dir only), network mode options, image selection, and how flags (model, effort, resume) pass through to the containerized CLI. Document the remaining gap vs Claude SDK (no per-tool-call interception).
+    acceptance:
+      - Design doc or ADR in docs/ covering container layout, volume strategy, network modes, and known gaps vs Claude.
+      - foreman.yaml schema extended with a codex.docker section (image, network, extraMounts, enabled).
+      - No implementation yet — design only.
+    required_tests:
+      - Spec/schema test validates the new foreman.yaml codex.docker fields.
+    likely_files:
+      - packages/ai-foreman/src/adapters/types.ts
+      - packages/ai-foreman/foreman.yaml
+      - docs/architecture.md
+    rollback: null
+    notes: The Claude adapter is unchanged. Docker is opt-in for Codex only.
+
+  - id: T081
+    order: 81000
+    title: Implement Docker execution wrapper in the Codex adapter
+    area: Runtime
+    priority: P1
+    size: L
+    risk: High
+    depends_on: [T080]
+    summary: When codex.docker.enabled is true in foreman.yaml, wrap `codex exec` in `docker run` — mount the project dir as the workspace volume (read-write), mount the Codex config/credentials as read-only, set the working directory, apply network mode, and stream stdout/stderr back to ai-foreman identically to the bare adapter. Fall back to bare exec when Docker is unavailable or disabled.
+    acceptance:
+      - `ai-foreman start ./my-project --agent codex` with docker.enabled=true runs inside a container.
+      - Only the project directory is writable; host filesystem is not accessible.
+      - stdout/stderr streaming and STEP_STATUS parsing are identical to bare Codex.
+      - Docker unavailable → graceful fallback to bare exec with a warning.
+    required_tests:
+      - Unit tests for Docker command construction (volumes, network, flags).
+      - Integration test running a dummy ticket with Docker Codex (requires Docker in CI).
+    likely_files:
+      - packages/ai-foreman/src/adapters/codex.ts
+      - packages/ai-foreman/src/adapters/docker.ts
+      - packages/ai-foreman/test/adapters.test.ts
+    rollback: Set docker.enabled=false to revert to bare exec; no behavior change for Claude.
+    notes: Risk is High because Docker availability and credential mounting vary by environment.
+
+  - id: T082
+    order: 82000
+    title: Map foreman.yaml bash/network policy onto Docker Codex runs
+    area: Runtime
+    priority: P1
+    size: M
+    risk: Medium
+    depends_on: [T081]
+    summary: Translate the subset of foreman.yaml policy that is enforceable via Docker into container configuration — network isolation (none/host/bridge) maps to codex.docker.network; file write containment is enforced by volume scope. Document which foreman.yaml policies apply to Docker Codex and which remain unenforced (per-tool-call allow/deny still requires an SDK).
+    acceptance:
+      - codex.docker.network in foreman.yaml controls Docker --network flag.
+      - Volume mount ensures writes outside the project dir are impossible.
+      - A clear table in the README documents policy coverage: Claude (full) vs Docker Codex (container-level) vs bare Codex (none).
+    required_tests:
+      - Test that Docker command includes correct --network flag from config.
+      - Test that no volume outside the project dir is mounted by default.
+    likely_files:
+      - packages/ai-foreman/src/adapters/docker.ts
+      - packages/ai-foreman/foreman.yaml
+      - packages/ai-foreman/README.md
+    rollback: null
+    notes: Per-command bash allow-listing is not achievable without SDK; document the gap honestly.
+
+  - id: T083
+    order: 83000
+    title: Auto-detect Docker and surface docker mode in ai-foreman doctor
+    area: Runtime
+    priority: P2
+    size: S
+    risk: Low
+    depends_on: [T081]
+    summary: Add Docker availability detection to `ai-foreman doctor` — check that `docker` is on PATH and the daemon is running, report docker.enabled status from foreman.yaml, and warn if docker.enabled=true but Docker is unavailable. Add a --docker flag to `ai-foreman start` as a one-shot override of codex.docker.enabled.
+    acceptance:
+      - `ai-foreman doctor` reports Docker available/unavailable and the current docker.enabled setting.
+      - `ai-foreman start --docker` enables Docker mode for that run without editing foreman.yaml.
+      - Clear warning when docker.enabled=true but daemon is not running.
+    required_tests:
+      - Unit test for Docker detection logic (mock PATH).
+      - Doctor output test for docker section.
+    likely_files:
+      - packages/ai-foreman/src/cli/doctor.ts
+      - packages/ai-foreman/src/adapters/docker.ts
+      - packages/ai-foreman/src/index.ts
+    rollback: null
+    notes: --docker flag makes CI configuration easier without config file changes.
+
+  - id: T084
+    order: 84000
+    title: Phase 8 gate — Docker Codex parity verification and docs
+    area: Runtime
+    priority: P1
+    size: S
+    risk: Low
+    depends_on: [T082, T083]
+    summary: Run the dummy-project smoke test three ways — bare Codex, Docker Codex, Claude — and verify Docker Codex provides filesystem and network containment. Update README with a Docker Codex setup guide and an honest comparison table of what each mode controls.
+    acceptance:
+      - Smoke test completes for all three modes.
+      - Attempting to write outside the project dir in Docker Codex fails at the container level.
+      - README comparison table covers: filesystem isolation, network control, per-tool policy, bash allow-listing, audit log.
+      - CI runs Docker Codex tests when Docker is available (skip otherwise).
+    required_tests:
+      - Three-mode smoke test captured as evidence.
+      - Container escape attempt test (write to /tmp on host — should fail).
+    likely_files:
+      - packages/ai-foreman/test/integration.test.ts
+      - packages/ai-foreman/README.md
+      - examples/dummy-project/**
+    rollback: null
+    notes: Closes E8. Remaining gap (per-tool interception) requires an OpenAI SDK — track as a future item if OpenAI ships one.
+
+  # ───────────────────────────── E9 · Optional Claude Agent SDK ─────────────────────────────
+  # Goal: make the Claude Agent SDK (~30MB) opt-in so Codex-only users don't carry it.
+  # The SDK is moved to optionalDependencies; the Claude adapter lazy-loads it at runtime
+  # and fails fast with a clear install message if it's missing. rafi create gains a question
+  # that sets harness.targets, which downstream tooling uses to decide whether the SDK is needed.
+
+  - id: T090
+    order: 90000
+    title: Add agent-runtime question to rafi create walkthrough
+    area: CLI
+    priority: P1
+    size: S
+    risk: Low
+    depends_on: [T062]
+    summary: Add a yes/no question to the rafi create walkthrough — "Will you use Claude Code as your agent runtime? (No = Codex only, skips the Claude Agent SDK)" defaulting to Yes. Map the answer to harness.targets in project.yaml — Yes produces ["claude","codex"], No produces ["codex"]. Print a note after compile when targets excludes claude, explaining the SDK can be omitted.
+    acceptance:
+      - New yes/no question appears between the QA question and compile.
+      - Yes → harness.targets=["claude","codex"]; No → harness.targets=["codex"].
+      - --defaults keeps ["claude","codex"] (no behavior change).
+      - Post-compile message notes SDK is optional when targets=["codex"].
+    required_tests:
+      - Unit test: No answer produces harness.targets=["codex"].
+      - Unit test: --defaults produces harness.targets=["claude","codex"].
+    likely_files:
+      - packages/rafi/src/index.ts
+      - packages/rafi/src/project.ts
+      - packages/rafi/test/project.test.ts
+    rollback: null
+    notes: harness.targets already exists in the schema — this just surfaces it in the walkthrough.
+
+  - id: T091
+    order: 91000
+    title: Move Claude Agent SDK to optionalDependencies in ai-foreman
+    area: Runtime
+    priority: P1
+    size: S
+    risk: Medium
+    depends_on: [T090]
+    summary: Move @anthropic-ai/claude-agent-sdk from dependencies to optionalDependencies in ai-foreman/package.json. Update the publish/install docs to note that Codex-only users can install with --omit=optional to skip the SDK. No behavior change when the SDK is present.
+    acceptance:
+      - package.json lists the SDK under optionalDependencies, not dependencies.
+      - npm install ai-foreman still installs the SDK by default (optional deps install by default).
+      - npm install --omit=optional ai-foreman skips the SDK without error.
+      - README documents both install paths.
+    required_tests:
+      - Publish dry-run confirms the SDK is listed as optional in the packed manifest.
+    likely_files:
+      - packages/ai-foreman/package.json
+      - packages/ai-foreman/README.md
+    rollback: Move the SDK back to dependencies.
+    notes: optional deps install by default in npm/pnpm — the only change is Codex-only users can explicitly opt out.
+
+  - id: T092
+    order: 92000
+    title: Lazy-load the Claude Agent SDK in the Claude adapter
+    area: Runtime
+    priority: P1
+    size: M
+    risk: Medium
+    depends_on: [T091]
+    summary: Replace the top-level static import of @anthropic-ai/claude-agent-sdk in the Claude adapter with a dynamic import() at the point of first use. Catch the import error and throw a clear, actionable message ("Claude Agent SDK not installed — run: npm install @anthropic-ai/claude-agent-sdk") rather than a cryptic module-not-found crash. The Codex adapter is unaffected.
+    acceptance:
+      - SDK is not imported at module load time — only when a Claude session starts.
+      - Missing SDK produces a human-readable error with the install command.
+      - All existing Claude adapter tests pass.
+      - Codex-only runs never attempt to import the SDK.
+    required_tests:
+      - Unit test: Claude adapter with SDK missing throws the actionable error message.
+      - Unit test: Claude adapter with SDK present initialises normally.
+      - Existing adapter tests remain green.
+    likely_files:
+      - packages/ai-foreman/src/adapters/claude.ts
+      - packages/ai-foreman/test/adapters.test.ts
+    rollback: Revert to static import — SDK missing becomes a module-not-found crash again.
+    notes: Dynamic import() is already ESM-native — no bundler changes needed.
+
+  - id: T093
+    order: 93000
+    title: Surface SDK status in ai-foreman doctor
+    area: Runtime
+    priority: P2
+    size: XS
+    risk: Low
+    depends_on: [T092]
+    summary: Add a Claude Agent SDK check to `ai-foreman doctor` — detect whether the SDK is importable and report its version if present, or a clear "not installed" warning with the install command if absent. Only warn (not error) when targets=["codex"] since the SDK is not needed in that case.
+    acceptance:
+      - doctor reports SDK version when installed.
+      - doctor reports "not installed" + install hint when missing and targets includes claude.
+      - doctor reports "not required (Codex only)" when targets=["codex"] and SDK is absent.
+    required_tests:
+      - Unit tests for each doctor SDK output case (present/missing/not-required).
+    likely_files:
+      - packages/ai-foreman/src/cli/doctor.ts
+      - packages/ai-foreman/test/doctor.test.ts
+    rollback: null
+    notes: Pairs with the Docker doctor check added in T083.
+
+  - id: T094
+    order: 94000
+    title: Phase 9 gate — optional SDK install and Codex-only smoke test
+    area: Runtime
+    priority: P1
+    size: S
+    risk: Low
+    depends_on: [T092, T093]
+    summary: Verify that a Codex-only install (--omit=optional) works end-to-end without the SDK, and that a Claude install still works normally. Confirm the actionable error fires correctly when Claude is attempted without the SDK.
+    acceptance:
+      - npm install --omit=optional + ai-foreman start --agent codex completes a dummy-project run.
+      - With SDK present, ai-foreman start --agent claude completes normally.
+      - With SDK missing and --agent claude, the actionable error message is shown.
+      - ai-foreman doctor reports correctly in all three states.
+    required_tests:
+      - CI job with --omit=optional running a Codex dummy-project ticket.
+      - Test asserting the missing-SDK error message.
+    likely_files:
+      - packages/ai-foreman/test/integration.test.ts
+      - .github/workflows/ (or equivalent CI config)
+    rollback: null
+    notes: Closes E9.

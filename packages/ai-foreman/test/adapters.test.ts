@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildClaudeQueryOptions } from "../src/adapters/claude.js";
+import { buildClaudeQueryOptions, requireClaudeSDK } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import type { BuilderAdapterOptions } from "../src/adapters/types.js";
 
@@ -66,4 +66,11 @@ test("CodexAdapter.buildInstruction prepends systemPromptAppend to the turn text
 test("CodexAdapter.buildInstruction returns instruction unchanged when no systemPromptAppend", () => {
   const adapter = new CodexAdapter(BASE_OPTS);
   assert.equal(adapter.buildInstruction("Do the thing."), "Do the thing.");
+});
+
+// --- requireClaudeSDK ---
+
+test("requireClaudeSDK resolves to a module with a query function", async () => {
+  const sdk = await requireClaudeSDK();
+  assert.equal(typeof sdk.query, "function");
 });

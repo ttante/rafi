@@ -70,3 +70,13 @@ test("appName and timezone pass through", () => {
   assert.equal(config.appName, "Acme");
   assert.equal(config.timezone, "America/New_York");
 });
+
+test("useClaude:false sets harness.targets to codex only", () => {
+  const config = buildProjectConfig({ ...defaultAnswers(), useClaude: false });
+  assert.deepEqual(config.harness.targets, ["codex"]);
+});
+
+test("--defaults keeps useClaude:true and harness.targets includes claude", () => {
+  const config = buildProjectConfig(defaultAnswers());
+  assert.deepEqual(config.harness.targets, ["claude", "codex"]);
+});

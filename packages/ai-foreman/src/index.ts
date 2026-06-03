@@ -113,7 +113,7 @@ program
     const builder: BuilderAdapter =
       opts.agent === "codex"
         ? new CodexAdapter(adapterOpts)
-        : new ClaudeAdapter(adapterOpts);
+        : await ClaudeAdapter.create(adapterOpts);
     // Commander surfaces --no-qa as opts.qa === false; when --qa/--no-qa is not
     // passed, opts.qa is undefined and we fall back to the config default.
     const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
