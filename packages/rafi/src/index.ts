@@ -8,6 +8,10 @@ import { parse as parseYaml } from "yaml";
 import { assertProjectConfig } from "rafi-spec";
 import { compile, writeProjectYaml } from "./compiler.js";
 import { buildProjectConfig, defaultAnswers } from "./project.js";
+import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
+import { buildStartCommand } from "ai-foreman/cli/start.js";
+import { buildStatusCommand } from "ai-foreman/cli/status.js";
+import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -118,6 +122,11 @@ program
       console.log("rafi: skipping Claude Agent SDK (Codex only).");
     }
   });
+
+program.addCommand(buildTicketsCommand());
+program.addCommand(buildStartCommand());
+program.addCommand(buildStatusCommand());
+program.addCommand(buildDoctorCommand());
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`rafi: ${err instanceof Error ? err.message : String(err)}`);

@@ -1,0 +1,72 @@
+import { Command } from "commander";
+import { resolve, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { loadConfig } from "../config.js";
+import { isTicketsInitialized } from "../tickets/config.js";
+import { cmdValidate } from "../tickets/commands.js";
+
+const PACKAGE_VERSION = JSON.parse(
+  readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+)?.version as string;
+
+function commandVersion(command: string): { ok: boolean; detail?: string } {
+  const result = spawnSync(command, ["--version"], {
+    encoding: "utf8",
+    timeout: 3000,
+  });
+  if (result.error) return { ok: false, detail: result.error.message };
+  if (result.status !== 0) return { ok: false, detail: result.stderr.trim() };
+  return { ok: true, detail: (result.stdout.trim() || result.stderr.trim()).slice(0, 120) };
+}
+
+export function buildDoctorCommand(): Command {
+  return new Command("doctor")
+    .description("Check Foreman, agent CLIs, config, and optional ticket tracker readiness.")
+    .argument("[project]", "path to the project directory", ".")
+    .action((project: string) => {
+      const cwd = resolve(project);
+      let errors = 0;
+
+      const report = (ok: boolean, label: string, detail?: string): void => {
+        console.log(`${ok ? "ok" : "!!"} ${label}${detail ? ` — ${detail}` : ""}`);
+        if (!ok) errors++;
+      };
+      const warn = (label: string, detail?: string): void => {
+        console.log(`-- ${label}${detail ? ` — ${detail}` : ""}`);
+      };
+
+      report(Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10) >= 20, "node >=20", process.version);
+      report(Boolean(PACKAGE_VERSION), "foreman package version", PACKAGE_VERSION);
+      report(existsSync(cwd), "project directory exists", cwd);
+      if (!existsSync(cwd)) process.exit(1);
+
+      try {
+        loadConfig(join(cwd, "foreman.yaml"));
+        report(true, "foreman.yaml", existsSync(join(cwd, "foreman.yaml")) ? "valid" : "not present, using defaults");
+      } catch (err) {
+        report(false, "foreman.yaml", err instanceof Error ? err.message : String(err));
+      }
+
+      const claude = commandVersion("claude");
+      if (claude.ok) warn("claude CLI found", claude.detail);
+      else warn("claude CLI not found", "Claude adapter may still work through the SDK if credentials are configured");
+
+      const codex = commandVersion("codex");
+      if (codex.ok) warn("codex CLI found", codex.detail);
+      else warn("codex CLI not found", "required only for --agent codex");
+
+      if (isTicketsInitialized(cwd)) {
+        try {
+          const result = cmdValidate(cwd);
+          report(result.clean, ".tickets validation", result.clean ? "clean" : `${result.issues.length} issue(s)`);
+        } catch (err) {
+          report(false, ".tickets validation", err instanceof Error ? err.message : String(err));
+        }
+      } else {
+        warn(".tickets", "not initialized; start will run in plain mode");
+      }
+
+      process.exit(errors === 0 ? 0 : 1);
+    });
+}

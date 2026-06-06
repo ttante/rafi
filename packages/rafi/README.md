@@ -1,8 +1,8 @@
 # @rafi-ai/cli
 
-Scaffold and compile AI agent configs for your repo.
+Scaffold, compile, and drive your AI agent harness — all from one command.
 
-`rafi create` reads your stack, assembles best-practice rule packs, and writes the files Claude Code and Codex read — AGENTS.md, CLAUDE.md, subagents, and starter docs — all in one command.
+`rafi create` reads your stack, assembles best-practice rule packs, and writes the files Claude Code and Codex read. `rafi start` drives an agent builder through a ticket queue unattended. All `ai-foreman` commands are available under `rafi`.
 
 ## Install
 
@@ -10,9 +10,9 @@ Scaffold and compile AI agent configs for your repo.
 npm install -g @rafi-ai/cli
 ```
 
-## Use
+## Commands
 
-Run `rafi` from inside the target repo:
+### Scaffold & compile
 
 ```sh
 cd my-repo
@@ -21,27 +21,26 @@ rafi create . --defaults  # skip walkthrough, use built-in defaults
 rafi compile .            # re-render after editing project.yaml
 ```
 
-## Commands
+`rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Answers are saved to `project.yaml`.
 
-### `rafi create .`
-
-Runs the walkthrough (or `--defaults` to skip it), writes `project.yaml`, and compiles all configs.
+### Ticket lifecycle
 
 ```sh
-rafi create .
-rafi create . --defaults  # built-in defaults; byte-equivalent to the bundled rule set
-rafi create . --force     # overwrite existing doc files
+rafi tickets init --app-name "My App"   # initialize .tickets/ in the project
+rafi tickets populate                    # agent fills tickets from existing docs
+rafi tickets queue                       # show the next-N queue
+rafi tickets validate                    # run all 4 validation passes
+rafi tickets render                      # regenerate docs/ticket-progress.md
 ```
 
-The walkthrough collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Answers are saved to `project.yaml`.
-
-### `rafi compile .`
-
-Re-renders all configs from an existing `project.yaml`. Run this after editing the config or upgrading `special-agents`.
+### Run the builder
 
 ```sh
-rafi compile .
-rafi compile . --force
+rafi start . --steps 10              # drive a Claude builder through 10 steps
+rafi start . --steps 5 --agent codex # use Codex instead
+rafi start . --steps 5 --no-qa       # skip per-ticket QA
+rafi status .                         # summarize the most recent run
+rafi doctor .                         # check env, config, and readiness
 ```
 
 ## What gets written
@@ -52,7 +51,7 @@ rafi compile . --force
   CLAUDE.md                        Claude Code entrypoint (@AGENTS.md import)
   project.yaml                     stack config (commit this)
   .claude/agents/<role>.md         Claude subagent files (builder, qa, planner, ticket-maker)
-  .rafi/compiled/<role>/system.md  role system text — read by ai-foreman at runtime
+  .rafi/compiled/<role>/system.md  role system text — read at runtime
   .rafi/compiled/<role>/meta.json  skills + model config
   docs/                            starter doc templates (flag-gated by stack)
 ```
@@ -60,5 +59,5 @@ rafi compile . --force
 ## Part of Rafi
 
 - **`special-agents`** — library (rules + skills + agents + composition)
-- **`ai-foreman`** — runtime that drives agents through a ticket loop
-- **`@rafi-ai/cli`** — this CLI
+- **`ai-foreman`** — standalone runtime (same commands, separate install)
+- **`@rafi-ai/cli`** — this CLI (includes everything)

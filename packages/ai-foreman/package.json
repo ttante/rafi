@@ -14,6 +14,24 @@
   "bin": {
     "ai-foreman": "./dist/index.js"
   },
+  "exports": {
+    "./cli/tickets.js": {
+      "types": "./dist/cli/tickets.d.ts",
+      "default": "./dist/cli/tickets.js"
+    },
+    "./cli/start.js": {
+      "types": "./dist/cli/start.d.ts",
+      "default": "./dist/cli/start.js"
+    },
+    "./cli/status.js": {
+      "types": "./dist/cli/status.d.ts",
+      "default": "./dist/cli/status.js"
+    },
+    "./cli/doctor.js": {
+      "types": "./dist/cli/doctor.d.ts",
+      "default": "./dist/cli/doctor.js"
+    }
+  },
   "files": [
     "dist",
     "README.md",

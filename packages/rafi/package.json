@@ -26,6 +26,7 @@
   },
   "bundledDependencies": ["rafi-spec"],
   "dependencies": {
+    "ai-foreman": "workspace:*",
     "special-agents": "workspace:*",
     "rafi-spec": "workspace:*",
     "@clack/prompts": "^1.4.0",

@@ -1,23 +1,20 @@
 # Rafi (Refined AI Framework & Implementor)
 
-A lightweight + powerful modern harness engineering framework.
+A lightweight + powerful harness engineering framework. Your best bet for everything from one-shot builds to small feature implementation. Especially helpful for building enterprise level AI features.
 
-Features:
-- Composes best-practice rule packs into skills
-- Compses skills into specialized agaents tailored to your stack (builder, QA, planner, ticket-maker)
-- Gates AI, frontend, cloud, and backend rules on your actual stack so agents get exactly what they need.
-- `ai-foreman` defines a robust ticketing/tracking solution
-- Populates upcoming tickets via specialized-agent
-- Drives agents unattended through tickets with built-in QA cycling per step
-- Pro level AI App features
+## Features
+- Composes best-practice rules into skills into agents (builder, QA, planner, ticket-maker)
+- In-stack rules for AI | frontend | cloud | backend
+- `ai-foreman` (robust ticketing/tracking solution):
+- Sets up + populates tickets via specialized-agent
+- Drives agents through tickets with built-in QA cycling per step
 
-## Why
-Rafi is your best bet for everything from one-shot app building to small feature implementation by:
-- enforcing strict test driven development (TDD) practices
-- prescribing enterprise level stability & security features from square one
-- using a rich ticket system with curated prompts to ensure it stays updated
-- tracking future work that results from completed tickets
-- coupling ticket implementation with QA that ensures code quality, test passing & regression protection
+## How
+- enforces strict test driven development (TDD)
+- enterprise level stability & security features from square one
+- rock solid task tracking
+- future work identified + documented
+- QA-coupled builder ensure: code quality | testing | regression protection
 
 ## AI App Superbuilder
 
@@ -97,12 +94,12 @@ my-repo/
   ```
 - Use the ticket-maker agent to convert the plan into a structured, ordered ticket queue
   ```sh
-  ai-foreman tickets init --app-name "My App"
-  ai-foreman tickets populate
+  rafi tickets init --app-name "My App"
+  rafi tickets populate
   ```
 - Run the builder to implement tickets one by one, with QA after each step
   ```sh
-  ai-foreman start . --steps 10
+  rafi start . --steps 10
   ```
 
 ### Existing Projects
@@ -119,12 +116,12 @@ my-repo/
   ```
 - Import your existing backlog — populate from planning docs, a ticket file, or a markdown roadmap
   ```sh
-  ai-foreman tickets init --app-name "My App"
-  ai-foreman tickets populate
+  rafi tickets init --app-name "My App"
+  rafi tickets populate
   ```
 - Run the builder against your backlog; QA cycles and future-work tracking keep the queue clean as work completes
   ```sh
-  ai-foreman start . --steps 10
+  rafi start . --steps 10
   ```
 
 ## Rule packs
@@ -140,12 +137,11 @@ Choices are saved in `project.yaml`. The top of `AGENTS.md` shows a `# rafi: ai=
 
 ## Unattended ticket loop
 
-`ai-foreman` drives your agents through a ticket queue — no human needed between steps:
+`rafi` drives your agents through a ticket queue — no human needed between steps:
 
 ```sh
-npm install -g ai-foreman
-ai-foreman tickets init --project ./my-repo --app-name "My App"
-ai-foreman start ./my-repo --steps 5
+rafi tickets init --project ./my-repo --app-name "My App"
+rafi start ./my-repo --steps 5
 ```
 
 - Reads compiled role bundles from `.rafi/compiled/` so each turn gets the right guidance.
@@ -156,9 +152,9 @@ ai-foreman start ./my-repo --steps 5
 
 | Package | Install | Description |
 |---|---|---|
-| `@rafi-ai/cli` | `npm install -g @rafi-ai/cli` | `rafi create` / `rafi compile` — scaffold and compile |
+| `@rafi-ai/cli` | `npm install -g @rafi-ai/cli` | All commands — scaffold, compile, tickets, start, status, doctor |
 | `special-agents` | `npm install special-agents` | Rules, skills, and agent library |
-| `ai-foreman` | `npm install -g ai-foreman` | Ticket-loop runtime |
+| `ai-foreman` | `npm install -g ai-foreman` | Ticket-loop runtime (standalone alternative) |
 
 ## Monorepo
 
