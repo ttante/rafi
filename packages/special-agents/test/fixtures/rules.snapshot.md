@@ -252,20 +252,30 @@ Preferred verification order when available:
 ## AI Quality, Confidence, And Evals
 
 - Always plan AI generation workflows for high-confidence outputs, not just plausible outputs.
-- Define quality gates, confidence scoring, QA checks, and acceptance thresholds for AI-generated results.
+- Define quality gates, confidence scoring, QA checks, and acceptance thresholds for every AI-driven step before implementing it.
 - Assume the project will include custom QA steps for important AI generations.
-- When an AI generation is important or user-facing, include tests, evals, review workflows, or human approval steps that match the risk level.
-- For prompts used in AI generation steps, QA steps, correction steps, and other relevant AI uses, instruct the model to check its work three times by default.
-- Make the number of model self-checks configurable.
-- Make extra model self-checking toggleable so it can be disabled when cost, latency, or workflow needs require it.
-- During planning, consult the user about where work-checking prompts should be used, how many checks are appropriate, and when extra checks may be turned off.
-- When using AI generation, start with at least one correct or top-quality example, and prefer many high-quality examples.
-- Use correct/high-quality examples during AI generation where they improve quality.
-- During planning, consult the user on which AI generation stages should use examples.
-- Build the ability to toggle the use of correct/high-quality examples at AI generation steps where practical.
-- Track AI failures, correction rates, confidence levels, approval outcomes, and quality trends.
+- When an AI step is important or user-facing, include tests, evals, review workflows, or human approval steps that match the risk level.
+- For prompts used in AI generation, QA, and correction steps, instruct the model to check its work three times by default. Make the number of self-checks configurable and toggleable so it can be disabled when cost, latency, or workflow requires it.
+- During planning, consult the user about where self-checking prompts should be used, how many checks are appropriate, and when extra checks may be turned off.
+
+### Correct-Example Libraries
+
+- For every AI step, build and maintain a library of correct, high-quality examples that demonstrate what a good output looks like. This library serves two purposes: it is injected into prompts as few-shot context to guide the model, and it anchors the eval suite.
+- Seed the example library with at least one correct example before writing any AI step. Prefer many high-quality, diverse examples that cover common cases, edge cases, and tricky inputs.
+- Examples should show the full input-to-output mapping for the step — not just an answer, but the reasoning or format the model is expected to follow.
+- Include negative examples (clearly wrong outputs with an explanation of why they are wrong) where they meaningfully help the model avoid common failure modes.
+- Version the example library alongside prompts. A prompt change and its associated example changes should be reviewed together.
+- During planning, identify which AI steps will use injected examples, how many to inject at runtime, and whether the selection should be static, retrieved by similarity, or chosen by another model.
+- Build the ability to toggle example injection per step so it can be disabled when cost or latency requires it.
+- Track which examples were injected for each production generation as part of the replay record so failures can be traced back to example quality.
+- Review and prune the example library over time: retire examples that no longer represent correct behavior and add examples from corrected production failures.
+
+### Eval Suites
+
 - Keep AI eval suites, golden examples, adversarial cases, and regression results updated in `docs/ai-evals.md`.
-- Promote prompt or model changes only when required eval suites meet documented thresholds, or document the explicit user-approved reason for accepting the risk.
+- Maintain eval sets that cover: correct common cases, edge cases, known failure modes, adversarial inputs, and cases drawn from corrected production failures.
+- Track AI failures, correction rates, confidence levels, approval outcomes, and quality trends.
+- Promote prompt, parameter, or model changes only when required eval suites meet documented thresholds, or document the explicit user-approved reason for accepting the risk.
 
 ## AI Reproducibility, Replayability, And Prompt Tuning
 
@@ -292,6 +302,26 @@ Preferred verification order when available:
 - Preserve approved corrections and failed generations in a structured format that could support future fine-tuning, evals, or custom model training.
 - Document the journey toward custom model training in `docs/ai.md`, including data requirements, quality thresholds, privacy constraints, retention rules, estimated cost, and when training is worth it.
 - During planning, consult the user about the AI learning-loop and custom-training approach. If the full setup would be too cumbersome or data-heavy, recommend a lighter approach.
+
+## AI Batch Execution And Model Comparison
+
+- Design every AI step — generation, classification, extraction, routing, validation, summarization, or any other model-driven operation — so it can be run in batch mode without code changes.
+- Batch mode means: given a set of inputs, run all of them through the same step and collect results, scores, costs, and latency for each.
+- Build batch execution as a first-class capability, not an afterthought. The ability to run a step over many examples should be available from day one.
+- Support running a batch across multiple models simultaneously so outputs can be compared side-by-side for the same inputs.
+- For each batch run, record: input, model/provider, parameters, output, scoring result, cost, latency, total step duration, and timestamp. Store results in a format that supports filtering, sorting, and aggregation.
+- Record step timing at every level: time-to-first-token, total generation time, and end-to-end step duration including pre/post-processing. This allows latency regressions to be caught the same way correctness regressions are.
+- Track step timing trends over time — not just per run, but across runs — so gradual latency drift is visible before it becomes a user-facing problem.
+- Define a scoring function for each AI step before implementing it. Scoring may be rule-based, model-judged, human-reviewed, or a combination — but it must be explicit and repeatable.
+- Use batch comparison results as the primary evidence for model selection decisions at each step. Document the winning model, the runner-up, and the margin by which the winner was chosen.
+- Allow batch runs to use golden examples, synthetic inputs, real sampled inputs, adversarial cases, or any combination.
+- Make it easy to add new inputs to the batch suite for a step — especially real-world cases that caused problems in production.
+- Track batch suite coverage: the suite should include common cases, edge cases, known failure modes, and adversarial inputs for each step.
+- Support partial batches and incremental runs so new models or parameter changes can be tested against a subset of the suite before a full run.
+- Automate batch runs in CI when prompts, models, parameters, or scoring functions change.
+- Produce a diff-friendly summary report for each batch run: pass/fail per example, score distributions, cost and latency comparisons, and a clear recommendation.
+- When batch results show a regression, block the change and require explicit sign-off with a documented rationale before merging.
+- Keep batch suite inputs, expected outputs (or scoring criteria), and historical results versioned in the repository alongside the prompts they test.
 
 ## Release, Versioning, And Change Management
 

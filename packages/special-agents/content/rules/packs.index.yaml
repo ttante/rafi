@@ -133,45 +133,51 @@ packs:
     condition: ai
     template: false
     order: 22000
+  - name: ai-batch-testing
+    category: domain
+    path: domain/ai-batch-testing.md
+    condition: ai
+    template: false
+    order: 23000
   - name: release
     category: process
     path: process/release.md
     condition: always
     template: false
-    order: 23000
+    order: 24000
   - name: accessibility
     category: domain
     path: domain/accessibility.md
     condition: frontend
     template: false
-    order: 24000
+    order: 25000
   - name: observability
     category: domain
     path: domain/observability.md
     condition: always
     template: false
-    order: 25000
+    order: 26000
   - name: business-docs
     category: process
     path: process/business-docs.md
     condition: always
     template: false
-    order: 26000
+    order: 27000
   - name: architecture
     category: process
     path: process/architecture.md
     condition: always
     template: false
-    order: 27000
+    order: 28000
   - name: definition-of-done
     category: base
     path: base/definition-of-done.md
     condition: always
     template: false
-    order: 28000
+    order: 29000
   - name: response-expectations
     category: base
     path: base/response-expectations.md
     condition: always
     template: false
-    order: 29000
+    order: 30000

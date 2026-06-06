@@ -1,6 +1,6 @@
 {
   "name": "@rafi-ai/cli",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Rafi CLI — scaffold and compile AI framework configs for a target repo.",
   "type": "module",
   "bin": {

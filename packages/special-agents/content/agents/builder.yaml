@@ -19,6 +19,7 @@ conditionalPacks:
     - domain/ai-cost
     - domain/ai-reproducibility
     - domain/ai-governance
+    - domain/ai-batch-testing
   frontend:
     - domain/accessibility
 model: null

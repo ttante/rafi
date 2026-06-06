@@ -71,10 +71,10 @@ function snapshotSections(): Map<string, string> {
   return out;
 }
 
-test("index lists one pack per section (29 sections → 29 packs)", () => {
+test("index lists one pack per section (30 sections → 30 packs)", () => {
   const sections = snapshotSections();
-  assert.equal(sections.size, 29, "snapshot should have 29 sections");
-  assert.equal(index.length, 29, "index should list 29 packs");
+  assert.equal(sections.size, 30, "snapshot should have 30 sections");
+  assert.equal(index.length, 30, "index should list 30 packs");
 });
 
 test("each pack renders back to its exact source section", () => {

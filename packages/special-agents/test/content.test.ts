@@ -75,9 +75,9 @@ test("loadDefaults returns the expected stack keys and flags", () => {
   assert.equal(typeof d.flags.usesAI, "boolean");
 });
 
-test("loadPacksIndex returns 29 entries in strictly ascending order", () => {
+test("loadPacksIndex returns 30 entries in strictly ascending order", () => {
   const index = loadPacksIndex();
-  assert.equal(index.length, 29);
+  assert.equal(index.length, 30);
   for (let i = 1; i < index.length; i++) {
     assert.ok(index[i].order > index[i - 1].order, "index not in ascending order");
   }

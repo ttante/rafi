@@ -84,12 +84,13 @@ const MAP: Record<string, Meta | null> = {
   "AI Quality, Confidence, And Evals": { dir: "domain", name: "ai-evals", condition: "ai", description: "Quality gates, confidence, evals, and examples for AI." },
   "AI Reproducibility, Replayability, And Prompt Tuning": { dir: "domain", name: "ai-reproducibility", condition: "ai", description: "Replayability, prompt versioning, and prompt tuning." },
   "AI Cost Tracking And Learning Loop": { dir: "domain", name: "ai-cost", condition: "ai", description: "AI cost tracking and the correction/learning loop." },
+  "AI Batch Execution And Model Comparison": { dir: "domain", name: "ai-batch-testing", condition: "ai", description: "Batch execution and model comparison for any AI step." },
 
   "Test-Driven Development": { dir: "process", name: "tdd", condition: "always", description: "Test-driven development discipline: identify behavior, write tests first, then minimal code." },
 };
 
 /** Expected number of packs emitted (one per section of the snapshot). */
-export const EXPECTED_PACK_COUNT = 29;
+export const EXPECTED_PACK_COUNT = 30;
 
 interface IndexEntry {
   name: string;
