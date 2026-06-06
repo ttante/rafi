@@ -14,11 +14,11 @@ A lightweight + powerful harness engineering framework. Your best bet for everyt
 - enterprise level stability & security features from square one
 - rock solid task tracking
 - future work identified + documented
-- QA-coupled builder ensure: code quality | testing | regression protection
+- QA-coupled builder ensures code quality + testing + regression protection
 
 ## AI App Superbuilder
 
-Rafi shines even brighter when building apps that leverage LLMs. Enable `usesAI` and your agents get five additional rule packs that enforce enterprise-grade AI engineering from the first line of code:
+Rafi shines brightest in apps that leverage LLMs. Enable `usesAI` and your agents get five additional rule packs that enforce enterprise-grade AI engineering from the first line of code:
 
 - **Adversarial safety** — agents plan prompt injection defense, jailbreak protection, content safety checks, tool scoping, and abuse monitoring before writing any AI feature. Red-teaming is built into release criteria. An incident plan for harmful, wrong, expensive, or policy-violating outputs is required.
 - **Confidence & evals** — every AI generation step gets quality gates, confidence scoring, and acceptance thresholds. Models check their own work three times by default (configurable). Eval suites with golden examples and adversarial cases are required before promoting any prompt change.
