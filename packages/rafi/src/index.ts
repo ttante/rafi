@@ -84,7 +84,7 @@ program
       const packageManager = await text({ message: "Package manager:", defaultValue: answers.packageManager });
       if (isCancel(packageManager)) process.exit(0);
 
-      const usesAI = await confirm({ message: "Will this app call LLMs / do AI generation?", initialValue: false });
+      const usesAI = await confirm({ message: "Will this app call LLMs / do AI generation?", initialValue: true });
       if (isCancel(usesAI)) process.exit(0);
 
       const useClaude = await confirm({ message: "Will you use Claude Code as your agent runtime? (No = Codex only, skips the Claude Agent SDK)", initialValue: true });

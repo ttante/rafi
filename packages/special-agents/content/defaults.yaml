@@ -9,5 +9,5 @@ stack:
   packageManager: "pnpm"
 flags:
   hasFrontend: true
-  usesAI: false
+  usesAI: true
   runsInCloud: true

@@ -60,7 +60,7 @@ rafi compile .            # re-render after editing project.yaml
 | Cloud | AWS |
 | Package manager | pnpm |
 | Has frontend | ✓ |
-| Uses AI | ✗ (opt-in — enables the AI App Superbuilder packs) |
+| Uses AI | ✓ (opt-out — disable to exclude AI rule packs) |
 | Runs in cloud | ✓ |
 
 Edit `project.yaml` and run `rafi compile` to change anything.
