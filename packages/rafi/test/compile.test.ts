@@ -46,12 +46,12 @@ test("AGENTS.md starts with the conditions header line", () => {
   assert.ok(first.includes("cloud="), "header missing cloud flag");
 });
 
-test("conditions header reflects the actual flags (ai=off for default)", () => {
+test("conditions header reflects the actual flags (ai=on for default)", () => {
   const dir = tempDir();
-  const config = buildProjectConfig(defaultAnswers()); // usesAI:false by default
+  const config = buildProjectConfig(defaultAnswers()); // usesAI:true by default
   compile(dir, config);
   const first = readFileSync(join(dir, "AGENTS.md"), "utf8").split("\n")[0];
-  assert.ok(first.includes("ai=off"), `expected ai=off but got: ${first}`);
+  assert.ok(first.includes("ai=on"), `expected ai=on but got: ${first}`);
   assert.ok(first.includes("frontend=on"), `expected frontend=on but got: ${first}`);
 });
 

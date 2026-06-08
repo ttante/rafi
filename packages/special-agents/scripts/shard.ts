@@ -48,7 +48,7 @@ const MAP: Record<string, Meta | null> = {
       ["`pnpm`", "`{{packageManager}}`"],
       ["Default database: PostgreSQL", "Default database: {{database}}"],
       ["Default frontend: React with TypeScript", "Default frontend: {{frontend}}"],
-      ["Default backend: Node.js, Python, or both, based on the project needs", "Default backend: {{backend}}"],
+      ["Default backend: Python and Node.js.", "Default backend: {{backend}}."],
       ["Default cloud infrastructure: AWS", "Default cloud infrastructure: {{cloud}}"],
     ],
   },

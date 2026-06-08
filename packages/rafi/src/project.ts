@@ -15,6 +15,8 @@ export interface WalkthroughAnswers {
   usesAI: boolean;
   useClaude: boolean;
   qa: boolean;
+  /** Path to an existing tickets or plans file, if the user has one. */
+  ticketsFile?: string;
 }
 
 /** Default answers — equivalent to running with `--defaults`. */

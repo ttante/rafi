@@ -50,21 +50,31 @@ program
   .action(async (project: string, opts) => {
     const targetDir = resolve(project);
 
-    let answers = defaultAnswers();
+    // Read app name from target package.json if present
+    const targetPkgPath = join(targetDir, "package.json");
+    const targetPkgName = existsSync(targetPkgPath)
+      ? (JSON.parse(readFileSync(targetPkgPath, "utf8")) as { name?: string }).name ?? undefined
+      : undefined;
+
+    // Detect timezone from the runtime — no need to ask
+    const detectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+    let answers = {
+      ...defaultAnswers(),
+      ...(targetPkgName ? { appName: targetPkgName } : {}),
+      timezone: detectedTimezone,
+    };
 
     if (!opts.defaults) {
       // Interactive walkthrough — requires Node >=20 for @clack/prompts
-      const { intro, outro, text, confirm, select, isCancel } = await import("@clack/prompts");
+      const { intro, outro, text, confirm, isCancel } = await import("@clack/prompts");
       intro("rafi create — configure your AI framework");
 
       const appName = await text({ message: "App name:", defaultValue: answers.appName });
       if (isCancel(appName)) process.exit(0);
 
-      const timezone = await text({ message: "Timezone:", defaultValue: answers.timezone });
-      if (isCancel(timezone)) process.exit(0);
-
       const frontendRaw = await text({
-        message: `Frontend stack (Enter "${answers.frontend}" to keep default, type "No UI" for no frontend):`,
+        message: `Frontend stack (type "No UI" for no frontend):`,
         defaultValue: answers.frontend,
       });
       if (isCancel(frontendRaw)) process.exit(0);
@@ -84,15 +94,31 @@ program
       const packageManager = await text({ message: "Package manager:", defaultValue: answers.packageManager });
       if (isCancel(packageManager)) process.exit(0);
 
-      const usesAI = await confirm({ message: "Will this app call LLMs / do AI generation?", initialValue: true });
+      const usesAI = await confirm({ message: "Will this app call LLMs / do AI generation?", initialValue: answers.usesAI });
       if (isCancel(usesAI)) process.exit(0);
 
-      const useClaude = await confirm({ message: "Will you use Claude Code as your agent runtime? (No = Codex only, skips the Claude Agent SDK)", initialValue: true });
+      const useClaude = await confirm({
+        message: "Do you want to include support for Claude Code? (rafi supports Codex CLI and Claude Code)",
+        initialValue: true,
+      });
       if (isCancel(useClaude)) process.exit(0);
+
+      const hasTicketsFile = await confirm({
+        message: "Do you have an existing file with tickets or plans? (we'll use it to populate your ticket queue)",
+        initialValue: false,
+      });
+      if (isCancel(hasTicketsFile)) process.exit(0);
+
+      let ticketsFile: string | undefined;
+      if (hasTicketsFile) {
+        const ticketsFilePath = await text({ message: "Path to your tickets or plans file:" });
+        if (isCancel(ticketsFilePath)) process.exit(0);
+        ticketsFile = String(ticketsFilePath) || undefined;
+      }
 
       answers = {
         appName: String(appName),
-        timezone: String(timezone),
+        timezone: detectedTimezone,
         frontend: String(frontendRaw),
         backend: String(backend),
         database: String(database),
@@ -101,6 +127,7 @@ program
         usesAI: Boolean(usesAI),
         useClaude: Boolean(useClaude),
         qa: true,
+        ticketsFile,
       };
 
       outro("Configuration collected — compiling...");
@@ -120,6 +147,15 @@ program
       console.log("rafi: Claude Agent SDK installed.");
     } else {
       console.log("rafi: skipping Claude Agent SDK (Codex only).");
+    }
+
+    if (answers.ticketsFile) {
+      console.log(`\nrafi: to import your existing tickets or plans, run:`);
+      console.log(`  rafi tickets init --app-name "${answers.appName}"`);
+      console.log(`  rafi tickets populate --tickets "${answers.ticketsFile}"`);
+    } else {
+      console.log(`\nrafi: to set up your ticket queue, run:`);
+      console.log(`  rafi tickets init --app-name "${answers.appName}"`);
     }
   });
 

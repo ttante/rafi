@@ -36,7 +36,7 @@ Keep durable process rules in this file. Put detailed project facts in the proje
 - Default database: PostgreSQL.
 - Default frontend: React with TypeScript.
 - Unless the user explicitly says otherwise, plan to build a UI for the app. Do not assume an app is API-only, CLI-only, or backend-only.
-- Default backend: Node.js, Python, or both, based on the project needs.
+- Default backend: Python and Node.js.
 - Default cloud infrastructure: AWS. Suggest another cloud provider when it is clearly more optimal for cost, product fit, compliance, operations, or team constraints.
 - Unless otherwise noted, build applications so they can run both locally and in the cloud. Consult the user if local/cloud runtime expectations are unclear.
 - If planning selects a different stack, update this rule file and the architecture docs to reflect that choice.

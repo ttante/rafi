@@ -3,7 +3,7 @@
 # `rafi create` writes a project.yaml that overrides these per project.
 stack:
   frontend: "React with TypeScript"
-  backend: "Node.js, Python, or both, based on the project needs"
+  backend: "Python and Node.js"
   database: "PostgreSQL"
   cloud: "AWS"
   packageManager: "pnpm"
