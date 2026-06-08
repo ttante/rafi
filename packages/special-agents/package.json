@@ -1,6 +1,6 @@
 {
   "name": "special-agents",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Rafi library: composable best-practice rules, skills, and agents for Claude Code and Codex.",
   "type": "module",
   "main": "./dist/index.js",
