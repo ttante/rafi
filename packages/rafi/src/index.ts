@@ -67,51 +67,78 @@ program
 
     if (!opts.defaults) {
       // Interactive walkthrough — requires Node >=20 for @clack/prompts
-      const { intro, outro, text, confirm, isCancel } = await import("@clack/prompts");
+      const { intro, outro, text, confirm, isCancel, log } = await import("@clack/prompts");
       intro("rafi create — configure your AI framework");
 
-      const appName = await text({ message: "App name:", defaultValue: answers.appName });
+      log.info("Each question is pre-filled with its default — press Enter to accept.");
+      log.info(`Timezone: ${detectedTimezone} (auto-detected, not asked)`);
+
+      const appName = await text({
+        message: "App name: (press Enter to accept)",
+        initialValue: answers.appName,
+        defaultValue: answers.appName,
+      });
       if (isCancel(appName)) process.exit(0);
 
       const frontendRaw = await text({
-        message: `Frontend stack (type "No UI" for no frontend):`,
+        message: `Frontend stack (Enter to accept, or type "No UI" for no frontend):`,
+        initialValue: answers.frontend,
         defaultValue: answers.frontend,
       });
       if (isCancel(frontendRaw)) process.exit(0);
 
-      const backend = await text({ message: "Backend stack:", defaultValue: answers.backend });
+      const backend = await text({
+        message: "Backend stack: (Enter to accept)",
+        initialValue: answers.backend,
+        defaultValue: answers.backend,
+      });
       if (isCancel(backend)) process.exit(0);
 
-      const database = await text({ message: "Database:", defaultValue: answers.database });
+      const database = await text({
+        message: "Database: (Enter to accept)",
+        initialValue: answers.database,
+        defaultValue: answers.database,
+      });
       if (isCancel(database)) process.exit(0);
 
       const cloudRaw = await text({
-        message: `Cloud provider (type "Local only" for no cloud):`,
+        message: `Cloud provider (Enter to accept, or type "Local only" for no cloud):`,
+        initialValue: answers.cloud,
         defaultValue: answers.cloud,
       });
       if (isCancel(cloudRaw)) process.exit(0);
 
-      const packageManager = await text({ message: "Package manager:", defaultValue: answers.packageManager });
+      const packageManager = await text({
+        message: "Package manager: (Enter to accept)",
+        initialValue: answers.packageManager,
+        defaultValue: answers.packageManager,
+      });
       if (isCancel(packageManager)) process.exit(0);
 
-      const usesAI = await confirm({ message: "Will this app call LLMs / do AI generation?", initialValue: answers.usesAI });
+      const usesAI = await confirm({
+        message: "Will this app call LLMs / do AI generation? (Enter to accept)",
+        initialValue: answers.usesAI,
+      });
       if (isCancel(usesAI)) process.exit(0);
 
       const useClaude = await confirm({
-        message: "Do you want to include support for Claude Code? (rafi supports Codex CLI and Claude Code)",
+        message: "Do you want to include support for Claude Code? (Enter to accept — rafi supports Codex CLI and Claude Code)",
         initialValue: true,
       });
       if (isCancel(useClaude)) process.exit(0);
 
       const hasTicketsFile = await confirm({
-        message: "Do you have an existing file with tickets or plans? (we'll use it to populate your ticket queue)",
+        message: "Do you have an existing file with tickets or plans? (Enter to accept)",
         initialValue: false,
       });
       if (isCancel(hasTicketsFile)) process.exit(0);
 
       let ticketsFile: string | undefined;
       if (hasTicketsFile) {
-        const ticketsFilePath = await text({ message: "Path to your tickets or plans file:" });
+        const ticketsFilePath = await text({
+          message: "Path to your tickets or plans file:",
+          placeholder: "e.g. docs/tickets.md or tickets.yaml",
+        });
         if (isCancel(ticketsFilePath)) process.exit(0);
         ticketsFile = String(ticketsFilePath) || undefined;
       }
