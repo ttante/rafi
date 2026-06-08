@@ -29,6 +29,7 @@
     "ai-foreman": "workspace:*",
     "special-agents": "workspace:*",
     "rafi-spec": "workspace:*",
+    "ajv": "^8.20.0",
     "@clack/prompts": "^1.4.0",
     "commander": "^12.1.0",
     "yaml": "^2.5.1"

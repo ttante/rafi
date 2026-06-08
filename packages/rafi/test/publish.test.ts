@@ -4,11 +4,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_DIR = join(HERE, "..");
+const packageJson = JSON.parse(
+  readFileSync(join(PKG_DIR, "package.json"), "utf8"),
+) as { dependencies?: Record<string, string>; bundledDependencies?: string[] };
 
 function packList(): string[] {
   const out = execSync("npm pack --dry-run --json 2>/dev/null", {
@@ -38,4 +42,9 @@ test("@rafi-ai/cli pack includes package.json and README.md", () => {
   const files = packList();
   assert.ok(files.includes("package.json"), "package.json missing from pack");
   assert.ok(files.includes("README.md"), "README.md missing from pack");
+});
+
+test("@rafi-ai/cli declares ajv for bundled rafi-spec runtime imports", () => {
+  assert.ok(packageJson.bundledDependencies?.includes("rafi-spec"), "rafi-spec is not bundled");
+  assert.ok(packageJson.dependencies?.ajv, "ajv must be a direct dependency for bundled rafi-spec");
 });

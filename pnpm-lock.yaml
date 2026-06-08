@@ -63,6 +63,9 @@ importers:
       ai-foreman:
         specifier: workspace:*
         version: link:../ai-foreman
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
       commander:
         specifier: ^12.1.0
         version: 12.1.0
@@ -104,6 +107,9 @@ importers:
 
   packages/special-agents:
     dependencies:
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
       rafi-spec:
         specifier: workspace:*
         version: link:../spec

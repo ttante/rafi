@@ -27,6 +27,7 @@
   "bundledDependencies": ["rafi-spec"],
   "dependencies": {
     "rafi-spec": "workspace:*",
+    "ajv": "^8.20.0",
     "yaml": "^2.5.1"
   },
   "devDependencies": {
