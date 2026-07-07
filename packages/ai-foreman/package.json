@@ -1,16 +1,18 @@
 {
   "name": "ai-foreman",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
+  "license": "Apache-2.0",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ttante/foreman.git"
+    "url": "git+https://github.com/ttante/rafi.git",
+    "directory": "packages/ai-foreman"
   },
   "bugs": {
-    "url": "https://github.com/ttante/foreman/issues"
+    "url": "https://github.com/ttante/rafi/issues"
   },
-  "homepage": "https://github.com/ttante/foreman#readme",
+  "homepage": "https://github.com/ttante/rafi/tree/main/packages/ai-foreman#readme",
   "bin": {
     "ai-foreman": "./dist/index.js"
   },

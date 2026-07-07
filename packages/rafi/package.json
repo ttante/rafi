@@ -1,8 +1,18 @@
 {
   "name": "@rafi-ai/cli",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Rafi CLI — scaffold and compile AI framework configs for a target repo.",
+  "license": "Apache-2.0",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ttante/rafi.git",
+    "directory": "packages/rafi"
+  },
+  "bugs": {
+    "url": "https://github.com/ttante/rafi/issues"
+  },
+  "homepage": "https://github.com/ttante/rafi#readme",
   "bin": {
     "rafi": "./dist/index.js"
   },
@@ -14,7 +24,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

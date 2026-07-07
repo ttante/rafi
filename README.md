@@ -39,13 +39,13 @@ Run `rafi` from inside the target repo:
 - Answer 9 questions about your stack (or skip with `--defaults`)
 - Get `AGENTS.md`, `CLAUDE.md`, subagents, and starter docs written to your repo
 - If you say yes to Claude Code, the Claude Agent SDK is installed automatically
-- Re-run `rafi compile` whenever you update `project.yaml`
+- Re-run `rafi compile` whenever you update `rafi-config.yaml`
 
 ```sh
 cd my-repo
 rafi create .             # interactive walkthrough
 rafi create . --defaults  # skip walkthrough, use built-in defaults
-rafi compile .            # re-render after editing project.yaml
+rafi compile .            # re-render after editing rafi-config.yaml
 ```
 
 ## Defaults
@@ -63,7 +63,7 @@ rafi compile .            # re-render after editing project.yaml
 | Uses AI | ✓ (opt-out — disable to exclude AI rule packs) |
 | Runs in cloud | ✓ |
 
-Edit `project.yaml` and run `rafi compile` to change anything.
+Edit `rafi-config.yaml` and run `rafi compile` to change anything. Older projects with `project.yaml` are migrated automatically.
 
 ## What gets written
 
@@ -71,10 +71,13 @@ Edit `project.yaml` and run `rafi compile` to change anything.
 my-repo/
   AGENTS.md                        Codex rules doc (your stack + best practices, flat)
   CLAUDE.md                        Claude Code entrypoint
-  project.yaml                     your stack config — commit this, edit to update
+  rafi-config.yaml                 your stack config - commit this, edit to update
   .claude/agents/builder.md        Claude subagent — implements tickets
   .claude/agents/qa.md             Claude subagent — reviews completed work
   .claude/agents/planner.md        Claude subagent — plans and writes tickets
+  .claude/skills/<name>/SKILL.md   Claude project skills
+  .codex/agents/<role>.toml        Codex project subagents
+  .agents/skills/<name>/SKILL.md   Codex project skills
   .rafi/compiled/<role>/           role bundles read by ai-foreman at runtime
   docs/                            starter docs (architecture, API, ops, etc.)
 ```
@@ -104,14 +107,14 @@ my-repo/
 
 ### Existing Projects
 
-- Navigate into the repo and run rafi — answer questions about your current stack, or use `--defaults` and edit `project.yaml` to match reality
+- Navigate into the repo and run rafi — answer questions about your current stack, or use `--defaults` and edit `rafi-config.yaml` to match reality
   ```sh
   cd my-repo
   rafi create .
   ```
 - Enable the flags that match your stack (`usesAI`, `hasFrontend`, `runsInCloud`) and re-compile to get the right rule packs
   ```sh
-  # edit project.yaml, then:
+  # edit rafi-config.yaml, then:
   rafi compile .
   ```
 - Import your existing backlog — populate from planning docs, a ticket file, or a markdown roadmap
@@ -133,7 +136,7 @@ All 29 packs are assembled from your stack config. Most are always included; thr
 - **`hasFrontend`** — accessibility and UX rules
 - **`runsInCloud`** — cloud infra and IaC rules
 
-Choices are saved in `project.yaml`. The top of `AGENTS.md` shows a `# rafi: ai=off frontend=on cloud=on` header so the active set is always visible.
+Choices are saved in `rafi-config.yaml`. The top of `AGENTS.md` shows a `# rafi: ai=off frontend=on cloud=on` header so the active set is always visible.
 
 ## Unattended ticket loop
 
@@ -156,6 +159,15 @@ rafi start ./my-repo --steps 5
 | `special-agents` | `npm install special-agents` | Rules, skills, and agent library |
 | `ai-foreman` | `npm install -g ai-foreman` | Ticket-loop runtime (standalone alternative) |
 
+Published artifacts are on npm, not GitHub Packages. That means the GitHub repository homepage can show an empty "Packages" panel even when the npm packages above are available.
+
+## Releases and changelog
+
+- Next release versions: `@rafi-ai/cli@0.3.7`, `special-agents@0.3.7`, `ai-foreman@1.0.8`.
+- Release notes live in [CHANGELOG.md](./CHANGELOG.md).
+- Release mechanics and required checks live in [RELEASING.md](./RELEASING.md).
+- GitHub Releases should be created from version tags for user-visible releases. If the GitHub "Releases" panel is empty, no release tags have been published for this repository yet.
+
 ## Monorepo
 
 ```
@@ -167,3 +179,7 @@ packages/
 examples/
   dummy-project/    smoke-test target
 ```
+
+## License
+
+Apache-2.0. See [LICENSE](./LICENSE).

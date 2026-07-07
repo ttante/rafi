@@ -2,7 +2,7 @@
 
 29 composable best-practice rule packs, 6 skills, and 4 agent roles for Claude Code and Codex.
 
-The content layer of [Rafi](https://github.com/ttante/foreman). Ships both the authoring source (`content/`) and prebuilt composition logic so it can be used as a library, consumed by `rafi compile`, or extended directly.
+The content layer of [Rafi](https://github.com/ttante/rafi). Ships both the authoring source (`content/`) and prebuilt composition logic so it can be used as a library, consumed by `rafi compile`, or extended directly.
 
 ## Install
 

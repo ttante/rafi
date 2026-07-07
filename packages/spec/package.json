@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "description": "Rafi neutral schema: rule packs, skills, agents, and project config shapes shared by special-agents and ai-foreman.",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,7 +15,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
