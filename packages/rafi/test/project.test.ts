@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildProjectConfig, defaultAnswers, NO_UI, LOCAL_ONLY } from "../src/project.js";
+import { buildProjectConfig, defaultAnswers, normalizeProjectConfig, NO_UI, LOCAL_ONLY } from "../src/project.js";
 import { validateProjectConfig } from "rafi-spec";
 import { loadDefaults } from "special-agents";
 
@@ -79,4 +79,75 @@ test("useClaude:false sets harness.targets to codex only", () => {
 test("--defaults keeps useClaude:true and harness.targets includes claude", () => {
   const config = buildProjectConfig(defaultAnswers());
   assert.deepEqual(config.harness.targets, ["claude", "codex"]);
+});
+
+test("--defaults includes root agent files and native agent/skill paths", () => {
+  const config = buildProjectConfig(defaultAnswers());
+  assert.deepEqual(config.agent_files, {
+    mode: "overwrite",
+    codex: "./AGENTS.md",
+    claude: "./CLAUDE.md",
+  });
+  assert.equal(config.agents.builder.artifact_source, "rafi");
+  assert.equal(config.agents.builder.claude, "./.claude/agents/builder.md");
+  assert.equal(config.agents.builder.codex, "./.codex/agents/builder.toml");
+  assert.equal(config.skills.tdd.artifact_source, "rafi");
+  assert.equal(config.skills.tdd.claude, "./.claude/skills/tdd/SKILL.md");
+  assert.equal(config.skills.tdd.codex, "./.agents/skills/tdd/SKILL.md");
+});
+
+test("normalizeProjectConfig adds new fields to legacy project config", () => {
+  const { agent_files, agents, skills, ...legacy } = buildProjectConfig(defaultAnswers());
+  void agent_files;
+  void agents;
+  void skills;
+  const normalized = normalizeProjectConfig(legacy);
+  assert.equal(normalized.agent_files.codex, "./AGENTS.md");
+  assert.equal(normalized.agents.qa.artifact_source, "rafi");
+  assert.equal(normalized.agents.qa.claude, "./.claude/agents/qa.md");
+  assert.equal(normalized.skills["grill-me"].artifact_source, "rafi");
+  assert.equal(normalized.skills["grill-me"].codex, "./.agents/skills/grill-me/SKILL.md");
+});
+
+test("normalizeProjectConfig adds artifact_source to legacy artifact entries", () => {
+  const legacy = buildProjectConfig(defaultAnswers());
+  const { artifact_source, ...legacySkill } = legacy.skills.tdd;
+  void artifact_source;
+  const normalized = normalizeProjectConfig({
+    ...legacy,
+    skills: { tdd: legacySkill },
+  });
+  assert.equal(normalized.skills.tdd.artifact_source, "rafi");
+});
+
+test("normalizeProjectConfig preserves custom existing artifact paths", () => {
+  const config = buildProjectConfig(defaultAnswers());
+  const normalized = normalizeProjectConfig({
+    ...config,
+    agents: {
+      builder: {
+        artifact_source: "existing",
+        claude: "./.claude/agents/custom-builder.md",
+        codex: "./.codex/agents/custom-builder.toml",
+      },
+    },
+    skills: {
+      tdd: {
+        artifact_source: "existing",
+        claude: "./.claude/skills/custom-tdd/SKILL.md",
+        codex: "./.agents/skills/custom-tdd/SKILL.md",
+      },
+    },
+  });
+
+  assert.deepEqual(normalized.agents.builder, {
+    artifact_source: "existing",
+    claude: "./.claude/agents/custom-builder.md",
+    codex: "./.codex/agents/custom-builder.toml",
+  });
+  assert.deepEqual(normalized.skills.tdd, {
+    artifact_source: "existing",
+    claude: "./.claude/skills/custom-tdd/SKILL.md",
+    codex: "./.agents/skills/custom-tdd/SKILL.md",
+  });
 });

@@ -75,11 +75,27 @@ const boolRecord = (keys: string[]) => ({
   properties: Object.fromEntries(keys.map((k) => [k, { type: "boolean" }])),
 });
 
+const runtimeArtifactPaths = {
+  type: "object",
+  additionalProperties: false,
+  required: ["artifact_source", "claude", "codex"],
+  properties: {
+    artifact_source: { enum: ["rafi", "existing"] },
+    claude: { type: "string", minLength: 1 },
+    codex: { type: "string", minLength: 1 },
+  },
+} as const;
+
+const artifactPathMap = {
+  type: "object",
+  additionalProperties: runtimeArtifactPaths,
+} as const;
+
 export const projectConfigSchema = {
   $id: "rafi/projectConfig",
   type: "object",
   additionalProperties: false,
-  required: ["appName", "timezone", "stack", "flags", "harness"],
+  required: ["appName", "timezone", "stack", "flags", "harness", "agent_files", "agents", "skills"],
   properties: {
     appName: { type: "string", minLength: 1 },
     timezone: { type: "string", minLength: 1 },
@@ -98,5 +114,17 @@ export const projectConfigSchema = {
         qa: { type: "boolean" },
       },
     },
+    agent_files: {
+      type: "object",
+      additionalProperties: false,
+      required: ["mode", "codex", "claude"],
+      properties: {
+        mode: { enum: ["append", "update", "overwrite"] },
+        codex: { type: "string", minLength: 1 },
+        claude: { type: "string", minLength: 1 },
+      },
+    },
+    agents: artifactPathMap,
+    skills: artifactPathMap,
   },
 } as const;

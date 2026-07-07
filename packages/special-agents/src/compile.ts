@@ -9,8 +9,8 @@
  *
  * Per-role and lean-Claude emission build on this and the resolver (see resolve.ts).
  */
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { render } from "./template.js";
 import {
   loadAllPacks,
@@ -23,7 +23,11 @@ import {
 } from "./content.js";
 import { resolveAgentPacks, type ConditionFlags, type ResolvableManifest } from "./resolve.js";
 import { loadAgent, AGENT_ROLES } from "./agents.js";
+import { loadAllSkills, SKILLS_DIR } from "./skills.js";
 import type { AgentManifest, AgentRole, EffortLevel } from "rafi-spec";
+
+export const CUSTOM_ARTIFACTS_NOTE =
+  "Custom Rafi skills or agents can replace the defaults by setting `artifact_source: existing` and editing their paths in `rafi-config.yaml`.\n";
 
 export interface CompileOptions {
   /** Stack/flags to render with. Defaults to the bundled `defaults.yaml`. */
@@ -125,23 +129,33 @@ export function buildConditionsHeader(flags: {
  * Format: one-line conditions header + preamble + all packs rendered with defaults.
  */
 export function emitAgentsMd(targetDir: string, opts: CompileOptions = {}): void {
-  const defaults = opts.defaults ?? loadDefaults();
-  const header = buildConditionsHeader(defaults.flags as { usesAI: boolean; hasFrontend: boolean; runsInCloud: boolean });
-  writeFileSync(join(targetDir, "AGENTS.md"), header + composeRulesMarkdown({ defaults }), "utf8");
+  writeFileSync(join(targetDir, "AGENTS.md"), renderAgentsMd(opts), "utf8");
 }
 
 /**
  * Write `<targetDir>/CLAUDE.md` — the lean Claude entrypoint that imports `AGENTS.md`.
  */
 export function emitClaudeMd(targetDir: string, opts: CompileOptions = {}): void {
+  writeFileSync(join(targetDir, "CLAUDE.md"), renderClaudeMd(opts), "utf8");
+}
+
+export function renderAgentsMd(opts: CompileOptions = {}): string {
   const defaults = opts.defaults ?? loadDefaults();
   const header = buildConditionsHeader(defaults.flags as { usesAI: boolean; hasFrontend: boolean; runsInCloud: boolean });
-  writeFileSync(join(targetDir, "CLAUDE.md"), header + "@AGENTS.md\n", "utf8");
+  return header + composeRulesMarkdown({ defaults });
+}
+
+export function renderClaudeMd(opts: CompileOptions = {}): string {
+  const defaults = opts.defaults ?? loadDefaults();
+  const header = buildConditionsHeader(defaults.flags as { usesAI: boolean; hasFrontend: boolean; runsInCloud: boolean });
+  return header + "@AGENTS.md\n\n" + CUSTOM_ARTIFACTS_NOTE;
 }
 
 export interface EmitOptions extends AgentComposeOptions {
   /** Roles to emit. Defaults to all four. */
   roles?: AgentRole[];
+  /** Map generic skill names in role manifests to the installed runtime skill names. */
+  skillNames?: Record<string, string>;
 }
 
 /**
@@ -155,7 +169,8 @@ export function emitCompiledBundles(targetDir: string, opts: EmitOptions = {}): 
     const dir = join(targetDir, ".rafi", "compiled", role);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "system.md"), bundle.system, "utf8");
-    const meta = { skills: bundle.skills, model: bundle.model, effort: bundle.effort };
+    const skills = bundle.skills.map((skill) => opts.skillNames?.[skill] ?? skill);
+    const meta = { skills, model: bundle.model, effort: bundle.effort };
     writeFileSync(join(dir, "meta.json"), JSON.stringify(meta, null, 2) + "\n", "utf8");
   }
 }
@@ -173,5 +188,80 @@ export function emitClaudeAgents(targetDir: string, opts: EmitOptions = {}): voi
     const bundle = getAgent(role, opts);
     const frontMatter = `---\nname: ${bundle.manifest.name}\ndescription: ${bundle.manifest.description}\n---\n\n`;
     writeFileSync(join(agentsDir, `${role}.md`), frontMatter + bundle.system, "utf8");
+  }
+}
+
+export interface EmitMappedOptions extends EmitOptions {
+  paths?: Record<string, string>;
+  force?: boolean;
+}
+
+export function emitMappedClaudeAgents(targetDir: string, opts: EmitMappedOptions = {}): void {
+  const roles = opts.roles ?? AGENT_ROLES;
+  for (const role of roles) {
+    const bundle = getAgent(role, opts);
+    const path = join(targetDir, opts.paths?.[role] ?? `./.claude/agents/${role}.md`);
+    if (!opts.force && fileExists(path)) continue;
+    mkdirSync(dirname(path), { recursive: true });
+    const name = artifactNameFromPath(path, role);
+    const frontMatter = `---\nname: ${name}\ndescription: ${bundle.manifest.description}\n---\n\n`;
+    writeFileSync(path, frontMatter + bundle.system, "utf8");
+  }
+}
+
+export function emitCodexAgents(targetDir: string, opts: EmitMappedOptions = {}): void {
+  const roles = opts.roles ?? AGENT_ROLES;
+  for (const role of roles) {
+    const bundle = getAgent(role, opts);
+    const path = join(targetDir, opts.paths?.[role] ?? `./.codex/agents/${role}.toml`);
+    if (!opts.force && fileExists(path)) continue;
+    mkdirSync(dirname(path), { recursive: true });
+    const name = artifactNameFromPath(path, role);
+    const toml =
+      `name = ${JSON.stringify(name)}\n` +
+      `description = ${JSON.stringify(bundle.manifest.description)}\n` +
+      `developer_instructions = ${JSON.stringify(bundle.system)}\n`;
+    writeFileSync(path, toml, "utf8");
+  }
+}
+
+export interface EmitSkillsOptions {
+  /** Generic skill name -> runtime-specific path. */
+  paths?: Record<string, string>;
+  names?: string[];
+  force?: boolean;
+}
+
+export function emitSkills(targetDir: string, opts: EmitSkillsOptions = {}): void {
+  for (const skill of loadAllSkills()) {
+    if (opts.names && !opts.names.includes(skill.name)) continue;
+    const path = join(targetDir, opts.paths?.[skill.name] ?? `./.agents/skills/${skill.name}/SKILL.md`);
+    if (!opts.force && fileExists(path)) continue;
+    const dir = dirname(path);
+    mkdirSync(dirname(dir), { recursive: true });
+    cpSync(join(SKILLS_DIR, skill.name), dir, { recursive: true });
+    const installedName = artifactNameFromPath(path, skill.name);
+    if (installedName !== skill.name) {
+      const raw = readFileSync(join(SKILLS_DIR, skill.name, "SKILL.md"), "utf8");
+      writeFileSync(path, raw.replace(/^name:\s*.+$/m, `name: ${installedName}`), "utf8");
+    }
+  }
+}
+
+function artifactNameFromPath(path: string, fallback: string): string {
+  const file = path.split(/[\\/]/).pop() ?? fallback;
+  if (file === "SKILL.md") {
+    const parent = path.split(/[\\/]/).at(-2);
+    return parent && parent.length > 0 ? parent : fallback;
+  }
+  return file.replace(/\.(md|toml)$/i, "") || fallback;
+}
+
+function fileExists(path: string): boolean {
+  try {
+    readFileSync(path);
+    return true;
+  } catch {
+    return false;
   }
 }

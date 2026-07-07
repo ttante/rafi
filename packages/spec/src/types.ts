@@ -121,8 +121,27 @@ export interface HarnessConfig {
   qa: boolean;
 }
 
+/** How Rafi should handle existing root instruction files. */
+export type AgentFileMode = "append" | "update" | "overwrite";
+
+/** Root instruction files used by Codex and Claude. */
+export interface AgentFilesConfig {
+  mode: AgentFileMode;
+  codex: string;
+  claude: string;
+}
+
+/** Per-runtime paths for a skill or agent artifact. */
+export type ArtifactSource = "rafi" | "existing";
+
+export interface RuntimeArtifactConfig {
+  artifact_source: ArtifactSource;
+  claude: string;
+  codex: string;
+}
+
 /**
- * The committed `project.yaml` in a target repo. Skipping the walkthrough uses
+ * The committed `rafi-config.yaml` in a target repo. Skipping the walkthrough uses
  * the library defaults, which reproduce today's hardcoded guidance.
  */
 export interface ProjectConfig {
@@ -131,4 +150,7 @@ export interface ProjectConfig {
   stack: ProjectStack;
   flags: ProjectFlags;
   harness: HarnessConfig;
+  agent_files: AgentFilesConfig;
+  agents: Record<string, RuntimeArtifactConfig>;
+  skills: Record<string, RuntimeArtifactConfig>;
 }

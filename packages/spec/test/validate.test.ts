@@ -57,6 +57,13 @@ const validProject: ProjectConfig = {
   },
   flags: { hasFrontend: true, usesAI: false, runsInCloud: true },
   harness: { targets: ["claude", "codex"], qa: true },
+  agent_files: { mode: "overwrite", codex: "./AGENTS.md", claude: "./CLAUDE.md" },
+  agents: {
+    builder: { artifact_source: "rafi", claude: "./.claude/agents/builder.md", codex: "./.codex/agents/builder.toml" },
+  },
+  skills: {
+    tdd: { artifact_source: "rafi", claude: "./.claude/skills/tdd/SKILL.md", codex: "./.agents/skills/tdd/SKILL.md" },
+  },
 };
 
 test("valid fixtures pass", () => {
@@ -142,6 +149,38 @@ test("project: unknown stack key is rejected", () => {
     validateProjectConfig({
       ...validProject,
       stack: { ...validProject.stack, mobile: "React Native" },
+    }).valid,
+    false,
+  );
+});
+
+test("project: agent file mode is validated", () => {
+  assert.equal(
+    validateProjectConfig({
+      ...validProject,
+      agent_files: { ...validProject.agent_files, mode: "merge" },
+    }).valid,
+    false,
+  );
+});
+
+test("project: agents and skills require claude and codex paths", () => {
+  assert.equal(
+    validateProjectConfig({
+      ...validProject,
+      skills: { tdd: { claude: "./.claude/skills/tdd/SKILL.md" } },
+    }).valid,
+    false,
+  );
+});
+
+test("project: artifact_source must be rafi or existing", () => {
+  assert.equal(
+    validateProjectConfig({
+      ...validProject,
+      agents: {
+        builder: { ...validProject.agents.builder, artifact_source: "custom" },
+      },
     }).valid,
     false,
   );

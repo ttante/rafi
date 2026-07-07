@@ -11,3 +11,4 @@ For Claude Code, create a repository-root `CLAUDE.md` that imports the same rule
 
 Keep durable process rules in this file. Put detailed project facts in the project documents named below, not in the agent rules.
 
+Custom Rafi skills or agents can replace the defaults by setting `artifact_source: existing` and editing their paths in `rafi-config.yaml`.

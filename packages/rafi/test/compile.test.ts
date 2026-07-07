@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -97,6 +97,160 @@ test("compile writes .claude/agents/<role>.md for all four roles", () => {
       `missing .claude/agents/${role}.md`,
     );
   }
+});
+
+test("compile writes Codex agents and project skills from rafi-config paths", () => {
+  const dir = tempDir();
+  compile(dir, buildProjectConfig(defaultAnswers()));
+  for (const role of AGENT_ROLES) {
+    assert.ok(
+      existsSync(join(dir, ".codex", "agents", `${role}.toml`)),
+      `missing .codex/agents/${role}.toml`,
+    );
+  }
+  assert.ok(existsSync(join(dir, ".claude", "skills", "tdd", "SKILL.md")));
+  assert.ok(existsSync(join(dir, ".agents", "skills", "tdd", "SKILL.md")));
+});
+
+test("compiled role metadata uses configured skill names", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  config.skills.tdd = {
+    artifact_source: "rafi",
+    claude: "./.claude/skills/tdd-rafi/SKILL.md",
+    codex: "./.agents/skills/tdd-rafi/SKILL.md",
+  };
+  compile(dir, config);
+  const meta = JSON.parse(readFileSync(join(dir, ".rafi", "compiled", "qa", "meta.json"), "utf8"));
+  assert.ok(meta.skills.includes("tdd-rafi"));
+});
+
+test("compile fails clearly when existing-owned artifact paths are missing", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  config.skills.tdd = {
+    artifact_source: "existing",
+    claude: "./.claude/skills/tdd/SKILL.md",
+    codex: "./.agents/skills/tdd/SKILL.md",
+  };
+  assert.throws(
+    () => compile(dir, config),
+    /Configured existing Rafi artifact path\(s\) are missing/,
+  );
+});
+
+test("compile does not overwrite existing-owned skill files", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  config.skills.tdd = {
+    artifact_source: "existing",
+    claude: "./.claude/skills/tdd/SKILL.md",
+    codex: "./.agents/skills/tdd/SKILL.md",
+  };
+  const claudePath = join(dir, ".claude", "skills", "tdd", "SKILL.md");
+  const codexPath = join(dir, ".agents", "skills", "tdd", "SKILL.md");
+  mkdirSync(join(dir, ".claude", "skills", "tdd"), { recursive: true });
+  mkdirSync(join(dir, ".agents", "skills", "tdd"), { recursive: true });
+  writeFileSync(claudePath, "---\nname: tdd\ndescription: custom\n---\ncustom claude\n", "utf8");
+  writeFileSync(codexPath, "---\nname: tdd\ndescription: custom\n---\ncustom codex\n", "utf8");
+
+  compile(dir, config);
+
+  assert.equal(readFileSync(claudePath, "utf8"), "---\nname: tdd\ndescription: custom\n---\ncustom claude\n");
+  assert.equal(readFileSync(codexPath, "utf8"), "---\nname: tdd\ndescription: custom\n---\ncustom codex\n");
+});
+
+test("compile does not overwrite existing-owned agent files", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  config.agents.builder = {
+    artifact_source: "existing",
+    claude: "./.claude/agents/builder.md",
+    codex: "./.codex/agents/builder.toml",
+  };
+  const claudePath = join(dir, ".claude", "agents", "builder.md");
+  const codexPath = join(dir, ".codex", "agents", "builder.toml");
+  mkdirSync(join(dir, ".claude", "agents"), { recursive: true });
+  mkdirSync(join(dir, ".codex", "agents"), { recursive: true });
+  writeFileSync(claudePath, "---\nname: builder\ndescription: custom\n---\ncustom claude agent\n", "utf8");
+  writeFileSync(codexPath, 'name = "builder"\ndescription = "custom"\ndeveloper_instructions = "custom codex agent"\n', "utf8");
+
+  compile(dir, config);
+
+  assert.equal(readFileSync(claudePath, "utf8"), "---\nname: builder\ndescription: custom\n---\ncustom claude agent\n");
+  assert.equal(readFileSync(codexPath, "utf8"), 'name = "builder"\ndescription = "custom"\ndeveloper_instructions = "custom codex agent"\n');
+});
+
+test("compile fails clearly when existing-owned agent paths are missing", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  config.agents.builder = {
+    artifact_source: "existing",
+    claude: "./.claude/agents/builder.md",
+    codex: "./.codex/agents/builder.toml",
+  };
+
+  assert.throws(
+    () => compile(dir, config),
+    /agents\.builder\.claude: \.\/\.claude\/agents\/builder\.md/,
+  );
+});
+
+test("compile refreshes rafi-owned native artifacts", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  compile(dir, config);
+
+  const agentPath = join(dir, ".claude", "agents", "builder.md");
+  const skillPath = join(dir, ".agents", "skills", "tdd", "SKILL.md");
+  writeFileSync(agentPath, "STALE AGENT\n", "utf8");
+  writeFileSync(skillPath, "STALE SKILL\n", "utf8");
+
+  compile(dir, config);
+
+  assert.notEqual(readFileSync(agentPath, "utf8"), "STALE AGENT\n");
+  assert.notEqual(readFileSync(skillPath, "utf8"), "STALE SKILL\n");
+  assert.ok(readFileSync(agentPath, "utf8").includes("name: builder"));
+  assert.ok(readFileSync(skillPath, "utf8").includes("name: tdd"));
+});
+
+test("compile writes rafi-owned artifacts to configured renamed paths", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  config.agents.builder = {
+    artifact_source: "rafi",
+    claude: "./.claude/agents/builder-rafi.md",
+    codex: "./.codex/agents/builder-rafi.toml",
+  };
+  config.skills.tdd = {
+    artifact_source: "rafi",
+    claude: "./.claude/skills/tdd-rafi/SKILL.md",
+    codex: "./.agents/skills/tdd-rafi/SKILL.md",
+  };
+
+  compile(dir, config);
+
+  assert.ok(existsSync(join(dir, ".claude", "agents", "builder-rafi.md")));
+  assert.ok(existsSync(join(dir, ".codex", "agents", "builder-rafi.toml")));
+  assert.ok(existsSync(join(dir, ".claude", "skills", "tdd-rafi", "SKILL.md")));
+  assert.ok(existsSync(join(dir, ".agents", "skills", "tdd-rafi", "SKILL.md")));
+  assert.ok(readFileSync(join(dir, ".claude", "agents", "builder-rafi.md"), "utf8").includes("name: builder-rafi"));
+  assert.ok(readFileSync(join(dir, ".agents", "skills", "tdd-rafi", "SKILL.md"), "utf8").includes("name: tdd-rafi"));
+});
+
+test("append mode replaces Rafi's prior root block instead of duplicating it", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  config.agent_files.mode = "append";
+  writeFileSync(join(dir, "AGENTS.md"), "CUSTOM RULES\n", "utf8");
+
+  compile(dir, config);
+  compile(dir, config);
+
+  const content = readFileSync(join(dir, "AGENTS.md"), "utf8");
+  assert.ok(content.startsWith("CUSTOM RULES\n"));
+  assert.equal((content.match(/<!-- rafi:start -->/g) ?? []).length, 1);
+  assert.equal((content.match(/Updated Content, generated by @rafi\/cli/g) ?? []).length, 1);
 });
 
 test("compile is deterministic (two runs produce identical AGENTS.md)", () => {

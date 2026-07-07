@@ -18,10 +18,12 @@ npm install -g @rafi-ai/cli
 cd my-repo
 rafi create .             # interactive walkthrough
 rafi create . --defaults  # skip walkthrough, use built-in defaults
-rafi compile .            # re-render after editing project.yaml
+rafi compile .            # re-render after editing rafi-config.yaml
 ```
 
-`rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Answers are saved to `project.yaml`.
+`rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Answers are saved to `rafi-config.yaml`.
+
+Custom skills or agents can replace Rafi defaults by setting `artifact_source: existing` and editing their paths in `rafi-config.yaml`.
 
 ### Ticket lifecycle
 
@@ -49,8 +51,11 @@ rafi doctor .                         # check env, config, and readiness
 <project>/
   AGENTS.md                        Codex flat rules doc
   CLAUDE.md                        Claude Code entrypoint (@AGENTS.md import)
-  project.yaml                     stack config (commit this)
+  rafi-config.yaml                 stack config and agent/skill paths (commit this)
   .claude/agents/<role>.md         Claude subagent files (builder, qa, planner, ticket-maker)
+  .claude/skills/<name>/SKILL.md   Claude project skill files
+  .codex/agents/<role>.toml        Codex project subagent files
+  .agents/skills/<name>/SKILL.md   Codex project skill files
   .rafi/compiled/<role>/system.md  role system text — read at runtime
   .rafi/compiled/<role>/meta.json  skills + model config
   docs/                            starter doc templates (flag-gated by stack)
