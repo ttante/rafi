@@ -8,7 +8,7 @@ This project follows semantic versioning for published npm packages where practi
 
 No unreleased changes.
 
-## @rafi-ai/cli 0.3.7 / special-agents 0.3.7 / ai-foreman 1.0.8 - 2026-07-07
+## @rafi-ai/cli 0.3.7 / special-agents 0.3.7 / ai-foreman 1.0.8 / rafi-spec 0.3.7 - 2026-07-07
 
 ### Documentation
 
@@ -16,8 +16,13 @@ No unreleased changes.
 - Added package metadata that points npm users back to `ttante/rafi`.
 - Added release and changelog documentation for public release transparency.
 
+### Changed
+
+- Made `rafi-spec` a published dependency package instead of bundling it through pnpm workspace symlinks.
+
 ### Packages
 
+- Bumped `rafi-spec` to `0.3.7`.
 - Bumped `@rafi-ai/cli` to `0.3.7`.
 - Bumped `special-agents` to `0.3.7`.
 - Bumped `ai-foreman` to `1.0.8`.

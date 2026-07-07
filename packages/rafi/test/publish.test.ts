@@ -44,7 +44,13 @@ test("@rafi-ai/cli pack includes package.json and README.md", () => {
   assert.ok(files.includes("README.md"), "README.md missing from pack");
 });
 
-test("@rafi-ai/cli declares ajv for bundled rafi-spec runtime imports", () => {
-  assert.ok(packageJson.bundledDependencies?.includes("rafi-spec"), "rafi-spec is not bundled");
-  assert.ok(packageJson.dependencies?.ajv, "ajv must be a direct dependency for bundled rafi-spec");
+test("@rafi-ai/cli pack includes LICENSE", () => {
+  const files = packList();
+  assert.ok(files.includes("LICENSE"), "LICENSE missing from pack");
+});
+
+test("@rafi-ai/cli depends on published rafi-spec", () => {
+  assert.equal(packageJson.dependencies?.["rafi-spec"], "0.3.7");
+  assert.ok(!packageJson.bundledDependencies?.includes("rafi-spec"), "rafi-spec should not be bundled");
+  assert.ok(packageJson.dependencies?.ajv, "ajv must be a direct dependency for rafi-spec runtime imports");
 });

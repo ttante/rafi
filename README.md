@@ -158,12 +158,13 @@ rafi start ./my-repo --steps 5
 | `@rafi-ai/cli` | `npm install -g @rafi-ai/cli` | All commands — scaffold, compile, tickets, start, status, doctor |
 | `special-agents` | `npm install special-agents` | Rules, skills, and agent library |
 | `ai-foreman` | `npm install -g ai-foreman` | Ticket-loop runtime (standalone alternative) |
+| `rafi-spec` | dependency package | Shared schemas and TypeScript types used by the public packages |
 
 Published artifacts are on npm, not GitHub Packages. That means the GitHub repository homepage can show an empty "Packages" panel even when the npm packages above are available.
 
 ## Releases and changelog
 
-- Next release versions: `@rafi-ai/cli@0.3.7`, `special-agents@0.3.7`, `ai-foreman@1.0.8`.
+- Next release versions: `@rafi-ai/cli@0.3.7`, `special-agents@0.3.7`, `ai-foreman@1.0.8`, `rafi-spec@0.3.7`.
 - Release notes live in [CHANGELOG.md](./CHANGELOG.md).
 - Release mechanics and required checks live in [RELEASING.md](./RELEASING.md).
 - GitHub Releases should be created from version tags for user-visible releases. If the GitHub "Releases" panel is empty, no release tags have been published for this repository yet.
