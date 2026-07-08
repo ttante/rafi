@@ -3,7 +3,6 @@ import { Command } from "commander";
 import { resolve, join } from "node:path";
 import { existsSync } from "node:fs";
 import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import type { ProjectConfig } from "rafi-spec";
 import { compile, writeRafiConfigYaml } from "./compiler.js";
@@ -19,6 +18,7 @@ import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
 import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { buildStatusCommand } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
+import { installClaudeAgentSdk } from "./sdkInstall.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -137,20 +137,21 @@ program
       });
       if (isCancel(useClaude)) process.exit(0);
 
-      const hasTicketsFile = await confirm({
-        message: "Do you have an existing file with tickets or plans? (Enter to accept)",
+      const hasPlanningSources = await confirm({
+        message: "Do you have existing ticket or planning docs you want the populate agent to use? (Enter to accept)",
         initialValue: false,
       });
-      if (isCancel(hasTicketsFile)) process.exit(0);
+      if (isCancel(hasPlanningSources)) process.exit(0);
 
-      let ticketsFile: string | undefined;
-      if (hasTicketsFile) {
-        const ticketsFilePath = await text({
-          message: "Path to your tickets or plans file:",
-          placeholder: "e.g. docs/tickets.md or tickets.yaml",
+      let planningSources: string | undefined;
+      if (hasPlanningSources) {
+        log.info("Any format is OK: Markdown, YAML, text notes, folders, or globs. `rafi tickets populate` will scan relevant docs too.");
+        const planningSourcesRaw = await text({
+          message: "Files, folders, or globs for existing tickets/plans:",
+          placeholder: "e.g. docs/tickets.md, docs/plans.md, docs/planning/**",
         });
-        if (isCancel(ticketsFilePath)) process.exit(0);
-        ticketsFile = String(ticketsFilePath) || undefined;
+        if (isCancel(planningSourcesRaw)) process.exit(0);
+        planningSources = String(planningSourcesRaw) || undefined;
       }
 
       answers = {
@@ -164,7 +165,7 @@ program
         usesAI: Boolean(usesAI),
         useClaude: Boolean(useClaude),
         qa: true,
-        ticketsFile,
+        planningSources,
       };
 
       outro("Configuration collected — compiling...");
@@ -182,20 +183,27 @@ program
     console.log(`rafi: custom skills or agents can replace Rafi defaults by setting artifact_source: existing and editing their paths in ${RAFI_CONFIG_FILE}.`);
 
     if (answers.useClaude) {
-      console.log("rafi: installing Claude Agent SDK...");
-      execSync("npm install @anthropic-ai/claude-agent-sdk", { cwd: targetDir, stdio: "inherit" });
+      installClaudeAgentSdk(targetDir, answers.packageManager);
       console.log("rafi: Claude Agent SDK installed.");
     } else {
       console.log("rafi: skipping Claude Agent SDK (Codex only).");
     }
 
-    if (answers.ticketsFile) {
+    if (answers.planningSources) {
+      const sourceArgs = parsePlanningSources(answers.planningSources).map(shellQuote).join(" ");
       console.log(`\nrafi: to import your existing tickets or plans, run:`);
       console.log(`  rafi tickets init --app-name "${answers.appName}"`);
-      console.log(`  rafi tickets populate --tickets "${answers.ticketsFile}"`);
+      if (sourceArgs) {
+        console.log(`  rafi tickets populate --sources ${sourceArgs}`);
+      } else {
+        console.log(`  rafi tickets populate`);
+      }
+      console.log(`rafi: any format is OK; the populate agent interprets the docs and also scans relevant planning files.`);
     } else {
       console.log(`\nrafi: to set up your ticket queue, run:`);
       console.log(`  rafi tickets init --app-name "${answers.appName}"`);
+      console.log(`  rafi tickets populate`);
+      console.log(`rafi: \`rafi tickets populate\` scans relevant ticket, plan, roadmap, TODO, spec, and milestone docs.`);
     }
   });
 
@@ -314,6 +322,17 @@ function setArtifactPaths(
 
 function cloneArtifactMap(map: ProjectConfig["agents"]): ProjectConfig["agents"] {
   return Object.fromEntries(Object.entries(map).map(([name, paths]) => [name, { ...paths }]));
+}
+
+function parsePlanningSources(raw: string): string[] {
+  return raw
+    .split(/\s*(?:,|\+)\s*|\s+/)
+    .map((source) => source.trim())
+    .filter(Boolean);
+}
+
+function shellQuote(value: string): string {
+  return `"${value.replace(/(["\\$`])/g, "\\$1")}"`;
 }
 
 program.addCommand(buildTicketsCommand());

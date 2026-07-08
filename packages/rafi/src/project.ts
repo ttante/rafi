@@ -16,8 +16,8 @@ export interface WalkthroughAnswers {
   usesAI: boolean;
   useClaude: boolean;
   qa: boolean;
-  /** Path to an existing tickets or plans file, if the user has one. */
-  ticketsFile?: string;
+  /** Files, folders, or globs with existing tickets or planning material. */
+  planningSources?: string;
 }
 
 export const RAFI_CONFIG_FILE = "rafi-config.yaml";

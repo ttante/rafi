@@ -75,6 +75,7 @@ What each part does:
 - TODOs
 - roadmap docs
 - ticket files
+- folders or globs containing planning notes
 
 ## Primary Options
 
@@ -112,6 +113,7 @@ Resume rule:
 | `-a, --agent <agent>` | `claude` / `codex` | `claude` | Builder agent. |
 | `-m, --model <model>` | `gpt-5.5` / any supported agent model | agent default | Overrides the builder model. |
 | `--effort <level>` | Claude Code: `low` / `medium` / `high` / `xhigh`<br>Codex: `low` / `medium` / `high` / `xhigh` | agent default | Reasoning level. |
+| `--sources <paths...>` | `docs/tickets.md docs/plans/**` | scans relevant docs automatically | Optional files, folders, or globs for the agent to check first. Any reasonable planning format is OK. |
 | `--fast` | flag | off | Lower latency. |
 | `-y, --yes` | flag | off | Skips confirmation before builder edits ticket files. |
 
@@ -229,10 +231,12 @@ Supported source material can include:
 - TODOs
 - roadmap docs
 - Markdown trackers
+- folders or globs containing planning notes
 
 ```bash
 # Claude Code
 ai-foreman tickets populate --project ./my-project
+ai-foreman tickets populate --project ./my-project --sources docs/tickets.md docs/plans/**
 
 # Codex
 ai-foreman tickets populate --project ./my-project --agent codex
@@ -516,8 +520,6 @@ Package output:
 - **`special-agents`** — library (rules + skills + agents + composition)
 - **`ai-foreman`** — this runtime
 - **`@rafi-ai/cli`** — CLI for `rafi create` and `rafi compile`
-
-
 
 
 

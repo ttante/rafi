@@ -9,6 +9,7 @@ import { buildNextQueue } from "../src/tickets/queue.js";
 import { computeDisplayStatus, resolveBlockers } from "../src/tickets/blockers.js";
 import { validateTicketDefs, detectCycles } from "../src/tickets/ticketLoader.js";
 import { cmdInit, cmdUpdate, cmdComplete, cmdBlock, cmdQueue, cmdDiscover } from "../src/tickets/commands.js";
+import { buildPopulateInstruction } from "../src/cli/tickets.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import type { TicketState } from "../src/tickets/stateDb.js";
 
@@ -62,6 +63,26 @@ function makeState(ticketId: string, status: TicketState["status"]): [string, Ti
 function makeTmpDir(): string {
   return mkdtempSync(join(tmpdir(), "foreman-tickets-test-"));
 }
+
+// ── populate instruction ─────────────────────────────────────────────────────
+
+test("populate instruction includes optional source hints and scan guidance", () => {
+  const instruction = buildPopulateInstruction(["docs/tickets.md", "docs/plans/**"]);
+
+  assert.match(instruction, /User-provided planning source hints/);
+  assert.match(instruction, /- docs\/tickets\.md/);
+  assert.match(instruction, /- docs\/plans\/\*\*/);
+  assert.match(instruction, /files, folders, or globs/);
+  assert.match(instruction, /Any reasonable project-planning format is acceptable/);
+  assert.match(instruction, /Then inspect the repository for existing planning sources/);
+});
+
+test("populate instruction says to scan when no source hints are provided", () => {
+  const instruction = buildPopulateInstruction();
+
+  assert.match(instruction, /No specific planning sources were provided/);
+  assert.match(instruction, /Scan the repository for relevant planning and ticketing documents/);
+});
 
 // ── queue computation ─────────────────────────────────────────────────────────
 

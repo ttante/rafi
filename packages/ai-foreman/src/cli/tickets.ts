@@ -58,14 +58,27 @@ function makeLogPath(projectDir: string, label: string): string {
   return join(projectDir, ".foreman", `${stamp}-${label}.jsonl`);
 }
 
-export function buildPopulateInstruction(): string {
+export function buildPopulateInstruction(sourceHints?: string[]): string {
+  const sources = sourceHints ?? [];
+  const sourceHintBlock = sources.length > 0
+    ? `
+User-provided planning source hints:
+${sources.map((source) => `- ${source}`).join("\n")}
+
+Treat these as files, folders, or globs to check first. Any reasonable project-planning format is acceptable because you are responsible for interpreting it. If a hinted source does not exist or is ambiguous, continue scanning the repository before asking for help.
+`
+    : `
+No specific planning sources were provided. Scan the repository for relevant planning and ticketing documents.
+`;
+
   return `You are being run by Foreman to populate this repository's Foreman ticket tracker.
 
 Goal:
 - Convert every existing project ticket, task, backlog item, roadmap item, or implementation step into Foreman's structured ticket system.
 - Do not implement product/code changes. Only update ticket-tracker files.
+${sourceHintBlock}
 
-Read these files first:
+Before editing, read these tracker control files:
 - .tickets/config.yaml
 - .tickets/tickets.yaml
 - .tickets/tracker-rules.md
@@ -134,6 +147,7 @@ export function buildTicketsCommand(): Command {
     .option("-a, --agent <agent>", "builder agent (claude | codex)", "claude")
     .option("-m, --model <model>", "override the builder's model")
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
+    .option("--sources <paths...>", "source hint files, folders, or globs to check first")
     .option("--fast", "fast mode - lower latency")
     .option("-y, --yes", "skip confirmation prompt before letting the builder edit tickets")
     .action(async (opts) => {
@@ -184,7 +198,7 @@ export function buildTicketsCommand(): Command {
       console.log(`foreman tickets: log ${logPath}\n`);
 
       try {
-        const turn = await foreman.runInstruction(buildPopulateInstruction());
+        const turn = await foreman.runInstruction(buildPopulateInstruction(opts.sources as string[] | undefined));
         await builder.close();
         await viewer;
 

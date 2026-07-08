@@ -8,6 +8,28 @@ This project follows semantic versioning for published npm packages where practi
 
 No unreleased changes.
 
+## @rafi-ai/cli 0.3.8 / ai-foreman 1.0.9 - 2026-07-08
+
+### Added
+
+- Added `tickets populate --sources <paths...>` source hints for files, folders, and globs. The populate agent still scans relevant planning docs automatically when no hints are provided.
+
+### Changed
+
+- Updated the `rafi create` interview to ask for planning/ticket source files, folders, or globs, and to explain that any reasonable format is OK because an agent interprets the material.
+- Updated `rafi create` follow-up instructions to use `rafi tickets populate` or `rafi tickets populate --sources ...` instead of the invalid `--tickets` populate option.
+
+### Fixed
+
+- Fixed `rafi create` Claude Agent SDK installation in pnpm workspace roots by respecting the selected package manager and using workspace-root install flags where needed.
+
+### Packages
+
+- Bumped `ai-foreman` to `1.0.9`.
+- Bumped `@rafi-ai/cli` to `0.3.8`.
+- Kept `special-agents` at `0.3.7`.
+- Kept `rafi-spec` at `0.3.7`.
+
 ## @rafi-ai/cli 0.3.7 / special-agents 0.3.7 / ai-foreman 1.0.8 / rafi-spec 0.3.7 - 2026-07-07
 
 ### Documentation

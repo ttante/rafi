@@ -21,7 +21,7 @@ rafi create . --defaults  # skip walkthrough, use built-in defaults
 rafi compile .            # re-render after editing rafi-config.yaml
 ```
 
-`rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Answers are saved to `rafi-config.yaml`.
+`rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. If you have existing planning material, you can enter files, folders, or globs as source hints for `rafi tickets populate`; any reasonable format is OK because an agent interprets it. Stack answers are saved to `rafi-config.yaml`.
 
 Custom skills or agents can replace Rafi defaults by setting `artifact_source: existing` and editing their paths in `rafi-config.yaml`.
 
@@ -30,6 +30,7 @@ Custom skills or agents can replace Rafi defaults by setting `artifact_source: e
 ```sh
 rafi tickets init --app-name "My App"   # initialize .tickets/ in the project
 rafi tickets populate                    # agent fills tickets from existing docs
+rafi tickets populate --sources docs/tickets.md docs/plans/**
 rafi tickets queue                       # show the next-N queue
 rafi tickets validate                    # run all 4 validation passes
 rafi tickets render                      # regenerate docs/ticket-progress.md

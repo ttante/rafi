@@ -14,6 +14,12 @@ function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "rafi-cli-test-"));
 }
 
+function tsxBin(projectRoot: string): string {
+  const local = join(projectRoot, "node_modules", ".bin", "tsx");
+  if (existsSync(local)) return local;
+  return join(projectRoot, "..", "..", "node_modules", ".bin", "tsx");
+}
+
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
 
 test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
@@ -25,7 +31,7 @@ test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { sk
   writeFileSync(join(dir, "project.yaml"), stringify(legacy), "utf8");
 
   const projectRoot = join(HERE, "..");
-  const output = execFileSync(join(projectRoot, "node_modules", ".bin", "tsx"), ["src/index.ts", "compile", dir], {
+  const output = execFileSync(tsxBin(projectRoot), ["src/index.ts", "compile", dir], {
     cwd: projectRoot,
     encoding: "utf8",
   });

@@ -100,6 +100,7 @@ my-repo/
   rafi tickets init --app-name "My App"
   rafi tickets populate
   ```
+- `rafi tickets populate` scans relevant planning docs automatically; pass `--sources docs/tickets.md docs/plans/**` when you want the agent to check specific files, folders, or globs first.
 - Run the builder to implement tickets one by one, with QA after each step
   ```sh
   rafi start . --steps 10
@@ -117,10 +118,11 @@ my-repo/
   # edit rafi-config.yaml, then:
   rafi compile .
   ```
-- Import your existing backlog — populate from planning docs, a ticket file, or a markdown roadmap
+- Import your existing backlog — populate from planning docs, ticket files, folders of notes, or markdown roadmaps. Any reasonable format is OK because an agent interprets the sources.
   ```sh
   rafi tickets init --app-name "My App"
   rafi tickets populate
+  # or: rafi tickets populate --sources docs/tickets.md docs/plans/**
   ```
 - Run the builder against your backlog; QA cycles and future-work tracking keep the queue clean as work completes
   ```sh
@@ -164,7 +166,7 @@ Published artifacts are on npm, not GitHub Packages. That means the GitHub repos
 
 ## Releases and changelog
 
-- Next release versions: `@rafi-ai/cli@0.3.7`, `special-agents@0.3.7`, `ai-foreman@1.0.8`, `rafi-spec@0.3.7`.
+- Next release versions: `@rafi-ai/cli@0.3.8`, `special-agents@0.3.7`, `ai-foreman@1.0.9`, `rafi-spec@0.3.7`.
 - Release notes live in [CHANGELOG.md](./CHANGELOG.md).
 - Release mechanics and required checks live in [RELEASING.md](./RELEASING.md).
 - GitHub Releases should be created from version tags for user-visible releases. If the GitHub "Releases" panel is empty, no release tags have been published for this repository yet.
