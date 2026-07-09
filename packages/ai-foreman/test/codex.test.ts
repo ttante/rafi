@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CodexAdapter, parseCodexLine } from "../src/adapters/codex.js";
 import type { BuilderAdapterOptions } from "../src/adapters/types.js";
 
@@ -15,6 +18,16 @@ function makeOpts(overrides: Partial<BuilderAdapterOptions> = {}): BuilderAdapte
 
 function adapter(overrides: Partial<BuilderAdapterOptions> = {}): CodexAdapter {
   return new CodexAdapter(makeOpts(overrides));
+}
+
+function withPath(path: string, fn: () => Promise<void> | void): Promise<void> {
+  const originalPath = process.env.PATH;
+  process.env.PATH = path;
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      process.env.PATH = originalPath;
+    });
 }
 
 // ── buildArgs ────────────────────────────────────────────────────────────────
@@ -131,4 +144,32 @@ test("parseCodexLine: turn.started and turn.completed produce no events", () => 
     parse('{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}').events.length,
     0,
   );
+});
+
+test("CodexAdapter normalizes 401 process failures into repair guidance", async () => {
+  const binDir = mkdtempSync(join(tmpdir(), "codex-auth-test-"));
+  const projectDir = mkdtempSync(join(tmpdir(), "codex-auth-project-"));
+  const codexPath = join(binDir, "codex");
+  writeFileSync(
+    codexPath,
+    [
+      "#!/bin/sh",
+      "echo '401 Invalid authentication credentials' >&2",
+      "exit 1",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  chmodSync(codexPath, 0o755);
+
+  await withPath(binDir, async () => {
+    const a = adapter({ cwd: projectDir });
+    const result = await a.sendTurn("hello");
+    await a.close();
+
+    assert.equal(result.isError, true);
+    assert.match(result.text, /codex exec failed during builder turn/);
+    assert.match(result.text, /codex login/);
+    assert.match(result.text, /401 Invalid authentication credentials/);
+  });
 });

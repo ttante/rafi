@@ -5,7 +5,21 @@ import { existsSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import type { ProjectConfig } from "rafi-spec";
-import { compile, writeRafiConfigYaml } from "./compiler.js";
+import {
+  compile,
+  formatRuntimeUpdateFailure,
+  isRootFileMode,
+  rootFileModeValues,
+  runtimeCommandLabel,
+  writeRafiConfigYaml,
+  type RuntimeUpdateError,
+} from "./compiler.js";
+import { compileWithRootUpdateRecovery, type RootUpdateRecoveryChoice } from "./createRecovery.js";
+import {
+  ensureAgentRuntimesReady,
+  type RuntimeReadinessChoice,
+  type RuntimeReadinessError,
+} from "./runtimeReadiness.js";
 import {
   artifactPaths,
   buildProjectConfig,
@@ -35,8 +49,10 @@ program
   .description("Re-render .claude/, .codex/, AGENTS.md, and role bundles from an existing rafi-config.yaml.")
   .argument("<project>", "path to the target repo")
   .option("--force", "overwrite existing doc files")
+  .option("--root-file-mode <mode>", "override root instruction file handling for this run (append | overwrite | update)")
   .action((project: string, opts) => {
     const targetDir = resolve(project);
+    const rootFileMode = parseRootFileMode(opts.rootFileMode);
     const loaded = loadRafiConfig(targetDir);
     if (!loaded) {
       console.error(`rafi: ${RAFI_CONFIG_FILE} not found at ${join(targetDir, RAFI_CONFIG_FILE)}`);
@@ -46,7 +62,10 @@ program
       writeRafiConfigYaml(targetDir, loaded.config);
       console.log(`rafi: migrated ${LEGACY_PROJECT_CONFIG_FILE} to ${RAFI_CONFIG_FILE}; you can delete ${LEGACY_PROJECT_CONFIG_FILE}.`);
     }
-    compile(targetDir, loaded.config, { force: opts.force as boolean | undefined });
+    compile(targetDir, loaded.config, {
+      force: opts.force as boolean | undefined,
+      rootFileMode,
+    });
     console.log(`rafi: compiled ${targetDir}`);
     console.log(`rafi: custom skills or agents can replace Rafi defaults by setting artifact_source: existing and editing their paths in ${RAFI_CONFIG_FILE}.`);
   });
@@ -57,8 +76,10 @@ program
   .argument("<project>", "path to the target repo")
   .option("--defaults", "skip walkthrough and use built-in defaults")
   .option("--force", "overwrite existing doc files")
+  .option("--root-file-mode <mode>", "override root instruction file handling (append | overwrite | update)")
   .action(async (project: string, opts) => {
     const targetDir = resolve(project);
+    const rootFileMode = parseRootFileMode(opts.rootFileMode);
 
     // Read app name from target package.json if present
     const targetPkgPath = join(targetDir, "package.json");
@@ -171,11 +192,16 @@ program
       outro("Configuration collected — compiling...");
     }
 
-    const config = await applyCollisionChoices(targetDir, buildProjectConfig(answers));
+    const config = await applyCollisionChoices(targetDir, buildProjectConfig(answers), rootFileMode);
     writeRafiConfigYaml(targetDir, config);
-    compile(targetDir, config, {
-      force: opts.force as boolean | undefined,
-    });
+    await compileWithRootUpdateRecovery(
+      targetDir,
+      config,
+      {
+        force: opts.force as boolean | undefined,
+      },
+      promptRootUpdateRecovery,
+    );
 
     const aiStatus = config.flags.usesAI ? "on" : "off";
     console.log(`rafi: compiled ${targetDir}`);
@@ -188,6 +214,9 @@ program
     } else {
       console.log("rafi: skipping Claude Agent SDK (Codex only).");
     }
+
+    await ensureAgentRuntimesReady(targetDir, config.harness.targets, promptRuntimeReadinessRecovery);
+    console.log(`rafi: verified agent runtime auth for ${config.harness.targets.join(" and ")}.`);
 
     if (answers.planningSources) {
       const sourceArgs = parsePlanningSources(answers.planningSources).map(shellQuote).join(" ");
@@ -226,6 +255,7 @@ function loadRafiConfig(targetDir: string): { config: ProjectConfig; migrated: b
 async function applyCollisionChoices(
   targetDir: string,
   config: ProjectConfig,
+  rootFileMode?: ProjectConfig["agent_files"]["mode"],
 ): Promise<ProjectConfig> {
   const next: ProjectConfig = {
     ...config,
@@ -233,17 +263,20 @@ async function applyCollisionChoices(
     agents: cloneArtifactMap(config.agents),
     skills: cloneArtifactMap(config.skills),
   };
+  if (rootFileMode) {
+    next.agent_files.mode = rootFileMode;
+  }
 
   const rootCollisions = [next.agent_files.codex, next.agent_files.claude].filter((path) =>
     existsSync(join(targetDir, path)),
   );
-  if (rootCollisions.length > 0) {
+  if (rootCollisions.length > 0 && !rootFileMode) {
     const { select, isCancel } = await import("@clack/prompts");
     const mode = await select({
       message: `${rootCollisions.length} root agent file collision(s) found. How should Rafi handle them?`,
       options: [
         { value: "append", label: "Append — add a dated Rafi section at the end" },
-        { value: "update", label: "Update — ask the installed agent runtime to rewrite the file" },
+        { value: "update", label: "Update — ask an authenticated installed agent runtime to rewrite the file" },
         { value: "overwrite", label: "Overwrite — replace with Rafi's generated file" },
       ],
     });
@@ -284,6 +317,42 @@ async function applyCollisionChoices(
   }
 
   return next;
+}
+
+async function promptRootUpdateRecovery(err: RuntimeUpdateError): Promise<RootUpdateRecoveryChoice> {
+  const { select, isCancel, log } = await import("@clack/prompts");
+  log.error(formatRuntimeUpdateFailure(err));
+  const choice = await select({
+    message: `${runtimeCommandLabel(err.runtime)} failed while updating ${err.targetFile}. What should Rafi do?`,
+    options: [
+      { value: "retry", label: "Retry update — rerun after fixing authentication" },
+      { value: "append", label: "Append instead — preserve existing guidance and add a Rafi section" },
+      { value: "overwrite", label: "Overwrite instead — replace the root instruction files" },
+      { value: "cancel", label: "Cancel" },
+    ],
+  });
+  if (isCancel(choice) || choice === "cancel") process.exit(0);
+  return choice as RootUpdateRecoveryChoice;
+}
+
+async function promptRuntimeReadinessRecovery(err: RuntimeReadinessError): Promise<RuntimeReadinessChoice> {
+  const { select, isCancel, log } = await import("@clack/prompts");
+  log.error(err.message);
+  const choice = await select({
+    message: `${runtimeCommandLabel(err.runtime)} is not ready. Fix authentication, then retry the check.`,
+    options: [
+      { value: "retry", label: "Retry check" },
+      { value: "cancel", label: "Cancel" },
+    ],
+  });
+  if (isCancel(choice) || choice === "cancel") process.exit(0);
+  return choice as RuntimeReadinessChoice;
+}
+
+function parseRootFileMode(value: unknown): ProjectConfig["agent_files"]["mode"] | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string" && isRootFileMode(value)) return value;
+  throw new Error(`--root-file-mode must be one of: ${rootFileModeValues().join(", ")}`);
 }
 
 function artifactCollisions(

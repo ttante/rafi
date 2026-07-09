@@ -8,6 +8,7 @@ import type {
   BuilderEvent,
   TurnResult,
 } from "./types.js";
+import { normalizeRuntimeErrorText } from "../runtimeAuth.js";
 
 /** Result of parsing one JSONL line from `codex exec --json` output. */
 export interface CodexLineResult {
@@ -150,6 +151,9 @@ export class CodexAdapter implements BuilderAdapter {
         let text = textParts.join("\n");
         if (!text && code !== 0) {
           text = Buffer.concat(stderrChunks).toString().trim();
+        }
+        if (code !== 0) {
+          text = normalizeRuntimeErrorText("codex", text, code, "builder turn");
         }
         const result: TurnResult = {
           text,

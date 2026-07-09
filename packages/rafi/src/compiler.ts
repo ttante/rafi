@@ -17,12 +17,45 @@ import { RAFI_CONFIG_FILE } from "./project.js";
 
 const RAFI_APPEND_START = "<!-- rafi:start -->";
 const RAFI_APPEND_END = "<!-- rafi:end -->";
+const ROOT_FILE_MODES = ["append", "update", "overwrite"] as const;
+export type AgentRuntime = "claude" | "codex";
 
 export interface CompileProjectOptions extends CopyDocsOptions {
   /** Skip doc copying entirely (useful in tests that don't need docs). */
   skipDocs?: boolean;
   /** Skip native skill/subagent files; useful when compile should only refresh runtime bundles. */
   skipNativeArtifacts?: boolean;
+  /** Override agent_files.mode for this compile only. */
+  rootFileMode?: ProjectConfig["agent_files"]["mode"];
+}
+
+export interface RuntimeUpdateErrorOptions {
+  runtime: AgentRuntime;
+  targetFile: string;
+  exitCode?: number | null;
+  stdout?: string;
+  stderr?: string;
+  cause?: unknown;
+}
+
+export class RuntimeUpdateError extends Error {
+  readonly runtime: AgentRuntime;
+  readonly targetFile: string;
+  readonly exitCode?: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly authLikely: boolean;
+
+  constructor(opts: RuntimeUpdateErrorOptions) {
+    super(formatRuntimeUpdateFailure(opts), { cause: opts.cause });
+    this.name = "RuntimeUpdateError";
+    this.runtime = opts.runtime;
+    this.targetFile = opts.targetFile;
+    this.exitCode = opts.exitCode;
+    this.stdout = opts.stdout ?? "";
+    this.stderr = opts.stderr ?? "";
+    this.authLikely = isRuntimeAuthFailure(`${this.stderr}\n${this.stdout}`);
+  }
 }
 
 /** Map a ProjectConfig to the Defaults shape special-agents compile functions expect. */
@@ -51,11 +84,12 @@ export function compile(targetDir: string, config: ProjectConfig, opts: CompileP
   const conditions = flagsToConditions(config.flags);
   validateExistingArtifacts(targetDir, config);
   const skillNames = configuredSkillNames(config);
-  const updateRuntime = config.harness.targets.includes("claude") ? "claude" : "codex";
+  const updateRuntime: AgentRuntime = config.harness.targets.includes("claude") ? "claude" : "codex";
+  const rootFileMode = opts.rootFileMode ?? config.agent_files.mode;
 
   // Flat Codex doc + lean Claude entrypoint
-  writeInstructionFile(targetDir, config.agent_files.codex, renderAgentsMd({ defaults }), config.agent_files.mode, updateRuntime);
-  writeInstructionFile(targetDir, config.agent_files.claude, renderClaudeMd({ defaults }), config.agent_files.mode, updateRuntime);
+  writeInstructionFile(targetDir, config.agent_files.codex, renderAgentsMd({ defaults }), rootFileMode, updateRuntime);
+  writeInstructionFile(targetDir, config.agent_files.claude, renderClaudeMd({ defaults }), rootFileMode, updateRuntime);
 
   // Lean Claude subagent files (role-filtered)
   if (!opts.skipNativeArtifacts) {
@@ -112,7 +146,7 @@ function writeInstructionFile(
   relPath: string,
   generated: string,
   mode: ProjectConfig["agent_files"]["mode"],
-  runtime: "claude" | "codex",
+  runtime: AgentRuntime,
 ): void {
   const path = join(targetDir, relPath);
   mkdirSync(dirname(path), { recursive: true });
@@ -148,7 +182,7 @@ function updateInstructionFileWithAgent(
   targetDir: string,
   relPath: string,
   generated: string,
-  runtime: "claude" | "codex",
+  runtime: AgentRuntime,
 ): void {
   const prompt =
     `Update ${relPath} in this repository.\n\n` +
@@ -158,17 +192,113 @@ function updateInstructionFileWithAgent(
     generated;
   try {
     if (runtime === "codex") {
-      execFileSync("codex", ["exec", "--sandbox", "workspace-write", "-C", targetDir, prompt], { stdio: "inherit" });
+      execFileSync("codex", ["exec", "--sandbox", "workspace-write", "-C", targetDir, prompt], {
+        cwd: targetDir,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
     } else {
-      execFileSync("claude", ["-p", prompt], { cwd: targetDir, stdio: "inherit" });
+      execFileSync("claude", ["-p", prompt], {
+        cwd: targetDir,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
     }
   } catch (err) {
-    throw new Error(
-      `Cannot update ${relPath}: ${runtime} runtime is not available or failed. ` +
-      "Choose append/overwrite or install the selected agent runtime.",
-      { cause: err },
-    );
+    const failure = err as {
+      status?: number | null;
+      stdout?: string | Buffer;
+      stderr?: string | Buffer;
+    };
+    throw new RuntimeUpdateError({
+      runtime,
+      targetFile: relPath,
+      exitCode: failure.status,
+      stdout: outputToString(failure.stdout),
+      stderr: outputToString(failure.stderr),
+      cause: err,
+    });
   }
+}
+
+export function isRootFileMode(value: string): value is ProjectConfig["agent_files"]["mode"] {
+  return (ROOT_FILE_MODES as readonly string[]).includes(value);
+}
+
+export function rootFileModeValues(): readonly ProjectConfig["agent_files"]["mode"][] {
+  return ROOT_FILE_MODES;
+}
+
+export function isRuntimeAuthFailure(output: string): boolean {
+  return [
+    /\b401\b/i,
+    /invalid authentication credentials/i,
+    /not logged in/i,
+    /login required/i,
+    /unauthenticated/i,
+    /unauthorized/i,
+    /expired[\w\s-]*token/i,
+    /token[\w\s-]*expired/i,
+    /session expired/i,
+    /authentication.*expired/i,
+  ].some((pattern) => pattern.test(output));
+}
+
+export function runtimeCommandLabel(runtime: AgentRuntime): string {
+  return runtime === "claude" ? "claude -p" : "codex exec";
+}
+
+export function runtimeRepairCommands(runtime: AgentRuntime): string {
+  if (runtime === "claude") {
+    return [
+      "claude auth logout",
+      "claude auth login --claudeai",
+      'claude -p "Return exactly OK"',
+      "",
+      "Claude subscription users may also need:",
+      "claude setup-token",
+    ].join("\n");
+  }
+  return [
+    "codex login",
+    'codex exec "Return exactly OK"',
+  ].join("\n");
+}
+
+export function formatRuntimeUpdateFailure(opts: RuntimeUpdateErrorOptions): string {
+  const command = runtimeCommandLabel(opts.runtime);
+  const output = [opts.stderr, opts.stdout].filter(Boolean).join("\n").trim();
+  const exit = opts.exitCode === undefined || opts.exitCode === null ? "unknown" : String(opts.exitCode);
+  const authLikely = isRuntimeAuthFailure(output);
+  const authLine = authLikely
+    ? "The runtime output looks like an authentication failure."
+    : "This often means the selected agent runtime is missing or not authenticated.";
+  const details = output ? `\n\nRuntime output:\n${truncateRuntimeOutput(output)}` : "";
+  return (
+    `Could not update ${opts.targetFile} with ${command} (exit code ${exit}).\n\n` +
+    `${authLine}\n\n` +
+    "Repair and verify:\n" +
+    indent(runtimeRepairCommands(opts.runtime)) +
+    "\n\nFallback options:\n" +
+    `  - Edit ${RAFI_CONFIG_FILE} and set agent_files.mode: append or overwrite.\n` +
+    "  - Or rerun with --root-file-mode append|overwrite|update." +
+    details
+  );
+}
+
+function outputToString(value: string | Buffer | undefined): string {
+  if (!value) return "";
+  return Buffer.isBuffer(value) ? value.toString("utf8") : value;
+}
+
+function truncateRuntimeOutput(output: string): string {
+  const max = 2000;
+  if (output.length <= max) return output;
+  return `${output.slice(0, max).trimEnd()}\n... truncated ...`;
+}
+
+function indent(value: string): string {
+  return value.split("\n").map((line) => `  ${line}`).join("\n");
 }
 
 function configuredSkillNames(config: ProjectConfig): Record<string, string> {

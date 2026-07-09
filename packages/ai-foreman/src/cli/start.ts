@@ -11,6 +11,8 @@ import { Foreman, createPermissionHandler } from "../foreman.js";
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
 import { printEvents } from "./events.js";
 import { loadRoleBundle } from "../roles.js";
+import { ensureRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
+import type { AgentRuntime } from "../runtimeAuth.js";
 
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
@@ -101,6 +103,9 @@ export function buildStartCommand(): Command {
       const logPath = join(cwd, ".foreman", `${stamp}.jsonl`);
       const log = new Log(logPath);
       const policy = new PermissionPolicy(config.permissions, cwd);
+      const agent = opts.agent as AgentRuntime;
+
+      await ensureRuntimeReadyForCommand(cwd, agent, "start");
 
       const roleBundle = loadRoleBundle("builder", { projectDir: cwd });
       const adapterOpts = {
@@ -114,7 +119,7 @@ export function buildStartCommand(): Command {
         skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
       };
       const builder: BuilderAdapter =
-        opts.agent === "codex"
+        agent === "codex"
           ? new CodexAdapter(adapterOpts)
           : await ClaudeAdapter.create(adapterOpts);
       const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
@@ -126,7 +131,7 @@ export function buildStartCommand(): Command {
         opts.fast ? "fast" : null,
         qaEnabled ? null : "qa=off",
       ].filter(Boolean).join(" ");
-      console.log(`foreman: driving a ${opts.agent} builder through ${steps} step(s)${modifiers ? ` [${modifiers}]` : ""}`);
+      console.log(`foreman: driving a ${agent} builder through ${steps} step(s)${modifiers ? ` [${modifiers}]` : ""}`);
       console.log(`foreman: project ${cwd}`);
       if (trackerRelPath) console.log(`foreman: tracker ${trackerRelPath}`);
       console.log(`foreman: log ${logPath}\n`);

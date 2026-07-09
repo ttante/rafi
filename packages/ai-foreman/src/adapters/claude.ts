@@ -19,6 +19,7 @@ export async function requireClaudeSDK() {
   }
 }
 import { AsyncQueue } from "../util/asyncQueue.js";
+import { normalizeRuntimeErrorText } from "../runtimeAuth.js";
 import type {
   BuilderAdapter,
   BuilderAdapterOptions,
@@ -73,8 +74,13 @@ export class ClaudeAdapter implements BuilderAdapter {
   private closed = false;
 
   static async create(opts: BuilderAdapterOptions): Promise<ClaudeAdapter> {
-    const { query } = await requireClaudeSDK();
-    return new ClaudeAdapter(opts, query);
+    try {
+      const { query } = await requireClaudeSDK();
+      return new ClaudeAdapter(opts, query);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(normalizeRuntimeErrorText("claude", message, null, "adapter startup"), { cause: err });
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -111,7 +117,8 @@ export class ClaudeAdapter implements BuilderAdapter {
         (err instanceof Error &&
           (err.name === "AbortError" || err.message.includes("aborted")));
       if (!isShutdownAbort) {
-        const message = err instanceof Error ? err.message : String(err);
+        const rawMessage = err instanceof Error ? err.message : String(err);
+        const message = normalizeRuntimeErrorText("claude", rawMessage, null, "builder stream");
         this.eventQueue.push({ kind: "error", message });
         this.pending?.reject(new Error(message));
         this.pending = undefined;
@@ -145,7 +152,9 @@ export class ClaudeAdapter implements BuilderAdapter {
             ? msg.errors.join("; ")
             : "";
       const result: TurnResult = {
-        text,
+        text: msg.is_error
+          ? normalizeRuntimeErrorText("claude", text, null, "builder turn")
+          : text,
         isError: msg.is_error,
         numTurns: msg.num_turns,
         costUsd: msg.total_cost_usd,

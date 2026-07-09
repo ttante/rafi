@@ -47,3 +47,22 @@ test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { sk
   assert.match(config, /agents:/);
   assert.match(config, /skills:/);
 });
+
+test("compile --root-file-mode append overrides update mode for the run", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+  const dir = tempDir();
+  const config = buildProjectConfig({ ...defaultAnswers(), useClaude: false });
+  config.agent_files.mode = "update";
+  writeFileSync(join(dir, "rafi-config.yaml"), stringify(config), "utf8");
+  writeFileSync(join(dir, "AGENTS.md"), "CUSTOM RULES\n", "utf8");
+
+  const projectRoot = join(HERE, "..");
+  execFileSync(tsxBin(projectRoot), ["src/index.ts", "compile", dir, "--root-file-mode", "append"], {
+    cwd: projectRoot,
+    encoding: "utf8",
+  });
+
+  const content = readFileSync(join(dir, "AGENTS.md"), "utf8");
+  assert.ok(content.startsWith("CUSTOM RULES\n"));
+  assert.ok(content.includes("<!-- rafi:start -->"));
+  assert.match(readFileSync(join(dir, "rafi-config.yaml"), "utf8"), /mode: update/);
+});

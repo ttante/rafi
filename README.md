@@ -39,6 +39,7 @@ Run `rafi` from inside the target repo:
 - Answer 9 questions about your stack (or skip with `--defaults`)
 - Get `AGENTS.md`, `CLAUDE.md`, subagents, and starter docs written to your repo
 - If you say yes to Claude Code, the Claude Agent SDK is installed automatically
+- Selected agent runtimes are checked before `create`, `start`, and `tickets populate` continue, with repair prompts if auth is missing
 - Re-run `rafi compile` whenever you update `rafi-config.yaml`
 
 ```sh
@@ -46,7 +47,10 @@ cd my-repo
 rafi create .             # interactive walkthrough
 rafi create . --defaults  # skip walkthrough, use built-in defaults
 rafi compile .            # re-render after editing rafi-config.yaml
+rafi compile . --root-file-mode append  # one-run override for AGENTS.md/CLAUDE.md handling
 ```
+
+Use `--root-file-mode append|overwrite|update` with `rafi create` or `rafi compile` to choose how existing root instruction files are handled. `update` asks the installed agent runtime to merge guidance, so it requires an authenticated Claude Code or Codex CLI.
 
 ## Defaults
 

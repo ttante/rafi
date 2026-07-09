@@ -28,6 +28,8 @@ import {
 import { isTicketsInitialized } from "../tickets/config.js";
 import { importFromMarkdown } from "../tickets/importer.js";
 import { formatValidationIssues } from "../tickets/validate.js";
+import { ensureRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
+import type { AgentRuntime } from "../runtimeAuth.js";
 
 function fail(msg: string): never {
   console.error(`foreman tickets: ${msg}`);
@@ -179,6 +181,7 @@ export function buildTicketsCommand(): Command {
       const logPath = makeLogPath(dir, "tickets-populate");
       const log = new Log(logPath);
       const policy = new PermissionPolicy(config.permissions, dir);
+      await ensureRuntimeReadyForCommand(dir, agent as AgentRuntime, "tickets populate");
       const adapterOpts = {
         cwd: dir,
         model: opts.model as string | undefined,

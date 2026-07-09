@@ -8,6 +8,25 @@ This project follows semantic versioning for published npm packages where practi
 
 No unreleased changes.
 
+## @rafi-ai/cli 0.3.9 / ai-foreman 1.0.10 - 2026-07-09
+
+### Added
+
+- Added `--root-file-mode append|overwrite|update` to `rafi create` and `rafi compile` for root instruction file handling.
+
+### Fixed
+
+- Made root file `update` mode fail with actionable Claude/Codex authentication guidance, and let interactive `rafi create` retry or fall back to append/overwrite.
+- Added create-time Claude/Codex readiness checks so selected runtimes are authenticated before the walkthrough finishes.
+- Added Claude/Codex readiness checks before `rafi start` and `rafi tickets populate`, plus late 401 normalization inside the Claude and Codex adapters.
+
+### Packages
+
+- Bumped `ai-foreman` to `1.0.10`.
+- Bumped `@rafi-ai/cli` to `0.3.9`.
+- Kept `special-agents` at `0.3.7`.
+- Kept `rafi-spec` at `0.3.7`.
+
 ## @rafi-ai/cli 0.3.8 / ai-foreman 1.0.9 - 2026-07-08
 
 ### Added

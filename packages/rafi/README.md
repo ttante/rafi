@@ -19,9 +19,12 @@ cd my-repo
 rafi create .             # interactive walkthrough
 rafi create . --defaults  # skip walkthrough, use built-in defaults
 rafi compile .            # re-render after editing rafi-config.yaml
+rafi compile . --root-file-mode append  # one-run override for AGENTS.md/CLAUDE.md handling
 ```
 
-`rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. If you have existing planning material, you can enter files, folders, or globs as source hints for `rafi tickets populate`; any reasonable format is OK because an agent interprets it. Stack answers are saved to `rafi-config.yaml`.
+`rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Before `create`, `start`, or `tickets populate` continue into agent work, Rafi checks the selected runtime and prompts you to repair missing authentication. If you have existing planning material, you can enter files, folders, or globs as source hints for `rafi tickets populate`; any reasonable format is OK because an agent interprets it. Stack answers are saved to `rafi-config.yaml`.
+
+Use `--root-file-mode append|overwrite|update` with `rafi create` or `rafi compile` to choose how existing root instruction files are handled. `update` asks the installed agent runtime to merge guidance, so it requires an authenticated Claude Code or Codex CLI.
 
 Custom skills or agents can replace Rafi defaults by setting `artifact_source: existing` and editing their paths in `rafi-config.yaml`.
 

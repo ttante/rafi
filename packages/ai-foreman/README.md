@@ -145,12 +145,14 @@ Claude Code:
 - Default agent.
 - Uses your existing Claude Code credentials.
 - Runs through the Claude Agent SDK.
+- `start` and `tickets populate` check Claude auth before launching the builder and prompt you to repair it if needed.
 
 Codex:
 
 - Use `--agent codex`.
 - Shells out to `codex exec`.
 - Requires the `codex` CLI on your `PATH`.
+- `start` and `tickets populate --agent codex` check Codex auth before launching the builder and prompt you to repair it if needed.
 
 Task file:
 
@@ -520,6 +522,5 @@ Package output:
 - **`special-agents`** — library (rules + skills + agents + composition)
 - **`ai-foreman`** — this runtime
 - **`@rafi-ai/cli`** — CLI for `rafi create` and `rafi compile`
-
 
 
