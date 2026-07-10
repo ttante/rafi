@@ -13,6 +13,19 @@ import { printEvents } from "./events.js";
 import { loadRoleBundle } from "../roles.js";
 import { ensureRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
 import type { AgentRuntime } from "../runtimeAuth.js";
+import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "../tickets/config.js";
+import { loadTickets } from "../tickets/ticketLoader.js";
+import { StateDb } from "../tickets/stateDb.js";
+import { buildBranchAuditInstruction, buildBranchPlan, parseAuditDependencies } from "../branch/planner.js";
+import { currentGitRef, ensureCleanBaseWorktree, generatedTrackerDirtyPaths } from "../branch/git.js";
+import { formatGitHubFailure, preflightGh } from "../branch/github.js";
+import { runBranchPlan } from "../branch/runner.js";
+import {
+  findResumableBranchSessions,
+  formatBranchContinueCommand,
+  formatBranchSummaryFollowupCommands,
+} from "../branch/resume.js";
+import type { BranchPlan, BranchPlanNode } from "../branch/types.js";
 
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
@@ -35,6 +48,61 @@ function findLastSessionId(dir: string): string | undefined {
   return undefined;
 }
 
+function collectTicket(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function branchContinueTicketHelp(cwd: string, flag = "--continue"): string {
+  const sessions = findResumableBranchSessions(join(cwd, ".foreman"));
+  if (sessions.length === 0) {
+    return [
+      `branch mode ${flag} needs --ticket <id>, but no resumable branch ticket sessions were found.`,
+      `Checked: ${join(cwd, ".foreman")}`,
+    ].join("\n");
+  }
+
+  return [
+    `branch mode ${flag} needs --ticket <id>.`,
+    "Resumable branch ticket(s):",
+    ...sessions.map((session) => `  ${session.ticket}  ${session.branch}  worktree=${session.worktreePath}`),
+    "Run one of these commands:",
+    ...sessions.map((session) => `  ${formatBranchContinueCommand(cwd, session)}`),
+  ].join("\n");
+}
+
+async function ensureGitHubReadyForCreatePr(cwd: string, log: Log, yes: boolean): Promise<void> {
+  while (true) {
+    const result = preflightGh(cwd);
+    if (result.ok) return;
+
+    log.write("github-readiness-failed", {
+      code: result.code,
+      message: result.message,
+      repairCommands: result.repairCommands,
+      command: result.command,
+      output: result.output,
+    });
+
+    const detail = formatGitHubFailure(result);
+    if (yes || !process.stdin.isTTY || !process.stdout.isTTY) {
+      fail(`GitHub PR setup failed before building:\n${detail}`);
+    }
+
+    console.error(`foreman: GitHub PR setup failed before building:\n${detail}\n`);
+    const action = await select({
+      message: "Retry GitHub readiness check?",
+      options: [
+        { value: "retry", label: "Retry" },
+        { value: "cancel", label: "Cancel" },
+      ],
+    });
+    if (isCancel(action) || action === "cancel") {
+      console.log("ai-foreman: cancelled");
+      process.exit(0);
+    }
+  }
+}
+
 export function buildStartCommand(): Command {
   return new Command("start")
     .description("Enlist a builder and drive it through a batch of N steps.")
@@ -49,6 +117,14 @@ export function buildStartCommand(): Command {
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--fast", "fast mode — lower latency (maps to effort=low for codex)")
     .option("--no-qa", "disable per-ticket QA review (enabled by default)")
+    .option("--branch-per-ticket", "run each selected structured ticket in an isolated git worktree and branch")
+    .option("--create-pr", "push each successful ticket branch and create a GitHub PR (implies --branch-per-ticket)")
+    .option("--base <ref>", "base ref for root ticket branches (default: current branch or HEAD)")
+    .option("--branch-prefix <prefix>", "branch name prefix for ticket branches", "rafi")
+    .option("--max-branch-depth <n>", "maximum selected branch stack depth", "2")
+    .option("--pr-ready", "create ready-for-review PRs instead of draft PRs")
+    .option("--keep-worktrees", "keep successful ticket worktrees for inspection")
+    .option("--ticket <id>", "ticket id to continue in branch mode; repeat for multiple tickets", collectTicket, [])
     .action(async (project: string, opts) => {
       const steps = Number.parseInt(opts.steps, 10);
       if (!Number.isInteger(steps) || steps < 1) {
@@ -91,10 +167,33 @@ export function buildStartCommand(): Command {
         fail("choose either --resume <sessionId> or --continue, not both");
       }
 
+      const branchMode = Boolean(opts.branchPerTicket || opts.createPr);
+      const continueTickets = (opts.ticket as string[] | undefined) ?? [];
+      const maxBranchDepth = Number.parseInt(opts.maxBranchDepth, 10);
+      if (!Number.isInteger(maxBranchDepth) || maxBranchDepth < 1) {
+        fail("--max-branch-depth must be a positive integer");
+      }
+      if (!branchMode && continueTickets.length > 0) {
+        fail("--ticket is only supported with --branch-per-ticket --continue or --branch-per-ticket --resume");
+      }
+      if (branchMode) {
+        if (opts.resume && continueTickets.length > 1) {
+          fail("--resume <sessionId> in branch mode supports exactly one --ticket; use --continue for multiple tickets");
+        }
+        if ((opts.resume || opts.continue) && continueTickets.length === 0) {
+          fail(branchContinueTicketHelp(cwd, opts.resume ? "--resume" : "--continue"));
+        }
+        if (continueTickets.length > 0 && !(opts.resume || opts.continue)) {
+          fail("--ticket in branch mode requires --continue or --resume <sessionId>");
+        }
+        if (opts.tickets) fail("--tickets is not supported with --branch-per-ticket; initialize and use .tickets/tickets.yaml");
+        if (!isTicketsInitialized(cwd)) fail("--branch-per-ticket requires initialized .tickets/ (run ai-foreman tickets init)");
+      }
+
       const resumeSessionId =
         (opts.resume as string | undefined) ??
-        (opts.continue ? findLastSessionId(join(cwd, ".foreman")) : undefined);
-      if (opts.continue && !resumeSessionId) {
+        (!branchMode && opts.continue ? findLastSessionId(join(cwd, ".foreman")) : undefined);
+      if (!branchMode && opts.continue && !resumeSessionId) {
         fail(`no previous session id found under ${join(cwd, ".foreman")}`);
       }
 
@@ -102,27 +201,198 @@ export function buildStartCommand(): Command {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const logPath = join(cwd, ".foreman", `${stamp}.jsonl`);
       const log = new Log(logPath);
-      const policy = new PermissionPolicy(config.permissions, cwd);
       const agent = opts.agent as AgentRuntime;
 
-      await ensureRuntimeReadyForCommand(cwd, agent, "start");
+      const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
 
-      const roleBundle = loadRoleBundle("builder", { projectDir: cwd });
-      const adapterOpts = {
-        cwd,
-        model: opts.model as string | undefined,
-        resumeSessionId,
-        permission: createPermissionHandler(policy, log),
-        effort: opts.effort as EffortLevel | undefined,
-        fast: opts.fast as boolean | undefined,
-        systemPromptAppend: roleBundle.system || undefined,
-        skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
-      };
-      const builder: BuilderAdapter =
-        agent === "codex"
+      const createBuilder = async (builderCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
+        const builderPolicy = new PermissionPolicy(config.permissions, builderCwd);
+        const roleBundle = loadRoleBundle("builder", { projectDir: builderCwd });
+        const adapterOpts = {
+          cwd: builderCwd,
+          model: opts.model as string | undefined,
+          resumeSessionId: sessionId,
+          permission: createPermissionHandler(builderPolicy, log),
+          effort: opts.effort as EffortLevel | undefined,
+          fast: opts.fast as boolean | undefined,
+          systemPromptAppend: roleBundle.system || undefined,
+          skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+        };
+        return agent === "codex"
           ? new CodexAdapter(adapterOpts)
           : await ClaudeAdapter.create(adapterOpts);
-      const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
+      };
+
+      if (branchMode) {
+        const ticketsConfig = loadTicketsConfig(cwd);
+        const allowedBaseDirtyPaths = generatedTrackerDirtyPaths(ticketsConfig.paths);
+        try {
+          ensureCleanBaseWorktree(cwd, { allowedDirtyPaths: allowedBaseDirtyPaths });
+        } catch (err) {
+          fail(err instanceof Error ? err.message : String(err));
+        }
+        if (opts.createPr) {
+          await ensureGitHubReadyForCreatePr(cwd, log, Boolean(opts.yes));
+        }
+
+        await ensureRuntimeReadyForCommand(cwd, agent, "start");
+
+        const ticketPaths = resolveTicketPaths(ticketsConfig, cwd);
+        const tickets = loadTickets(ticketPaths.tickets);
+        const db = new StateDb(ticketPaths.stateDb);
+        const states = db.getAllStates();
+        db.close();
+
+        const ticketById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
+        const resumeSessionByTicket = new Map<string, { worktreePath: string; sessionId: string }>();
+        let plan: BranchPlan;
+        if (continueTickets.length > 0) {
+          const sessions = findResumableBranchSessions(join(cwd, ".foreman"));
+          const sessionByTicket = new Map(sessions.map((session) => [session.ticket, session]));
+          const nodes: BranchPlanNode[] = [];
+          for (const ticketId of continueTickets) {
+            const session = sessionByTicket.get(ticketId);
+            if (!session) {
+              fail([
+                `no resumable branch session found for ticket ${ticketId}`,
+                branchContinueTicketHelp(cwd),
+              ].join("\n"));
+            }
+            const ticket = ticketById.get(ticketId);
+            if (!ticket) fail(`ticket ${ticketId} no longer exists in .tickets/tickets.yaml`);
+            const sessionId = (opts.resume as string | undefined) ?? session.sessionId;
+            resumeSessionByTicket.set(ticketId, { worktreePath: session.worktreePath, sessionId });
+            nodes.push({
+              ticket,
+              branch: session.branch,
+              baseRef: session.base,
+              baseBranch: session.base,
+              dependencies: [],
+              depth: 1,
+              worktreePath: session.worktreePath,
+            });
+          }
+          plan = {
+            baseRef: nodes[0]?.baseRef ?? ((opts.base as string | undefined) ?? currentGitRef(cwd)),
+            nodes,
+            issues: [],
+          };
+          log.write("branch-plan", {
+            baseRef: plan.baseRef,
+            tickets: plan.nodes.map((node) => node.ticket.id),
+            branches: plan.nodes.map((node) => ({ ticket: node.ticket.id, branch: node.branch, base: node.baseBranch })),
+            issues: plan.issues,
+            resume: true,
+          });
+        } else {
+          plan = buildBranchPlan(tickets, states, {
+            steps,
+            baseRef: (opts.base as string | undefined) ?? currentGitRef(cwd),
+            branchPrefix: opts.branchPrefix as string,
+            maxBranchDepth,
+          });
+
+          let auditBuilder: BuilderAdapter | undefined;
+          let auditViewer: Promise<void> | undefined;
+          try {
+            auditBuilder = await createBuilder(cwd);
+            auditViewer = printEvents(auditBuilder.events());
+            const audit = await auditBuilder.sendTurn(buildBranchAuditInstruction(plan.nodes.map((node) => node.ticket)));
+            const auditDependencies = parseAuditDependencies(audit.text);
+            plan = buildBranchPlan(tickets, states, {
+              steps,
+              baseRef: (opts.base as string | undefined) ?? currentGitRef(cwd),
+              branchPrefix: opts.branchPrefix as string,
+              maxBranchDepth,
+              auditDependencies,
+            });
+            log.write("branch-plan", {
+              baseRef: plan.baseRef,
+              tickets: plan.nodes.map((node) => node.ticket.id),
+              branches: plan.nodes.map((node) => ({ ticket: node.ticket.id, branch: node.branch, base: node.baseBranch })),
+              issues: plan.issues,
+              auditDependencyCount: auditDependencies.length,
+            });
+          } finally {
+            await auditBuilder?.close().catch(() => {});
+            await auditViewer?.catch(() => {});
+          }
+        }
+
+        console.log(`foreman: ${continueTickets.length > 0 ? "resuming branch-per-ticket mode" : "branch-per-ticket mode"} for ${plan.nodes.length} ticket(s)`);
+        console.log(`foreman: project ${cwd}`);
+        console.log(`foreman: base ${plan.baseRef}`);
+        console.log(`foreman: log ${logPath}\n`);
+        for (const node of plan.nodes) {
+          console.log(`  ${node.ticket.id}  ${node.branch}  base=${node.baseBranch}`);
+        }
+        for (const issue of plan.issues) {
+          console.log(`  ! ${issue.ticket ?? "plan"}: ${issue.message}`);
+        }
+        console.log();
+
+        if (!opts.yes && plan.issues.every((issue) => !issue.blocking)) {
+          const action = await select({
+            message: "Proceed with branch-per-ticket run?",
+            options: [
+              { value: "proceed", label: "Proceed" },
+              { value: "cancel", label: "Cancel" },
+            ],
+          });
+          if (isCancel(action) || action === "cancel") {
+            console.log("ai-foreman: cancelled");
+            process.exit(0);
+          }
+        }
+
+        const summaries = await runBranchPlan({
+          projectDir: cwd,
+          runId: stamp,
+          plan,
+          log,
+          agent,
+          model: opts.model as string | undefined,
+          effort: opts.effort as EffortLevel | undefined,
+          fast: opts.fast as boolean | undefined,
+          notificationsEnabled: config.notifications.enabled,
+          qaEnabled,
+          createPr: Boolean(opts.createPr),
+          prReady: Boolean(opts.prReady),
+          keepWorktrees: Boolean(opts.keepWorktrees),
+          allowedBaseDirtyPaths,
+          resumeSessions: resumeSessionByTicket,
+          createBuilder: (builderCwd, sessionId) => createBuilder(builderCwd, sessionId),
+          observeBuilder: (builder) => printEvents(builder.events()),
+        });
+
+        console.log("foreman: branch run summary");
+        console.log("ticket\tbranch\tbase\tstatus\tcommit\tpush\tpr");
+        for (const row of summaries) {
+          console.log([
+            row.ticket,
+            row.branch || "-",
+            row.base,
+            row.buildStatus,
+            row.commit ?? "-",
+            row.pushStatus ?? "-",
+            row.pr?.url ?? row.pr?.error ?? row.detail ?? "-",
+          ].join("\t"));
+        }
+        const followupCommands = formatBranchSummaryFollowupCommands(cwd, join(cwd, ".foreman"), summaries);
+        if (followupCommands.length > 0) {
+          console.log();
+          console.log("foreman: continue blocked branch ticket(s) with:");
+          for (const command of followupCommands) {
+            console.log(`  ${command}`);
+          }
+        }
+
+        const failed = summaries.some((row) => row.buildStatus === "blocked" || row.buildStatus === "needs-human");
+        process.exit(failed ? 2 : 0);
+      }
+
+      await ensureRuntimeReadyForCommand(cwd, agent, "start");
+      const builder = await createBuilder(cwd, resumeSessionId);
       const foreman = new Foreman(builder, log, config.notifications.enabled, qaEnabled, 3, cwd);
 
       const modifiers = [

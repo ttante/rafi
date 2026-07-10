@@ -1,6 +1,6 @@
 {
   "name": "@rafi-ai/cli",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "Rafi CLI — scaffold and compile AI framework configs for a target repo.",
   "license": "Apache-2.0",
   "type": "module",
@@ -36,7 +36,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "ai-foreman": "1.0.10",
+    "ai-foreman": "1.0.11",
     "special-agents": "0.3.7",
     "rafi-spec": "0.3.7",
     "ajv": "^8.20.0",

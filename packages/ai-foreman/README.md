@@ -94,6 +94,14 @@ What each part does:
 | `--no-qa` | flag | QA on | Disables per-ticket QA review. |
 | `--continue` | flag | off | Resumes the most recent logged session. |
 | `-r, --resume <sessionId>` | session ID from `.foreman/` logs | none | Resumes a specific Claude/Codex session. |
+| `--branch-per-ticket` | flag | off | Runs each selected structured ticket in its own git worktree and branch. Requires initialized `.tickets/`. |
+| `--create-pr` | flag | off | Pushes each successful ticket branch and creates a GitHub PR. Implies `--branch-per-ticket`. |
+| `--pr-ready` | flag | draft PRs | Creates ready-for-review PRs instead of draft PRs when used with `--create-pr`. |
+| `--keep-worktrees` | flag | remove successful worktrees | Keeps successful ticket worktrees for inspection. Blocked worktrees are kept automatically. |
+| `--ticket <id>` | `T001` | none | Selects a branch-mode ticket to continue. Repeatable with `--continue`. |
+| `--base <ref>` | `main` / `origin/main` / `HEAD` | current branch or `HEAD` | Base ref for root ticket branches. |
+| `--branch-prefix <prefix>` | `rafi` / `feature` | `rafi` | Prefix for generated ticket branches. |
+| `--max-branch-depth <n>` | `1` / `2` / `3` | `2` | Maximum selected branch stack depth. |
 
 Auto-detected tracker files:
 
@@ -104,6 +112,17 @@ Resume rule:
 
 - Use either `--continue` or `--resume`.
 - Do not use both in the same command.
+- In branch mode, use `--continue --ticket <id>` to continue a ticket with its saved builder session.
+- For multiple branch tickets, repeat `--ticket` with `--continue`; do not reuse one explicit `--resume <sessionId>` across multiple tickets.
+- When a branch run ends blocked, Foreman prints paste-ready continue commands for resumable tickets.
+
+Branch-mode examples:
+
+```bash
+ai-foreman start ./my-project --steps 3 --branch-per-ticket --agent codex
+ai-foreman start ./my-project --steps 3 --create-pr --pr-ready --agent codex
+ai-foreman start ./my-project --steps 1 --branch-per-ticket --continue --ticket T001
+```
 
 ### `ai-foreman tickets populate`
 
@@ -522,5 +541,4 @@ Package output:
 - **`special-agents`** — library (rules + skills + agents + composition)
 - **`ai-foreman`** — this runtime
 - **`@rafi-ai/cli`** — CLI for `rafi create` and `rafi compile`
-
 

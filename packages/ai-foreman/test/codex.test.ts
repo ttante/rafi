@@ -89,6 +89,14 @@ test("buildArgs: resume subcommand when sessionId is set", () => {
   assert.equal(args[args.length - 1], "next step", "instruction must still be last");
 });
 
+test("buildArgs: resumeSessionId option seeds first turn resume", () => {
+  const args = adapter({ resumeSessionId: "seed-session" }).buildArgs("continue ticket");
+  const resumeIdx = args.indexOf("resume");
+  assert.ok(resumeIdx !== -1, "missing resume subcommand");
+  assert.equal(args[resumeIdx + 1], "seed-session");
+  assert.equal(args[args.length - 1], "continue ticket");
+});
+
 // ── parseCodexLine ───────────────────────────────────────────────────────────
 
 function parse(line: string) {

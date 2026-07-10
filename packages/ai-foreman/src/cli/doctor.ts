@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { loadConfig } from "../config.js";
 import { isTicketsInitialized } from "../tickets/config.js";
 import { cmdValidate } from "../tickets/commands.js";
+import { checkGitHubReadiness, inspectGitHubRemote } from "../branch/github.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -24,7 +25,8 @@ export function buildDoctorCommand(): Command {
   return new Command("doctor")
     .description("Check Foreman, agent CLIs, config, and optional ticket tracker readiness.")
     .argument("[project]", "path to the project directory", ".")
-    .action((project: string) => {
+    .option("--github", "run GitHub PR readiness checks")
+    .action((project: string, opts: { github?: boolean }) => {
       const cwd = resolve(project);
       let errors = 0;
 
@@ -67,6 +69,27 @@ export function buildDoctorCommand(): Command {
         warn(".tickets", "not initialized; start will run in plain mode");
       }
 
+      const remote = inspectGitHubRemote(cwd);
+      const shouldCheckGitHub = Boolean(opts.github) || (remote.ok && remote.remote.likelyGitHub);
+      if (shouldCheckGitHub) {
+        const readiness = checkGitHubReadiness(cwd);
+        if (readiness.ok) {
+          report(true, "github PR readiness", readiness.remote.repoArg);
+        } else if (opts.github) {
+          report(false, "github PR readiness", `${readiness.code}: ${readiness.message}`);
+          for (const command of readiness.repairCommands) warn("github repair", command);
+          if (readiness.output) warn("github output", truncateOneLine(readiness.output));
+        } else {
+          warn("github PR readiness", `${readiness.code}: ${readiness.message}`);
+          for (const command of readiness.repairCommands) warn("github repair", command);
+        }
+      }
+
       process.exit(errors === 0 ? 0 : 1);
     });
+}
+
+function truncateOneLine(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length <= 180 ? compact : `${compact.slice(0, 180).trimEnd()}...`;
 }

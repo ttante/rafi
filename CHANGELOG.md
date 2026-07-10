@@ -8,6 +8,25 @@ This project follows semantic versioning for published npm packages where practi
 
 No unreleased changes.
 
+## @rafi-ai/cli 0.3.10 / ai-foreman 1.0.11 - 2026-07-09
+
+### Added
+
+- Added branch-per-ticket GitHub PR failure handling that preserves repair commands, command output, and retry guidance through `ai-foreman status`.
+
+### Fixed
+
+- Classified GitHub CLI repository resolution failures separately from DNS and network failures.
+- Improved GitHub Enterprise repair guidance with hostname-specific `gh auth` and `gh repo view` commands.
+- Converted PR body write failures into structured `pr_create_failed` results so tickets are blocked cleanly and worktrees are retained for retry.
+
+### Packages
+
+- Bumped `ai-foreman` to `1.0.11`.
+- Bumped `@rafi-ai/cli` to `0.3.10`.
+- Kept `special-agents` at `0.3.7`.
+- Kept `rafi-spec` at `0.3.7`.
+
 ## @rafi-ai/cli 0.3.9 / ai-foreman 1.0.10 - 2026-07-09
 
 ### Added

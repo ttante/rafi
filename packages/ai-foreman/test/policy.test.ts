@@ -178,6 +178,16 @@ test("parseStepStatus recognizes qa_fail and extracts issues", () => {
   );
 });
 
+test("parseStepStatus extracts branch_dependency", () => {
+  const status = parseStepStatus(
+    'STEP_STATUS: blocked | ticket="T010" branch_dependency="T003" reason="needs shared API first"',
+  );
+  assert.equal(status.kind, "blocked");
+  assert.equal(status.ticket, "T010");
+  assert.equal(status.branchDependency, "T003");
+  assert.equal(status.reason, "needs shared API first");
+});
+
 test("buildQaInstruction includes the QA marker spec", () => {
   const text = buildQaInstruction();
   assert.ok(text.includes("STEP_STATUS: qa_pass"));

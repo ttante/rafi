@@ -79,7 +79,9 @@ export class CodexAdapter implements BuilderAdapter {
   private _closed = false;
   private _activeProc?: ChildProcess;
 
-  constructor(private readonly opts: BuilderAdapterOptions) {}
+  constructor(private readonly opts: BuilderAdapterOptions) {
+    this._sessionId = opts.resumeSessionId;
+  }
 
   /**
    * Prepend role system text to a turn instruction when `systemPromptAppend` is

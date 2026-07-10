@@ -30,6 +30,7 @@ export interface StepStatus {
   choices?: string[];
   issues?: string;
   ticket?: string;
+  branchDependency?: string;
   error?: string;
 }
 
@@ -81,6 +82,7 @@ export function parseStepStatus(text: string): StepStatus {
     question: fields.question,
     issues: fields.issues,
     ticket: fields.ticket,
+    branchDependency: fields.branch_dependency,
     choices: fields.choices
       ? fields.choices.split("|").map((c) => c.trim()).filter(Boolean)
       : undefined,
@@ -378,6 +380,14 @@ export class Foreman {
       outcome: "needs-human",
       detail: `QA could not converge after ${this.qaMaxCycles} cycles`,
     };
+  }
+
+  async runQaReview(stepIndex: number): Promise<{
+    outcome: "passed" | "blocked" | "needs-human";
+    detail?: string;
+    summary?: string;
+  }> {
+    return this.runQa(stepIndex);
   }
 
   async runBatch(n: number, trackerPath?: string): Promise<BatchResult> {
