@@ -26,8 +26,12 @@ const RULES_DIR = join(PKG, "content/rules");
 interface Defaults {
   stack: Record<string, string>;
   flags: Record<string, boolean>;
+  docsRoot?: string;
 }
-const defaults = parseYaml(readFileSync(join(PKG, "content/defaults.yaml"), "utf8")) as Defaults;
+const defaults = {
+  ...(parseYaml(readFileSync(join(PKG, "content/defaults.yaml"), "utf8")) as Defaults),
+  docsRoot: "docs",
+};
 
 interface IndexEntry {
   name: string;
@@ -53,6 +57,7 @@ function readPack(relPath: string): { fm: Record<string, unknown>; body: string 
 /** Minimal default-render: substitute {{var}} from defaults.stack. (Phase 3 formalizes this.) */
 function renderWithDefaults(body: string): string {
   return body.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
+    if (key === "docsRoot") return defaults.docsRoot ?? "docs";
     assert.ok(key in defaults.stack, `unknown placeholder {{${key}}}`);
     return defaults.stack[key];
   });

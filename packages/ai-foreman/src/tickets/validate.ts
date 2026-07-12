@@ -66,7 +66,7 @@ export function runAllValidation(
   // Pass 4: generated Markdown doc
   const progressDocPath = join(projectDir, config.paths.progressDoc);
   if (!existsSync(progressDocPath)) {
-    issues.push({ pass: 4, severity: "error", message: "[doc] docs/ticket-progress.md does not exist; run `foreman tickets render`" });
+    issues.push({ pass: 4, severity: "error", message: `[doc] ${config.paths.progressDoc} does not exist; run \`foreman tickets render\`` });
   } else {
     const doc = readFileSync(progressDocPath, "utf8");
     const requiredMarkers = [

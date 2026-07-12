@@ -22,13 +22,13 @@ packs:
     category: process
     path: process/project-docs.md
     condition: always
-    template: false
+    template: true
     order: 4000
   - name: tickets
     category: process
     path: process/tickets.md
     condition: always
-    template: false
+    template: true
     supersededByForeman: true
     order: 5000
   - name: tdd
@@ -71,7 +71,7 @@ packs:
     category: domain
     path: domain/scalability.md
     condition: always
-    template: false
+    template: true
     order: 12000
   - name: infra
     category: templated
@@ -89,7 +89,7 @@ packs:
     category: domain
     path: domain/data-governance.md
     condition: always
-    template: false
+    template: true
     order: 15000
   - name: security
     category: domain
@@ -101,13 +101,13 @@ packs:
     category: domain
     path: domain/ai-safety.md
     condition: ai
-    template: false
+    template: true
     order: 17000
   - name: ai-governance
     category: domain
     path: domain/ai-governance.md
     condition: ai
-    template: false
+    template: true
     order: 18000
   - name: robustness
     category: domain
@@ -119,7 +119,7 @@ packs:
     category: domain
     path: domain/ai-evals.md
     condition: ai
-    template: false
+    template: true
     order: 20000
   - name: ai-reproducibility
     category: domain
@@ -131,7 +131,7 @@ packs:
     category: domain
     path: domain/ai-cost.md
     condition: ai
-    template: false
+    template: true
     order: 22000
   - name: ai-batch-testing
     category: domain
@@ -143,7 +143,7 @@ packs:
     category: process
     path: process/release.md
     condition: always
-    template: false
+    template: true
     order: 24000
   - name: accessibility
     category: domain
@@ -155,19 +155,19 @@ packs:
     category: domain
     path: domain/observability.md
     condition: always
-    template: false
+    template: true
     order: 26000
   - name: business-docs
     category: process
     path: process/business-docs.md
     condition: always
-    template: false
+    template: true
     order: 27000
   - name: architecture
     category: process
     path: process/architecture.md
     condition: always
-    template: false
+    template: true
     order: 28000
   - name: definition-of-done
     category: base

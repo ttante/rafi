@@ -3,7 +3,7 @@ name: ai-safety
 category: domain
 description: "Adversarial safety and abuse protection for AI features."
 condition: ai
-template: false
+template: true
 ---
 ## AI And LLM Safety
 
@@ -15,5 +15,5 @@ template: false
 - Add AI abuse monitoring for suspicious prompts, repeated failures, high-cost usage, policy violations, and unusual generation patterns.
 - Red-team AI features with prompt injection, jailbreak, data leakage, unsafe action, tool misuse, and cost-abuse cases before high-risk releases.
 - Maintain an AI incident plan for harmful, wrong, private, expensive, abusive, or policy-violating outputs.
-- Document AI safety controls, known risks, and escalation paths in `docs/ai.md` and `docs/operations.md`.
+- Document AI safety controls, known risks, and escalation paths in `{{docsRoot}}/ai.md` and `{{docsRoot}}/operations.md`.
 

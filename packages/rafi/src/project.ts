@@ -4,6 +4,7 @@ import type { ProjectConfig, HarnessTarget, RuntimeArtifactConfig } from "rafi-s
 
 export const NO_UI = "No UI";
 export const LOCAL_ONLY = "Local only";
+export const DEFAULT_DOCS_ROOT = "docs";
 
 export interface WalkthroughAnswers {
   appName: string;
@@ -16,6 +17,8 @@ export interface WalkthroughAnswers {
   usesAI: boolean;
   useClaude: boolean;
   qa: boolean;
+  /** Repo-relative folder where Rafi project docs are written. */
+  docsRoot?: string;
   /** Files, folders, or globs with existing tickets or planning material. */
   planningSources?: string;
 }
@@ -102,6 +105,9 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
       codex: "./AGENTS.md",
       claude: "./CLAUDE.md",
     },
+    docs: {
+      root: answers.docsRoot ?? DEFAULT_DOCS_ROOT,
+    },
     agents: defaultAgentsConfig(),
     skills: defaultSkillsConfig(),
   };
@@ -118,6 +124,9 @@ export function normalizeProjectConfig(raw: unknown): ProjectConfig {
       mode: "overwrite",
       codex: "./AGENTS.md",
       claude: "./CLAUDE.md",
+    },
+    docs: {
+      root: cfg.docs?.root ?? DEFAULT_DOCS_ROOT,
     },
     agents: normalizeArtifactMap(cfg.agents, defaultAgentsConfig()),
     skills: normalizeArtifactMap(cfg.skills, defaultSkillsConfig()),

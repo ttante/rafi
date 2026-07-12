@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { select, isCancel } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
@@ -25,7 +25,7 @@ import {
   cmdQueue,
   cmdArchive,
 } from "../tickets/commands.js";
-import { isTicketsInitialized } from "../tickets/config.js";
+import { isTicketsInitialized, loadTicketsConfig } from "../tickets/config.js";
 import { importFromMarkdown } from "../tickets/importer.js";
 import { formatValidationIssues } from "../tickets/validate.js";
 import { ensureRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
@@ -60,7 +60,7 @@ function makeLogPath(projectDir: string, label: string): string {
   return join(projectDir, ".foreman", `${stamp}-${label}.jsonl`);
 }
 
-export function buildPopulateInstruction(sourceHints?: string[]): string {
+export function buildPopulateInstruction(sourceHints?: string[], progressDoc = "docs/ticket-progress.md"): string {
   const sources = sourceHints ?? [];
   const sourceHintBlock = sources.length > 0
     ? `
@@ -84,7 +84,7 @@ Before editing, read these tracker control files:
 - .tickets/config.yaml
 - .tickets/tickets.yaml
 - .tickets/tracker-rules.md
-- docs/ticket-progress.md if it exists
+- ${progressDoc} if it exists
 
 Then inspect the repository for existing planning sources. Check root and docs-style Markdown/YAML/TXT files whose names suggest tickets, backlog, roadmap, plan, TODOs, milestones, progress, specs, phases, or implementation steps. Preserve every ticket or task you find. Do not leave out details.
 
@@ -125,6 +125,7 @@ export function buildTicketsCommand(): Command {
     .option("--app-name <name>", "application name")
     .option("--timezone <tz>", "IANA timezone (e.g. America/Chicago)", "UTC")
     .option("--queue-limit <n>", "next-queue window size", "50")
+    .option("--docs-root <dir>", "repo-relative directory for generated ticket docs")
     .action((opts) => {
       const dir = cwd(opts);
       try {
@@ -132,6 +133,7 @@ export function buildTicketsCommand(): Command {
           appName: opts.appName as string | undefined,
           timezone: opts.timezone as string,
           queueLimit: Number(opts.queueLimit),
+          docsRoot: opts.docsRoot as string | undefined,
         });
         console.log(`foreman tickets: initialized .tickets/ in ${dir}`);
         console.log(`foreman tickets: next — add tickets to .tickets/tickets.yaml and run \`foreman tickets render\``);
@@ -201,7 +203,8 @@ export function buildTicketsCommand(): Command {
       console.log(`foreman tickets: log ${logPath}\n`);
 
       try {
-        const turn = await foreman.runInstruction(buildPopulateInstruction(opts.sources as string[] | undefined));
+        const ticketsConfig = loadTicketsConfig(dir);
+        const turn = await foreman.runInstruction(buildPopulateInstruction(opts.sources as string[] | undefined, ticketsConfig.paths.progressDoc));
         await builder.close();
         await viewer;
 
@@ -234,7 +237,7 @@ export function buildTicketsCommand(): Command {
         } else {
           console.log("foreman tickets: validation passed — all 4 passes clean");
         }
-        console.log("foreman tickets: populated .tickets/tickets.yaml and rendered docs/ticket-progress.md");
+        console.log(`foreman tickets: populated .tickets/tickets.yaml and rendered ${ticketsConfig.paths.progressDoc}`);
       } catch (err) {
         await builder.close().catch(() => {});
         fail(String(err instanceof Error ? err.message : err));
@@ -451,12 +454,13 @@ export function buildTicketsCommand(): Command {
 
   tickets
     .command("render")
-    .description("Regenerate docs/ticket-progress.md from current structured sources.")
+    .description("Regenerate the configured ticket progress doc from current structured sources.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .action((opts) => {
       try {
+        const ticketsConfig = loadTicketsConfig(cwd(opts));
         cmdRender(cwd(opts));
-        console.log("foreman tickets: rendered docs/ticket-progress.md");
+        console.log(`foreman tickets: rendered ${ticketsConfig.paths.progressDoc}`);
       } catch (err) {
         fail(String(err instanceof Error ? err.message : err));
       }
@@ -509,7 +513,7 @@ export function buildTicketsCommand(): Command {
 
   tickets
     .command("archive")
-    .description("Update docs/ticket-archive.md and prune old completed rows.")
+    .description("Update the configured ticket archive doc and prune old completed rows.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--older-than-days <n>", "only archive tickets completed more than N days ago")
     .action((opts) => {
@@ -529,10 +533,13 @@ export function buildTicketsCommand(): Command {
     .command("import")
     .description("(stub) Migrate an existing Markdown tracker.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
-    .option("--progress <path>", "path to existing docs/ticket-progress.md")
+    .option("--progress <path>", "path to existing ticket progress Markdown")
     .action((opts) => {
       try {
-        importFromMarkdown(opts.progress as string ?? "docs/ticket-progress.md");
+        const dir = cwd(opts);
+        const configuredProgress = (opts.progress as string | undefined) ?? loadTicketsConfig(dir).paths.progressDoc;
+        const progress = isAbsolute(configuredProgress) ? configuredProgress : join(dir, configuredProgress);
+        importFromMarkdown(progress);
       } catch (err) {
         console.error(String(err instanceof Error ? err.message : err));
         process.exit(1);

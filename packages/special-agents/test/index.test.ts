@@ -119,12 +119,12 @@ test("defaults.yaml covers exactly the placeholders used by templated packs", ()
     const { body } = readPack(e.path);
     for (const m of body.matchAll(/\{\{(\w+)\}\}/g)) used.add(m[1]);
   }
-  const provided = new Set(Object.keys(defaults.stack));
+  const provided = new Set([...Object.keys(defaults.stack), "docsRoot"]);
 
   const missing = [...used].filter((k) => !provided.has(k));
   assert.deepEqual(missing, [], `defaults.stack missing keys: ${missing.join(", ")}`);
 
-  const unused = [...provided].filter((k) => !used.has(k));
+  const unused = Object.keys(defaults.stack).filter((k) => !used.has(k));
   assert.deepEqual(unused, [], `defaults.stack has unused keys: ${unused.join(", ")}`);
 });
 

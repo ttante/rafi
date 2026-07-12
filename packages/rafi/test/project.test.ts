@@ -83,6 +83,7 @@ test("--defaults keeps useClaude:true and harness.targets includes claude", () =
 
 test("--defaults includes root agent files and native agent/skill paths", () => {
   const config = buildProjectConfig(defaultAnswers());
+  assert.deepEqual(config.docs, { root: "docs" });
   assert.deepEqual(config.agent_files, {
     mode: "overwrite",
     codex: "./AGENTS.md",
@@ -102,11 +103,17 @@ test("normalizeProjectConfig adds new fields to legacy project config", () => {
   void agents;
   void skills;
   const normalized = normalizeProjectConfig(legacy);
+  assert.equal(normalized.docs?.root, "docs");
   assert.equal(normalized.agent_files.codex, "./AGENTS.md");
   assert.equal(normalized.agents.qa.artifact_source, "rafi");
   assert.equal(normalized.agents.qa.claude, "./.claude/agents/qa.md");
   assert.equal(normalized.skills["grill-me"].artifact_source, "rafi");
   assert.equal(normalized.skills["grill-me"].codex, "./.agents/skills/grill-me/SKILL.md");
+});
+
+test("buildProjectConfig preserves a custom docs root", () => {
+  const config = buildProjectConfig({ ...defaultAnswers(), docsRoot: "docs-rafi" });
+  assert.deepEqual(config.docs, { root: "docs-rafi" });
 });
 
 test("normalizeProjectConfig adds artifact_source to legacy artifact entries", () => {

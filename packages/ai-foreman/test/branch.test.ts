@@ -280,6 +280,25 @@ test("ensureCleanBaseWorktree allows only generated tracker runtime files", () =
   }
 });
 
+test("generatedTrackerDirtyPaths includes configured archive docs and temp files", () => {
+  assert.deepEqual(
+    generatedTrackerDirtyPaths({
+      stateDb: ".tickets/ticket-state.sqlite",
+      progressDoc: "docs-rafi/ticket-progress.md",
+      archiveDoc: "docs-rafi/ticket-archive.md",
+    }),
+    [
+      ".tickets/ticket-state.sqlite",
+      ".tickets/ticket-state.sqlite-wal",
+      ".tickets/ticket-state.sqlite-shm",
+      "docs-rafi/ticket-progress.md",
+      "docs-rafi/ticket-progress.md.tmp",
+      "docs-rafi/ticket-archive.md",
+      "docs-rafi/ticket-archive.md.tmp",
+    ],
+  );
+});
+
 test("GitHub readiness classifies missing gh", () => {
   const dir = mkdtempSync(join(tmpdir(), "foreman-gh-missing-test-"));
   const oldPath = process.env.PATH;

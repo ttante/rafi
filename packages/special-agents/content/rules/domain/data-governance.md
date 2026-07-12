@@ -3,7 +3,7 @@ name: data-governance
 category: domain
 description: "Data classification, retention, consent, and PII handling."
 condition: always
-template: false
+template: true
 ---
 ## Data Governance
 
@@ -13,5 +13,5 @@ template: false
 - Document consent requirements for user data, analytics, AI replay logs, eval datasets, and future model training.
 - Use access controls for sensitive data and audit access where risk warrants it.
 - Redact or tokenize PII and secrets before storing prompts, outputs, logs, traces, eval cases, or replay data unless explicitly approved and protected.
-- Keep data-governance rules current in `docs/data-governance.md`.
+- Keep data-governance rules current in `{{docsRoot}}/data-governance.md`.
 

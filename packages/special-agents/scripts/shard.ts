@@ -29,6 +29,7 @@ interface Meta {
   description: string;
   condition: "always" | "frontend" | "ai" | "cloud" | "backend";
   template?: boolean;
+  docsRoot?: boolean;
   supersededByForeman?: boolean;
   subs?: Sub[];
 }
@@ -53,37 +54,37 @@ const MAP: Record<string, Meta | null> = {
     ],
   },
   "Infrastructure And Local/Cloud Runtime": {
-    dir: "templated", name: "infra", condition: "cloud", template: true,
+    dir: "templated", name: "infra", condition: "cloud", template: true, docsRoot: true,
     description: "Local/cloud runtime parity and infrastructure-as-code expectations.",
     subs: [["Document AWS account/region assumptions", "Document {{cloud}} account/region assumptions"]],
   },
   "Data And Database Rules": {
-    dir: "templated", name: "database", condition: "always", template: true,
+    dir: "templated", name: "database", condition: "always", template: true, docsRoot: true,
     description: "Database defaults, migrations, and boundary validation.",
     subs: [["Use PostgreSQL by default", "Use {{database}} by default"]],
   },
 
-  "Standard Project Documents": { dir: "process", name: "project-docs", condition: "always", description: "The standard set of project documents to create and maintain." },
-  "Ticket Tracking": { dir: "process", name: "tickets", condition: "always", supersededByForeman: true, description: "Ticket log expectations when no external tracker is configured." },
+  "Standard Project Documents": { dir: "process", name: "project-docs", condition: "always", template: true, docsRoot: true, description: "The standard set of project documents to create and maintain." },
+  "Ticket Tracking": { dir: "process", name: "tickets", condition: "always", template: true, docsRoot: true, supersededByForeman: true, description: "Ticket log expectations when no external tracker is configured." },
   "Testing And Verification": { dir: "process", name: "testing", condition: "always", description: "Discover and run the repo's quality commands; verification order." },
   "Automation And CI": { dir: "process", name: "ci", condition: "always", description: "Repeatable scripts and CI aligned with local verification." },
   "Dependency And Supply Chain Governance": { dir: "process", name: "dependencies", condition: "always", description: "Dependency, license, SBOM, and vulnerability governance." },
   "API And Contract Documentation": { dir: "process", name: "api-docs", condition: "always", description: "Machine-readable API docs and contract tests." },
-  "Release, Versioning, And Change Management": { dir: "process", name: "release", condition: "always", description: "Changelog, semver, release checklist, and post-release notes." },
-  "Business Documentation": { dir: "process", name: "business-docs", condition: "always", description: "Keep business assumptions, costs, and risks current." },
-  "Architecture And Decisions": { dir: "process", name: "architecture", condition: "always", description: "Architecture digest and ADR/decision-history discipline." },
+  "Release, Versioning, And Change Management": { dir: "process", name: "release", condition: "always", template: true, docsRoot: true, description: "Changelog, semver, release checklist, and post-release notes." },
+  "Business Documentation": { dir: "process", name: "business-docs", condition: "always", template: true, docsRoot: true, description: "Keep business assumptions, costs, and risks current." },
+  "Architecture And Decisions": { dir: "process", name: "architecture", condition: "always", template: true, docsRoot: true, description: "Architecture digest and ADR/decision-history discipline." },
 
-  "Scalability And Performance": { dir: "domain", name: "scalability", condition: "always", description: "Scaling strategy across server, cloud, AI, frontend, and data." },
-  "Data Governance": { dir: "domain", name: "data-governance", condition: "always", description: "Data classification, retention, consent, and PII handling." },
+  "Scalability And Performance": { dir: "domain", name: "scalability", condition: "always", template: true, docsRoot: true, description: "Scaling strategy across server, cloud, AI, frontend, and data." },
+  "Data Governance": { dir: "domain", name: "data-governance", condition: "always", template: true, docsRoot: true, description: "Data classification, retention, consent, and PII handling." },
   "Security, Privacy, And Compliance": { dir: "domain", name: "security", condition: "always", description: "Security, privacy, and compliance baseline." },
   "Robustness And Reliability": { dir: "domain", name: "robustness", condition: "always", description: "Resilient workflows, transactions, health checks, backups." },
-  "Observability And Operations": { dir: "domain", name: "observability", condition: "always", description: "Logging, metrics, dashboards, runbooks, and AI observability." },
+  "Observability And Operations": { dir: "domain", name: "observability", condition: "always", template: true, docsRoot: true, description: "Logging, metrics, dashboards, runbooks, and AI observability." },
   "Accessibility, UX, And Product Quality": { dir: "domain", name: "accessibility", condition: "frontend", description: "Accessible, resilient UI and product quality." },
-  "AI And LLM Safety": { dir: "domain", name: "ai-safety", condition: "ai", description: "Adversarial safety and abuse protection for AI features." },
-  "AI Model And Dataset Governance": { dir: "domain", name: "ai-governance", condition: "ai", description: "Model/provider and dataset governance." },
-  "AI Quality, Confidence, And Evals": { dir: "domain", name: "ai-evals", condition: "ai", description: "Quality gates, confidence, evals, and examples for AI." },
+  "AI And LLM Safety": { dir: "domain", name: "ai-safety", condition: "ai", template: true, docsRoot: true, description: "Adversarial safety and abuse protection for AI features." },
+  "AI Model And Dataset Governance": { dir: "domain", name: "ai-governance", condition: "ai", template: true, docsRoot: true, description: "Model/provider and dataset governance." },
+  "AI Quality, Confidence, And Evals": { dir: "domain", name: "ai-evals", condition: "ai", template: true, docsRoot: true, description: "Quality gates, confidence, evals, and examples for AI." },
   "AI Reproducibility, Replayability, And Prompt Tuning": { dir: "domain", name: "ai-reproducibility", condition: "ai", description: "Replayability, prompt versioning, and prompt tuning." },
-  "AI Cost Tracking And Learning Loop": { dir: "domain", name: "ai-cost", condition: "ai", description: "AI cost tracking and the correction/learning loop." },
+  "AI Cost Tracking And Learning Loop": { dir: "domain", name: "ai-cost", condition: "ai", template: true, docsRoot: true, description: "AI cost tracking and the correction/learning loop." },
   "AI Batch Execution And Model Comparison": { dir: "domain", name: "ai-batch-testing", condition: "ai", description: "Batch execution and model comparison for any AI step." },
 
   "Test-Driven Development": { dir: "process", name: "tdd", condition: "always", description: "Test-driven development discipline: identify behavior, write tests first, then minimal code." },
@@ -155,6 +156,10 @@ export function shard(snapshotText: string): ShardResult {
       if (!body.includes(from)) throw new Error(`Sub not found in ${meta.name}: ${JSON.stringify(from)}`);
       body = body.replace(from, to);
     }
+    if (meta.docsRoot) {
+      body = body.replace(/`docs\//g, "`{{docsRoot}}/");
+    }
+    const template = Boolean(meta.template || meta.docsRoot);
 
     const fm: string[] = [
       "---",
@@ -162,7 +167,7 @@ export function shard(snapshotText: string): ShardResult {
       `category: ${meta.dir}`,
       `description: ${JSON.stringify(meta.description)}`,
       `condition: ${meta.condition}`,
-      `template: ${meta.template ? "true" : "false"}`,
+      `template: ${template ? "true" : "false"}`,
     ];
     if (meta.supersededByForeman) fm.push("supersededByForeman: true");
     fm.push("---", "");
@@ -175,7 +180,7 @@ export function shard(snapshotText: string): ShardResult {
       category: meta.dir,
       path: relPath,
       condition: meta.condition,
-      template: Boolean(meta.template),
+      template,
       ...(meta.supersededByForeman ? { supersededByForeman: true } : {}),
       order,
     });

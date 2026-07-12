@@ -35,7 +35,6 @@ Use this document to track what the app does, who can use each feature, and what
 
 ## Future Ideas
 
-Add future ideas to `docs/tickets.md`; summarize only major themes here.
+Add future ideas to `{{docsRoot}}/tickets.md`; summarize only major themes here.
 
 - `<idea/theme>`
-

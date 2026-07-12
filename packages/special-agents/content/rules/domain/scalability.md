@@ -3,7 +3,7 @@ name: scalability
 category: domain
 description: "Scaling strategy across server, cloud, AI, frontend, and data."
 condition: always
-template: false
+template: true
 ---
 ## Scalability And Performance
 
@@ -14,5 +14,5 @@ template: false
 - For frontend work, watch bundle size, rendering cost, loading states, network waterfalls, and mobile performance.
 - For cloud infrastructure, document scaling assumptions, capacity limits, deployment topology, regions, managed services, and expected bottlenecks.
 - For AI/model usage, plan for provider limits, latency, concurrency, queueing, fallback behavior, cost controls, and model upgrade paths.
-- Document meaningful scalability assumptions and known limits in `docs/scalability.md`.
+- Document meaningful scalability assumptions and known limits in `{{docsRoot}}/scalability.md`.
 

@@ -18,11 +18,12 @@ npm install -g @rafi-ai/cli
 cd my-repo
 rafi create .             # interactive walkthrough
 rafi create . --defaults  # skip walkthrough, use built-in defaults
+rafi create . --docs-root docs-rafi  # choose the Rafi docs root explicitly
 rafi compile .            # re-render after editing rafi-config.yaml
 rafi compile . --root-file-mode append  # one-run override for AGENTS.md/CLAUDE.md handling
 ```
 
-`rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Before `create`, `start`, or `tickets populate` continue into agent work, Rafi checks the selected runtime and prompts you to repair missing authentication. If you have existing planning material, you can enter files, folders, or globs as source hints for `rafi tickets populate`; any reasonable format is OK because an agent interprets it. Stack answers are saved to `rafi-config.yaml`.
+`rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Before `create`, `start`, or `tickets populate` continue into agent work, Rafi checks the selected runtime and prompts you to repair missing authentication. If you have existing planning material, you can enter files, folders, or globs as source hints for `rafi tickets populate`; any reasonable format is OK because an agent interprets it. Stack answers and the selected docs root are saved to `rafi-config.yaml`.
 
 | Command / option | Notes |
 | --- | --- |
@@ -30,6 +31,7 @@ rafi compile . --root-file-mode append  # one-run override for AGENTS.md/CLAUDE.
 | `rafi create <project> --defaults` | Uses built-in defaults without prompts. |
 | `rafi compile <project>` | Re-renders generated files after editing `rafi-config.yaml`. |
 | `--force` | Overwrites generated starter doc files when Rafi would otherwise preserve them. |
+| `--docs-root <dir>` | Uses a safe repo-relative directory for Rafi starter and tracker docs. |
 | `--root-file-mode <mode>` | One-run override for existing root instruction files: `append`, `update`, or `overwrite`. |
 
 Existing root `AGENTS.md` and `CLAUDE.md` files are handled by `--root-file-mode` or `agent_files.mode`:
@@ -42,15 +44,18 @@ Existing root `AGENTS.md` and `CLAUDE.md` files are handled by `--root-file-mode
 
 Existing skill and subagent path collisions are handled separately. Rafi can overwrite the colliding file, write its default artifact under a `*-rafi` name, or use the existing project artifact by setting `artifact_source: existing` and editing the artifact paths in `rafi-config.yaml`.
 
+If `docs/` already exists, `rafi create` defaults to a separate `docs-rafi/` variant and persists that as `docs.root`. Legacy configs without `docs.root` still render to `docs/`.
+
 ### Ticket lifecycle
 
 ```sh
 rafi tickets init --app-name "My App"   # initialize .tickets/ in the project
+rafi tickets init --docs-root docs-rafi  # override tracker docs root
 rafi tickets populate                    # agent fills tickets from existing docs
 rafi tickets populate --sources docs/tickets.md docs/plans/**
 rafi tickets queue                       # show the next-N queue
 rafi tickets validate                    # run all 4 validation passes
-rafi tickets render                      # regenerate docs/ticket-progress.md
+rafi tickets render                      # regenerate the configured progress doc
 ```
 
 `tickets populate` options:
@@ -64,6 +69,8 @@ rafi tickets render                      # regenerate docs/ticket-progress.md
 | `-y, --yes` | Skip the confirmation before the agent edits ticket files. |
 
 `--tickets` is for `rafi start`, not `rafi tickets populate`. Use `--sources` when populate should read specific planning files.
+
+`rafi tickets init` reads `docs.root` from `rafi-config.yaml` when present and writes `ticket-progress.md` / `ticket-archive.md` under that root. If the selected progress doc already exists, init stops and asks you to choose another root.
 
 ### Run the builder
 
@@ -98,7 +105,7 @@ rafi doctor .                         # check env, config, and readiness
   .agents/skills/<name>/SKILL.md   Codex project skill files
   .rafi/compiled/<role>/system.md  role system text — read at runtime
   .rafi/compiled/<role>/meta.json  skills + model config
-  docs/                            starter doc templates (flag-gated by stack)
+  docs/                            starter doc templates, or configured docs.root
 ```
 
 ## Part of Rafi

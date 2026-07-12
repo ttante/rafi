@@ -36,7 +36,10 @@ export interface CompileOptions {
 
 /** Render one pack body, substituting `{{vars}}` and resolving `{{#if flag}}` blocks. */
 export function renderPackBody(pack: Pick<LoadedPack, "body">, defaults: Defaults): string {
-  return render(pack.body, { vars: defaults.stack, flags: defaults.flags });
+  return render(pack.body, {
+    vars: { ...defaults.stack, docsRoot: defaults.docsRoot ?? "docs" },
+    flags: defaults.flags,
+  });
 }
 
 /**
@@ -116,11 +119,12 @@ export function buildConditionsHeader(flags: {
   usesAI: boolean;
   hasFrontend: boolean;
   runsInCloud: boolean;
-}): string {
+}, docsRoot = "docs"): string {
   return (
     `# rafi: ai=${flags.usesAI ? "on" : "off"}` +
     ` frontend=${flags.hasFrontend ? "on" : "off"}` +
-    ` cloud=${flags.runsInCloud ? "on" : "off"}\n`
+    ` cloud=${flags.runsInCloud ? "on" : "off"}` +
+    ` docs=${docsRoot}\n`
   );
 }
 
@@ -141,13 +145,19 @@ export function emitClaudeMd(targetDir: string, opts: CompileOptions = {}): void
 
 export function renderAgentsMd(opts: CompileOptions = {}): string {
   const defaults = opts.defaults ?? loadDefaults();
-  const header = buildConditionsHeader(defaults.flags as { usesAI: boolean; hasFrontend: boolean; runsInCloud: boolean });
+  const header = buildConditionsHeader(
+    defaults.flags as { usesAI: boolean; hasFrontend: boolean; runsInCloud: boolean },
+    defaults.docsRoot ?? "docs",
+  );
   return header + composeRulesMarkdown({ defaults });
 }
 
 export function renderClaudeMd(opts: CompileOptions = {}): string {
   const defaults = opts.defaults ?? loadDefaults();
-  const header = buildConditionsHeader(defaults.flags as { usesAI: boolean; hasFrontend: boolean; runsInCloud: boolean });
+  const header = buildConditionsHeader(
+    defaults.flags as { usesAI: boolean; hasFrontend: boolean; runsInCloud: boolean },
+    defaults.docsRoot ?? "docs",
+  );
   return header + "@AGENTS.md\n\n" + CUSTOM_ARTIFACTS_NOTE;
 }
 

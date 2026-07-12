@@ -3,11 +3,18 @@ import { join } from "node:path";
 import { stringify } from "yaml";
 import type { TicketDef } from "./ticketSchema.js";
 import type { ValidationResult } from "./stateDb.js";
-import { type TicketsConfig, loadTicketsConfig, resolveTicketPaths, isTicketsInitialized } from "./config.js";
+import {
+  type TicketsConfig,
+  initDocsRoot,
+  loadTicketsConfig,
+  pathExistsOrSymlink,
+  resolveTicketPaths,
+  isTicketsInitialized,
+} from "./config.js";
 import { loadTickets, saveTickets } from "./ticketLoader.js";
 import { StateDb } from "./stateDb.js";
 import { nowTimestamp, logEvent } from "./events.js";
-import { renderAndWrite, DEFAULT_TRACKER_RULES } from "./renderMarkdown.js";
+import { renderAndWrite, renderTrackerRules } from "./renderMarkdown.js";
 import { runAllValidation } from "./validate.js";
 import { buildNextQueue } from "./queue.js";
 
@@ -49,6 +56,7 @@ export interface InitOptions {
   appName?: string;
   timezone?: string;
   queueLimit?: number;
+  docsRoot?: string;
 }
 
 export function cmdInit(projectDir: string, opts: InitOptions): void {
@@ -57,10 +65,20 @@ export function cmdInit(projectDir: string, opts: InitOptions): void {
   }
 
   const ticketsDir = join(projectDir, ".tickets");
+  const docsRoot = initDocsRoot(projectDir, opts.docsRoot);
+  const progressDoc = `${docsRoot}/ticket-progress.md`;
+  const archiveDoc = `${docsRoot}/ticket-archive.md`;
+  if (pathExistsOrSymlink(join(projectDir, progressDoc))) {
+    throw new Error(
+      `${progressDoc} already exists. Choose another docs root with --docs-root <dir> ` +
+      "or move the existing progress doc before initializing tickets.",
+    );
+  }
+
   mkdirSync(join(ticketsDir, "schema"), { recursive: true });
   mkdirSync(join(ticketsDir, "migrations"), { recursive: true });
   mkdirSync(join(ticketsDir, "backups"), { recursive: true });
-  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  mkdirSync(join(projectDir, docsRoot), { recursive: true });
 
   const config = {
     app_name: opts.appName ?? "My App",
@@ -71,8 +89,8 @@ export function cmdInit(projectDir: string, opts: InitOptions): void {
       tickets: ".tickets/tickets.yaml",
       state_db: ".tickets/ticket-state.sqlite",
       tracker_rules: ".tickets/tracker-rules.md",
-      progress_doc: "docs/ticket-progress.md",
-      archive_doc: "docs/ticket-archive.md",
+      progress_doc: progressDoc,
+      archive_doc: archiveDoc,
     },
     rendering: {
       preserve_legacy_llm_queue_heading: true,
@@ -94,7 +112,7 @@ export function cmdInit(projectDir: string, opts: InitOptions): void {
 
   writeFileSync(join(ticketsDir, "tickets.yaml"), "tickets: []\n", "utf8");
 
-  writeFileSync(join(ticketsDir, "tracker-rules.md"), DEFAULT_TRACKER_RULES, "utf8");
+  writeFileSync(join(ticketsDir, "tracker-rules.md"), renderTrackerRules(progressDoc), "utf8");
 
   const ticketSchema = {
     $schema: "http://json-schema.org/draft-07/schema#",

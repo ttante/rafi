@@ -28,20 +28,21 @@ function section(marker: string, content: string): string {
 
 // ── Default tracker-rules content ─────────────────────────────────────────────
 
-export const DEFAULT_TRACKER_RULES = `# Tracker Rules
+export function renderTrackerRules(progressDoc = "docs/ticket-progress.md"): string {
+  return `# Tracker Rules
 
 ## Purpose
 This tracker is the operational build control surface for humans and builder agents.
 
 ## First file to read
-Read \`docs/ticket-progress.md\` first. Do not scan the full backlog to choose work
+Read \`${progressDoc}\` first. Do not scan the full backlog to choose work
 unless the queue is empty or the user explicitly asks for broader planning.
 
 ## How to choose work
 Choose the first row in \`LLM_NEXT_QUEUE\` where \`Status\` is \`next\` and \`Blocked By\` is \`None\`.
 
 ## Required queue maintenance rule
-Every ticket update must regenerate \`docs/ticket-progress.md\`, including \`LLM_NEXT_QUEUE\`.
+Every ticket update must regenerate \`${progressDoc}\`, including \`LLM_NEXT_QUEUE\`.
 Use \`foreman tickets update <id>\` — never manually edit generated sections.
 
 ## Blocked work
@@ -56,7 +57,7 @@ Newly discovered work belongs in the Discovered Future Work Inbox.
 Use \`foreman tickets discover --summary "..." --rationale "..."\`.
 
 ## Generated document policy
-Do not manually edit generated sections of \`docs/ticket-progress.md\`.
+Do not manually edit generated sections of \`${progressDoc}\`.
 Use the \`foreman tickets\` commands instead.
 
 ## STEP_STATUS protocol
@@ -64,6 +65,9 @@ When Foreman is running this project, include the ticket ID in your done marker:
   STEP_STATUS: done | ticket="T001" summary="implemented the feature"
 Use \`foreman tickets discover\` for newly discovered work during a build run.
 `;
+}
+
+export const DEFAULT_TRACKER_RULES = renderTrackerRules();
 
 // ── Main renderer ─────────────────────────────────────────────────────────────
 
@@ -91,7 +95,7 @@ export function renderProgressDoc(input: RenderInput): string {
   const rulesPath = join(projectDir, config.paths.trackerRules);
   const rulesContent = existsSync(rulesPath)
     ? readFileSync(rulesPath, "utf8").trim()
-    : DEFAULT_TRACKER_RULES.trim();
+    : renderTrackerRules(config.paths.progressDoc).trim();
 
   const lines: string[] = [];
 

@@ -40,7 +40,7 @@ emitCompiledBundles("./my-repo", {
 
 ## Rule packs
 
-29 packs across four categories. Conditional packs are only included when the matching flag is on.
+30 packs across four categories. Conditional packs are only included when the matching flag is on.
 
 | Category | Packs | Condition |
 |---|---|---|

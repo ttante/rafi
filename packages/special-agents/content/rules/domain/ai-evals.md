@@ -3,7 +3,7 @@ name: ai-evals
 category: domain
 description: "Quality gates, confidence, evals, and examples for AI."
 condition: ai
-template: false
+template: true
 ---
 ## AI Quality, Confidence, And Evals
 
@@ -28,7 +28,7 @@ template: false
 
 ### Eval Suites
 
-- Keep AI eval suites, golden examples, adversarial cases, and regression results updated in `docs/ai-evals.md`.
+- Keep AI eval suites, golden examples, adversarial cases, and regression results updated in `{{docsRoot}}/ai-evals.md`.
 - Maintain eval sets that cover: correct common cases, edge cases, known failure modes, adversarial inputs, and cases drawn from corrected production failures.
 - Track AI failures, correction rates, confidence levels, approval outcomes, and quality trends.
 - Promote prompt, parameter, or model changes only when required eval suites meet documented thresholds, or document the explicit user-approved reason for accepting the risk.

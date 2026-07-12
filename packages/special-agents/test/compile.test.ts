@@ -52,6 +52,21 @@ test("custom stack values are substituted into the templated sections", () => {
   assert.ok(out.includes("## Security, Privacy, And Compliance"));
 });
 
+test("custom docsRoot rewrites bundled project-doc paths", () => {
+  const out = composeRulesMarkdown({
+    defaults: {
+      stack: loadDefaults().stack,
+      flags: { hasFrontend: true, usesAI: true, runsInCloud: true },
+      docsRoot: "docs-rafi",
+    },
+  });
+
+  assert.ok(out.includes("`docs-rafi/architecture.md`"));
+  assert.ok(out.includes("`docs-rafi/tickets.md`"));
+  assert.ok(out.includes("`docs-rafi/ai.md`"));
+  assert.doesNotMatch(out, /`docs\//);
+});
+
 test("the composed doc contains every section heading, including TDD", () => {
   const headings = [...snapshot.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
   const out = composeRulesMarkdown();

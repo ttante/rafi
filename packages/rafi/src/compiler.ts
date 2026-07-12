@@ -12,8 +12,8 @@ import {
   type Defaults,
 } from "special-agents";
 import type { AgentRole, ProjectConfig, ProjectFlags } from "rafi-spec";
-import { copyDocs, type CopyDocsOptions } from "./docs.js";
-import { RAFI_CONFIG_FILE } from "./project.js";
+import { copyDocs, validateDocsRoot, type CopyDocsOptions } from "./docs.js";
+import { DEFAULT_DOCS_ROOT, RAFI_CONFIG_FILE } from "./project.js";
 
 const RAFI_APPEND_START = "<!-- rafi:start -->";
 const RAFI_APPEND_END = "<!-- rafi:end -->";
@@ -63,6 +63,7 @@ export function projectConfigToDefaults(config: ProjectConfig): Defaults {
   return {
     stack: config.stack as unknown as Record<string, string>,
     flags: config.flags as unknown as Record<string, boolean>,
+    docsRoot: config.docs?.root ?? DEFAULT_DOCS_ROOT,
   };
 }
 
@@ -80,7 +81,8 @@ function flagsToConditions(flags: ProjectFlags) {
  * compiled role bundles, and (optionally) starter docs to `targetDir`.
  */
 export function compile(targetDir: string, config: ProjectConfig, opts: CompileProjectOptions = {}): void {
-  const defaults = projectConfigToDefaults(config);
+  const docsRoot = validateDocsRoot(targetDir, config.docs?.root ?? DEFAULT_DOCS_ROOT);
+  const defaults = { ...projectConfigToDefaults(config), docsRoot };
   const conditions = flagsToConditions(config.flags);
   validateExistingArtifacts(targetDir, config);
   const skillNames = configuredSkillNames(config);
@@ -126,7 +128,7 @@ export function compile(targetDir: string, config: ProjectConfig, opts: CompileP
 
   // Starter docs (flag-gated)
   if (!opts.skipDocs) {
-    copyDocs(targetDir, config.flags, { force: opts.force });
+    copyDocs(targetDir, config.flags, { force: opts.force, docsRoot });
   }
 }
 

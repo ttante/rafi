@@ -12,5 +12,5 @@ template: true
 - Keep migrations reviewable and, where practical, reversible.
 - Update seed data, fixtures, and `.env.example` when schema or setup requirements change.
 - Validate data at system boundaries and before persistence.
-- Document important entities and relationships in `docs/architecture.md`.
+- Document important entities and relationships in `{{docsRoot}}/architecture.md`.
 

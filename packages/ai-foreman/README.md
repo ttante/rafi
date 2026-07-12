@@ -105,6 +105,7 @@ What each part does:
 
 Auto-detected tracker files:
 
+- configured `paths.progress_doc` from `.tickets/config.yaml`
 - `docs/ticket-progress.md`
 - `ticket-progress.md`
 
@@ -249,6 +250,9 @@ Init options:
 | `--app-name <name>` | `"My App"` | none | Application name stored in tracker config. |
 | `--timezone <tz>` | `America/Chicago` / `UTC` | `UTC` | IANA timezone. |
 | `--queue-limit <n>` | `25` / `50` / `100` | `50` | Next-queue window size. |
+| `--docs-root <dir>` | `docs` / `docs-rafi` | `rafi-config.yaml` docs.root, then `docs` | Root for generated progress/archive docs. |
+
+`tickets init` reads `docs.root` from `rafi-config.yaml` when present. `--docs-root` overrides that value. The selected root must be a safe repo-relative directory, and init refuses to overwrite an existing selected `ticket-progress.md`.
 
 This creates:
 
@@ -264,6 +268,8 @@ This creates:
 docs/
   ticket-progress.md
 ```
+
+With `--docs-root docs-rafi`, the generated tracker docs are written under `docs-rafi/` instead.
 
 ### 2. Add Tickets
 
@@ -293,7 +299,7 @@ ai-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5
 `populate` tells the builder to:
 
 - read `.tickets/*`
-- read `docs/ticket-progress.md`
+- read the configured progress doc
 - read existing planning files
 - fill `.tickets/tickets.yaml`
 - render the progress doc
@@ -401,7 +407,7 @@ ai-foreman tickets queue --project ./my-project
 
 Generated output:
 
-- `docs/ticket-progress.md` is generated from `.tickets/tickets.yaml`.
+- The configured progress doc is generated from `.tickets/tickets.yaml`.
 - It also includes state from `.tickets/ticket-state.sqlite`.
 - Builders should read it.
 - You should not manually edit generated sections.

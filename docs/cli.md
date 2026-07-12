@@ -60,6 +60,8 @@ Arguments:
 Options:
   --defaults               skip walkthrough and use built-in defaults
   --force                  overwrite existing doc files
+  --docs-root <dir>        repo-relative directory for Rafi starter and tracker
+                           docs
   --root-file-mode <mode>  override root instruction file handling (append |
                            overwrite | update)
   -h, --help               display help for command
@@ -104,10 +106,10 @@ Commands:
   discover [options]                           Add newly discovered future work to the inbox.
   accept-future-work [options] <futureWorkId>  Promote a future-work item into tickets.yaml as a new ticket.
   reorder [options] <ticketId>                 Change the canonical implementation order of a ticket.
-  render [options]                             Regenerate docs/ticket-progress.md from current structured sources.
+  render [options]                             Regenerate the configured ticket progress doc from current structured sources.
   validate [options]                           Run all 4 validation passes. Exits 1 on error.
   queue [options]                              Print the next-N queue to stdout.
-  archive [options]                            Update docs/ticket-archive.md and prune old completed rows.
+  archive [options]                            Update the configured ticket archive doc and prune old completed rows.
   import [options]                             (stub) Migrate an existing Markdown tracker.
   help [command]                               display help for command
 ```
@@ -124,6 +126,7 @@ Options:
   --app-name <name>    application name
   --timezone <tz>      IANA timezone (e.g. America/Chicago) (default: "UTC")
   --queue-limit <n>    next-queue window size (default: "50")
+  --docs-root <dir>    repo-relative directory for generated ticket docs
   -h, --help           display help for command
 ```
 
@@ -290,7 +293,7 @@ Options:
 ```text
 Usage: rafi tickets render [options]
 
-Regenerate docs/ticket-progress.md from current structured sources.
+Regenerate the configured ticket progress doc from current structured sources.
 
 Options:
   -p, --project <dir>  project directory (default: cwd)
@@ -327,7 +330,7 @@ Options:
 ```text
 Usage: rafi tickets archive [options]
 
-Update docs/ticket-archive.md and prune old completed rows.
+Update the configured ticket archive doc and prune old completed rows.
 
 Options:
   -p, --project <dir>    project directory (default: cwd)
@@ -344,7 +347,7 @@ Usage: rafi tickets import [options]
 
 Options:
   -p, --project <dir>  project directory (default: cwd)
-  --progress <path>    path to existing docs/ticket-progress.md
+  --progress <path>    path to existing ticket progress Markdown
   -h, --help           display help for command
 ```
 
@@ -465,10 +468,10 @@ Commands:
   discover [options]                           Add newly discovered future work to the inbox.
   accept-future-work [options] <futureWorkId>  Promote a future-work item into tickets.yaml as a new ticket.
   reorder [options] <ticketId>                 Change the canonical implementation order of a ticket.
-  render [options]                             Regenerate docs/ticket-progress.md from current structured sources.
+  render [options]                             Regenerate the configured ticket progress doc from current structured sources.
   validate [options]                           Run all 4 validation passes. Exits 1 on error.
   queue [options]                              Print the next-N queue to stdout.
-  archive [options]                            Update docs/ticket-archive.md and prune old completed rows.
+  archive [options]                            Update the configured ticket archive doc and prune old completed rows.
   import [options]                             (stub) Migrate an existing Markdown tracker.
   help [command]                               display help for command
 ```

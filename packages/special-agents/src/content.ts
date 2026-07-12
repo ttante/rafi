@@ -32,11 +32,13 @@ export function parseRulePack(raw: string): RulePack {
 export interface Defaults {
   stack: Record<string, string>;
   flags: Record<string, boolean>;
+  docsRoot?: string;
 }
 
 /** Read content/defaults.yaml. */
 export function loadDefaults(): Defaults {
-  return parseYaml(readFileSync(join(CONTENT_DIR, "defaults.yaml"), "utf8")) as Defaults;
+  const defaults = parseYaml(readFileSync(join(CONTENT_DIR, "defaults.yaml"), "utf8")) as Defaults;
+  return { ...defaults, docsRoot: defaults.docsRoot ?? "docs" };
 }
 
 /** The flattened-rules-doc preamble (everything before the first section). */

@@ -1,6 +1,6 @@
 # Ticket Progress Tracker Template
 
-Copy this file to `docs/ticket-progress.md` in a project and replace placeholders before use. Keep the section names and marker comments stable so humans, scripts, and LLM builders can parse the tracker consistently.
+Copy this file to the configured progress doc in a project and replace placeholders before use. Keep the section names and marker comments stable so humans, scripts, and LLM builders can parse the tracker consistently.
 
 ## Purpose
 This file is the operational build tracker for humans and LLM builders. It records active ticket status, implementation order, timestamps, blockers, validation evidence, and future work. It is optimized so an LLM can answer "what are the next X tickets?" by reading one small queue instead of scanning the full backlog.
@@ -20,9 +20,9 @@ This template keeps the original queue-first workflow and adds fields that make 
 | Field | Value | Notes |
 |---|---|---|
 | App Name | `<APP_NAME>` | Human-readable app or repository name. |
-| Canonical Backlog | `docs/tickets.md` | Source of truth for full stories and ticket definitions. |
-| Progress Tracker | `docs/ticket-progress.md` | This operational tracker after the template is copied into a project. |
-| Archive File | `docs/ticket-archive.md` | Destination for old `done` and `canceled` tickets after reset. |
+| Canonical Backlog | configured backlog docs | Source of truth for full stories and ticket definitions. |
+| Progress Tracker | configured progress doc | This operational tracker after the template is copied into a project. |
+| Archive File | configured archive doc | Destination for old `done` and `canceled` tickets after reset. |
 | Queue Limit | `50` | Keep `LLM_NEXT_QUEUE` filled with the next 50 remaining tickets, or all remaining if fewer than 50 exist. |
 | Timezone | `<IANA_TIMEZONE>` | Example: `America/Chicago`. Use this for every timestamp. |
 | Timestamp Format | ISO 8601 with offset | Example: `2026-05-25T13:11:35-05:00`. |
@@ -32,7 +32,7 @@ This template keeps the original queue-first workflow and adds fields that make 
 
 ## Ground Rules For LLM Builders
 1. Start with `LLM_NEXT_QUEUE`; do not scan the full backlog to choose next work unless the queue is empty or the user explicitly asks for broader planning.
-2. Treat `docs/tickets.md` as the canonical backlog and this file as the operational status view.
+2. Treat the configured backlog docs as the canonical backlog and this file as the operational status view.
 3. Never mark a ticket `done` without required tests, validation evidence, or a documented reason why tests are not applicable.
 4. If a ticket status changes, update `LLM_NEXT_QUEUE`, `Active Ticket Status`, and `Work Log` in the same edit.
 5. If a blocker is discovered, update the ticket status to `blocked`, fill `Blocked By`, and add or update the row in `Blocked Tickets`.
@@ -58,12 +58,12 @@ Queue rows must satisfy these invariants:
 - If a ticket is blocked by another ticket, the dependency must be visible in `Depends On`, `Blocked By`, or both.
 
 ## Ticket Reset And Archive Policy
-Use ticket reset to keep the active table small and useful. When tickets are `done` or `canceled` and no longer need to stay in active context, move them out of `Active Ticket Status` into `docs/ticket-archive.md` or the configured archive file.
+Use ticket reset to keep the active table small and useful. When tickets are `done` or `canceled` and no longer need to stay in active context, move them out of `Active Ticket Status` into the configured archive file.
 
 Archive by lifecycle state, not by MVP vs post-MVP category.
 
 Current archive state:
-- The canonical backlog remains in `docs/tickets.md` for reference.
+- The canonical backlog remains in configured backlog docs for reference.
 - This tracker should keep only active, next, in-progress, blocked, and recently completed tickets needed for current planning.
 - Completed tickets should stay here only when they provide important immediate context for remaining work.
 - Archived tickets should retain ticket ID, title, final status, completion/cancel timestamp, validation evidence, and links to relevant PRs or commits when available.
@@ -193,7 +193,7 @@ Use this section to point to archived lifecycle records without forcing LLM buil
 
 | Archive File | Scope | Last Updated | Notes |
 |---|---|---|---|
-| `docs/ticket-archive.md` | Done and canceled tickets moved out of active context. | `<timestamp or N/A>` | Create this file when the first reset occurs. |
+| configured archive doc | Done and canceled tickets moved out of active context. | `<timestamp or N/A>` | Create this file when the first reset occurs. |
 
 ## Work Log
 Append one row for each meaningful tracker update. Keep summaries short but specific.

@@ -124,6 +124,14 @@ export const projectConfigSchema = {
         claude: { type: "string", minLength: 1 },
       },
     },
+    docs: {
+      type: "object",
+      additionalProperties: false,
+      required: ["root"],
+      properties: {
+        root: { type: "string", minLength: 1 },
+      },
+    },
     agents: artifactPathMap,
     skills: artifactPathMap,
   },

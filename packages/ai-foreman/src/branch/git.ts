@@ -20,16 +20,21 @@ export function currentGitRef(cwd: string): string {
   return branch || "HEAD";
 }
 
-export function generatedTrackerDirtyPaths(paths: { stateDb: string; progressDoc: string }): string[] {
+export function generatedTrackerDirtyPaths(paths: { stateDb: string; progressDoc: string; archiveDoc?: string }): string[] {
   const stateDb = normalizeRepoPath(paths.stateDb);
   const progressDoc = normalizeRepoPath(paths.progressDoc);
-  return [
+  const out = [
     stateDb,
     `${stateDb}-wal`,
     `${stateDb}-shm`,
     progressDoc,
     `${progressDoc}.tmp`,
   ];
+  if (paths.archiveDoc) {
+    const archiveDoc = normalizeRepoPath(paths.archiveDoc);
+    out.push(archiveDoc, `${archiveDoc}.tmp`);
+  }
+  return out;
 }
 
 export function ensureCleanBaseWorktree(cwd: string, opts: BaseWorktreeCleanOptions = {}): void {
@@ -76,8 +81,22 @@ export function currentWorktreeBranch(worktreePath: string): string {
   return runGit(worktreePath, ["branch", "--show-current"]).stdout;
 }
 
-export function hasTrackerChanges(worktreePath: string): boolean {
-  const status = runGit(worktreePath, ["status", "--porcelain", "--", ".tickets", "docs/ticket-progress.md", "ticket-progress.md"]).stdout;
+export function hasTrackerChanges(
+  worktreePath: string,
+  paths: { progressDoc?: string; archiveDoc?: string } = {},
+): boolean {
+  const progressDoc = normalizeRepoPath(paths.progressDoc ?? "docs/ticket-progress.md");
+  const archiveDoc = normalizeRepoPath(paths.archiveDoc ?? "docs/ticket-archive.md");
+  const pathspecs = [
+    ".tickets",
+    progressDoc,
+    `${progressDoc}.tmp`,
+    archiveDoc,
+    `${archiveDoc}.tmp`,
+    "docs/ticket-progress.md",
+    "ticket-progress.md",
+  ];
+  const status = runGit(worktreePath, ["status", "--porcelain", "--", ...unique(pathspecs)]).stdout;
   return status.trim().length > 0;
 }
 
@@ -112,4 +131,8 @@ function normalizeRepoPath(path: string): string {
     .replace(/^\.\/+/, "")
     .replace(/\/+/g, "/")
     .replace(/\/$/, "");
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
 }

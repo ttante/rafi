@@ -23,11 +23,13 @@ import {
 import {
   artifactPaths,
   buildProjectConfig,
+  DEFAULT_DOCS_ROOT,
   defaultAnswers,
   LEGACY_PROJECT_CONFIG_FILE,
   normalizeProjectConfig,
   RAFI_CONFIG_FILE,
 } from "./project.js";
+import { docsRootPathExists, firstAvailableDocsRoot, validateDocsRoot } from "./docs.js";
 import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
 import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { buildStatusCommand } from "ai-foreman/cli/status.js";
@@ -76,10 +78,12 @@ program
   .argument("<project>", "path to the target repo")
   .option("--defaults", "skip walkthrough and use built-in defaults")
   .option("--force", "overwrite existing doc files")
+  .option("--docs-root <dir>", "repo-relative directory for Rafi starter and tracker docs")
   .option("--root-file-mode <mode>", "override root instruction file handling (append | overwrite | update)")
   .action(async (project: string, opts) => {
     const targetDir = resolve(project);
     const rootFileMode = parseRootFileMode(opts.rootFileMode);
+    const docsRootOption = opts.docsRoot as string | undefined;
 
     // Read app name from target package.json if present
     const targetPkgPath = join(targetDir, "package.json");
@@ -98,7 +102,7 @@ program
 
     if (!opts.defaults) {
       // Interactive walkthrough — requires Node >=20 for @clack/prompts
-      const { intro, outro, text, confirm, isCancel, log } = await import("@clack/prompts");
+      const { intro, outro, text, confirm, select, isCancel, log } = await import("@clack/prompts");
       intro("rafi create — configure your AI framework");
 
       log.info("Each question is pre-filled with its default — press Enter to accept.");
@@ -158,6 +162,13 @@ program
       });
       if (isCancel(useClaude)) process.exit(0);
 
+      const docsRoot = await chooseDocsRootForCreate(targetDir, docsRootOption, {
+        interactive: true,
+        select,
+        text,
+        isCancel,
+      });
+
       const hasPlanningSources = await confirm({
         message: "Do you have existing ticket or planning docs you want the populate agent to use? (Enter to accept)",
         initialValue: false,
@@ -169,7 +180,7 @@ program
         log.info("Any format is OK: Markdown, YAML, text notes, folders, or globs. `rafi tickets populate` will scan relevant docs too.");
         const planningSourcesRaw = await text({
           message: "Files, folders, or globs for existing tickets/plans:",
-          placeholder: "e.g. docs/tickets.md, docs/plans.md, docs/planning/**",
+          placeholder: `e.g. ${docsRoot}/tickets.md, ${docsRoot}/plans.md, ${docsRoot}/planning/**`,
         });
         if (isCancel(planningSourcesRaw)) process.exit(0);
         planningSources = String(planningSourcesRaw) || undefined;
@@ -186,10 +197,16 @@ program
         usesAI: Boolean(usesAI),
         useClaude: Boolean(useClaude),
         qa: true,
+        docsRoot,
         planningSources,
       };
 
       outro("Configuration collected — compiling...");
+    } else {
+      answers = {
+        ...answers,
+        docsRoot: await chooseDocsRootForCreate(targetDir, docsRootOption, { interactive: false }),
+      };
     }
 
     const config = await applyCollisionChoices(targetDir, buildProjectConfig(answers), rootFileMode);
@@ -221,7 +238,7 @@ program
     if (answers.planningSources) {
       const sourceArgs = parsePlanningSources(answers.planningSources).map(shellQuote).join(" ");
       console.log(`\nrafi: to import your existing tickets or plans, run:`);
-      console.log(`  rafi tickets init --app-name "${answers.appName}"`);
+      console.log(`  ${ticketsInitCommand(answers.appName, config.docs?.root ?? DEFAULT_DOCS_ROOT)}`);
       if (sourceArgs) {
         console.log(`  rafi tickets populate --sources ${sourceArgs}`);
       } else {
@@ -230,7 +247,7 @@ program
       console.log(`rafi: any format is OK; the populate agent interprets the docs and also scans relevant planning files.`);
     } else {
       console.log(`\nrafi: to set up your ticket queue, run:`);
-      console.log(`  rafi tickets init --app-name "${answers.appName}"`);
+      console.log(`  ${ticketsInitCommand(answers.appName, config.docs?.root ?? DEFAULT_DOCS_ROOT)}`);
       console.log(`  rafi tickets populate`);
       console.log(`rafi: \`rafi tickets populate\` scans relevant ticket, plan, roadmap, TODO, spec, and milestone docs.`);
     }
@@ -260,6 +277,7 @@ async function applyCollisionChoices(
   const next: ProjectConfig = {
     ...config,
     agent_files: { ...config.agent_files },
+    docs: config.docs ? { ...config.docs } : undefined,
     agents: cloneArtifactMap(config.agents),
     skills: cloneArtifactMap(config.skills),
   };
@@ -353,6 +371,73 @@ function parseRootFileMode(value: unknown): ProjectConfig["agent_files"]["mode"]
   if (value === undefined) return undefined;
   if (typeof value === "string" && isRootFileMode(value)) return value;
   throw new Error(`--root-file-mode must be one of: ${rootFileModeValues().join(", ")}`);
+}
+
+type DocsRootPromptTools = {
+  interactive: true;
+  select: (opts: {
+    message: string;
+    options: Array<{ value: string; label: string }>;
+  }) => Promise<unknown>;
+  text: (opts: {
+    message: string;
+    initialValue?: string;
+    defaultValue?: string;
+    validate?: (value: string | undefined) => string | Error | undefined;
+  }) => Promise<unknown>;
+  isCancel: (value: unknown) => boolean;
+} | {
+  interactive: false;
+};
+
+async function chooseDocsRootForCreate(
+  targetDir: string,
+  docsRootOption: string | undefined,
+  tools: DocsRootPromptTools,
+): Promise<string> {
+  if (docsRootOption) return validateDocsRoot(targetDir, docsRootOption);
+
+  if (!docsRootPathExists(targetDir, DEFAULT_DOCS_ROOT)) {
+    return DEFAULT_DOCS_ROOT;
+  }
+
+  const recommended = firstAvailableDocsRoot(targetDir);
+  if (!tools.interactive || !process.stdin.isTTY || !process.stdout.isTTY) {
+    return recommended;
+  }
+
+  const choice = await tools.select({
+    message: "A `docs/` path already exists. Where should Rafi put its starter docs?",
+    options: [
+      { value: "separate", label: `Use separate ${recommended}/ (Recommended) - keeps existing app docs untouched` },
+      { value: "existing", label: "Use existing docs/ - add only missing Rafi docs unless --force is set" },
+      { value: "custom", label: "Choose custom folder" },
+    ],
+  });
+  if (tools.isCancel(choice)) process.exit(0);
+  if (choice === "separate") return recommended;
+  if (choice === "existing") return validateDocsRoot(targetDir, DEFAULT_DOCS_ROOT);
+
+  const custom = await tools.text({
+    message: "Custom Rafi docs folder:",
+    initialValue: recommended,
+    defaultValue: recommended,
+    validate: (value) => {
+      try {
+        validateDocsRoot(targetDir, value ?? "");
+        return undefined;
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+    },
+  });
+  if (tools.isCancel(custom)) process.exit(0);
+  return validateDocsRoot(targetDir, String(custom));
+}
+
+function ticketsInitCommand(appName: string, docsRoot: string): string {
+  const docsArg = docsRoot === DEFAULT_DOCS_ROOT ? "" : ` --docs-root ${shellQuote(docsRoot)}`;
+  return `rafi tickets init --app-name ${shellQuote(appName)}${docsArg}`;
 }
 
 function artifactCollisions(

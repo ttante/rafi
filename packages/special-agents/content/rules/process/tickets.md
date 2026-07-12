@@ -3,12 +3,12 @@ name: tickets
 category: process
 description: "Ticket log expectations when no external tracker is configured."
 condition: always
-template: false
+template: true
 supersededByForeman: true
 ---
 ## Ticket Tracking
 
-- Maintain `docs/tickets.md` as the source of truth if no external tracker is configured.
+- Maintain `{{docsRoot}}/tickets.md` as the source of truth if no external tracker is configured.
 - Break work into epics, stories, and implementation tickets where useful.
 - Every ticket should include: ID, title, status, priority, user/business value, acceptance criteria, implementation notes, test expectations, and links to related docs or code when available.
 - Valid statuses: `Backlog`, `Ready`, `In Progress`, `Blocked`, `In Review`, `Done`, `Won't Do`.

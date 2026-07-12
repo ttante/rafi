@@ -32,6 +32,7 @@ export interface BranchRunnerOptions {
   prReady: boolean;
   keepWorktrees: boolean;
   allowedBaseDirtyPaths?: string[];
+  trackerPaths?: { progressDoc: string; archiveDoc: string };
   resumeSessions?: Map<string, { worktreePath: string; sessionId: string }>;
   createBuilder: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>;
   observeBuilder?: (builder: BuilderAdapter) => Promise<void>;
@@ -137,7 +138,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       );
 
       const { result, status } = await foreman.runInstruction(
-        resumeSession ? buildBranchTicketResumeInstruction(node) : buildBranchTicketInstruction(node),
+        resumeSession ? buildBranchTicketResumeInstruction(node, opts.trackerPaths) : buildBranchTicketInstruction(node, opts.trackerPaths),
       );
       const sessionId = builder.sessionId();
       if (sessionId) {
@@ -203,7 +204,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       if (currentBranch !== node.branch) {
         throw new Error(`builder switched branch from ${node.branch} to ${currentBranch}`);
       }
-      if (hasTrackerChanges(worktreePath)) {
+      if (hasTrackerChanges(worktreePath, opts.trackerPaths)) {
         throw new Error("builder modified tracker/control files in ticket worktree");
       }
 
@@ -357,7 +358,11 @@ function failureLogFields(node: BranchPlanNode, pr: PrResult): Record<string, un
   };
 }
 
-export function buildBranchTicketInstruction(node: BranchPlanNode): string {
+export function buildBranchTicketInstruction(
+  node: BranchPlanNode,
+  trackerPaths: { progressDoc?: string; archiveDoc?: string } = {},
+): string {
+  const progressDoc = trackerPaths.progressDoc ?? "docs/ticket-progress.md";
   return `Implement exactly this ticket in the current branch/worktree:
 
 ${node.ticket.id}: ${node.ticket.title}
@@ -378,7 +383,7 @@ Branch-mode rules:
 - Implement only ${node.ticket.id}.
 - Do not switch branches.
 - Do not push, create PRs, or run git commit.
-- Do not edit .tickets/, docs/ticket-progress.md, or other tracker state.
+- Do not edit .tickets/, ${progressDoc}, or other tracker state.
 - If another selected ticket is required before this one can be completed, stop and end with STEP_STATUS: blocked | ticket="${node.ticket.id}" branch_dependency="<ticket-id>" reason="<why>".
 - End with STEP_STATUS: done | ticket="${node.ticket.id}" summary="<what changed>" when the ticket is implemented.
 
@@ -387,7 +392,11 @@ QA will happen in this same builder session after implementation.
 ${MARKER_SPEC}`;
 }
 
-export function buildBranchTicketResumeInstruction(node: BranchPlanNode): string {
+export function buildBranchTicketResumeInstruction(
+  node: BranchPlanNode,
+  trackerPaths: { progressDoc?: string; archiveDoc?: string } = {},
+): string {
+  const progressDoc = trackerPaths.progressDoc ?? "docs/ticket-progress.md";
   return `Continue the existing builder session for this ticket in the current branch/worktree:
 
 ${node.ticket.id}: ${node.ticket.title}
@@ -398,7 +407,7 @@ Branch-mode rules:
 - Implement only ${node.ticket.id}.
 - Do not switch branches.
 - Do not push, create PRs, or run git commit.
-- Do not edit .tickets/, docs/ticket-progress.md, or other tracker state.
+- Do not edit .tickets/, ${progressDoc}, or other tracker state.
 - If another selected ticket is required before this one can be completed, stop and end with STEP_STATUS: blocked | ticket="${node.ticket.id}" branch_dependency="<ticket-id>" reason="<why>".
 - End with STEP_STATUS: done | ticket="${node.ticket.id}" summary="<what changed>" when the ticket is implemented.
 

@@ -46,6 +46,7 @@ Run `rafi` from inside the target repo:
 cd my-repo
 rafi create .             # interactive walkthrough
 rafi create . --defaults  # skip walkthrough, use built-in defaults
+rafi create . --docs-root docs-rafi  # choose where Rafi writes starter/tracker docs
 rafi compile .            # re-render after editing rafi-config.yaml
 ```
 
@@ -63,7 +64,7 @@ my-repo/
   .codex/agents/<role>.toml        Codex project subagents
   .agents/skills/<name>/SKILL.md   Codex project skills
   .rafi/compiled/<role>/           role bundles read by ai-foreman at runtime
-  docs/                            starter docs (architecture, API, ops, etc.)
+  docs/                            starter docs (or docs-rafi/ when docs/ already exists)
 ```
 
 ## Defaults
@@ -97,6 +98,8 @@ For non-interactive runs, the same root-file behavior can be set with `--root-fi
 
 Existing project skills and subagents can either stay project-owned or be replaced by Rafi. If a generated skill or subagent path collides, `rafi create` asks whether Rafi should overwrite it. If not, Rafi writes its defaults under `*-rafi` paths, and you can reference your existing artifact by setting `artifact_source: existing` in `rafi-config.yaml`.
 
+If a target repo already has a `docs/` path, `rafi create` keeps those app docs untouched by default and writes Rafi starter docs under the first safe `docs-rafi/` variant. The selected root is saved as `docs.root` in `rafi-config.yaml`; legacy configs without it continue to use `docs/`.
+
 ## Suggested Use
 
 ### New Projects
@@ -119,6 +122,7 @@ Existing project skills and subagents can either stay project-owned or be replac
   rafi tickets init --app-name "My App"
   rafi tickets populate
   ```
+- `rafi tickets init` reads `docs.root` from `rafi-config.yaml`; pass `--docs-root <dir>` to override it for standalone ticket setup.
 - `rafi tickets populate` scans relevant planning docs automatically; pass `--sources docs/tickets.md docs/plans/**` when you want the agent to check specific files, folders, or globs first.
 - Run the builder to implement tickets one by one, with QA after each step
   ```sh
@@ -150,14 +154,14 @@ Existing project skills and subagents can either stay project-owned or be replac
 
 ## Rule packs
 
-All 29 packs are assembled from your stack config. Most are always included; three groups are conditional:
+All 30 packs are assembled from your stack config. Most are always included; three groups are conditional:
 
 - **Always** — code quality, git safety, testing, TDD, CI, security, observability, robustness, scalability, data governance, API docs, release, architecture, and templated stack rules (frontend framework, backend, database, package manager substituted from your answers)
 - **`usesAI`** — AI safety, evals, cost tracking, reproducibility, and AI governance rules
 - **`hasFrontend`** — accessibility and UX rules
 - **`runsInCloud`** — cloud infra and IaC rules
 
-Choices are saved in `rafi-config.yaml`. The top of `AGENTS.md` shows a `# rafi: ai=off frontend=on cloud=on` header so the active set is always visible.
+Choices are saved in `rafi-config.yaml`. The top of `AGENTS.md` shows a `# rafi: ai=off frontend=on cloud=on docs=docs` header so the active set and docs root are always visible.
 
 ## Unattended ticket loop
 
@@ -189,10 +193,10 @@ Current package versions:
 
 | Package | Version |
 |---|---|
-| `@rafi-ai/cli` | `0.3.11` |
-| `ai-foreman` | `1.0.12` |
-| `special-agents` | `0.3.7` |
-| `rafi-spec` | `0.3.7` |
+| `@rafi-ai/cli` | `0.4.0` |
+| `ai-foreman` | `1.1.0` |
+| `special-agents` | `0.4.0` |
+| `rafi-spec` | `0.4.0` |
 
 - Release notes live in [CHANGELOG.md](./CHANGELOG.md).
 - Release mechanics and required checks live in [RELEASING.md](./RELEASING.md).
@@ -242,6 +246,7 @@ Runs the walkthrough, writes `rafi-config.yaml`, and compiles the target repo.
 |---|---|
 | `--defaults` | Skip the walkthrough and use built-in defaults. |
 | `--force` | Overwrite existing doc files. |
+| `--docs-root <dir>` | Use a safe repo-relative directory for Rafi starter and tracker docs. |
 | `--root-file-mode <mode>` | Override root instruction file handling. Valid modes: `append`, `update`, `overwrite`. |
 
 #### `rafi compile <project>`
@@ -267,6 +272,7 @@ Initializes the `.tickets/` structure in a project directory.
 | `--app-name <name>` | Application name. |
 | `--timezone <tz>` | IANA timezone. Default: `UTC`. |
 | `--queue-limit <n>` | Next-queue window size. Default: `50`. |
+| `--docs-root <dir>` | Override the generated ticket docs root. |
 
 #### `rafi tickets populate`
 
@@ -387,7 +393,7 @@ Changes the canonical implementation order of a ticket.
 
 #### `rafi tickets render`
 
-Regenerates `docs/ticket-progress.md` from current structured sources.
+Regenerates the configured ticket progress doc from current structured sources.
 
 | Option | Description |
 |---|---|
@@ -412,7 +418,7 @@ Prints the next-N queue to stdout.
 
 #### `rafi tickets archive`
 
-Updates `docs/ticket-archive.md` and prunes old completed rows.
+Updates the configured ticket archive doc and prunes old completed rows.
 
 | Option | Description |
 |---|---|
@@ -426,7 +432,7 @@ Currently a stub for migrating an existing Markdown tracker.
 | Option | Description |
 |---|---|
 | `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--progress <path>` | Path to an existing `docs/ticket-progress.md`. |
+| `--progress <path>` | Path to an existing ticket progress Markdown file. |
 
 ### Builder And Runtime Commands
 

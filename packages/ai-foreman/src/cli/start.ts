@@ -52,6 +52,10 @@ function collectTicket(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
 function branchContinueTicketHelp(cwd: string, flag = "--continue"): string {
   const sessions = findResumableBranchSessions(join(cwd, ".foreman"));
   if (sessions.length === 0) {
@@ -143,7 +147,14 @@ export function buildStartCommand(): Command {
       const cwd = resolve(project);
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
 
-      const TRACKER_SEARCH_PATHS = ["docs/ticket-progress.md", "ticket-progress.md"];
+      const configuredTrackerPath = isTicketsInitialized(cwd)
+        ? loadTicketsConfig(cwd).paths.progressDoc
+        : undefined;
+      const TRACKER_SEARCH_PATHS = unique([
+        configuredTrackerPath,
+        "docs/ticket-progress.md",
+        "ticket-progress.md",
+      ].filter(Boolean) as string[]);
       let ticketsContent: string | undefined;
       let trackerRelPath: string | undefined;
 
@@ -360,6 +371,10 @@ export function buildStartCommand(): Command {
           prReady: Boolean(opts.prReady),
           keepWorktrees: Boolean(opts.keepWorktrees),
           allowedBaseDirtyPaths,
+          trackerPaths: {
+            progressDoc: ticketsConfig.paths.progressDoc,
+            archiveDoc: ticketsConfig.paths.archiveDoc,
+          },
           resumeSessions: resumeSessionByTicket,
           createBuilder: (builderCwd, sessionId) => createBuilder(builderCwd, sessionId),
           observeBuilder: (builder) => printEvents(builder.events()),

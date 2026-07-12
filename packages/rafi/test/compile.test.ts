@@ -44,6 +44,7 @@ test("AGENTS.md starts with the conditions header line", () => {
   assert.ok(first.includes("ai="), "header missing ai flag");
   assert.ok(first.includes("frontend="), "header missing frontend flag");
   assert.ok(first.includes("cloud="), "header missing cloud flag");
+  assert.ok(first.includes("docs=docs"), "header missing docs root");
 });
 
 test("conditions header reflects the actual flags (ai=on for default)", () => {
@@ -66,6 +67,30 @@ test("custom stack values appear in AGENTS.md body", () => {
   const body = readFileSync(join(dir, "AGENTS.md"), "utf8");
   assert.ok(body.includes("MongoDB"), "custom database not in AGENTS.md");
   assert.ok(body.includes("yarn"), "custom packageManager not in AGENTS.md");
+});
+
+test("custom docs root appears in generated rules and starter docs", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  config.docs = { root: "docs-rafi" };
+  compile(dir, config);
+
+  const agentsMd = readFileSync(join(dir, "AGENTS.md"), "utf8");
+  assert.ok(agentsMd.split("\n")[0]?.includes("docs=docs-rafi"));
+  assert.ok(agentsMd.includes("`docs-rafi/architecture.md`"));
+  assert.ok(!agentsMd.includes("`docs/architecture.md`"));
+  assert.ok(existsSync(join(dir, "docs-rafi", "features.md")));
+  assert.ok(readFileSync(join(dir, "docs-rafi", "features.md"), "utf8").includes("`docs-rafi/tickets.md`"));
+});
+
+test("compile validates docs root before writing generated files", () => {
+  const dir = tempDir();
+  const config = buildProjectConfig(defaultAnswers());
+  config.docs = { root: "../docs-outside" };
+
+  assert.throws(() => compile(dir, config), /docs root/);
+  assert.ok(!existsSync(join(dir, "AGENTS.md")));
+  assert.ok(!existsSync(join(dir, "CLAUDE.md")));
 });
 
 test("compile writes CLAUDE.md with header and @AGENTS.md import", () => {

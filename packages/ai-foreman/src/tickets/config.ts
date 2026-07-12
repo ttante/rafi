@@ -1,5 +1,5 @@
-import { readFileSync, existsSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { readFileSync, existsSync, lstatSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { parse } from "yaml";
 
 export interface TicketsPaths {
@@ -63,6 +63,76 @@ export const DEFAULT_TICKETS_CONFIG: TicketsConfig = {
     backupBeforeImportOrMigration: true,
   },
 };
+
+export const DEFAULT_DOCS_ROOT = "docs";
+
+const GLOB_CHARS = /[*?[\]{}]/;
+
+export function normalizeDocsRoot(docsRoot: string): string {
+  const raw = docsRoot.trim();
+  if (!raw) throw new Error("docs root must be a non-empty repo-relative directory");
+  if (isAbsolute(raw) || /^[A-Za-z]:[\\/]/.test(raw)) {
+    throw new Error(`docs root must be repo-relative: ${docsRoot}`);
+  }
+  if (GLOB_CHARS.test(raw)) {
+    throw new Error(`docs root must be a concrete directory, not a glob: ${docsRoot}`);
+  }
+
+  const normalized = normalize(raw.replace(/\\/g, "/")).replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!normalized || normalized === "." || normalized === "..") {
+    throw new Error(`docs root must be a named repo-relative directory: ${docsRoot}`);
+  }
+  if (normalized.split("/").includes("..")) {
+    throw new Error(`docs root must not contain parent-directory traversal: ${docsRoot}`);
+  }
+  return normalized.replace(/^\.\/+/, "");
+}
+
+export function validateDocsRoot(projectDir: string, docsRoot: string): string {
+  const normalized = normalizeDocsRoot(docsRoot);
+  const repoRoot = resolve(projectDir);
+  const repoRootReal = realOrResolved(repoRoot);
+  const rootPath = resolve(repoRoot, normalized);
+  const rel = relative(repoRoot, rootPath);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`docs root must stay inside the repository: ${docsRoot}`);
+  }
+  if (pathExistsOrSymlink(rootPath)) {
+    let realRoot;
+    try {
+      realRoot = realpathSync(rootPath);
+    } catch {
+      throw new Error(`docs root resolves to a non-directory: ${normalized}`);
+    }
+    assertInsideRepo(repoRootReal, realRoot, docsRoot);
+    let stat;
+    try {
+      stat = statSync(rootPath);
+    } catch {
+      throw new Error(`docs root resolves to a non-directory: ${normalized}`);
+    }
+    if (!stat.isDirectory()) {
+      throw new Error(`docs root resolves to a non-directory: ${normalized}`);
+    }
+  } else {
+    assertExistingAncestorInsideRepo(repoRoot, repoRootReal, rootPath, docsRoot);
+  }
+  return normalized;
+}
+
+export function initDocsRoot(projectDir: string, override?: string): string {
+  if (override) return validateDocsRoot(projectDir, override);
+  const configured = readRafiDocsRoot(projectDir);
+  return validateDocsRoot(projectDir, configured ?? DEFAULT_DOCS_ROOT);
+}
+
+function readRafiDocsRoot(projectDir: string): string | undefined {
+  const configPath = join(projectDir, "rafi-config.yaml");
+  if (!existsSync(configPath)) return undefined;
+  const raw = (parse(readFileSync(configPath, "utf8")) as Record<string, unknown>) ?? {};
+  const docs = raw.docs as Record<string, unknown> | undefined;
+  return typeof docs?.root === "string" ? docs.root : undefined;
+}
 
 function snakeToCamel(s: string): string {
   return s.replace(/_([a-z])/g, (_, c: string) => (c as string).toUpperCase());
@@ -184,4 +254,54 @@ export function resolveTicketPaths(
     progressDoc: r(p.progressDoc),
     archiveDoc: r(p.archiveDoc),
   };
+}
+
+export function pathExistsOrSymlink(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function realOrResolved(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function assertExistingAncestorInsideRepo(repoRoot: string, repoRootReal: string, rootPath: string, docsRoot: string): void {
+  let current = dirname(rootPath);
+  while (current !== repoRoot && !pathExistsOrSymlink(current)) {
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+  if (!pathExistsOrSymlink(current)) return;
+  try {
+    const stat = statSync(current);
+    if (!stat.isDirectory()) {
+      throw new Error(`docs root resolves to a non-directory: ${docsRoot}`);
+    }
+  } catch {
+    throw new Error(`docs root resolves to a non-directory: ${docsRoot}`);
+  }
+  if (current === repoRoot) return;
+  let realAncestor;
+  try {
+    realAncestor = realpathSync(current);
+  } catch {
+    throw new Error(`docs root resolves to a non-directory: ${docsRoot}`);
+  }
+  assertInsideRepo(repoRootReal, realAncestor, docsRoot);
+}
+
+function assertInsideRepo(repoRootReal: string, candidateReal: string, docsRoot: string): void {
+  const rel = relative(repoRootReal, candidateReal);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`docs root must stay inside the repository: ${docsRoot}`);
+  }
 }

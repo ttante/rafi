@@ -139,7 +139,8 @@ export { QA_MARKER_SPEC } from "./markers.js";
 export function buildPrimer(n: number, trackerPath?: string, ticketsEnabled = false): string {
   let trackerRule: string;
   if (ticketsEnabled) {
-    trackerRule = `\n- Ticket state is managed by foreman — you do NOT need to manually edit docs/ticket-progress.md.` +
+    const progressDoc = trackerPath ?? "docs/ticket-progress.md";
+    trackerRule = `\n- Ticket state is managed by foreman — you do NOT need to manually edit ${progressDoc}.` +
       `\n- Use \`foreman tickets discover --summary "..." --rationale "..."\` to log newly discovered work.` +
       `\n- Use \`foreman tickets update <id> --next-action "..."\` to record mid-turn notes.` +
       `\n- Always include ticket="<id>" in your STEP_STATUS marker so foreman can update the tracker.`;

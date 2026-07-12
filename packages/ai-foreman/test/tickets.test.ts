@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify } from "yaml";
@@ -8,8 +8,9 @@ import { stringify } from "yaml";
 import { buildNextQueue } from "../src/tickets/queue.js";
 import { computeDisplayStatus, resolveBlockers } from "../src/tickets/blockers.js";
 import { validateTicketDefs, detectCycles } from "../src/tickets/ticketLoader.js";
-import { cmdInit, cmdUpdate, cmdComplete, cmdBlock, cmdQueue, cmdDiscover } from "../src/tickets/commands.js";
+import { cmdInit, cmdUpdate, cmdComplete, cmdBlock, cmdQueue, cmdDiscover, cmdValidate } from "../src/tickets/commands.js";
 import { buildPopulateInstruction } from "../src/cli/tickets.js";
+import { loadTicketsConfig } from "../src/tickets/config.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import type { TicketState } from "../src/tickets/stateDb.js";
 
@@ -75,6 +76,12 @@ test("populate instruction includes optional source hints and scan guidance", ()
   assert.match(instruction, /files, folders, or globs/);
   assert.match(instruction, /Any reasonable project-planning format is acceptable/);
   assert.match(instruction, /Then inspect the repository for existing planning sources/);
+});
+
+test("populate instruction uses the configured progress doc path", () => {
+  const instruction = buildPopulateInstruction(undefined, "docs-rafi/ticket-progress.md");
+  assert.match(instruction, /docs-rafi\/ticket-progress\.md if it exists/);
+  assert.doesNotMatch(instruction, /docs\/ticket-progress\.md if it exists/);
 });
 
 test("populate instruction says to scan when no source hints are provided", () => {
@@ -237,6 +244,92 @@ test("init creates expected files", () => {
     assert.ok(existsSync(join(dir, ".tickets/tracker-rules.md")));
     assert.ok(existsSync(join(dir, ".tickets/ticket-state.sqlite")));
     assert.ok(existsSync(join(dir, "docs/ticket-progress.md")));
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("init writes tracker docs under an explicit docs root", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "docs-rafi" });
+    const config = loadTicketsConfig(dir);
+    assert.equal(config.paths.progressDoc, "docs-rafi/ticket-progress.md");
+    assert.equal(config.paths.archiveDoc, "docs-rafi/ticket-archive.md");
+    assert.ok(existsSync(join(dir, "docs-rafi/ticket-progress.md")));
+    assert.ok(!existsSync(join(dir, "docs/ticket-progress.md")));
+    assert.match(readFileSync(join(dir, ".tickets", "tracker-rules.md"), "utf8"), /docs-rafi\/ticket-progress\.md/);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("init reads docs root from rafi-config.yaml when --docs-root is omitted", () => {
+  const dir = makeTmpDir();
+  try {
+    writeFileSync(join(dir, "rafi-config.yaml"), stringify({ docs: { root: "docs-rafi" } }), "utf8");
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    assert.ok(existsSync(join(dir, "docs-rafi/ticket-progress.md")));
+    assert.equal(loadTicketsConfig(dir).paths.progressDoc, "docs-rafi/ticket-progress.md");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("init --docs-root overrides rafi-config.yaml docs root", () => {
+  const dir = makeTmpDir();
+  try {
+    writeFileSync(join(dir, "rafi-config.yaml"), stringify({ docs: { root: "docs-rafi" } }), "utf8");
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "custom-docs" });
+    assert.ok(existsSync(join(dir, "custom-docs/ticket-progress.md")));
+    assert.equal(loadTicketsConfig(dir).paths.progressDoc, "custom-docs/ticket-progress.md");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("init refuses to overwrite an existing selected progress doc", () => {
+  const dir = makeTmpDir();
+  try {
+    mkdirSync(join(dir, "docs-rafi"), { recursive: true });
+    writeFileSync(join(dir, "docs-rafi", "ticket-progress.md"), "# existing\n", "utf8");
+    assert.throws(
+      () => cmdInit(dir, { docsRoot: "docs-rafi" }),
+      /docs-rafi\/ticket-progress\.md already exists/,
+    );
+    assert.ok(!existsSync(join(dir, ".tickets", "config.yaml")));
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("init rejects docs roots that escape through symlinks", () => {
+  const dir = makeTmpDir();
+  const outside = makeTmpDir();
+  try {
+    symlinkSync(outside, join(dir, "outside-link"));
+    assert.throws(
+      () => cmdInit(dir, { docsRoot: "outside-link" }),
+      /docs root must stay inside the repository/,
+    );
+    assert.throws(
+      () => cmdInit(dir, { docsRoot: "outside-link/nested" }),
+      /docs root must stay inside the repository/,
+    );
+    assert.ok(!existsSync(join(dir, ".tickets", "config.yaml")));
+  } finally {
+    rmSync(dir, { recursive: true });
+    rmSync(outside, { recursive: true });
+  }
+});
+
+test("validate passes against an alternate progress doc path", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "docs-rafi" });
+    const result = cmdValidate(dir);
+    assert.equal(result.clean, true);
+    assert.equal(result.issues.length, 0);
   } finally {
     rmSync(dir, { recursive: true });
   }

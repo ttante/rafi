@@ -131,6 +131,11 @@ export interface AgentFilesConfig {
   claude: string;
 }
 
+/** Project documentation root used for Rafi starter docs and tracker docs. */
+export interface DocsConfig {
+  root: string;
+}
+
 /** Per-runtime paths for a skill or agent artifact. */
 export type ArtifactSource = "rafi" | "existing";
 
@@ -151,6 +156,7 @@ export interface ProjectConfig {
   flags: ProjectFlags;
   harness: HarnessConfig;
   agent_files: AgentFilesConfig;
+  docs?: DocsConfig;
   agents: Record<string, RuntimeArtifactConfig>;
   skills: Record<string, RuntimeArtifactConfig>;
 }

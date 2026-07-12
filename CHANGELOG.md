@@ -6,7 +6,18 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
-No unreleased changes.
+## @rafi-ai/cli 0.4.0 / ai-foreman 1.1.0 / special-agents 0.4.0 / rafi-spec 0.4.0 - 2026-07-12
+
+### Added
+
+- Added `docs.root` to `rafi-config.yaml` so Rafi starter docs and generated ticket tracker docs can live outside `docs/`.
+- Added `rafi create --docs-root <dir>` and `rafi tickets init --docs-root <dir>`.
+
+### Changed
+
+- `rafi create` now keeps existing app-owned `docs/` folders untouched by default, choosing a safe `docs-rafi/` variant when needed.
+- Ticket initialization now writes `ticket-progress.md` and `ticket-archive.md` under the configured docs root and refuses to overwrite a pre-existing selected progress doc.
+- Rule packs, starter docs, generated root instruction headers, and ticket runtime guidance now render configured docs paths instead of assuming `docs/`.
 
 ## @rafi-ai/cli 0.3.11 / ai-foreman 1.0.12 - 2026-07-12
 

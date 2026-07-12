@@ -186,6 +186,16 @@ test("project: artifact_source must be rafi or existing", () => {
   );
 });
 
+test("project: optional docs root is accepted", () => {
+  assert.equal(
+    validateProjectConfig({
+      ...validProject,
+      docs: { root: "docs-rafi" },
+    }).valid,
+    true,
+  );
+});
+
 // ───────────────────────── assert* (throwing narrowers) ─────────────────────────
 // These are part of the public surface: foreman/special-agents call them to fail
 // fast on bad authoring inputs. They must pass through valid data and throw with a
