@@ -24,9 +24,23 @@ rafi compile . --root-file-mode append  # one-run override for AGENTS.md/CLAUDE.
 
 `rafi create` collects your stack (frontend, backend, database, cloud, package manager) and three boolean flags: `usesAI`, `hasFrontend`, `runsInCloud`. It also asks whether you'll use Claude Code — if yes, the Claude Agent SDK is installed automatically. Before `create`, `start`, or `tickets populate` continue into agent work, Rafi checks the selected runtime and prompts you to repair missing authentication. If you have existing planning material, you can enter files, folders, or globs as source hints for `rafi tickets populate`; any reasonable format is OK because an agent interprets it. Stack answers are saved to `rafi-config.yaml`.
 
-Use `--root-file-mode append|overwrite|update` with `rafi create` or `rafi compile` to choose how existing root instruction files are handled. `update` asks the installed agent runtime to merge guidance, so it requires an authenticated Claude Code or Codex CLI.
+| Command / option | Notes |
+| --- | --- |
+| `rafi create <project>` | Runs the walkthrough, writes `rafi-config.yaml`, then compiles generated files. |
+| `rafi create <project> --defaults` | Uses built-in defaults without prompts. |
+| `rafi compile <project>` | Re-renders generated files after editing `rafi-config.yaml`. |
+| `--force` | Overwrites generated starter doc files when Rafi would otherwise preserve them. |
+| `--root-file-mode <mode>` | One-run override for existing root instruction files: `append`, `update`, or `overwrite`. |
 
-Custom skills or agents can replace Rafi defaults by setting `artifact_source: existing` and editing their paths in `rafi-config.yaml`.
+Existing root `AGENTS.md` and `CLAUDE.md` files are handled by `--root-file-mode` or `agent_files.mode`:
+
+| Mode | Behavior |
+| --- | --- |
+| `append` | Preserve existing text and add or refresh a dated Rafi block at the end. |
+| `update` | Ask an authenticated Claude Code or Codex runtime to merge existing guidance with Rafi guidance. |
+| `overwrite` | Replace the file with Rafi's generated version. |
+
+Existing skill and subagent path collisions are handled separately. Rafi can overwrite the colliding file, write its default artifact under a `*-rafi` name, or use the existing project artifact by setting `artifact_source: existing` and editing the artifact paths in `rafi-config.yaml`.
 
 ### Ticket lifecycle
 
@@ -39,6 +53,18 @@ rafi tickets validate                    # run all 4 validation passes
 rafi tickets render                      # regenerate docs/ticket-progress.md
 ```
 
+`tickets populate` options:
+
+| Option | Notes |
+| --- | --- |
+| `--sources <paths...>` | Files, folders, or globs the agent should check first. Keep using this for populate source hints. |
+| `--agent <agent>` | Selects Claude or Codex. Defaults to Claude. |
+| `--model <model>` / `--effort <level>` | Override the selected runtime's model and reasoning effort. |
+| `--fast` | Lower-latency mode. |
+| `-y, --yes` | Skip the confirmation before the agent edits ticket files. |
+
+`--tickets` is for `rafi start`, not `rafi tickets populate`. Use `--sources` when populate should read specific planning files.
+
 ### Run the builder
 
 ```sh
@@ -48,6 +74,16 @@ rafi start . --steps 5 --no-qa       # skip per-ticket QA
 rafi status .                         # summarize the most recent run
 rafi doctor .                         # check env, config, and readiness
 ```
+
+| Command / option | Notes |
+| --- | --- |
+| `rafi start <project> --steps <n>` | Runs the builder through up to `n` tickets or steps. |
+| `--agent <agent>` | Selects the Claude or Codex builder runtime. |
+| `--tickets <path>` | Sends a one-off task file to the builder during start preflight. |
+| `--no-qa` | Skips the per-ticket QA review. |
+| `--continue` / `--resume <id>` | Resume the latest or a specific logged session. |
+| `rafi status <project>` | Summarizes the latest run, including branch/PR failures when present. |
+| `rafi doctor <project>` | Checks environment, config, ticket tracker, and readiness. |
 
 ## What gets written
 

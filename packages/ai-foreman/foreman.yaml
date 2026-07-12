@@ -1,6 +1,6 @@
 # Foreman configuration. Any field omitted here falls back to the built-in
 # defaults in src/config.ts. This file is read from the *project* directory
-# passed to `foreman start`, so each project can tune its own policy.
+# passed to `ai-foreman start`, so each project can tune its own policy.
 
 permissions:
   # Bash commands are auto-approved only when EVERY segment (split on && || ; |)
@@ -26,6 +26,8 @@ permissions:
     - ls
     - "cat "
     - "mkdir "
+    - ai-foreman tickets
+    # Legacy-compatible prefix for older generated docs and logs.
     - foreman tickets
     - pytest
     - "python "

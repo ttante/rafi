@@ -124,6 +124,32 @@ ai-foreman start ./my-project --steps 3 --create-pr --pr-ready --agent codex
 ai-foreman start ./my-project --steps 1 --branch-per-ticket --continue --ticket T001
 ```
 
+### GitHub PR Failure Recovery
+
+When `--create-pr` cannot prepare GitHub, push a branch, or create a PR, Foreman records a structured failure and blocks the affected ticket cleanly. Blocked worktrees are retained automatically so you can repair the environment and retry without losing the ticket session.
+
+`ai-foreman status ./my-project` shows the latest GitHub failure code, repair commands, last command output, and a retry command when a resumable ticket session exists.
+
+Common failure codes:
+
+| Code | Meaning |
+| --- | --- |
+| `gh_missing` | GitHub CLI is not installed or not on `PATH`. |
+| `gh_not_authenticated` | `gh` is installed but not authenticated for the remote host. |
+| `repo_unreachable` | `gh repo view` cannot access the target repository. |
+| `git_remote_unreachable` | `git ls-remote` cannot access the configured remote. |
+| `network_or_timeout` | A GitHub or git command timed out or hit a network error. |
+| `push_failed` | The ticket branch could not be pushed. |
+| `pr_create_failed` | The branch pushed, but PR creation or PR body writing failed. |
+
+For GitHub Enterprise remotes, repair commands include the remote host:
+
+```bash
+gh auth login --hostname <host>
+gh auth status --hostname <host>
+gh repo view <host>/<owner>/<repo>
+```
+
 ### `ai-foreman tickets populate`
 
 | Option | Common values | Default | Notes |
@@ -541,4 +567,3 @@ Package output:
 - **`special-agents`** — library (rules + skills + agents + composition)
 - **`ai-foreman`** — this runtime
 - **`@rafi-ai/cli`** — CLI for `rafi create` and `rafi compile`
-

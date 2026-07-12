@@ -1,5 +1,5 @@
 # Rafi implementation tickets — derived from PLAN.md.
-# Schema follows foreman's .tickets/tickets.yaml format (see foreman/README.md).
+# Schema follows ai-foreman's .tickets/tickets.yaml format (see packages/ai-foreman/README.md).
 # Status fields are intentionally absent (they live in ticket-state.sqlite once tracked).
 # Epics map to PLAN.md phases:
 #   E0 Monorepo (Phase 0) · E1 Spec (Phase 1) · E2 Library+Rules (Phase 2)

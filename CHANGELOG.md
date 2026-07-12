@@ -8,6 +8,27 @@ This project follows semantic versioning for published npm packages where practi
 
 No unreleased changes.
 
+## @rafi-ai/cli 0.3.11 / ai-foreman 1.0.12 - 2026-07-12
+
+### Added
+
+- Added a root README **All Commands** reference covering every current `rafi` command, ticket subcommand, runtime command, option, default, and standalone `ai-foreman` runtime equivalent.
+- Added `docs/cli.md` as a generated Commander help snapshot for `rafi` and standalone `ai-foreman`.
+- Documented GitHub PR failure recovery behavior in the standalone `ai-foreman` README.
+
+### Changed
+
+- Expanded the `@rafi-ai/cli` package README with clearer command, ticket lifecycle, root file handling, and runtime option references.
+- Updated default runtime permissions to allow `ai-foreman tickets` while keeping the legacy-compatible `foreman tickets` prefix.
+- Updated historical/root docs to use the current `ai-foreman` package naming.
+
+### Packages
+
+- Bumped `ai-foreman` to `1.0.12`.
+- Bumped `@rafi-ai/cli` to `0.3.11`.
+- Kept `special-agents` at `0.3.7`.
+- Kept `rafi-spec` at `0.3.7`.
+
 ## @rafi-ai/cli 0.3.10 / ai-foreman 1.0.11 - 2026-07-09
 
 ### Added

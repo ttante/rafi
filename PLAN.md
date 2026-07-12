@@ -1,5 +1,7 @@
 # Rafi — Refined AI Framework & Implementor
 
+> Historical design artifact. Current usage, package names, and version facts live in the READMEs and [CHANGELOG.md](./CHANGELOG.md).
+
 > Status: PLAN ONLY. No code changes yet. This document is the agreed design before any work starts.
 
 ## 0. Vision & Naming
