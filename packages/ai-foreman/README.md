@@ -85,7 +85,7 @@ What each part does:
 | --- | --- | --- | --- |
 | `<project>` | `./my-project` / `../repo` | required | Target repo the agent works in. |
 | `-s, --steps <n>` | `1` / `5` / `10` | required | Max tickets or implementation steps to drive. |
-| `-a, --agent <agent>` | `claude` / `codex` | `claude` | Builder agent. |
+| `-a, --agent <agent>` | `claude` / `codex` | single `rafi-config.yaml` target, otherwise `claude` | Builder agent. Explicit `--agent` always wins. |
 | `-m, --model <model>` | `gpt-5.5` / any supported agent model | agent default | Overrides the builder model. |
 | `--effort <level>` | Claude Code: `low` / `medium` / `high` / `xhigh`<br>Codex: `low` / `medium` / `high` / `xhigh` | agent default | Reasoning level. |
 | `--fast` | flag | off | Lower latency. For Codex, maps to `effort=low` when `--effort` is not set. |
@@ -156,7 +156,7 @@ gh repo view <host>/<owner>/<repo>
 | Option | Common values | Default | Notes |
 | --- | --- | --- | --- |
 | `-p, --project <dir>` | `./my-project` / `../repo` | current directory | Target repo with `.tickets/`. |
-| `-a, --agent <agent>` | `claude` / `codex` | `claude` | Builder agent. |
+| `-a, --agent <agent>` | `claude` / `codex` | single `rafi-config.yaml` target, otherwise `claude` | Builder agent. Explicit `--agent` always wins. |
 | `-m, --model <model>` | `gpt-5.5` / any supported agent model | agent default | Overrides the builder model. |
 | `--effort <level>` | Claude Code: `low` / `medium` / `high` / `xhigh`<br>Codex: `low` / `medium` / `high` / `xhigh` | agent default | Reasoning level. |
 | `--sources <paths...>` | `docs/tickets.md docs/plans/**` | scans relevant docs automatically | Optional files, folders, or globs for the agent to check first. Any reasonable planning format is OK. |
@@ -188,17 +188,25 @@ Without tickets, Foreman still works with:
 
 Claude Code:
 
-- Default agent.
+- Default agent when no single runtime target is configured.
 - Uses your existing Claude Code credentials.
 - Runs through the Claude Agent SDK.
-- `start` and `tickets populate` check Claude auth before launching the builder and prompt you to repair it if needed.
+- `start` and `tickets populate` check Claude auth before launching the builder and prompt you to repair it, switch to Codex for the current run, or cancel when interactive.
 
 Codex:
 
-- Use `--agent codex`.
+- Use `--agent codex`, or set `harness.targets: ["codex"]` in `rafi-config.yaml` and omit `--agent`.
 - Shells out to `codex exec`.
 - Requires the `codex` CLI on your `PATH`.
-- `start` and `tickets populate --agent codex` check Codex auth before launching the builder and prompt you to repair it if needed.
+- `start` and `tickets populate --agent codex` check Codex auth before launching the builder and prompt you to repair it, switch to Claude for the current run, or cancel when interactive.
+
+Runtime defaults and recovery:
+
+- If `--agent` is omitted, Foreman reads `rafi-config.yaml`. A single `harness.targets` value selects that runtime; missing config or both targets default to Claude.
+- Non-interactive and `--yes` runs fail clearly instead of switching runtimes automatically.
+- Resume and continue flows do not offer runtime switching because session IDs are runtime-specific.
+- If an interactive command switches providers, a provider-specific `--model` override is ignored for that run. `--effort` and `--fast` remain in effect.
+- Cancel stops the command and keeps project files, generated files, and installed packages in place.
 
 Task file:
 

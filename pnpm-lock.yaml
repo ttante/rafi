@@ -29,7 +29,7 @@ importers:
         specifier: ^3.7.2
         version: 3.7.2
       special-agents:
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../special-agents
       yaml:
         specifier: ^2.5.1
@@ -61,7 +61,7 @@ importers:
         specifier: ^1.4.0
         version: 1.5.0
       ai-foreman:
-        specifier: workspace:*
+        specifier: 1.2.0
         version: link:../ai-foreman
       ajv:
         specifier: ^8.20.0
@@ -70,10 +70,10 @@ importers:
         specifier: ^12.1.0
         version: 12.1.0
       rafi-spec:
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../spec
       special-agents:
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../special-agents
       yaml:
         specifier: ^2.5.1
@@ -111,7 +111,7 @@ importers:
         specifier: ^8.20.0
         version: 8.20.0
       rafi-spec:
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../spec
       yaml:
         specifier: ^2.5.1

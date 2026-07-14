@@ -36,16 +36,18 @@ npm install -g @rafi-ai/cli
 
 Run `rafi` from inside the target repo:
 
-- Answer 9 questions about your stack (or skip with `--defaults`)
-- Get `AGENTS.md`, `CLAUDE.md`, subagents, and starter docs written to your repo
-- If you say yes to Claude Code, the Claude Agent SDK is installed automatically with your selected package manager (`npm`, `pnpm`, Yarn Classic/modern, or Bun)
-- Selected agent runtimes are checked before `create`, `start`, and `tickets populate` continue, with repair prompts if auth is missing
+- Answer the walkthrough questions about your stack (or skip with `--defaults`)
+- Choose runtime targets: both Claude and Codex, Claude only, or Codex only
+- Get target-specific agent files, role bundles, and starter docs written to your repo
+- If the final target set includes Claude Code, the Claude Agent SDK is installed automatically with your selected package manager (`npm`, `pnpm`, Yarn Classic/modern, or Bun)
+- Selected agent runtimes are checked before `create`, `start`, and `tickets populate` continue, with retry/switch/cancel recovery prompts if auth is missing
 - Re-run `rafi compile` whenever you update `rafi-config.yaml`
 
 ```sh
 cd my-repo
 rafi create .             # interactive walkthrough
 rafi create . --defaults  # skip walkthrough, use built-in defaults
+rafi create . --runtime codex  # Codex-only native artifacts
 rafi create . --docs-root docs-rafi  # choose where Rafi writes starter/tracker docs
 rafi compile .            # re-render after editing rafi-config.yaml
 ```
@@ -54,18 +56,20 @@ rafi compile .            # re-render after editing rafi-config.yaml
 
 ```
 my-repo/
-  AGENTS.md                        Codex rules doc (your stack + best practices, flat)
-  CLAUDE.md                        Claude Code entrypoint
+  AGENTS.md                        Codex rules doc, when Codex is targeted
+  AGENTS-rafi.md                   Append-mode overflow sidecar, when needed
+  CLAUDE.md                        Claude Code entrypoint or standalone rules, when Claude is targeted
+  CLAUDE-rafi.md                   Append-mode overflow sidecar, when needed
   rafi-config.yaml                 your stack config - commit this, edit to update
-  .claude/agents/builder.md        Claude subagent — implements tickets
-  .claude/agents/qa.md             Claude subagent — reviews completed work
-  .claude/agents/planner.md        Claude subagent — plans and writes tickets
-  .claude/skills/<name>/SKILL.md   Claude project skills
-  .codex/agents/<role>.toml        Codex project subagents
-  .agents/skills/<name>/SKILL.md   Codex project skills
-  .rafi/compiled/<role>/           role bundles read by ai-foreman at runtime
+  .claude/agents/<role>.md         Claude subagents, when Claude is targeted
+  .claude/skills/<name>/SKILL.md   Claude project skills, when Claude is targeted
+  .codex/agents/<role>.toml        Codex project subagents, when Codex is targeted
+  .agents/skills/<name>/SKILL.md   Codex project skills, when Codex is targeted
+  .rafi/compiled/<role>/           role bundles always emitted for ai-foreman
   docs/                            starter docs (or docs-rafi/ when docs/ already exists)
 ```
+
+`harness.targets` in `rafi-config.yaml` controls which native files are refreshed. Files for unselected targets are preserved, not deleted.
 
 ## Defaults
 
@@ -90,11 +94,13 @@ Rafi includes protections against overwriting existing `AGENTS.md`, `CLAUDE.md`,
 
 | Choice | Existing `AGENTS.md` / `CLAUDE.md` behavior | Use when |
 |---|---|---|
-| `append` | Preserves existing text and writes or refreshes a dated Rafi block at the end. | You want the safest non-destructive default. |
+| `append` | Preserves existing text and writes or refreshes a dated Rafi block. If inline append would exceed the runtime startup guard, Rafi writes generated guidance to `AGENTS-rafi.md` or `CLAUDE-rafi.md` and inserts a compact reference block near the top of the root file. | You want the safest non-destructive default. |
 | `update` | Asks an installed agent runtime to merge existing guidance with Rafi guidance. | You want one coherent file and have authenticated Claude Code or Codex. |
 | `overwrite` | Replaces the file with Rafi's generated version. | The existing file is disposable or already generated. |
 
 For non-interactive runs, the same root-file behavior can be set with `--root-file-mode append|update|overwrite` on `rafi create` or `rafi compile`, or with `agent_files.mode` in `rafi-config.yaml`.
+
+Append overflow sidecars are target-aware: Codex writes `AGENTS-rafi.md` only when `AGENTS.md` would exceed Codex's root file guard, and Claude writes `CLAUDE-rafi.md` only when `CLAUDE.md` would exceed Claude's guard. Rafi refuses to overwrite a pre-existing sidecar unless it is clearly Rafi-generated. Claude `@file` imports still load imported content into Claude's context according to Claude Code behavior; this sidecar keeps the root file short and visible to startup readers, but it is not a Claude context-reduction mechanism.
 
 Existing project skills and subagents can either stay project-owned or be replaced by Rafi. If a generated skill or subagent path collides, `rafi create` asks whether Rafi should overwrite it. If not, Rafi writes its defaults under `*-rafi` paths, and you can reference your existing artifact by setting `artifact_source: existing` in `rafi-config.yaml`.
 
@@ -193,8 +199,8 @@ Current package versions:
 
 | Package | Version |
 |---|---|
-| `@rafi-ai/cli` | `0.4.1` |
-| `ai-foreman` | `1.1.0` |
+| `@rafi-ai/cli` | `0.5.0` |
+| `ai-foreman` | `1.2.0` |
 | `special-agents` | `0.4.0` |
 | `rafi-spec` | `0.4.0` |
 
@@ -247,11 +253,12 @@ Runs the walkthrough, writes `rafi-config.yaml`, and compiles the target repo.
 | `--defaults` | Skip the walkthrough and use built-in defaults. |
 | `--force` | Overwrite existing doc files. |
 | `--docs-root <dir>` | Use a safe repo-relative directory for Rafi starter and tracker docs. |
+| `--runtime <both\|claude\|codex>` | Select which native runtime artifacts to emit. `--defaults` keeps both unless this is supplied. |
 | `--root-file-mode <mode>` | Override root instruction file handling. Valid modes: `append`, `update`, `overwrite`. |
 
 #### `rafi compile <project>`
 
-Re-renders `.claude/`, `.codex/`, `AGENTS.md`, and role bundles from an existing `rafi-config.yaml`.
+Re-renders the native artifacts selected by `harness.targets` and always refreshes `.rafi/compiled/<role>/*` role bundles from an existing `rafi-config.yaml`.
 
 | Option | Description |
 |---|---|
@@ -281,7 +288,7 @@ Asks a builder to populate `.tickets/tickets.yaml` from existing project ticket 
 | Option | Description |
 |---|---|
 | `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `-a, --agent <agent>` | Builder agent. Valid values: `claude`, `codex`. Default: `claude`. |
+| `-a, --agent <agent>` | Builder agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `-m, --model <model>` | Override the builder's model. |
 | `--effort <level>` | Reasoning effort level. Valid values: `low`, `medium`, `high`, `xhigh`. |
 | `--sources <paths...>` | Source hint files, folders, or globs to check first. |
@@ -443,7 +450,7 @@ Enlists a builder and drives it through a batch of N steps.
 | Option | Description |
 |---|---|
 | `-s, --steps <n>` | Required. Number of steps to drive. |
-| `-a, --agent <agent>` | Builder agent. Valid values: `claude`, `codex`. Default: `claude`. |
+| `-a, --agent <agent>` | Builder agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `-m, --model <model>` | Override the builder's model. |
 | `-r, --resume <sessionId>` | Resume a prior builder session. |
 | `--continue` | Resume the most recent logged session for this project. |

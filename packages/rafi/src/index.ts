@@ -12,6 +12,7 @@ import {
   rootFileModeValues,
   runtimeCommandLabel,
   writeRafiConfigYaml,
+  type AgentRuntime,
   type RuntimeUpdateError,
 } from "./compiler.js";
 import { compileWithRootUpdateRecovery, type RootUpdateRecoveryChoice } from "./createRecovery.js";
@@ -27,7 +28,9 @@ import {
   defaultAnswers,
   LEGACY_PROJECT_CONFIG_FILE,
   normalizeProjectConfig,
+  parseRuntimeSelection,
   RAFI_CONFIG_FILE,
+  runtimeSelectionToTargets,
 } from "./project.js";
 import { docsRootPathExists, firstAvailableDocsRoot, validateDocsRoot } from "./docs.js";
 import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
@@ -79,10 +82,12 @@ program
   .option("--defaults", "skip walkthrough and use built-in defaults")
   .option("--force", "overwrite existing doc files")
   .option("--docs-root <dir>", "repo-relative directory for Rafi starter and tracker docs")
+  .option("--runtime <runtime>", "agent runtime targets to configure (both | claude | codex)")
   .option("--root-file-mode <mode>", "override root instruction file handling (append | overwrite | update)")
   .action(async (project: string, opts) => {
     const targetDir = resolve(project);
     const rootFileMode = parseRootFileMode(opts.rootFileMode);
+    const runtimeOption = parseRuntimeSelection(opts.runtime);
     const docsRootOption = opts.docsRoot as string | undefined;
 
     // Read app name from target package.json if present
@@ -99,6 +104,9 @@ program
       ...(targetPkgName ? { appName: targetPkgName } : {}),
       timezone: detectedTimezone,
     };
+    if (runtimeOption) {
+      answers.runtimeTargets = runtimeSelectionToTargets(runtimeOption);
+    }
 
     if (!opts.defaults) {
       // Interactive walkthrough — requires Node >=20 for @clack/prompts
@@ -156,11 +164,16 @@ program
       });
       if (isCancel(usesAI)) process.exit(0);
 
-      const useClaude = await confirm({
-        message: "Do you want to include support for Claude Code? (Enter to accept — rafi supports Codex CLI and Claude Code)",
-        initialValue: true,
+      const runtimeSelection = runtimeOption ?? await select({
+        message: "Agent runtime targets:",
+        initialValue: "both",
+        options: [
+          { value: "both", label: "Both" },
+          { value: "claude", label: "Claude only" },
+          { value: "codex", label: "Codex only" },
+        ],
       });
-      if (isCancel(useClaude)) process.exit(0);
+      if (isCancel(runtimeSelection)) process.exit(0);
 
       const docsRoot = await chooseDocsRootForCreate(targetDir, docsRootOption, {
         interactive: true,
@@ -195,7 +208,7 @@ program
         cloud: String(cloudRaw),
         packageManager: String(packageManager),
         usesAI: Boolean(usesAI),
-        useClaude: Boolean(useClaude),
+        runtimeTargets: runtimeSelectionToTargets(parseRuntimeSelection(runtimeSelection) ?? "both"),
         qa: true,
         docsRoot,
         planningSources,
@@ -205,13 +218,14 @@ program
     } else {
       answers = {
         ...answers,
+        ...(runtimeOption ? { runtimeTargets: runtimeSelectionToTargets(runtimeOption) } : {}),
         docsRoot: await chooseDocsRootForCreate(targetDir, docsRootOption, { interactive: false }),
       };
     }
 
-    const config = await applyCollisionChoices(targetDir, buildProjectConfig(answers), rootFileMode);
+    let config = await applyCollisionChoices(targetDir, buildProjectConfig(answers), rootFileMode);
     writeRafiConfigYaml(targetDir, config);
-    await compileWithRootUpdateRecovery(
+    config = await compileCreateConfig(
       targetDir,
       config,
       {
@@ -220,19 +234,42 @@ program
       promptRootUpdateRecovery,
     );
 
+    const finalTargets = await ensureCreateRuntimesReady(targetDir, config, Boolean(opts.defaults));
+    if (!sameTargets(config.harness.targets, finalTargets)) {
+      const previousTargets = config.harness.targets;
+      config = {
+        ...config,
+        harness: {
+          ...config.harness,
+          targets: finalTargets,
+        },
+      };
+      writeRafiConfigYaml(targetDir, config);
+      config = await compileCreateConfig(
+        targetDir,
+        config,
+        {
+          force: opts.force as boolean | undefined,
+        },
+        promptRootUpdateRecovery,
+      );
+      if (!sameTargets(previousTargets, config.harness.targets) && sameTargets(config.harness.targets, finalTargets)) {
+        console.log(`rafi: switched runtime target to ${config.harness.targets.join(" and ")} and updated ${RAFI_CONFIG_FILE}.`);
+      }
+    }
+
     const aiStatus = config.flags.usesAI ? "on" : "off";
     console.log(`rafi: compiled ${targetDir}`);
     console.log(`rafi: AI rules: ${aiStatus === "off" ? "excluded — re-run \`rafi compile\` after setting usesAI: true to add them" : "included"}`);
     console.log(`rafi: custom skills or agents can replace Rafi defaults by setting artifact_source: existing and editing their paths in ${RAFI_CONFIG_FILE}.`);
 
-    if (answers.useClaude) {
+    if (config.harness.targets.includes("claude")) {
       installClaudeAgentSdk(targetDir, answers.packageManager);
       console.log("rafi: Claude Agent SDK installed.");
     } else {
       console.log("rafi: skipping Claude Agent SDK (Codex only).");
     }
 
-    await ensureAgentRuntimesReady(targetDir, config.harness.targets, promptRuntimeReadinessRecovery);
     console.log(`rafi: verified agent runtime auth for ${config.harness.targets.join(" and ")}.`);
 
     if (answers.planningSources) {
@@ -285,15 +322,13 @@ async function applyCollisionChoices(
     next.agent_files.mode = rootFileMode;
   }
 
-  const rootCollisions = [next.agent_files.codex, next.agent_files.claude].filter((path) =>
-    existsSync(join(targetDir, path)),
-  );
+  const rootCollisions = selectedRootInstructionPaths(next).filter((path) => existsSync(join(targetDir, path)));
   if (rootCollisions.length > 0 && !rootFileMode) {
     const { select, isCancel } = await import("@clack/prompts");
     const mode = await select({
       message: `${rootCollisions.length} root agent file collision(s) found. How should Rafi handle them?`,
       options: [
-        { value: "append", label: "Append — add a dated Rafi section at the end" },
+        { value: "append", label: "Append — preserve existing text and add Rafi guidance or a sidecar reference" },
         { value: "update", label: "Update — ask an authenticated installed agent runtime to rewrite the file" },
         { value: "overwrite", label: "Overwrite — replace with Rafi's generated file" },
       ],
@@ -340,27 +375,68 @@ async function applyCollisionChoices(
 async function promptRootUpdateRecovery(err: RuntimeUpdateError): Promise<RootUpdateRecoveryChoice> {
   const { select, isCancel, log } = await import("@clack/prompts");
   log.error(formatRuntimeUpdateFailure(err));
+  log.info(
+    "Cancel stops here and keeps generated files in place. Rafi will not uninstall packages, delete generated files, or corrupt setup.",
+  );
   const choice = await select({
     message: `${runtimeCommandLabel(err.runtime)} failed while updating ${err.targetFile}. What should Rafi do?`,
     options: [
-      { value: "retry", label: "Retry update — rerun after fixing authentication" },
-      { value: "append", label: "Append instead — preserve existing guidance and add a Rafi section" },
+      { value: "retry", label: "Fix manually and retry update" },
+      { value: "switch", label: `Use ${runtimeDisplayName(otherRuntime(err.runtime))} for now` },
+      { value: "append", label: "Append instead — preserve existing guidance and add Rafi guidance or a sidecar reference" },
       { value: "overwrite", label: "Overwrite instead — replace the root instruction files" },
-      { value: "cancel", label: "Cancel" },
+      { value: "cancel", label: "Cancel - stop here; keep generated files" },
     ],
   });
   if (isCancel(choice) || choice === "cancel") process.exit(0);
   return choice as RootUpdateRecoveryChoice;
 }
 
-async function promptRuntimeReadinessRecovery(err: RuntimeReadinessError): Promise<RuntimeReadinessChoice> {
+async function compileCreateConfig(
+  targetDir: string,
+  config: ProjectConfig,
+  opts: Parameters<typeof compileWithRootUpdateRecovery>[2],
+  choose: Parameters<typeof compileWithRootUpdateRecovery>[3],
+): Promise<ProjectConfig> {
+  const result = await compileWithRootUpdateRecovery(targetDir, config, opts, choose);
+  if (!sameTargets(config.harness.targets, result.harness.targets)) {
+    writeRafiConfigYaml(targetDir, result);
+    console.log(`rafi: switched runtime target to ${result.harness.targets.join(" and ")} and updated ${RAFI_CONFIG_FILE}.`);
+    return result;
+  }
+  return config;
+}
+
+async function ensureCreateRuntimesReady(
+  targetDir: string,
+  config: ProjectConfig,
+  defaultsMode: boolean,
+): Promise<AgentRuntime[]> {
+  const nonInteractive = defaultsMode || !process.stdin.isTTY || !process.stdout.isTTY;
+  if (nonInteractive) {
+    return ensureAgentRuntimesReady(targetDir, config.harness.targets, async (err) => {
+      throw err;
+    });
+  }
+  return ensureAgentRuntimesReady(targetDir, config.harness.targets, promptRuntimeReadinessRecovery);
+}
+
+async function promptRuntimeReadinessRecovery(
+  err: RuntimeReadinessError,
+  otherRuntime: AgentRuntime,
+): Promise<RuntimeReadinessChoice> {
   const { select, isCancel, log } = await import("@clack/prompts");
   log.error(err.message);
+  log.info(
+    "Cancel stops here and keeps generated files in place. Rafi will not uninstall packages, delete generated files, or corrupt setup. " +
+    `After fixing authentication, run \`rafi compile .\`, \`rafi start . --steps ...\`, or rerun \`rafi create .\` if you want the walkthrough again.`,
+  );
   const choice = await select({
-    message: `${runtimeCommandLabel(err.runtime)} is not ready. Fix authentication, then retry the check.`,
+    message: `${runtimeCommandLabel(err.runtime)} is not ready. What should Rafi do?`,
     options: [
-      { value: "retry", label: "Retry check" },
-      { value: "cancel", label: "Cancel" },
+      { value: "retry", label: "Fix manually and retry check" },
+      { value: "switch", label: `Use ${runtimeDisplayName(otherRuntime)} for now` },
+      { value: "cancel", label: "Cancel - stop here; keep generated files" },
     ],
   });
   if (isCancel(choice) || choice === "cancel") process.exit(0);
@@ -447,17 +523,28 @@ function artifactCollisions(
   const collisions: Array<{ kind: "agent" | "skill"; name: string }> = [];
   for (const name of Object.keys(config.agents)) {
     const paths = artifactPaths("agent", name);
-    if (existsSync(join(targetDir, paths.claude)) || existsSync(join(targetDir, paths.codex))) {
+    if (selectedArtifactPaths(config, paths).some((path) => existsSync(join(targetDir, path)))) {
       collisions.push({ kind: "agent", name });
     }
   }
   for (const name of Object.keys(config.skills)) {
     const paths = artifactPaths("skill", name);
-    if (existsSync(join(targetDir, paths.claude)) || existsSync(join(targetDir, paths.codex))) {
+    if (selectedArtifactPaths(config, paths).some((path) => existsSync(join(targetDir, path)))) {
       collisions.push({ kind: "skill", name });
     }
   }
   return collisions;
+}
+
+function selectedArtifactPaths(
+  config: ProjectConfig,
+  paths: ProjectConfig["agents"][string],
+): string[] {
+  return config.harness.targets.map((target) => paths[target]);
+}
+
+function selectedRootInstructionPaths(config: ProjectConfig): string[] {
+  return config.harness.targets.map((target) => config.agent_files[target]);
 }
 
 function setArtifactPaths(
@@ -487,6 +574,18 @@ function parsePlanningSources(raw: string): string[] {
 
 function shellQuote(value: string): string {
   return `"${value.replace(/(["\\$`])/g, "\\$1")}"`;
+}
+
+function runtimeDisplayName(runtime: AgentRuntime): string {
+  return runtime === "claude" ? "Claude" : "Codex";
+}
+
+function otherRuntime(runtime: AgentRuntime): AgentRuntime {
+  return runtime === "claude" ? "codex" : "claude";
+}
+
+function sameTargets(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 program.addCommand(buildTicketsCommand());

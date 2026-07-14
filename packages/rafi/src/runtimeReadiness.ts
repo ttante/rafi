@@ -6,7 +6,7 @@ import {
   runtimeRepairCommands,
 } from "./compiler.js";
 
-export type RuntimeReadinessChoice = "retry" | "cancel";
+export type RuntimeReadinessChoice = "retry" | "switch" | "cancel";
 
 export interface RuntimeReadinessErrorOptions {
   runtime: AgentRuntime;
@@ -68,10 +68,11 @@ export function checkAgentRuntimeReady(targetDir: string, runtime: AgentRuntime)
 export async function ensureAgentRuntimesReady(
   targetDir: string,
   runtimes: readonly AgentRuntime[],
-  choose: (err: RuntimeReadinessError) => Promise<RuntimeReadinessChoice>,
+  choose: (err: RuntimeReadinessError, otherRuntime: AgentRuntime) => Promise<RuntimeReadinessChoice>,
   check: (targetDir: string, runtime: AgentRuntime) => void = checkAgentRuntimeReady,
-): Promise<void> {
-  for (const runtime of uniqueRuntimes(runtimes)) {
+): Promise<AgentRuntime[]> {
+  const selected = uniqueRuntimes(runtimes);
+  for (const runtime of selected) {
     while (true) {
       try {
         check(targetDir, runtime);
@@ -80,12 +81,18 @@ export async function ensureAgentRuntimesReady(
         const failure = err instanceof RuntimeReadinessError
           ? err
           : new RuntimeReadinessError({ runtime, cause: err });
-        const choice = await choose(failure);
+        const fallbackRuntime = otherRuntime(runtime);
+        const choice = await choose(failure, fallbackRuntime);
         if (choice === "retry") continue;
+        if (choice === "switch") {
+          check(targetDir, fallbackRuntime);
+          return [fallbackRuntime];
+        }
         throw failure;
       }
     }
   }
+  return selected;
 }
 
 export function formatRuntimeReadinessFailure(opts: RuntimeReadinessErrorOptions): string {
@@ -110,6 +117,10 @@ function uniqueRuntimes(runtimes: readonly AgentRuntime[]): AgentRuntime[] {
     if (!out.includes(runtime)) out.push(runtime);
   }
   return out;
+}
+
+function otherRuntime(runtime: AgentRuntime): AgentRuntime {
+  return runtime === "claude" ? "codex" : "claude";
 }
 
 function outputToString(value: string | Buffer | undefined): string {

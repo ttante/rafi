@@ -6,6 +6,37 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+## @rafi-ai/cli 0.5.0 / ai-foreman 1.2.0 - 2026-07-14
+
+### Added
+
+- Added `rafi create --runtime <both|claude|codex>` and an interactive runtime target prompt.
+- Added config-derived default runtime selection for `rafi start`, `ai-foreman start`, and `tickets populate` when `--agent` is omitted. A single `harness.targets` value is used; missing config or both targets still default to Claude.
+- Added interactive retry-or-switch recovery for Claude/Codex readiness failures, including verified fallback readiness checks and Claude Agent SDK import checks when switching to Claude.
+
+### Changed
+
+- `harness.targets` now controls which native artifacts `rafi compile` emits. Codex targets write `AGENTS.md`, `.codex/agents/*`, and `.agents/skills/*`; Claude targets write `CLAUDE.md`, `.claude/agents/*`, and `.claude/skills/*`; `.rafi/compiled/<role>/*` is always emitted.
+- `agent_files.mode: append` now keeps oversized root instruction files within runtime startup guards by moving Rafi-generated guidance into target-specific sidecars (`AGENTS-rafi.md` or `CLAUDE-rafi.md`) and inserting a compact reference block near the top of the root file.
+- `rafi create --defaults` keeps both runtime targets unless `--runtime` is supplied.
+- Claude Agent SDK installation now runs only when the final create target set includes Claude.
+- Runtime cancel prompts now explicitly state that generated files and installed packages are kept in place.
+- Runtime fallback during `start` and `tickets populate` is current-run only. Create-time fallback persists the singleton `harness.targets` value to `rafi-config.yaml` and recompiles.
+
+### Fixed
+
+- Existing-artifact validation and collision handling now only consider selected runtime targets.
+- Files for unselected runtime targets are preserved instead of being refreshed or deleted.
+- Resume/continue flows no longer offer runtime switching because saved session IDs are runtime-specific.
+- Provider-specific `--model` overrides are dropped and reported when an interactive command falls back across Claude/Codex providers. `--effort` and `--fast` are preserved.
+
+### Packages
+
+- Bumped `@rafi-ai/cli` to `0.5.0`.
+- Bumped `ai-foreman` to `1.2.0`.
+- Kept `special-agents` at `0.4.0`.
+- Kept `rafi-spec` at `0.4.0`.
+
 ## @rafi-ai/cli 0.4.1 - 2026-07-14
 
 ### Fixed

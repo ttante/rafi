@@ -30,6 +30,7 @@ import { importFromMarkdown } from "../tickets/importer.js";
 import { formatValidationIssues } from "../tickets/validate.js";
 import { ensureRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
 import type { AgentRuntime } from "../runtimeAuth.js";
+import { resolveAgentForProject } from "./runtimeSelection.js";
 
 function fail(msg: string): never {
   console.error(`foreman tickets: ${msg}`);
@@ -40,14 +41,7 @@ function cwd(opts: { project?: string }): string {
   return resolve(opts.project ?? ".");
 }
 
-const VALID_AGENTS = ["claude", "codex"] as const;
 const VALID_EFFORT = ["low", "medium", "high", "xhigh"] as const;
-
-function validateAgent(agent: string): asserts agent is typeof VALID_AGENTS[number] {
-  if (!VALID_AGENTS.includes(agent as typeof VALID_AGENTS[number])) {
-    fail(`unknown agent "${agent}" — choose: ${VALID_AGENTS.join(" | ")}`);
-  }
-}
 
 function validateEffort(effort: string | undefined): asserts effort is EffortLevel | undefined {
   if (effort && !VALID_EFFORT.includes(effort as EffortLevel)) {
@@ -148,7 +142,7 @@ export function buildTicketsCommand(): Command {
     .command("populate")
     .description("Ask a builder to populate .tickets/tickets.yaml from existing project ticket/backlog docs.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
-    .option("-a, --agent <agent>", "builder agent (claude | codex)", "claude")
+    .option("-a, --agent <agent>", "builder agent (claude | codex)")
     .option("-m, --model <model>", "override the builder's model")
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--sources <paths...>", "source hint files, folders, or globs to check first")
@@ -156,11 +150,17 @@ export function buildTicketsCommand(): Command {
     .option("-y, --yes", "skip confirmation prompt before letting the builder edit tickets")
     .action(async (opts) => {
       const dir = cwd(opts);
-      const agent = opts.agent as string;
-      validateAgent(agent);
       validateEffort(opts.effort as string | undefined);
 
       if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
+      let agent: AgentRuntime;
+      try {
+        agent = resolveAgentForProject(dir, opts.agent as string | undefined);
+      } catch (err) {
+        fail(err instanceof Error ? err.message : String(err));
+      }
+      let model = opts.model as string | undefined;
+
       if (!isTicketsInitialized(dir)) {
         fail(`ticket tracker is not initialized in ${dir}; run \`foreman tickets init --project ${dir}\` first`);
       }
@@ -183,10 +183,16 @@ export function buildTicketsCommand(): Command {
       const logPath = makeLogPath(dir, "tickets-populate");
       const log = new Log(logPath);
       const policy = new PermissionPolicy(config.permissions, dir);
-      await ensureRuntimeReadyForCommand(dir, agent as AgentRuntime, "tickets populate");
+      const ready = await ensureRuntimeReadyForCommand(dir, agent, {
+        label: "tickets populate",
+        yes: Boolean(opts.yes),
+        model,
+      });
+      agent = ready.runtime;
+      model = ready.model;
       const adapterOpts = {
         cwd: dir,
-        model: opts.model as string | undefined,
+        model,
         permission: createPermissionHandler(policy, log),
         effort: opts.effort as EffortLevel | undefined,
         fast: opts.fast as boolean | undefined,

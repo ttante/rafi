@@ -4,7 +4,14 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildProjectConfig, defaultAnswers, normalizeProjectConfig, NO_UI, LOCAL_ONLY } from "../src/project.js";
+import {
+  buildProjectConfig,
+  defaultAnswers,
+  normalizeProjectConfig,
+  NO_UI,
+  LOCAL_ONLY,
+  runtimeSelectionToTargets,
+} from "../src/project.js";
 import { validateProjectConfig } from "rafi-spec";
 import { loadDefaults } from "special-agents";
 
@@ -74,6 +81,21 @@ test("appName and timezone pass through", () => {
 test("useClaude:false sets harness.targets to codex only", () => {
   const config = buildProjectConfig({ ...defaultAnswers(), useClaude: false });
   assert.deepEqual(config.harness.targets, ["codex"]);
+});
+
+test("runtimeTargets can select both, Claude only, or Codex only", () => {
+  assert.deepEqual(
+    buildProjectConfig({ ...defaultAnswers(), runtimeTargets: runtimeSelectionToTargets("both") }).harness.targets,
+    ["claude", "codex"],
+  );
+  assert.deepEqual(
+    buildProjectConfig({ ...defaultAnswers(), runtimeTargets: runtimeSelectionToTargets("claude") }).harness.targets,
+    ["claude"],
+  );
+  assert.deepEqual(
+    buildProjectConfig({ ...defaultAnswers(), runtimeTargets: runtimeSelectionToTargets("codex") }).harness.targets,
+    ["codex"],
+  );
 });
 
 test("--defaults keeps useClaude:true and harness.targets includes claude", () => {

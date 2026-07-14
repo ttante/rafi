@@ -5,6 +5,8 @@ import type { ProjectConfig, HarnessTarget, RuntimeArtifactConfig } from "rafi-s
 export const NO_UI = "No UI";
 export const LOCAL_ONLY = "Local only";
 export const DEFAULT_DOCS_ROOT = "docs";
+export const RUNTIME_SELECTIONS = ["both", "claude", "codex"] as const;
+export type RuntimeSelection = typeof RUNTIME_SELECTIONS[number];
 
 export interface WalkthroughAnswers {
   appName: string;
@@ -15,7 +17,9 @@ export interface WalkthroughAnswers {
   cloud: string;
   packageManager: string;
   usesAI: boolean;
-  useClaude: boolean;
+  runtimeTargets?: HarnessTarget[];
+  /** Legacy input accepted for compatibility with callers built before --runtime. */
+  useClaude?: boolean;
   qa: boolean;
   /** Repo-relative folder where Rafi project docs are written. */
   docsRoot?: string;
@@ -59,6 +63,42 @@ export function defaultSkillsConfig(): Record<string, RuntimeArtifactConfig> {
   return Object.fromEntries(RAFI_SKILL_NAMES.map((name) => [name, artifactPaths("skill", name)]));
 }
 
+export function runtimeSelectionToTargets(selection: RuntimeSelection): HarnessTarget[] {
+  if (selection === "claude") return ["claude"];
+  if (selection === "codex") return ["codex"];
+  return ["claude", "codex"];
+}
+
+export function runtimeTargetsToSelection(targets: readonly HarnessTarget[]): RuntimeSelection {
+  const normalized = normalizeHarnessTargets(targets);
+  if (normalized.length === 1) return normalized[0];
+  return "both";
+}
+
+export function parseRuntimeSelection(value: unknown): RuntimeSelection | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string" && (RUNTIME_SELECTIONS as readonly string[]).includes(value)) {
+    return value as RuntimeSelection;
+  }
+  throw new Error(`--runtime must be one of: ${RUNTIME_SELECTIONS.join(", ")}`);
+}
+
+export function normalizeHarnessTargets(targets: readonly HarnessTarget[] | undefined): HarnessTarget[] {
+  if (!targets || targets.length === 0) return ["claude", "codex"];
+  const out: HarnessTarget[] = [];
+  for (const target of targets) {
+    if ((target === "claude" || target === "codex") && !out.includes(target)) {
+      out.push(target);
+    }
+  }
+  return out.length > 0 ? out : ["claude", "codex"];
+}
+
+function targetsFromAnswers(answers: WalkthroughAnswers): HarnessTarget[] {
+  if (answers.runtimeTargets) return normalizeHarnessTargets(answers.runtimeTargets);
+  return answers.useClaude === false ? ["codex"] : ["claude", "codex"];
+}
+
 /** Default answers — equivalent to running with `--defaults`. */
 export function defaultAnswers(): WalkthroughAnswers {
   const d = loadDefaults();
@@ -80,7 +120,7 @@ export function defaultAnswers(): WalkthroughAnswers {
 export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
   const hasFrontend = answers.frontend !== NO_UI;
   const runsInCloud = answers.cloud !== LOCAL_ONLY;
-  const targets: HarnessTarget[] = answers.useClaude ? ["claude", "codex"] : ["codex"];
+  const targets = targetsFromAnswers(answers);
   return {
     appName: answers.appName,
     timezone: answers.timezone,

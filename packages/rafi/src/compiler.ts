@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { stringify } from "yaml";
 import {
@@ -11,12 +11,14 @@ import {
   renderClaudeMd,
   type Defaults,
 } from "special-agents";
-import type { AgentRole, ProjectConfig, ProjectFlags } from "rafi-spec";
+import type { AgentRole, HarnessTarget, ProjectConfig, ProjectFlags } from "rafi-spec";
 import { copyDocs, validateDocsRoot, type CopyDocsOptions } from "./docs.js";
 import { DEFAULT_DOCS_ROOT, RAFI_CONFIG_FILE } from "./project.js";
 
 const RAFI_APPEND_START = "<!-- rafi:start -->";
 const RAFI_APPEND_END = "<!-- rafi:end -->";
+const CLAUDE_APPEND_CHAR_LIMIT = 40_000;
+const CODEX_APPEND_BYTE_LIMIT = 32 * 1024;
 const ROOT_FILE_MODES = ["append", "update", "overwrite"] as const;
 export type AgentRuntime = "claude" | "codex";
 
@@ -84,43 +86,54 @@ export function compile(targetDir: string, config: ProjectConfig, opts: CompileP
   const docsRoot = validateDocsRoot(targetDir, config.docs?.root ?? DEFAULT_DOCS_ROOT);
   const defaults = { ...projectConfigToDefaults(config), docsRoot };
   const conditions = flagsToConditions(config.flags);
-  validateExistingArtifacts(targetDir, config);
-  const skillNames = configuredSkillNames(config);
-  const updateRuntime: AgentRuntime = config.harness.targets.includes("claude") ? "claude" : "codex";
+  const targets = runtimeTargets(config);
+  validateExistingArtifacts(targetDir, config, targets);
+  const skillNames = configuredSkillNames(config, targets);
   const rootFileMode = opts.rootFileMode ?? config.agent_files.mode;
 
-  // Flat Codex doc + lean Claude entrypoint
-  writeInstructionFile(targetDir, config.agent_files.codex, renderAgentsMd({ defaults }), rootFileMode, updateRuntime);
-  writeInstructionFile(targetDir, config.agent_files.claude, renderClaudeMd({ defaults }), rootFileMode, updateRuntime);
+  // Target-native root instruction files.
+  if (targets.includes("codex")) {
+    writeInstructionFile(targetDir, config.agent_files.codex, renderAgentsMd({ defaults }), rootFileMode, "codex");
+  }
+  if (targets.includes("claude")) {
+    const claudeRoot = targets.includes("codex")
+      ? renderClaudeMd({ defaults })
+      : renderStandaloneClaudeMd({ defaults });
+    writeInstructionFile(targetDir, config.agent_files.claude, claudeRoot, rootFileMode, "claude");
+  }
 
-  // Lean Claude subagent files (role-filtered)
+  // Target-native subagent and skill files (role-filtered).
   if (!opts.skipNativeArtifacts) {
     const rafiOwnedAgentRoles = rafiOwnedNames(config.agents) as AgentRole[];
     const rafiOwnedSkillNames = rafiOwnedNames(config.skills);
-    emitMappedClaudeAgents(targetDir, {
-      defaults,
-      conditions,
-      roles: rafiOwnedAgentRoles,
-      force: true,
-      paths: rafiOwnedPaths(config.agents, "claude"),
-    });
-    emitCodexAgents(targetDir, {
-      defaults,
-      conditions,
-      roles: rafiOwnedAgentRoles,
-      force: true,
-      paths: rafiOwnedPaths(config.agents, "codex"),
-    });
-    emitSkills(targetDir, {
-      names: rafiOwnedSkillNames,
-      force: true,
-      paths: rafiOwnedPaths(config.skills, "claude"),
-    });
-    emitSkills(targetDir, {
-      names: rafiOwnedSkillNames,
-      force: true,
-      paths: rafiOwnedPaths(config.skills, "codex"),
-    });
+    if (targets.includes("claude")) {
+      emitMappedClaudeAgents(targetDir, {
+        defaults,
+        conditions,
+        roles: rafiOwnedAgentRoles,
+        force: true,
+        paths: rafiOwnedPaths(config.agents, "claude"),
+      });
+      emitSkills(targetDir, {
+        names: rafiOwnedSkillNames,
+        force: true,
+        paths: rafiOwnedPaths(config.skills, "claude"),
+      });
+    }
+    if (targets.includes("codex")) {
+      emitCodexAgents(targetDir, {
+        defaults,
+        conditions,
+        roles: rafiOwnedAgentRoles,
+        force: true,
+        paths: rafiOwnedPaths(config.agents, "codex"),
+      });
+      emitSkills(targetDir, {
+        names: rafiOwnedSkillNames,
+        force: true,
+        paths: rafiOwnedPaths(config.skills, "codex"),
+      });
+    }
   }
 
   // Compiled role bundles for foreman (role-filtered)
@@ -143,6 +156,15 @@ export function writeRafiConfigYaml(targetDir: string, config: ProjectConfig): v
 
 export const writeProjectYaml = writeRafiConfigYaml;
 
+function renderStandaloneClaudeMd(opts: { defaults: Defaults }): string {
+  return renderAgentsMd(opts).replace(
+    "For Codex, copy this content into the repository root as `AGENTS.md`.\n" +
+    "For Claude Code, create a repository-root `CLAUDE.md` that imports the same rules:\n\n" +
+    "```md\n@AGENTS.md\n```\n\n",
+    "This `CLAUDE.md` contains the canonical project instruction source for Claude Code.\n\n",
+  );
+}
+
 function writeInstructionFile(
   targetDir: string,
   relPath: string,
@@ -157,23 +179,134 @@ function writeInstructionFile(
     return;
   }
   if (mode === "append") {
-    const existing = readFileSync(path, "utf8");
-    const block = rafiAppendBlock(generated);
-    const managedBlock = new RegExp(`${escapeRegExp(RAFI_APPEND_START)}[\\s\\S]*?${escapeRegExp(RAFI_APPEND_END)}\\n?`);
-    if (managedBlock.test(existing)) {
-      writeFileSync(path, existing.replace(managedBlock, block), "utf8");
-      return;
-    }
-    const separator = existing.endsWith("\n") ? "\n" : "\n\n";
-    writeFileSync(path, `${existing}${separator}${block}`, "utf8");
+    writeAppendInstructionFile(targetDir, relPath, generated, runtime);
     return;
   }
   updateInstructionFileWithAgent(targetDir, relPath, generated, runtime);
 }
 
+function writeAppendInstructionFile(
+  targetDir: string,
+  relPath: string,
+  generated: string,
+  runtime: AgentRuntime,
+): void {
+  const rootPath = join(targetDir, relPath);
+  const existing = readFileSync(rootPath, "utf8");
+  const inlineBlock = rafiAppendBlock(generated);
+  const inlineContent = replaceOrInsertManagedBlock(existing, inlineBlock, "end");
+  const sidecarRelPath = sidecarPathForRootInstruction(relPath);
+  const sidecarFileName = basename(sidecarRelPath);
+  const stickySidecar = managedBlockReferencesSidecar(existing, sidecarFileName);
+
+  if (!stickySidecar && !exceedsAppendLimit(runtime, inlineContent)) {
+    writeFileSync(rootPath, inlineContent, "utf8");
+    return;
+  }
+
+  const sidecarPath = join(targetDir, sidecarRelPath);
+  validateRafiSidecar(sidecarPath, sidecarRelPath);
+  mkdirSync(dirname(sidecarPath), { recursive: true });
+  writeFileSync(sidecarPath, generated, "utf8");
+  const referenceBlock = rafiAppendReferenceBlock(runtime, sidecarFileName);
+  const referenceContent = replaceOrInsertManagedBlock(existing, referenceBlock, "top");
+  writeFileSync(rootPath, referenceContent, "utf8");
+}
+
 function rafiAppendBlock(generated: string): string {
   const date = new Date().toISOString();
   return `${RAFI_APPEND_START}\nUpdated Content, generated by @rafi/cli on ${date}\n\n${generated.trimEnd()}\n${RAFI_APPEND_END}\n`;
+}
+
+function rafiAppendReferenceBlock(runtime: AgentRuntime, sidecarFileName: string): string {
+  const date = new Date().toISOString();
+  const reference = runtime === "claude"
+    ? [
+      `Rafi-generated guidance is in \`${sidecarFileName}\`. Claude Code should import it from:`,
+      "",
+      `@${sidecarFileName}`,
+    ].join("\n")
+    : [
+      `Rafi-generated guidance is in \`${sidecarFileName}\`. Read \`${sidecarFileName}\` before planning or editing in this repository.`,
+      "",
+      `@${sidecarFileName}`,
+    ].join("\n");
+  return `${RAFI_APPEND_START}\nUpdated Content, generated by @rafi/cli on ${date}\n\n${reference}\n${RAFI_APPEND_END}\n`;
+}
+
+export function sidecarPathForRootInstruction(relPath: string): string {
+  const match = /^(.*?)([^/\\]+)$/.exec(relPath);
+  if (!match) return `${relPath}-rafi`;
+  const [, dir, file] = match;
+  const dot = file.lastIndexOf(".");
+  if (dot > 0) {
+    return `${dir}${file.slice(0, dot)}-rafi${file.slice(dot)}`;
+  }
+  return `${dir}${file}-rafi`;
+}
+
+export function appendLimitForRuntime(runtime: AgentRuntime): number {
+  return runtime === "claude" ? CLAUDE_APPEND_CHAR_LIMIT : CODEX_APPEND_BYTE_LIMIT;
+}
+
+export function exceedsAppendLimit(runtime: AgentRuntime, content: string): boolean {
+  const size = runtime === "claude" ? content.length : Buffer.byteLength(content, "utf8");
+  return size > appendLimitForRuntime(runtime);
+}
+
+function replaceOrInsertManagedBlock(existing: string, block: string, placement: "end" | "top"): string {
+  const managedBlock = rafiManagedBlockRegExp();
+  if (managedBlock.test(existing)) {
+    if (placement === "top") {
+      return insertManagedBlockNearTop(existing.replace(managedBlock, ""), block);
+    }
+    return existing.replace(managedBlock, block);
+  }
+  if (placement === "top") {
+    return insertManagedBlockNearTop(existing, block);
+  }
+  const separator = existing.endsWith("\n") ? "\n" : "\n\n";
+  return `${existing}${separator}${block}`;
+}
+
+function insertManagedBlockNearTop(existing: string, block: string): string {
+  const insertionIndex = topManagedBlockInsertionIndex(existing);
+  const before = existing.slice(0, insertionIndex);
+  const after = existing.slice(insertionIndex);
+  const afterSeparator = after.length === 0 || after.startsWith("\n") || after.startsWith("\r\n") ? "" : "\n";
+  return `${before}${block}${afterSeparator}${after}`;
+}
+
+function topManagedBlockInsertionIndex(existing: string): number {
+  const bomLength = existing.startsWith("\uFEFF") ? 1 : 0;
+  const frontmatter = /^---[ \t]*(?:\r?\n)(?:[\s\S]*?(?:\r?\n))?(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/.exec(
+    existing.slice(bomLength),
+  );
+  if (frontmatter) return bomLength + frontmatter[0].length;
+  return bomLength;
+}
+
+function managedBlockReferencesSidecar(existing: string, sidecarFileName: string): boolean {
+  const block = existing.match(rafiManagedBlockRegExp())?.[0] ?? "";
+  return block.includes(`@${sidecarFileName}`) || block.includes(`\`${sidecarFileName}\``);
+}
+
+function validateRafiSidecar(sidecarPath: string, sidecarRelPath: string): void {
+  if (!existsSync(sidecarPath)) return;
+  const existing = readFileSync(sidecarPath, "utf8");
+  if (isRafiGeneratedSidecar(existing)) return;
+  throw new Error(
+    `Refusing to overwrite existing ${sidecarRelPath}. ` +
+    "Rafi append overflow sidecars must be missing or clearly Rafi-generated.",
+  );
+}
+
+export function isRafiGeneratedSidecar(content: string): boolean {
+  return content.startsWith("# rafi:");
+}
+
+function rafiManagedBlockRegExp(): RegExp {
+  return new RegExp(`${escapeRegExp(RAFI_APPEND_START)}[\\s\\S]*?${escapeRegExp(RAFI_APPEND_END)}\\n?`);
 }
 
 function escapeRegExp(value: string): string {
@@ -303,23 +436,48 @@ function indent(value: string): string {
   return value.split("\n").map((line) => `  ${line}`).join("\n");
 }
 
-function configuredSkillNames(config: ProjectConfig): Record<string, string> {
+function runtimeTargets(config: ProjectConfig): AgentRuntime[] {
+  const targets: AgentRuntime[] = [];
+  for (const target of config.harness.targets) {
+    if ((target === "claude" || target === "codex") && !targets.includes(target)) {
+      targets.push(target);
+    }
+  }
+  return targets.length > 0 ? targets : ["claude", "codex"];
+}
+
+function skillNameRuntime(targets: readonly AgentRuntime[]): HarnessTarget {
+  return targets.includes("claude") ? "claude" : "codex";
+}
+
+function configuredSkillNames(config: ProjectConfig, targets: readonly AgentRuntime[]): Record<string, string> {
+  const runtime = skillNameRuntime(targets);
   return Object.fromEntries(
-    Object.entries(config.skills).map(([generic, paths]) => [generic, skillNameFromPath(paths.claude || paths.codex, generic)]),
+    Object.entries(config.skills).map(([generic, paths]) => [generic, skillNameFromPath(paths[runtime], generic)]),
   );
 }
 
-function validateExistingArtifacts(targetDir: string, config: ProjectConfig): void {
+function validateExistingArtifacts(
+  targetDir: string,
+  config: ProjectConfig,
+  targets: readonly AgentRuntime[],
+): void {
   const missing: string[] = [];
   for (const [name, artifact] of Object.entries(config.agents)) {
     if (artifact.artifact_source !== "existing") continue;
-    if (!existsSync(join(targetDir, artifact.claude))) missing.push(`agents.${name}.claude: ${artifact.claude}`);
-    if (!existsSync(join(targetDir, artifact.codex))) missing.push(`agents.${name}.codex: ${artifact.codex}`);
+    for (const runtime of targets) {
+      if (!existsSync(join(targetDir, artifact[runtime]))) {
+        missing.push(`agents.${name}.${runtime}: ${artifact[runtime]}`);
+      }
+    }
   }
   for (const [name, artifact] of Object.entries(config.skills)) {
     if (artifact.artifact_source !== "existing") continue;
-    if (!existsSync(join(targetDir, artifact.claude))) missing.push(`skills.${name}.claude: ${artifact.claude}`);
-    if (!existsSync(join(targetDir, artifact.codex))) missing.push(`skills.${name}.codex: ${artifact.codex}`);
+    for (const runtime of targets) {
+      if (!existsSync(join(targetDir, artifact[runtime]))) {
+        missing.push(`skills.${name}.${runtime}: ${artifact[runtime]}`);
+      }
+    }
   }
   if (missing.length > 0) {
     throw new Error(

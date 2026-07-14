@@ -13,6 +13,7 @@ import { printEvents } from "./events.js";
 import { loadRoleBundle } from "../roles.js";
 import { ensureRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
 import type { AgentRuntime } from "../runtimeAuth.js";
+import { resolveAgentForProject } from "./runtimeSelection.js";
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "../tickets/config.js";
 import { loadTickets } from "../tickets/ticketLoader.js";
 import { StateDb } from "../tickets/stateDb.js";
@@ -112,7 +113,7 @@ export function buildStartCommand(): Command {
     .description("Enlist a builder and drive it through a batch of N steps.")
     .argument("<project>", "path to the project directory the builder works in")
     .requiredOption("-s, --steps <n>", "number of steps to drive")
-    .option("-a, --agent <agent>", "builder agent (claude | codex)", "claude")
+    .option("-a, --agent <agent>", "builder agent (claude | codex)")
     .option("-m, --model <model>", "override the builder's model")
     .option("-r, --resume <sessionId>", "resume a prior builder session")
     .option("--continue", "resume the most recent logged session for this project")
@@ -134,11 +135,6 @@ export function buildStartCommand(): Command {
       if (!Number.isInteger(steps) || steps < 1) {
         fail("--steps must be a positive integer");
       }
-      const VALID_AGENTS = ["claude", "codex"];
-      if (!VALID_AGENTS.includes(opts.agent)) {
-        fail(`unknown agent "${opts.agent}" — choose: ${VALID_AGENTS.join(" | ")}`);
-      }
-
       const VALID_EFFORT = ["low", "medium", "high", "xhigh"];
       if (opts.effort && !VALID_EFFORT.includes(opts.effort)) {
         fail(`unknown effort "${opts.effort}" — choose: ${VALID_EFFORT.join(" | ")}`);
@@ -146,6 +142,13 @@ export function buildStartCommand(): Command {
 
       const cwd = resolve(project);
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
+      let agent: AgentRuntime;
+      try {
+        agent = resolveAgentForProject(cwd, opts.agent as string | undefined);
+      } catch (err) {
+        fail(err instanceof Error ? err.message : String(err));
+      }
+      let model = opts.model as string | undefined;
 
       const configuredTrackerPath = isTicketsInitialized(cwd)
         ? loadTicketsConfig(cwd).paths.progressDoc
@@ -212,7 +215,6 @@ export function buildStartCommand(): Command {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const logPath = join(cwd, ".foreman", `${stamp}.jsonl`);
       const log = new Log(logPath);
-      const agent = opts.agent as AgentRuntime;
 
       const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
 
@@ -221,7 +223,7 @@ export function buildStartCommand(): Command {
         const roleBundle = loadRoleBundle("builder", { projectDir: builderCwd });
         const adapterOpts = {
           cwd: builderCwd,
-          model: opts.model as string | undefined,
+          model,
           resumeSessionId: sessionId,
           permission: createPermissionHandler(builderPolicy, log),
           effort: opts.effort as EffortLevel | undefined,
@@ -246,7 +248,14 @@ export function buildStartCommand(): Command {
           await ensureGitHubReadyForCreatePr(cwd, log, Boolean(opts.yes));
         }
 
-        await ensureRuntimeReadyForCommand(cwd, agent, "start");
+        const ready = await ensureRuntimeReadyForCommand(cwd, agent, {
+          label: "start",
+          yes: Boolean(opts.yes),
+          allowSwitch: !(opts.resume || opts.continue),
+          model,
+        });
+        agent = ready.runtime;
+        model = ready.model;
 
         const ticketPaths = resolveTicketPaths(ticketsConfig, cwd);
         const tickets = loadTickets(ticketPaths.tickets);
@@ -362,7 +371,7 @@ export function buildStartCommand(): Command {
           plan,
           log,
           agent,
-          model: opts.model as string | undefined,
+          model,
           effort: opts.effort as EffortLevel | undefined,
           fast: opts.fast as boolean | undefined,
           notificationsEnabled: config.notifications.enabled,
@@ -406,12 +415,19 @@ export function buildStartCommand(): Command {
         process.exit(failed ? 2 : 0);
       }
 
-      await ensureRuntimeReadyForCommand(cwd, agent, "start");
+      const ready = await ensureRuntimeReadyForCommand(cwd, agent, {
+        label: "start",
+        yes: Boolean(opts.yes),
+        allowSwitch: !(opts.resume || opts.continue),
+        model,
+      });
+      agent = ready.runtime;
+      model = ready.model;
       const builder = await createBuilder(cwd, resumeSessionId);
       const foreman = new Foreman(builder, log, config.notifications.enabled, qaEnabled, 3, cwd);
 
       const modifiers = [
-        opts.model ? `model=${opts.model}` : null,
+        model ? `model=${model}` : null,
         opts.effort ? `effort=${opts.effort}` : null,
         opts.fast ? "fast" : null,
         qaEnabled ? null : "qa=off",

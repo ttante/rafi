@@ -70,3 +70,44 @@ test("runtime readiness cancellation throws without checking later runtimes", as
 
   assert.deepEqual(checked, ["claude"]);
 });
+
+test("runtime readiness can switch to the other runtime after verification", async () => {
+  const checked: AgentRuntime[] = [];
+
+  const finalTargets = await ensureAgentRuntimesReady(
+    "/tmp/project",
+    ["claude", "codex"],
+    async (_err, otherRuntime) => {
+      assert.equal(otherRuntime, "codex");
+      return "switch";
+    },
+    (_targetDir, runtime) => {
+      checked.push(runtime);
+      if (runtime === "claude") {
+        throw new RuntimeReadinessError({ runtime, stderr: "not logged in" });
+      }
+    },
+  );
+
+  assert.deepEqual(checked, ["claude", "codex"]);
+  assert.deepEqual(finalTargets, ["codex"]);
+});
+
+test("runtime readiness throws when fallback runtime is not ready", async () => {
+  const checked: AgentRuntime[] = [];
+
+  await assert.rejects(
+    ensureAgentRuntimesReady(
+      "/tmp/project",
+      ["claude"],
+      async () => "switch",
+      (_targetDir, runtime) => {
+        checked.push(runtime);
+        throw new RuntimeReadinessError({ runtime, stderr: "not logged in" });
+      },
+    ),
+    /codex exec failed/,
+  );
+
+  assert.deepEqual(checked, ["claude", "codex"]);
+});

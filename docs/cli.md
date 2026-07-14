@@ -18,6 +18,14 @@ Commander help does not visually mark every `requiredOption`. Source-derived req
 - `rafi tickets accept-future-work <futureWorkId>` requires `--ticket-id <id>` and `--order <n>`.
 - `rafi tickets complete <ticketId>` requires `--evidence <text>` unless `--validation-result not_applicable` is used.
 
+Runtime behavior not fully expressible in Commander help:
+
+- `rafi create --runtime <both|claude|codex>` controls `harness.targets`. `--defaults` keeps both targets unless `--runtime` is supplied.
+- `rafi compile` emits native artifacts only for configured targets: Codex writes `AGENTS.md`, `.codex/agents/*`, and `.agents/skills/*`; Claude writes `CLAUDE.md`, `.claude/agents/*`, and `.claude/skills/*`. `.rafi/compiled/<role>/*` is always emitted. Files for unselected targets are preserved, not deleted.
+- In `agent_files.mode: append` or `--root-file-mode append`, Rafi appends generated guidance inline unless that would exceed the target runtime's root-file startup guard. Overflow writes generated guidance to a target-specific sidecar (`AGENTS-rafi.md` or `CLAUDE-rafi.md`) and inserts a compact managed reference block near the top of the root file. Claude `@file` imports still load into Claude's context; this keeps root files short, but it is not a Claude context-reduction mechanism.
+- `rafi start`, `ai-foreman start`, and `tickets populate` use a single `harness.targets` value from `rafi-config.yaml` when `--agent` is omitted. Missing config or both targets default to Claude.
+- Interactive runtime auth/readiness failures offer retry, verified switch to the other runtime, or cancel. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because session IDs are runtime-specific.
+
 ## `rafi`
 
 ### `rafi --help`
@@ -62,6 +70,8 @@ Options:
   --force                  overwrite existing doc files
   --docs-root <dir>        repo-relative directory for Rafi starter and tracker
                            docs
+  --runtime <runtime>      agent runtime targets to configure (both | claude |
+                           codex)
   --root-file-mode <mode>  override root instruction file handling (append |
                            overwrite | update)
   -h, --help               display help for command
@@ -140,7 +150,7 @@ ticket/backlog docs.
 
 Options:
   -p, --project <dir>   project directory (default: cwd)
-  -a, --agent <agent>   builder agent (claude | codex) (default: "claude")
+  -a, --agent <agent>   builder agent (claude | codex)
   -m, --model <model>   override the builder's model
   --effort <level>      reasoning effort level (low|medium|high|xhigh)
   --sources <paths...>  source hint files, folders, or globs to check first
@@ -363,7 +373,7 @@ Arguments:
 
 Options:
   -s, --steps <n>           number of steps to drive
-  -a, --agent <agent>       builder agent (claude | codex) (default: "claude")
+  -a, --agent <agent>       builder agent (claude | codex)
   -m, --model <model>       override the builder's model
   -r, --resume <sessionId>  resume a prior builder session
   --continue                resume the most recent logged session for this
@@ -488,7 +498,7 @@ Arguments:
 
 Options:
   -s, --steps <n>           number of steps to drive
-  -a, --agent <agent>       builder agent (claude | codex) (default: "claude")
+  -a, --agent <agent>       builder agent (claude | codex)
   -m, --model <model>       override the builder's model
   -r, --resume <sessionId>  resume a prior builder session
   --continue                resume the most recent logged session for this

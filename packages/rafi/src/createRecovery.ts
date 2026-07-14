@@ -2,10 +2,11 @@ import type { ProjectConfig } from "rafi-spec";
 import {
   compile,
   RuntimeUpdateError,
+  type AgentRuntime,
   type CompileProjectOptions,
 } from "./compiler.js";
 
-export type RootUpdateRecoveryChoice = "retry" | "append" | "overwrite";
+export type RootUpdateRecoveryChoice = "retry" | "append" | "overwrite" | "switch";
 
 export async function compileWithRootUpdateRecovery(
   targetDir: string,
@@ -25,6 +26,14 @@ export async function compileWithRootUpdateRecovery(
       const choice = await choose(err);
       if (choice === "retry") {
         runConfig = config;
+      } else if (choice === "switch") {
+        runConfig = {
+          ...config,
+          harness: {
+            ...config.harness,
+            targets: [otherRuntime(err.runtime)],
+          },
+        };
       } else {
         runConfig = {
           ...config,
@@ -36,4 +45,8 @@ export async function compileWithRootUpdateRecovery(
       }
     }
   }
+}
+
+function otherRuntime(runtime: AgentRuntime): AgentRuntime {
+  return runtime === "claude" ? "codex" : "claude";
 }
