@@ -38,7 +38,7 @@ Run `rafi` from inside the target repo:
 
 - Answer 9 questions about your stack (or skip with `--defaults`)
 - Get `AGENTS.md`, `CLAUDE.md`, subagents, and starter docs written to your repo
-- If you say yes to Claude Code, the Claude Agent SDK is installed automatically
+- If you say yes to Claude Code, the Claude Agent SDK is installed automatically with your selected package manager (`npm`, `pnpm`, Yarn Classic/modern, or Bun)
 - Selected agent runtimes are checked before `create`, `start`, and `tickets populate` continue, with repair prompts if auth is missing
 - Re-run `rafi compile` whenever you update `rafi-config.yaml`
 
@@ -193,7 +193,7 @@ Current package versions:
 
 | Package | Version |
 |---|---|
-| `@rafi-ai/cli` | `0.4.0` |
+| `@rafi-ai/cli` | `0.4.1` |
 | `ai-foreman` | `1.1.0` |
 | `special-agents` | `0.4.0` |
 | `rafi-spec` | `0.4.0` |

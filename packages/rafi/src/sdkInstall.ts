@@ -8,16 +8,27 @@ export interface InstallCommand {
   command: string;
   args: string[];
   display: string;
+  fallbackFrom?: string;
+}
+
+type KnownPackageManager = "npm" | "pnpm" | "yarn" | "bun";
+
+export interface BuildClaudeAgentSdkInstallCommandOptions {
+  resolvePackageManagerVersion?: (
+    packageManager: KnownPackageManager,
+    targetDir: string,
+  ) => string | undefined;
 }
 
 export function buildClaudeAgentSdkInstallCommand(
   targetDir: string,
   packageManager: string,
+  options: BuildClaudeAgentSdkInstallCommandOptions = {},
 ): InstallCommand {
-  const manager = normalizePackageManager(packageManager);
+  const manager = resolvePackageManager(targetDir, packageManager, options);
   const isWorkspaceRoot = hasWorkspaceConfig(targetDir);
 
-  switch (manager) {
+  switch (manager.name) {
     case "pnpm":
       return command("pnpm", [
         "add",
@@ -27,20 +38,23 @@ export function buildClaudeAgentSdkInstallCommand(
     case "yarn":
       return command("yarn", [
         "add",
-        ...(isWorkspaceRoot ? ["-W"] : []),
+        ...(isWorkspaceRoot && isYarnClassic(manager.version) ? ["-W"] : []),
         CLAUDE_AGENT_SDK_PACKAGE,
       ]);
     case "bun":
       return command("bun", ["add", CLAUDE_AGENT_SDK_PACKAGE]);
     case "npm":
     default:
-      return command("npm", ["install", CLAUDE_AGENT_SDK_PACKAGE]);
+      return command("npm", ["install", CLAUDE_AGENT_SDK_PACKAGE], manager.fallbackFrom);
   }
 }
 
 export function installClaudeAgentSdk(targetDir: string, packageManager: string): void {
   const install = buildClaudeAgentSdkInstallCommand(targetDir, packageManager);
-  console.log(`rafi: installing Claude Agent SDK with \`${install.display}\`...`);
+  const fallback = install.fallbackFrom
+    ? ` (unknown package manager \`${install.fallbackFrom}\`; falling back to npm)`
+    : "";
+  console.log(`rafi: installing Claude Agent SDK with \`${install.display}\`${fallback}...`);
   try {
     execFileSync(install.command, install.args, { cwd: targetDir, stdio: "inherit" });
   } catch (err) {
@@ -51,21 +65,89 @@ export function installClaudeAgentSdk(targetDir: string, packageManager: string)
   }
 }
 
-function command(command: string, args: string[]): InstallCommand {
+function command(command: string, args: string[], fallbackFrom?: string): InstallCommand {
   return {
     command,
     args,
     display: [command, ...args].join(" "),
+    fallbackFrom,
   };
 }
 
-function normalizePackageManager(packageManager: string): "npm" | "pnpm" | "yarn" | "bun" {
+function resolvePackageManager(
+  targetDir: string,
+  packageManager: string,
+  options: BuildClaudeAgentSdkInstallCommandOptions,
+): { name: KnownPackageManager; version?: string; fallbackFrom?: string } {
+  const selected = parsePackageManager(packageManager);
+  if (!selected.name) {
+    return { name: "npm", fallbackFrom: packageManager.trim() || "unknown" };
+  }
+
+  if (selected.name !== "yarn" || selected.version) {
+    return { name: selected.name, version: selected.version };
+  }
+
+  const targetPackageManager = parsePackageManager(readTargetPackageManager(targetDir) ?? "");
+  if (targetPackageManager.name === "yarn" && targetPackageManager.version) {
+    return { name: "yarn", version: targetPackageManager.version };
+  }
+
+  const resolvePackageManagerVersion =
+    options.resolvePackageManagerVersion ?? defaultResolvePackageManagerVersion;
+  return {
+    name: "yarn",
+    version: resolvePackageManagerVersion("yarn", targetDir),
+  };
+}
+
+function parsePackageManager(
+  packageManager: string,
+): { name?: KnownPackageManager; version?: string } {
   const value = packageManager.trim().toLowerCase();
-  if (value.startsWith("pnpm")) return "pnpm";
-  if (value.startsWith("yarn")) return "yarn";
-  if (value.startsWith("bun")) return "bun";
-  if (value.startsWith("npm")) return "npm";
-  return "npm";
+  if (!value) return {};
+
+  for (const name of ["npm", "pnpm", "yarn", "bun"] satisfies KnownPackageManager[]) {
+    if (value === name) return { name };
+    if (value.startsWith(`${name}@`)) {
+      const version = value.slice(name.length + 1).trim();
+      return { name, version: version || undefined };
+    }
+  }
+
+  return {};
+}
+
+function defaultResolvePackageManagerVersion(
+  packageManager: KnownPackageManager,
+  targetDir: string,
+): string | undefined {
+  try {
+    return execFileSync(packageManager, ["--version"], {
+      cwd: targetDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function readTargetPackageManager(targetDir: string): string | undefined {
+  const pkgPath = join(targetDir, "package.json");
+  if (!existsSync(pkgPath)) return undefined;
+
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { packageManager?: unknown };
+    return typeof pkg.packageManager === "string" ? pkg.packageManager : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isYarnClassic(version: string | undefined): boolean {
+  const major = version?.trim().match(/^v?(\d+)/)?.[1];
+  return major === "1";
 }
 
 function hasWorkspaceConfig(targetDir: string): boolean {

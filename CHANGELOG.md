@@ -6,6 +6,24 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+## @rafi-ai/cli 0.4.1 - 2026-07-14
+
+### Fixed
+
+- Fixed `rafi create` Claude Agent SDK installation for Yarn modern/Berry workspace roots by omitting Yarn Classic's `-W` flag on Yarn 2+ while preserving the Yarn 1 workspace-root install command.
+- Kept Claude Agent SDK install command generation aligned with the selected package manager for npm, pnpm, Yarn Classic, Yarn modern/Berry, and Bun, including versioned package manager strings such as `yarn@4.5.0` and `pnpm@10.2.1`.
+
+### Changed
+
+- Unknown package manager answers still fall back to npm, but the install message now says the fallback is happening.
+
+### Packages
+
+- Bumped `@rafi-ai/cli` to `0.4.1`.
+- Kept `ai-foreman` at `1.1.0`.
+- Kept `special-agents` at `0.4.0`.
+- Kept `rafi-spec` at `0.4.0`.
+
 ## @rafi-ai/cli 0.4.0 / ai-foreman 1.1.0 / special-agents 0.4.0 / rafi-spec 0.4.0 - 2026-07-12
 
 ### Added
