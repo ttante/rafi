@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { loadSkill } from "special-agents";
 import { AsyncQueue } from "../util/asyncQueue.js";
 import type {
   BuilderAdapter,
@@ -69,7 +72,7 @@ export function parseCodexLine(raw: Record<string, unknown>): CodexLineResult {
  * subsequent turns.
  *
  * NOTE: opts.permission is accepted for interface conformance but is not
- * invoked. Codex manages its own tool sandboxing via --sandbox workspace-write.
+ * invoked. Codex manages its own tool sandboxing via --sandbox.
  */
 export class CodexAdapter implements BuilderAdapter {
   readonly agent = "codex" as const;
@@ -89,14 +92,23 @@ export class CodexAdapter implements BuilderAdapter {
    * role guidance must ride along with each turn.
    */
   buildInstruction(instruction: string): string {
-    return this.opts.systemPromptAppend
-      ? `${this.opts.systemPromptAppend}\n\n${instruction}`
-      : instruction;
+    return [
+      this.opts.systemPromptAppend,
+      this.buildSkillsAppendix(),
+      instruction,
+    ].filter((part): part is string => Boolean(part)).join("\n\n");
   }
 
   /** Build the `codex exec` argument list for the given instruction. */
   buildArgs(instruction: string): string[] {
-    const args: string[] = ["exec", "--json", "--sandbox", "workspace-write", "-C", this.opts.cwd];
+    const args: string[] = [
+      "exec",
+      "--json",
+      "--sandbox",
+      this.opts.sandboxMode ?? "workspace-write",
+      "-C",
+      this.opts.cwd,
+    ];
 
     if (this.opts.model) args.push("-m", this.opts.model);
 
@@ -112,6 +124,19 @@ export class CodexAdapter implements BuilderAdapter {
 
     args.push(instruction);
     return args;
+  }
+
+  private buildSkillsAppendix(): string | undefined {
+    if (!this.opts.skills || this.opts.skills.length === 0) return undefined;
+    const blocks = this.opts.skills
+      .map((skill) => loadSkillMarkdown(this.opts.cwd, skill))
+      .filter((block): block is string => Boolean(block));
+    if (blocks.length === 0) return undefined;
+    return [
+      "# Preloaded Skills",
+      "Use the following skills for this run.",
+      ...blocks,
+    ].join("\n\n");
   }
 
   sendTurn(instruction: string): Promise<TurnResult> {
@@ -189,5 +214,20 @@ export class CodexAdapter implements BuilderAdapter {
     this._activeProc?.kill("SIGTERM");
     this.eventQueue.close();
     return Promise.resolve();
+  }
+}
+
+function loadSkillMarkdown(cwd: string, skill: string): string | undefined {
+  const projectPath = join(cwd, ".agents", "skills", skill, "SKILL.md");
+  if (existsSync(projectPath)) {
+    return `## ${skill}\n${readFileSync(projectPath, "utf8").trim()}`;
+  }
+
+  try {
+    const bundled = loadSkill(skill);
+    const body = bundled.body?.trim();
+    return body ? `## ${bundled.name}\n${body}` : undefined;
+  } catch {
+    return undefined;
   }
 }

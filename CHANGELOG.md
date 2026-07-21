@@ -6,6 +6,16 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+### Added
+
+- Added `rafi plan [project]` to run a read-only planning agent from a brief plus repo inspection, using the `planner` role with the `grill-me` skill and writing managed plan history under `<docs.root>/rafi-plans/`.
+
+### Changed
+
+- `rafi plan` refreshes `<docs.root>/rafi-plan.md` as the latest plan for ticket population.
+- `tickets populate` now prefers `<docs.root>/rafi-plan.md` when no `--sources` are provided and runs with the `ticket-maker` role bundle.
+- Codex role runs now flatten requested skill content into the prompt, and planning runs use Codex's read-only sandbox.
+
 ## @rafi-ai/cli 0.5.0 / ai-foreman 1.2.0 - 2026-07-14
 
 ### Added

@@ -23,8 +23,9 @@ Runtime behavior not fully expressible in Commander help:
 - `rafi create --runtime <both|claude|codex>` controls `harness.targets`. `--defaults` keeps both targets unless `--runtime` is supplied.
 - `rafi compile` emits native artifacts only for configured targets: Codex writes `AGENTS.md`, `.codex/agents/*`, and `.agents/skills/*`; Claude writes `CLAUDE.md`, `.claude/agents/*`, and `.claude/skills/*`. `.rafi/compiled/<role>/*` is always emitted. Files for unselected targets are preserved, not deleted.
 - In `agent_files.mode: append` or `--root-file-mode append`, Rafi appends generated guidance inline unless that would exceed the target runtime's root-file startup guard. Overflow writes generated guidance to a target-specific sidecar (`AGENTS-rafi.md` or `CLAUDE-rafi.md`) and inserts a compact managed reference block near the top of the root file. Claude `@file` imports still load into Claude's context; this keeps root files short, but it is not a Claude context-reduction mechanism.
-- `rafi start`, `ai-foreman start`, and `tickets populate` use a single `harness.targets` value from `rafi-config.yaml` when `--agent` is omitted. Missing config or both targets default to Claude.
+- `rafi plan`, `rafi start`, `ai-foreman start`, and `tickets populate` use a single `harness.targets` value from `rafi-config.yaml` when `--agent` is omitted. Missing config or both targets default to Claude.
 - Interactive runtime auth/readiness failures offer retry, verified switch to the other runtime, or cancel. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because session IDs are runtime-specific.
+- `rafi plan` writes versioned history to `<docs.root>/rafi-plans/<timestamp>.md` and refreshes `<docs.root>/rafi-plan.md`.
 
 ## `rafi`
 
@@ -44,6 +45,8 @@ Commands:
                                bundles from an existing rafi-config.yaml.
   create [options] <project>   Run the walkthrough, write rafi-config.yaml, and
                                compile the target repo.
+  plan [options] [project]     Create a ticket-maker-ready implementation plan
+                               from a brief and repo inspection.
   tickets                      Manage the structured ticket tracker for a
                                project.
   start [options] <project>    Enlist a builder and drive it through a batch of
@@ -95,6 +98,30 @@ Options:
   -h, --help               display help for command
 ```
 
+### `rafi plan --help`
+
+```text
+Usage: rafi plan [options] [project]
+
+Create a ticket-maker-ready implementation plan from a brief and repo
+inspection.
+
+Arguments:
+  project               path to the target repo (default: ".")
+
+Options:
+  --brief <text>        planning brief
+  --brief-file <path>   file containing the planning brief
+  --sources <paths...>  source hint files, folders, or globs to check first
+  -a, --agent <agent>   planning agent (claude | codex)
+  -m, --model <model>   override the planning agent's model
+  --effort <level>      reasoning effort level (low|medium|high|xhigh)
+  --fast                fast mode - lower latency
+  -y, --yes             skip confirmation prompt before running the planning
+                        agent
+  -h, --help            display help for command
+```
+
 ### `rafi tickets --help`
 
 ```text
@@ -107,7 +134,7 @@ Options:
 
 Commands:
   init [options]                               Initialize .tickets/ structure in a project directory.
-  populate [options]                           Ask a builder to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
+  populate [options]                           Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
   update [options] <ticketId>                  Update ticket status or progress fields.
   complete [options] <ticketId>                Mark a ticket done with validation evidence.
   block [options] <ticketId>                   Mark a ticket as blocked.
@@ -145,8 +172,8 @@ Options:
 ```text
 Usage: rafi tickets populate [options]
 
-Ask a builder to populate .tickets/tickets.yaml from existing project
-ticket/backlog docs.
+Ask the ticket-maker role to populate .tickets/tickets.yaml from existing
+project ticket/backlog docs.
 
 Options:
   -p, --project <dir>   project directory (default: cwd)
@@ -469,7 +496,7 @@ Options:
 
 Commands:
   init [options]                               Initialize .tickets/ structure in a project directory.
-  populate [options]                           Ask a builder to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
+  populate [options]                           Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
   update [options] <ticketId>                  Update ticket status or progress fields.
   complete [options] <ticketId>                Mark a ticket done with validation evidence.
   block [options] <ticketId>                   Mark a ticket as blocked.

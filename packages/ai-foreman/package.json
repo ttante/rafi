@@ -17,6 +17,10 @@
     "ai-foreman": "dist/index.js"
   },
   "exports": {
+    "./agent-run.js": {
+      "types": "./dist/agentRun.d.ts",
+      "default": "./dist/agentRun.js"
+    },
     "./cli/tickets.js": {
       "types": "./dist/cli/tickets.d.ts",
       "default": "./dist/cli/tickets.js"

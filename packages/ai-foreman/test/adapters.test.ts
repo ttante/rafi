@@ -63,6 +63,15 @@ test("CodexAdapter.buildInstruction prepends systemPromptAppend to the turn text
   assert.ok(result.includes("Do the thing."), "original instruction must be present");
 });
 
+test("CodexAdapter.buildInstruction flattens requested bundled skills", () => {
+  const adapter = new CodexAdapter({ ...BASE_OPTS, skills: ["grill-me"] });
+  const result = adapter.buildInstruction("Plan the work.");
+  assert.match(result, /# Preloaded Skills/);
+  assert.match(result, /## grill-me/);
+  assert.match(result, /Interview me relentlessly/);
+  assert.ok(result.endsWith("Plan the work."), "original instruction must remain last");
+});
+
 test("CodexAdapter.buildInstruction returns instruction unchanged when no systemPromptAppend", () => {
   const adapter = new CodexAdapter(BASE_OPTS);
   assert.equal(adapter.buildInstruction("Do the thing."), "Do the thing.");

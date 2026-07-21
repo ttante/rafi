@@ -5,6 +5,7 @@ A lightweight + powerful harness engineering framework. Your best bet for everyt
 ## Features
 - Composes best-practice rules into skills into agents (builder, QA, planner, ticket-maker)
 - In-stack rules for AI | frontend | cloud | backend
+- Turns a user brief plus repo inspection into a ticket-maker-ready plan with `rafi plan`
 - `ai-foreman` (robust ticketing/tracking solution):
 - Sets up + populates tickets via specialized-agent
 - Drives agents through tickets with built-in QA cycling per step
@@ -40,7 +41,7 @@ Run `rafi` from inside the target repo:
 - Choose runtime targets: both Claude and Codex, Claude only, or Codex only
 - Get target-specific agent files, role bundles, and starter docs written to your repo
 - If the final target set includes Claude Code, the Claude Agent SDK is installed automatically with your selected package manager (`npm`, `pnpm`, Yarn Classic/modern, or Bun)
-- Selected agent runtimes are checked before `create`, `start`, and `tickets populate` continue, with retry/switch/cancel recovery prompts if auth is missing
+- Selected agent runtimes are checked before `create`, `plan`, `start`, and `tickets populate` continue, with retry/switch/cancel recovery prompts if auth is missing
 - Re-run `rafi compile` whenever you update `rafi-config.yaml`
 
 ```sh
@@ -50,6 +51,7 @@ rafi create . --defaults  # skip walkthrough, use built-in defaults
 rafi create . --runtime codex  # Codex-only native artifacts
 rafi create . --docs-root docs-rafi  # choose where Rafi writes starter/tracker docs
 rafi compile .            # re-render after editing rafi-config.yaml
+rafi plan . --brief "Add account settings"  # create a ticket-maker-ready plan
 ```
 
 ## What gets written
@@ -67,6 +69,8 @@ my-repo/
   .agents/skills/<name>/SKILL.md   Codex project skills, when Codex is targeted
   .rafi/compiled/<role>/           role bundles always emitted for ai-foreman
   docs/                            starter docs (or docs-rafi/ when docs/ already exists)
+  docs/rafi-plan.md                latest managed plan from rafi plan
+  docs/rafi-plans/<timestamp>.md   preserved plan history
 ```
 
 `harness.targets` in `rafi-config.yaml` controls which native files are refreshed. Files for unselected targets are preserved, not deleted.
@@ -115,21 +119,17 @@ If a target repo already has a `docs/` path, `rafi create` keeps those app docs 
   mkdir my-repo && cd my-repo
   rafi create .
   ```
-- Use Claude or Codex to run the `planner` subagent and make a thorough, refined plan for what you are building
+- Ask Rafi to run the `planner` role with `grill-me` and write a ticket-maker-ready plan
   ```sh
-  # Claude Code
-  claude -p "Use the planner subagent. I am building a team knowledge base for support engineers. Ask me clarifying questions first, then draft a thorough PRD, architecture notes, and implementation plan in docs/."
-
-  # Codex
-  codex exec "Use the planner subagent. I am building a team knowledge base for support engineers. Ask me clarifying questions first, then draft a thorough PRD, architecture notes, and implementation plan in docs/."
+  rafi plan . --brief "I am building a team knowledge base for support engineers."
   ```
 - Use the ticket-maker agent to convert the plan into a structured, ordered ticket queue
   ```sh
   rafi tickets init --app-name "My App"
-  rafi tickets populate
+  rafi tickets populate --sources docs/rafi-plan.md
   ```
 - `rafi tickets init` reads `docs.root` from `rafi-config.yaml`; pass `--docs-root <dir>` to override it for standalone ticket setup.
-- `rafi tickets populate` scans relevant planning docs automatically; pass `--sources docs/tickets.md docs/plans/**` when you want the agent to check specific files, folders, or globs first.
+- `rafi tickets populate` prefers `docs/rafi-plan.md` when it exists, and otherwise scans relevant planning docs automatically; pass `--sources docs/tickets.md docs/plans/**` when you want the agent to check specific files, folders, or globs first.
 - Run the builder to implement tickets one by one, with QA after each step
   ```sh
   rafi start . --steps 10
@@ -147,9 +147,10 @@ If a target repo already has a `docs/` path, `rafi create` keeps those app docs 
   # edit rafi-config.yaml, then:
   rafi compile .
   ```
-- Import your existing backlog — populate from planning docs, ticket files, folders of notes, or markdown roadmaps. Any reasonable format is OK because an agent interprets the sources.
+- Turn a brief plus your current repo into a managed plan, or import your existing backlog from planning docs, ticket files, folders of notes, or markdown roadmaps. Any reasonable format is OK because an agent interprets the sources.
   ```sh
   rafi tickets init --app-name "My App"
+  rafi plan . --brief "Plan the next customer billing milestone" --sources docs/roadmap.md
   rafi tickets populate
   # or: rafi tickets populate --sources docs/tickets.md docs/plans/**
   ```
@@ -186,7 +187,7 @@ rafi start ./my-repo --steps 5
 
 | Package | Install | Description |
 |---|---|---|
-| `@rafi-ai/cli` | `npm install -g @rafi-ai/cli` | All commands — scaffold, compile, tickets, start, status, doctor |
+| `@rafi-ai/cli` | `npm install -g @rafi-ai/cli` | All commands — scaffold, compile, plan, tickets, start, status, doctor |
 | `special-agents` | `npm install special-agents` | Rules, skills, and agent library |
 | `ai-foreman` | `npm install -g ai-foreman` | Ticket-loop runtime (standalone alternative) |
 | `rafi-spec` | dependency package | Shared schemas and TypeScript types used by the public packages |
@@ -265,6 +266,29 @@ Re-renders the native artifacts selected by `harness.targets` and always refresh
 | `--force` | Overwrite existing doc files. |
 | `--root-file-mode <mode>` | Override root instruction file handling for this run. Valid modes: `append`, `update`, `overwrite`. |
 
+### Planning Commands
+
+#### `rafi plan [project]`
+
+Runs a read-only planning agent from a user brief, loads the `planner` role plus `grill-me`, and writes a ticket-maker-ready Markdown plan.
+
+| Option | Description |
+|---|---|
+| `--brief <text>` | Planning brief. |
+| `--brief-file <path>` | File containing the planning brief. Use either this or `--brief`. |
+| `--sources <paths...>` | Source hint files, folders, or globs to check first. |
+| `-a, --agent <agent>` | Planning agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
+| `-m, --model <model>` | Override the planning agent's model. |
+| `--effort <level>` | Reasoning effort level. Valid values: `low`, `medium`, `high`, `xhigh`. |
+| `--fast` | Fast mode with lower latency. |
+| `-y, --yes` | Skip the confirmation prompt before running the planning agent. |
+
+`rafi plan` writes every run to `<docs.root>/rafi-plans/<timestamp>.md` and refreshes `<docs.root>/rafi-plan.md`. The next step is usually:
+
+```sh
+rafi tickets populate --sources docs/rafi-plan.md
+```
+
 ### Ticket Commands
 
 Use `rafi tickets --help` for the ticket command list. The same ticket commands are available in standalone runtime form as `ai-foreman tickets ...`.
@@ -283,7 +307,7 @@ Initializes the `.tickets/` structure in a project directory.
 
 #### `rafi tickets populate`
 
-Asks a builder to populate `.tickets/tickets.yaml` from existing project ticket or backlog docs.
+Asks the `ticket-maker` role to populate `.tickets/tickets.yaml` from existing project ticket or backlog docs.
 
 | Option | Description |
 |---|---|
@@ -291,7 +315,7 @@ Asks a builder to populate `.tickets/tickets.yaml` from existing project ticket 
 | `-a, --agent <agent>` | Builder agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `-m, --model <model>` | Override the builder's model. |
 | `--effort <level>` | Reasoning effort level. Valid values: `low`, `medium`, `high`, `xhigh`. |
-| `--sources <paths...>` | Source hint files, folders, or globs to check first. |
+| `--sources <paths...>` | Source hint files, folders, or globs to check first. When omitted, `tickets populate` prefers `<docs.root>/rafi-plan.md` if it exists. |
 | `--fast` | Fast mode with lower latency. |
 | `-y, --yes` | Skip the confirmation prompt before letting the builder edit tickets. |
 

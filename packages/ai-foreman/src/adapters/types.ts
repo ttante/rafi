@@ -51,6 +51,8 @@ export interface BuilderAdapterOptions {
   effort?: EffortLevel;
   /** Fast mode: lower latency at the cost of some quality. */
   fast?: boolean;
+  /** Codex sandbox mode. Defaults to workspace-write for implementation runs. */
+  sandboxMode?: "workspace-write" | "read-only";
   /** Role system text to append to the harness system prompt (from .rafi/compiled or library). */
   systemPromptAppend?: string;
   /** Skill names to preload for this session (Claude: lazy-loaded; Codex: flattened). */

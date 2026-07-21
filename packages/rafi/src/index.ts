@@ -38,6 +38,7 @@ import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { buildStatusCommand } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
 import { installClaudeAgentSdk } from "./sdkInstall.js";
+import { buildPlanCommand } from "./plan.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -588,6 +589,7 @@ function sameTargets(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+program.addCommand(buildPlanCommand());
 program.addCommand(buildTicketsCommand());
 program.addCommand(buildStartCommand());
 program.addCommand(buildStatusCommand());

@@ -44,6 +44,14 @@ test("buildArgs: baseline includes required flags and instruction", () => {
   assert.ok(!args.includes("resume"), "should not include resume on first turn");
 });
 
+test("buildArgs: read-only sandbox override", () => {
+  const args = adapter({ sandboxMode: "read-only" }).buildArgs("inspect only");
+  const idx = args.indexOf("--sandbox");
+  assert.ok(idx !== -1, "missing --sandbox");
+  assert.equal(args[idx + 1], "read-only");
+  assert.ok(!args.includes("workspace-write"), "workspace-write should not be used");
+});
+
 test("buildArgs: model flag", () => {
   const args = adapter({ model: "gpt-5.4" }).buildArgs("x");
   const idx = args.indexOf("-m");

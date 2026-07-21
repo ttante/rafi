@@ -1,14 +1,11 @@
 import { Command } from "commander";
 import { existsSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { select, isCancel } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
-import { PermissionPolicy } from "../permissions/policy.js";
-import { ClaudeAdapter } from "../adapters/claude.js";
-import { CodexAdapter } from "../adapters/codex.js";
-import { Foreman, createPermissionHandler } from "../foreman.js";
-import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
+import { Foreman } from "../foreman.js";
+import type { EffortLevel } from "../adapters/types.js";
 import { printEvents } from "./events.js";
 import {
   cmdInit,
@@ -28,9 +25,13 @@ import {
 import { isTicketsInitialized, loadTicketsConfig } from "../tickets/config.js";
 import { importFromMarkdown } from "../tickets/importer.js";
 import { formatValidationIssues } from "../tickets/validate.js";
-import { ensureRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
-import type { AgentRuntime } from "../runtimeAuth.js";
-import { resolveAgentForProject } from "./runtimeSelection.js";
+import {
+  assertEffortLevel,
+  createRoleBuilder,
+  makeLogPath,
+  type RoleBuilderOptions,
+} from "../agentRun.js";
+import type { TicketsConfig } from "../tickets/config.js";
 
 function fail(msg: string): never {
   console.error(`foreman tickets: ${msg}`);
@@ -41,17 +42,18 @@ function cwd(opts: { project?: string }): string {
   return resolve(opts.project ?? ".");
 }
 
-const VALID_EFFORT = ["low", "medium", "high", "xhigh"] as const;
-
-function validateEffort(effort: string | undefined): asserts effort is EffortLevel | undefined {
-  if (effort && !VALID_EFFORT.includes(effort as EffortLevel)) {
-    fail(`unknown effort "${effort}" — choose: ${VALID_EFFORT.join(" | ")}`);
-  }
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
-function makeLogPath(projectDir: string, label: string): string {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return join(projectDir, ".foreman", `${stamp}-${label}.jsonl`);
+const TICKET_POPULATE_ROLE = "ticket-maker";
+
+function validateEffort(effort: string | undefined): asserts effort is EffortLevel | undefined {
+  try {
+    assertEffortLevel(effort);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
 }
 
 export function buildPopulateInstruction(sourceHints?: string[], progressDoc = "docs/ticket-progress.md"): string {
@@ -105,6 +107,42 @@ or
 STEP_STATUS: blocked | reason="why ticket population cannot proceed"`;
 }
 
+export function resolvePopulateSources(
+  projectDir: string,
+  explicitSources: string[] | undefined,
+  ticketsConfig: TicketsConfig,
+): string[] | undefined {
+  if (explicitSources && explicitSources.length > 0) return explicitSources;
+  const candidates = unique([
+    join(dirname(ticketsConfig.paths.progressDoc), "rafi-plan.md"),
+    "docs/rafi-plan.md",
+  ]);
+  const plan = candidates.find((candidate) => existsSync(join(projectDir, candidate)));
+  return plan ? [plan] : undefined;
+}
+
+export function buildPopulateAgentRunOptions(opts: {
+  projectDir: string;
+  agent?: string;
+  model?: string;
+  effort?: EffortLevel;
+  fast?: boolean;
+  yes?: boolean;
+  log: Log;
+}): RoleBuilderOptions {
+  return {
+    projectDir: opts.projectDir,
+    role: TICKET_POPULATE_ROLE,
+    agent: opts.agent,
+    model: opts.model,
+    effort: opts.effort,
+    fast: opts.fast,
+    yes: opts.yes,
+    label: "tickets populate",
+    log: opts.log,
+  };
+}
+
 export function buildTicketsCommand(): Command {
   const tickets = new Command("tickets").description(
     "Manage the structured ticket tracker for a project.",
@@ -140,7 +178,7 @@ export function buildTicketsCommand(): Command {
 
   tickets
     .command("populate")
-    .description("Ask a builder to populate .tickets/tickets.yaml from existing project ticket/backlog docs.")
+    .description("Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("-a, --agent <agent>", "builder agent (claude | codex)")
     .option("-m, --model <model>", "override the builder's model")
@@ -153,13 +191,6 @@ export function buildTicketsCommand(): Command {
       validateEffort(opts.effort as string | undefined);
 
       if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
-      let agent: AgentRuntime;
-      try {
-        agent = resolveAgentForProject(dir, opts.agent as string | undefined);
-      } catch (err) {
-        fail(err instanceof Error ? err.message : String(err));
-      }
-      let model = opts.model as string | undefined;
 
       if (!isTicketsInitialized(dir)) {
         fail(`ticket tracker is not initialized in ${dir}; run \`foreman tickets init --project ${dir}\` first`);
@@ -179,38 +210,37 @@ export function buildTicketsCommand(): Command {
         }
       }
 
-      const config = loadConfig(join(dir, "foreman.yaml"));
       const logPath = makeLogPath(dir, "tickets-populate");
       const log = new Log(logPath);
-      const policy = new PermissionPolicy(config.permissions, dir);
-      const ready = await ensureRuntimeReadyForCommand(dir, agent, {
-        label: "tickets populate",
-        yes: Boolean(opts.yes),
-        model,
-      });
-      agent = ready.runtime;
-      model = ready.model;
-      const adapterOpts = {
-        cwd: dir,
-        model,
-        permission: createPermissionHandler(policy, log),
-        effort: opts.effort as EffortLevel | undefined,
-        fast: opts.fast as boolean | undefined,
-      };
-      const builder: BuilderAdapter =
-        agent === "codex"
-          ? new CodexAdapter(adapterOpts)
-          : await ClaudeAdapter.create(adapterOpts);
-      const viewer = printEvents(builder.events());
-      const foreman = new Foreman(builder, log, config.notifications.enabled, false, 3, dir);
-
-      console.log(`foreman tickets: populating tickets with ${agent}`);
-      console.log(`foreman tickets: project ${dir}`);
-      console.log(`foreman tickets: log ${logPath}\n`);
+      const config = loadConfig(join(dir, "foreman.yaml"));
+      let builder: Awaited<ReturnType<typeof createRoleBuilder>>["builder"] | undefined;
+      let viewer: Promise<void> | undefined;
 
       try {
+        const roleBuilder = await createRoleBuilder(buildPopulateAgentRunOptions({
+          projectDir: dir,
+          agent: opts.agent as string | undefined,
+          model: opts.model as string | undefined,
+          effort: opts.effort as EffortLevel | undefined,
+          fast: opts.fast as boolean | undefined,
+          yes: Boolean(opts.yes),
+          log,
+        }));
+        builder = roleBuilder.builder;
+        viewer = printEvents(builder.events());
+        const foreman = new Foreman(builder, log, config.notifications.enabled, false, 3, dir);
+
+        console.log(`foreman tickets: populating tickets with ${roleBuilder.runtime}`);
+        console.log(`foreman tickets: project ${dir}`);
+        console.log(`foreman tickets: role ${TICKET_POPULATE_ROLE}`);
+        console.log(`foreman tickets: log ${logPath}\n`);
+
         const ticketsConfig = loadTicketsConfig(dir);
-        const turn = await foreman.runInstruction(buildPopulateInstruction(opts.sources as string[] | undefined, ticketsConfig.paths.progressDoc));
+        const sourceHints = resolvePopulateSources(dir, opts.sources as string[] | undefined, ticketsConfig);
+        if (sourceHints?.length) {
+          console.log(`foreman tickets: source hints ${sourceHints.join(" ")}`);
+        }
+        const turn = await foreman.runInstruction(buildPopulateInstruction(sourceHints, ticketsConfig.paths.progressDoc));
         await builder.close();
         await viewer;
 
@@ -245,7 +275,8 @@ export function buildTicketsCommand(): Command {
         }
         console.log(`foreman tickets: populated .tickets/tickets.yaml and rendered ${ticketsConfig.paths.progressDoc}`);
       } catch (err) {
-        await builder.close().catch(() => {});
+        await builder?.close().catch(() => {});
+        await viewer?.catch(() => {});
         fail(String(err instanceof Error ? err.message : err));
       }
     });

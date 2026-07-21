@@ -23,6 +23,7 @@ export interface LogRecord {
     | "escalation"
     | "needs_input"
     | "preflight"
+    | "rafi-plan"
     | "ticket-populate"
     | "qa"
     | "qa-fix"

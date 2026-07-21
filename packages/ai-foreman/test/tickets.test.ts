@@ -9,7 +9,12 @@ import { buildNextQueue } from "../src/tickets/queue.js";
 import { computeDisplayStatus, resolveBlockers } from "../src/tickets/blockers.js";
 import { validateTicketDefs, detectCycles } from "../src/tickets/ticketLoader.js";
 import { cmdInit, cmdUpdate, cmdComplete, cmdBlock, cmdQueue, cmdDiscover, cmdValidate } from "../src/tickets/commands.js";
-import { buildPopulateInstruction } from "../src/cli/tickets.js";
+import { Log } from "../src/log.js";
+import {
+  buildPopulateAgentRunOptions,
+  buildPopulateInstruction,
+  resolvePopulateSources,
+} from "../src/cli/tickets.js";
 import { loadTicketsConfig } from "../src/tickets/config.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import type { TicketState } from "../src/tickets/stateDb.js";
@@ -89,6 +94,52 @@ test("populate instruction says to scan when no source hints are provided", () =
 
   assert.match(instruction, /No specific planning sources were provided/);
   assert.match(instruction, /Scan the repository for relevant planning and ticketing documents/);
+});
+
+test("populate defaults to the latest Rafi plan when present", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "docs-rafi" });
+    writeFileSync(join(dir, "docs-rafi", "rafi-plan.md"), "# Plan\n", "utf8");
+
+    const sources = resolvePopulateSources(dir, undefined, loadTicketsConfig(dir));
+
+    assert.deepEqual(sources, ["docs-rafi/rafi-plan.md"]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("populate explicit sources override the latest Rafi plan default", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "docs-rafi" });
+    writeFileSync(join(dir, "docs-rafi", "rafi-plan.md"), "# Plan\n", "utf8");
+
+    const sources = resolvePopulateSources(dir, ["docs/custom.md"], loadTicketsConfig(dir));
+
+    assert.deepEqual(sources, ["docs/custom.md"]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("populate agent run options use the ticket-maker role", () => {
+  const dir = makeTmpDir();
+  try {
+    const log = new Log(join(dir, ".foreman", "test.jsonl"));
+    const opts = buildPopulateAgentRunOptions({
+      projectDir: dir,
+      agent: "codex",
+      log,
+    });
+
+    assert.equal(opts.role, "ticket-maker");
+    assert.equal(opts.label, "tickets populate");
+    assert.equal(opts.agent, "codex");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
 });
 
 // ── queue computation ─────────────────────────────────────────────────────────

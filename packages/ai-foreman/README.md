@@ -51,7 +51,7 @@ Requires:
 
 - Check the target project.
 - Initialize Foreman's local ticket tracker.
-- Ask agent to convert existing tickets or populate them
+- Ask the ticket-maker role to convert existing tickets or populate them
 - Run foreman for 5 tickets (and QA each one when done)
 
 ```bash
@@ -65,12 +65,13 @@ What each part does:
 
 - `./my-project`: the repo Foreman will work on.
 - `tickets init`: creates the local `.tickets/` tracker.
-- `tickets populate`: asks Codex to convert project planning material.
+- `tickets populate`: asks the ticket-maker role to convert project planning material.
 - Converted output uses Foreman's schema.
 - `start`: drives Codex through the next tickets one step at a time.
 
 `tickets populate` can convert:
 
+- a managed Rafi plan at `<docs.root>/rafi-plan.md`
 - plans
 - TODOs
 - roadmap docs
@@ -159,7 +160,7 @@ gh repo view <host>/<owner>/<repo>
 | `-a, --agent <agent>` | `claude` / `codex` | single `rafi-config.yaml` target, otherwise `claude` | Builder agent. Explicit `--agent` always wins. |
 | `-m, --model <model>` | `gpt-5.5` / any supported agent model | agent default | Overrides the builder model. |
 | `--effort <level>` | Claude Code: `low` / `medium` / `high` / `xhigh`<br>Codex: `low` / `medium` / `high` / `xhigh` | agent default | Reasoning level. |
-| `--sources <paths...>` | `docs/tickets.md docs/plans/**` | scans relevant docs automatically | Optional files, folders, or globs for the agent to check first. Any reasonable planning format is OK. |
+| `--sources <paths...>` | `docs/tickets.md docs/plans/**` | `<docs.root>/rafi-plan.md` when present, otherwise scans relevant docs automatically | Optional files, folders, or globs for the agent to check first. Any reasonable planning format is OK. |
 | `--fast` | flag | off | Lower latency. |
 | `-y, --yes` | flag | off | Skips confirmation before builder edits ticket files. |
 
@@ -283,7 +284,7 @@ With `--docs-root docs-rafi`, the generated tracker docs are written under `docs
 
 If the project already has planning material:
 
-- Ask a builder to convert it into Foreman's ticket format.
+- Ask the ticket-maker role to convert it into Foreman's ticket format.
 
 Supported source material can include:
 
@@ -297,6 +298,7 @@ Supported source material can include:
 ```bash
 # Claude Code
 ai-foreman tickets populate --project ./my-project
+ai-foreman tickets populate --project ./my-project --sources docs/rafi-plan.md
 ai-foreman tickets populate --project ./my-project --sources docs/tickets.md docs/plans/**
 
 # Codex
@@ -308,6 +310,7 @@ ai-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5
 
 - read `.tickets/*`
 - read the configured progress doc
+- prefer `<docs.root>/rafi-plan.md` when no `--sources` are provided and that file exists
 - read existing planning files
 - fill `.tickets/tickets.yaml`
 - render the progress doc
@@ -535,7 +538,8 @@ For Claude:
 For Codex:
 
 - Codex tool calls are not currently intercepted by Foreman.
-- Codex runs under `codex exec --sandbox workspace-write`.
+- Runtime implementation and ticket population runs use `codex exec --sandbox workspace-write`.
+- Read-only callers such as `rafi plan` can request `codex exec --sandbox read-only`.
 - Codex safety depends on Codex's own sandboxing.
 
 Default config:
