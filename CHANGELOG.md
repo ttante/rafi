@@ -4,6 +4,19 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.6.1 - 2026-07-21
+
+### Changed
+
+- Updated the README quick-start planning examples to lead with the interactive `rafi plan .` interview, with `--brief` and `--brief-file` documented as optional non-interactive alternatives.
+
+### Packages
+
+- Bumped `@rafi-ai/cli` to `0.6.1`.
+- Kept `ai-foreman` at `1.3.0`.
+- Kept `special-agents` at `0.4.0`.
+- Kept `rafi-spec` at `0.4.0`.
+
 ## @rafi-ai/cli 0.6.0 / ai-foreman 1.3.0 - 2026-07-21
 
 ### Added

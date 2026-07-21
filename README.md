@@ -51,7 +51,7 @@ rafi create . --defaults  # skip walkthrough, use built-in defaults
 rafi create . --runtime codex  # Codex-only native artifacts
 rafi create . --docs-root docs-rafi  # choose where Rafi writes starter/tracker docs
 rafi compile .            # re-render after editing rafi-config.yaml
-rafi plan . --brief "Add account settings"  # create a ticket-maker-ready plan
+rafi plan .                 # start an interactive planning interview
 ```
 
 ## What gets written
@@ -119,9 +119,9 @@ If a target repo already has a `docs/` path, `rafi create` keeps those app docs 
   mkdir my-repo && cd my-repo
   rafi create .
   ```
-- Ask Rafi to run the `planner` role with `grill-me` and write a ticket-maker-ready plan
+- Ask Rafi to run the `planner` role with `grill-me`, interview you for the brief, and write a ticket-maker-ready plan
   ```sh
-  rafi plan . --brief "I am building a team knowledge base for support engineers."
+  rafi plan .
   ```
 - Use the ticket-maker agent to convert the plan into a structured, ordered ticket queue
   ```sh
@@ -147,10 +147,10 @@ If a target repo already has a `docs/` path, `rafi create` keeps those app docs 
   # edit rafi-config.yaml, then:
   rafi compile .
   ```
-- Turn a brief plus your current repo into a managed plan, or import your existing backlog from planning docs, ticket files, folders of notes, or markdown roadmaps. Any reasonable format is OK because an agent interprets the sources.
+- Turn your current repo into a managed plan through Rafi's interactive planning interview, or import your existing backlog from planning docs, ticket files, folders of notes, or markdown roadmaps. Any reasonable format is OK because an agent interprets the sources.
   ```sh
   rafi tickets init --app-name "My App"
-  rafi plan . --brief "Plan the next customer billing milestone" --sources docs/roadmap.md
+  rafi plan . --sources docs/roadmap.md
   rafi tickets populate
   # or: rafi tickets populate --sources docs/tickets.md docs/plans/**
   ```
@@ -200,7 +200,7 @@ Current package versions:
 
 | Package | Version |
 |---|---|
-| `@rafi-ai/cli` | `0.6.0` |
+| `@rafi-ai/cli` | `0.6.1` |
 | `ai-foreman` | `1.3.0` |
 | `special-agents` | `0.4.0` |
 | `rafi-spec` | `0.4.0` |
@@ -270,12 +270,12 @@ Re-renders the native artifacts selected by `harness.targets` and always refresh
 
 #### `rafi plan [project]`
 
-Runs a read-only planning agent from a user brief, loads the `planner` role plus `grill-me`, and writes a ticket-maker-ready Markdown plan.
+Runs a read-only planning agent, loads the `planner` role plus `grill-me`, and writes a ticket-maker-ready Markdown plan. Run `rafi plan .` to start the interactive planning interview; Rafi prompts for the initial brief, then the planner inspects the repo, stress-tests the plan with `grill-me`, and asks a focused follow-up question only when it is genuinely blocked.
 
 | Option | Description |
 |---|---|
-| `--brief <text>` | Planning brief. |
-| `--brief-file <path>` | File containing the planning brief. Use either this or `--brief`. |
+| `--brief <text>` | Optional non-interactive planning brief for scripts or one-line runs. |
+| `--brief-file <path>` | Optional file containing the planning brief. Use either this or `--brief`. |
 | `--sources <paths...>` | Source hint files, folders, or globs to check first. |
 | `-a, --agent <agent>` | Planning agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `-m, --model <model>` | Override the planning agent's model. |

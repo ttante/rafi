@@ -24,14 +24,14 @@ rafi compile .            # re-render after editing rafi-config.yaml
 rafi compile . --root-file-mode append  # one-run override for AGENTS.md/CLAUDE.md handling
 ```
 
-`rafi create` collects your stack (frontend, backend, database, cloud, package manager), three boolean flags (`usesAI`, `hasFrontend`, `runsInCloud`), and runtime targets: both Claude and Codex, Claude only, or Codex only. `--defaults` keeps both targets unless `--runtime` is supplied. The Claude Agent SDK is installed only when the final target set includes Claude. Before `create`, `plan`, `start`, or `tickets populate` continue into agent work, Rafi checks the selected runtime and prompts you to repair missing authentication or switch to the other runtime when it can be verified. Non-interactive runs and `--yes` fail clearly instead of switching automatically. Cancel keeps generated files and installed packages in place; after fixing auth, run `rafi compile .`, `rafi plan . --brief ...`, `rafi start . --steps ...`, or rerun `rafi create .` for the walkthrough. If you have existing planning material, you can enter files, folders, or globs as source hints for `rafi plan` or `rafi tickets populate`; any reasonable format is OK because an agent interprets it. Stack answers, runtime targets, and the selected docs root are saved to `rafi-config.yaml`.
+`rafi create` collects your stack (frontend, backend, database, cloud, package manager), three boolean flags (`usesAI`, `hasFrontend`, `runsInCloud`), and runtime targets: both Claude and Codex, Claude only, or Codex only. `--defaults` keeps both targets unless `--runtime` is supplied. The Claude Agent SDK is installed only when the final target set includes Claude. Before `create`, `plan`, `start`, or `tickets populate` continue into agent work, Rafi checks the selected runtime and prompts you to repair missing authentication or switch to the other runtime when it can be verified. Non-interactive runs and `--yes` fail clearly instead of switching automatically. Cancel keeps generated files and installed packages in place; after fixing auth, run `rafi compile .`, `rafi plan .`, `rafi start . --steps ...`, or rerun `rafi create .` for the walkthrough. If you have existing planning material, you can enter files, folders, or globs as source hints for `rafi plan` or `rafi tickets populate`; any reasonable format is OK because an agent interprets it. Stack answers, runtime targets, and the selected docs root are saved to `rafi-config.yaml`.
 
 | Command / option | Notes |
 | --- | --- |
 | `rafi create <project>` | Runs the walkthrough, writes `rafi-config.yaml`, then compiles generated files. |
 | `rafi create <project> --defaults` | Uses built-in defaults without prompts. |
 | `rafi compile <project>` | Re-renders generated files after editing `rafi-config.yaml`. |
-| `rafi plan [project] --brief <text>` | Runs a read-only planner and writes a ticket-maker-ready plan. |
+| `rafi plan [project]` | Runs an interactive read-only planner and writes a ticket-maker-ready plan. |
 | `--force` | Overwrites generated starter doc files when Rafi would otherwise preserve them. |
 | `--docs-root <dir>` | Uses a safe repo-relative directory for Rafi starter and tracker docs. |
 | `--runtime <both\|claude\|codex>` | Selects which native runtime artifacts are emitted. |
@@ -54,19 +54,19 @@ If `docs/` already exists, `rafi create` defaults to a separate `docs-rafi/` var
 ### Planning
 
 ```sh
-rafi plan . --brief "Add account settings"
-rafi plan . --brief-file docs/brief.md --sources docs/roadmap.md src/features
+rafi plan .
+rafi plan . --sources docs/roadmap.md src/features
 rafi tickets populate --sources docs/rafi-plan.md
 ```
 
-`rafi plan` runs the `planner` role with the `grill-me` skill and non-mutating permissions. The planning agent can read, search, inspect, and ask questions, but Rafi CLI writes the final plan artifact itself.
+`rafi plan` starts an interactive planning interview, then runs the `planner` role with the `grill-me` skill and non-mutating permissions. The planning agent can read, search, inspect, stress-test assumptions, and ask a focused follow-up question when it is genuinely blocked, but Rafi CLI writes the final plan artifact itself.
 
 `plan` options:
 
 | Option | Notes |
 | --- | --- |
-| `--brief <text>` | Planning brief. |
-| `--brief-file <path>` | File containing the planning brief. Use either this or `--brief`. |
+| `--brief <text>` | Optional non-interactive planning brief for scripts or one-line runs. |
+| `--brief-file <path>` | Optional file containing the planning brief. Use either this or `--brief`. |
 | `--sources <paths...>` | Source hint files, folders, or globs to inspect first. |
 | `--agent <agent>` | Selects Claude or Codex. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `--model <model>` / `--effort <level>` | Override the selected runtime's model and reasoning effort. |
