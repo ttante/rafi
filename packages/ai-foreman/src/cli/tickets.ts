@@ -1,6 +1,7 @@
 import { Command } from "commander";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { select, isCancel } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
@@ -23,6 +24,7 @@ import {
   cmdArchive,
 } from "../tickets/commands.js";
 import { isTicketsInitialized, loadTicketsConfig } from "../tickets/config.js";
+import { validateDocsRoot } from "../tickets/config.js";
 import { importFromMarkdown } from "../tickets/importer.js";
 import { formatValidationIssues } from "../tickets/validate.js";
 import {
@@ -47,6 +49,7 @@ function unique(values: string[]): string[] {
 }
 
 const TICKET_POPULATE_ROLE = "ticket-maker";
+const RAFI_CONFIG_FILES = ["rafi-config.yaml", "project.yaml"] as const;
 
 function validateEffort(effort: string | undefined): asserts effort is EffortLevel | undefined {
   try {
@@ -113,12 +116,32 @@ export function resolvePopulateSources(
   ticketsConfig: TicketsConfig,
 ): string[] | undefined {
   if (explicitSources && explicitSources.length > 0) return explicitSources;
+  const rafiPlan = resolveConfiguredRafiPlanSource(projectDir, "rafi-config.yaml");
+  if (rafiPlan) return [rafiPlan];
+  const legacyPlan = resolveConfiguredRafiPlanSource(projectDir, "project.yaml");
+  if (legacyPlan) return [legacyPlan];
   const candidates = unique([
     join(dirname(ticketsConfig.paths.progressDoc), "rafi-plan.md"),
     "docs/rafi-plan.md",
   ]);
   const plan = candidates.find((candidate) => existsSync(join(projectDir, candidate)));
   return plan ? [plan] : undefined;
+}
+
+function resolveConfiguredRafiPlanSource(
+  projectDir: string,
+  file: typeof RAFI_CONFIG_FILES[number],
+): string | undefined {
+  const configPath = join(projectDir, file);
+  if (!existsSync(configPath)) return undefined;
+  const raw = parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${file}: expected a YAML object`);
+  }
+  const docs = raw.docs as Record<string, unknown> | undefined;
+  if (typeof docs?.root !== "string") return undefined;
+  const candidate = `${validateDocsRoot(projectDir, docs.root)}/rafi-plan.md`;
+  return existsSync(join(projectDir, candidate)) ? candidate : undefined;
 }
 
 export function buildPopulateAgentRunOptions(opts: {

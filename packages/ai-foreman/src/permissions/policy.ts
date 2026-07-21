@@ -14,10 +14,12 @@ const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const SHELL_SPLIT = /\s*(?:&&|\|\||;|\|)\s*/;
 
 /** Shell features that make a prefix allow-list too easy to bypass. */
-const ESCALATE_SHELL_SYNTAX = [
-  { pattern: /\s\d?>|\s>>|\s</, reason: "shell redirection is not auto-approved" },
-  { pattern: /\$\(|`/, reason: "shell substitution is not auto-approved" },
-];
+const SHELL_REDIRECTION = {
+  standard: /\s\d?>|\s>>|\s</,
+  strict: /(?:^|[^\\])(?:\d+)?(?:>>?|<<?)/,
+  reason: "shell redirection is not auto-approved",
+};
+const SHELL_SUBSTITUTION = { pattern: /\$\(|`/, reason: "shell substitution is not auto-approved" };
 
 /**
  * Rules-based permission classifier. No LLM: routine requests are auto-approved,
@@ -68,7 +70,13 @@ export class PermissionPolicy {
       return { decision: "escalate", reason: `command matches "${hitEscalate}"` };
     }
 
-    const syntax = ESCALATE_SHELL_SYNTAX.find((s) => s.pattern.test(command));
+    const syntax = [
+      {
+        pattern: this.config.strictShellRedirection ? SHELL_REDIRECTION.strict : SHELL_REDIRECTION.standard,
+        reason: SHELL_REDIRECTION.reason,
+      },
+      SHELL_SUBSTITUTION,
+    ].find((s) => s.pattern.test(command));
     if (syntax) {
       return { decision: "escalate", reason: syntax.reason };
     }

@@ -24,6 +24,12 @@ test("ai-foreman pack includes dist/ output", () => {
   assert.ok(files.some((f) => f.startsWith("dist/")), "no dist/ files in pack");
 });
 
+test("ai-foreman pack includes agent-run exported subpath files", () => {
+  const files = packList();
+  assert.ok(files.includes("dist/agentRun.js"), "dist/agentRun.js missing from pack");
+  assert.ok(files.includes("dist/agentRun.d.ts"), "dist/agentRun.d.ts missing from pack");
+});
+
 test("ai-foreman pack includes foreman.yaml", () => {
   const files = packList();
   assert.ok(files.includes("foreman.yaml"), "foreman.yaml missing from pack");

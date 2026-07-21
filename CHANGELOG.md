@@ -4,17 +4,27 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
-## Unreleased
+## @rafi-ai/cli 0.6.0 / ai-foreman 1.3.0 - 2026-07-21
 
 ### Added
 
 - Added `rafi plan [project]` to run a read-only planning agent from a brief plus repo inspection, using the `planner` role with the `grill-me` skill and writing managed plan history under `<docs.root>/rafi-plans/`.
+- Added automated help snapshot coverage for the changed `rafi`, `rafi plan`, and `rafi tickets populate` command surfaces.
 
 ### Changed
 
 - `rafi plan` refreshes `<docs.root>/rafi-plan.md` as the latest plan for ticket population.
-- `tickets populate` now prefers `<docs.root>/rafi-plan.md` when no `--sources` are provided and runs with the `ticket-maker` role bundle.
+- `tickets populate` now prefers the configured Rafi `<docs.root>/rafi-plan.md` when no `--sources` are provided, then legacy `project.yaml`, then the ticket progress-doc directory, then `docs/rafi-plan.md`, and runs with the `ticket-maker` role bundle.
+- `rafi plan` now treats only `STEP_STATUS: plan_complete` as success and validates required plan sections before writing plan artifacts.
+- Read-only planning permissions now allow only fixed inspection-oriented Git commands and escalate write-capable flags such as `--output`, `-o`, `--exec`, and `--format`.
 - Codex role runs now flatten requested skill content into the prompt, and planning runs use Codex's read-only sandbox.
+
+### Packages
+
+- Bumped `@rafi-ai/cli` to `0.6.0`.
+- Bumped `ai-foreman` to `1.3.0`.
+- Kept `special-agents` at `0.4.0`.
+- Kept `rafi-spec` at `0.4.0`.
 
 ## @rafi-ai/cli 0.5.0 / ai-foreman 1.2.0 - 2026-07-14
 

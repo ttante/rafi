@@ -110,6 +110,83 @@ test("populate defaults to the latest Rafi plan when present", () => {
   }
 });
 
+test("populate prefers Rafi config docs root over ticket progress docs root", () => {
+  const dir = makeTmpDir();
+  try {
+    writeFileSync(join(dir, "rafi-config.yaml"), stringify({ docs: { root: "docs-rafi" } }), "utf8");
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "custom-docs" });
+    mkdirSync(join(dir, "docs-rafi"), { recursive: true });
+    writeFileSync(join(dir, "docs-rafi", "rafi-plan.md"), "# Rafi Plan\n", "utf8");
+    writeFileSync(join(dir, "project.yaml"), stringify({ docs: { root: "../outside" } }), "utf8");
+
+    const sources = resolvePopulateSources(dir, undefined, loadTicketsConfig(dir));
+
+    assert.deepEqual(sources, ["docs-rafi/rafi-plan.md"]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("populate falls back from legacy Rafi docs root to ticket docs root, docs root, then scanning", () => {
+  const legacyOnly = makeTmpDir();
+  const ticketDocs = makeTmpDir();
+  const defaultDocs = makeTmpDir();
+  const none = makeTmpDir();
+  try {
+    writeFileSync(join(legacyOnly, "project.yaml"), stringify({ docs: { root: "legacy-docs" } }), "utf8");
+    cmdInit(legacyOnly, { appName: "Test", timezone: "UTC", docsRoot: "custom-docs" });
+    mkdirSync(join(legacyOnly, "legacy-docs"), { recursive: true });
+    writeFileSync(join(legacyOnly, "legacy-docs", "rafi-plan.md"), "# Legacy Plan\n", "utf8");
+    assert.deepEqual(resolvePopulateSources(legacyOnly, undefined, loadTicketsConfig(legacyOnly)), ["legacy-docs/rafi-plan.md"]);
+
+    cmdInit(ticketDocs, { appName: "Test", timezone: "UTC", docsRoot: "custom-docs" });
+    writeFileSync(join(ticketDocs, "custom-docs", "rafi-plan.md"), "# Ticket Plan\n", "utf8");
+    assert.deepEqual(resolvePopulateSources(ticketDocs, undefined, loadTicketsConfig(ticketDocs)), ["custom-docs/rafi-plan.md"]);
+
+    cmdInit(defaultDocs, { appName: "Test", timezone: "UTC", docsRoot: "custom-docs" });
+    mkdirSync(join(defaultDocs, "docs"), { recursive: true });
+    writeFileSync(join(defaultDocs, "docs", "rafi-plan.md"), "# Default Plan\n", "utf8");
+    assert.deepEqual(resolvePopulateSources(defaultDocs, undefined, loadTicketsConfig(defaultDocs)), ["docs/rafi-plan.md"]);
+
+    cmdInit(none, { appName: "Test", timezone: "UTC", docsRoot: "custom-docs" });
+    assert.equal(resolvePopulateSources(none, undefined, loadTicketsConfig(none)), undefined);
+  } finally {
+    rmSync(legacyOnly, { recursive: true });
+    rmSync(ticketDocs, { recursive: true });
+    rmSync(defaultDocs, { recursive: true });
+    rmSync(none, { recursive: true });
+  }
+});
+
+test("populate errors on invalid active Rafi config docs root", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "custom-docs" });
+    writeFileSync(join(dir, "rafi-config.yaml"), stringify({ docs: { root: "../outside" } }), "utf8");
+
+    assert.throws(
+      () => resolvePopulateSources(dir, undefined, loadTicketsConfig(dir)),
+      /docs root must not contain parent-directory traversal/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("populate explicit sources bypass invalid config parsing", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "custom-docs" });
+    writeFileSync(join(dir, "rafi-config.yaml"), stringify({ docs: { root: "../outside" } }), "utf8");
+
+    const sources = resolvePopulateSources(dir, ["docs/custom.md"], loadTicketsConfig(dir));
+
+    assert.deepEqual(sources, ["docs/custom.md"]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
 test("populate explicit sources override the latest Rafi plan default", () => {
   const dir = makeTmpDir();
   try {

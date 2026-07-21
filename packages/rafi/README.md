@@ -96,7 +96,7 @@ rafi tickets render                      # regenerate the configured progress do
 
 | Option | Notes |
 | --- | --- |
-| `--sources <paths...>` | Files, folders, or globs the agent should check first. When omitted, populate prefers `<docs.root>/rafi-plan.md` if it exists. |
+| `--sources <paths...>` | Files, folders, or globs the agent should check first. When omitted, populate prefers the configured Rafi `<docs.root>/rafi-plan.md`, then the ticket docs root, then `docs/rafi-plan.md`, if they exist. |
 | `--agent <agent>` | Selects Claude or Codex. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `--model <model>` / `--effort <level>` | Override the selected runtime's model and reasoning effort. |
 | `--fast` | Lower-latency mode. |

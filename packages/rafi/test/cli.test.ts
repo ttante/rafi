@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { stringify } from "yaml";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
+import { program } from "../src/index.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -21,6 +22,39 @@ function tsxBin(projectRoot: string): string {
 }
 
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
+
+function commandByPath(names: string[]) {
+  let current = program;
+  for (const name of names) {
+    const next = current.commands.find((candidate) => candidate.name() === name);
+    assert.ok(next, `missing command ${names.join(" ")}`);
+    current = next;
+  }
+  return current;
+}
+
+function docsHelpBlock(docs: string, heading: string): string {
+  const marker = `### \`${heading}\`\n\n\`\`\`text\n`;
+  const start = docs.indexOf(marker);
+  assert.notEqual(start, -1, `missing docs heading ${heading}`);
+  const contentStart = start + marker.length;
+  const end = docs.indexOf("\n```", contentStart);
+  assert.notEqual(end, -1, `missing docs fence for ${heading}`);
+  return docs.slice(contentStart, end).trimEnd();
+}
+
+test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+  const docs = readFileSync(join(HERE, "..", "..", "..", "docs", "cli.md"), "utf8");
+  const cases = [
+    { heading: "rafi --help", command: program },
+    { heading: "rafi plan --help", command: commandByPath(["plan"]) },
+    { heading: "rafi tickets populate --help", command: commandByPath(["tickets", "populate"]) },
+  ];
+
+  for (const item of cases) {
+    assert.equal(item.command.helpInformation().trimEnd(), docsHelpBlock(docs, item.heading), item.heading);
+  }
+});
 
 test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
   const dir = tempDir();

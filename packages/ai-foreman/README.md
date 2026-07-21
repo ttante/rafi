@@ -160,7 +160,7 @@ gh repo view <host>/<owner>/<repo>
 | `-a, --agent <agent>` | `claude` / `codex` | single `rafi-config.yaml` target, otherwise `claude` | Builder agent. Explicit `--agent` always wins. |
 | `-m, --model <model>` | `gpt-5.5` / any supported agent model | agent default | Overrides the builder model. |
 | `--effort <level>` | Claude Code: `low` / `medium` / `high` / `xhigh`<br>Codex: `low` / `medium` / `high` / `xhigh` | agent default | Reasoning level. |
-| `--sources <paths...>` | `docs/tickets.md docs/plans/**` | `<docs.root>/rafi-plan.md` when present, otherwise scans relevant docs automatically | Optional files, folders, or globs for the agent to check first. Any reasonable planning format is OK. |
+| `--sources <paths...>` | `docs/tickets.md docs/plans/**` | Configured Rafi `<docs.root>/rafi-plan.md`, then ticket docs root, then `docs/rafi-plan.md`, otherwise scans | Optional files, folders, or globs for the agent to check first. Any reasonable planning format is OK. |
 | `--fast` | flag | off | Lower latency. |
 | `-y, --yes` | flag | off | Skips confirmation before builder edits ticket files. |
 
@@ -310,7 +310,7 @@ ai-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5
 
 - read `.tickets/*`
 - read the configured progress doc
-- prefer `<docs.root>/rafi-plan.md` when no `--sources` are provided and that file exists
+- prefer the configured Rafi `<docs.root>/rafi-plan.md`, then the ticket docs root, then `docs/rafi-plan.md` when no `--sources` are provided
 - read existing planning files
 - fill `.tickets/tickets.yaml`
 - render the progress doc

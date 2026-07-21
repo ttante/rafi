@@ -6,6 +6,8 @@ export interface PermissionConfig {
   allowBash: string[];
   /** Bash command substrings that always escalate (checked first). */
   escalateBash: string[];
+  /** Escalate shell redirection even when it is attached to an allowed command. */
+  strictShellRedirection?: boolean;
   /** Tool names auto-approved when their target stays inside the worktree. */
   allowTools: string[];
   /** Tool names that always escalate. */
@@ -130,6 +132,9 @@ function validateConfig(raw: unknown, path: string): asserts raw is {
       if (permissions[key] !== undefined && !isStringArray(permissions[key])) {
         throw new Error(`${path}: permissions.${key} must be an array of strings`);
       }
+    }
+    if (permissions.strictShellRedirection !== undefined && typeof permissions.strictShellRedirection !== "boolean") {
+      throw new Error(`${path}: permissions.strictShellRedirection must be a boolean`);
     }
   }
   if (cfg.notifications !== undefined) {

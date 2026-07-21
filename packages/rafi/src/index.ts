@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { resolve, join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { ProjectConfig } from "rafi-spec";
 import {
@@ -44,7 +45,7 @@ const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 )?.version as string;
 
-const program = new Command();
+export const program = new Command();
 program
   .name("rafi")
   .description("Scaffold and compile Rafi AI framework configs for a target repo.")
@@ -595,7 +596,24 @@ program.addCommand(buildStartCommand());
 program.addCommand(buildStatusCommand());
 program.addCommand(buildDoctorCommand());
 
-program.parseAsync(process.argv).catch((err) => {
-  console.error(`rafi: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+export async function runRafiCli(argv = process.argv): Promise<void> {
+  await program.parseAsync(argv);
+}
+
+if (isDirectCliEntrypoint()) {
+  runRafiCli().catch((err) => {
+    console.error(`rafi: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}
+
+function isDirectCliEntrypoint(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const modulePath = fileURLToPath(import.meta.url);
+  try {
+    return realpathSync(entry) === realpathSync(modulePath);
+  } catch {
+    return resolve(entry) === modulePath;
+  }
+}

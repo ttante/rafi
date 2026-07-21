@@ -8,10 +8,15 @@ import { mergeSkills } from "ai-foreman/agent-run.js";
 import {
   buildPlanAgentRunOptions,
   buildPlanInstruction,
+  formatPlanValidationFailures,
+  isSuccessfulPlanStatus,
   nextPopulateCommand,
+  resolveBrief,
   resolvePlanDocsRoot,
   stripFinalStepStatusMarker,
+  validatePlanMarkdown,
   writePlanArtifacts,
+  writeValidatedPlanArtifacts,
 } from "../src/plan.js";
 
 function tempDir(): string {
@@ -83,6 +88,102 @@ test("plan docs root resolves from rafi-config.yaml or defaults to docs", () => 
   } finally {
     rmSync(configured, { recursive: true });
     rmSync(fallback, { recursive: true });
+  }
+});
+
+test("plan success status accepts only plan_complete", () => {
+  assert.equal(isSuccessfulPlanStatus("plan_complete"), true);
+  assert.equal(isSuccessfulPlanStatus("done"), false);
+  assert.equal(isSuccessfulPlanStatus("qa_pass"), false);
+});
+
+test("plan validation accepts required sections and ticket-maker guidance", () => {
+  const missing = validatePlanMarkdown(`
+## Goal
+Ship account settings.
+
+## Problem Statement
+Users cannot update account settings.
+
+## Repo Findings
+The account area is in app/account.
+
+## Locked Decisions
+Use the existing form stack.
+
+## Open Questions
+None.
+
+## Scope
+Settings page and save path.
+
+## Out of Scope
+Billing settings.
+
+## Risks
+Validation regressions.
+
+## Rollback Notes
+Revert the settings route.
+
+## Ticket-Maker Guidance
+- Ticket slices: account settings route, save API, tests.
+- Dependencies: save API before UI submit wiring.
+- Acceptance criteria: users can save valid changes and see validation errors.
+- Required tests: unit tests and an integration smoke test.
+- Likely files: app/account/settings.tsx, server/account.ts.
+- Branch/batch strategy: use one branch per slice and batch repeated component-library form updates.
+STEP_STATUS: plan_complete | summary="created ticket-maker-ready Rafi plan"
+`);
+
+  assert.deepEqual(missing, []);
+});
+
+test("plan validation rejects missing sections and ticket-maker guidance items", () => {
+  const missing = validatePlanMarkdown(`
+## Goal
+Ship account settings.
+
+## Ticket-Maker Guidance
+- Ticket slices: account settings route.
+`);
+
+  assert.ok(missing.includes("section: Problem Statement"));
+  assert.ok(missing.includes("section: Repo Findings"));
+  assert.ok(missing.includes("Ticket-Maker Guidance: dependencies"));
+  assert.ok(missing.includes("Ticket-Maker Guidance: acceptance criteria"));
+  assert.ok(missing.includes("Ticket-Maker Guidance: required tests"));
+  assert.ok(missing.includes("Ticket-Maker Guidance: likely files"));
+  assert.ok(missing.includes("Ticket-Maker Guidance: branch/batch strategy"));
+  assert.match(formatPlanValidationFailures(missing), /missing section: Problem Statement/);
+});
+
+test("validated plan writes reject incomplete plans before creating artifacts", () => {
+  const dir = tempDir();
+  try {
+    assert.throws(
+      () => writeValidatedPlanArtifacts(dir, "docs-rafi", "## Goal\nShip account settings.\n"),
+      /planner returned an incomplete plan/,
+    );
+    assert.equal(existsSync(join(dir, "docs-rafi", "rafi-plan.md")), false);
+    assert.equal(existsSync(join(dir, "docs-rafi", "rafi-plans")), false);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("resolveBrief reports --brief and --brief-file conflict before empty brief validation", async () => {
+  const dir = tempDir();
+  try {
+    const briefFile = join(dir, "brief.md");
+    writeFileSync(briefFile, "Use file\n", "utf8");
+
+    await assert.rejects(
+      () => resolveBrief({ brief: "", briefFile }),
+      /choose either --brief or --brief-file/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true });
   }
 });
 

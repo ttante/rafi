@@ -25,7 +25,8 @@ Runtime behavior not fully expressible in Commander help:
 - In `agent_files.mode: append` or `--root-file-mode append`, Rafi appends generated guidance inline unless that would exceed the target runtime's root-file startup guard. Overflow writes generated guidance to a target-specific sidecar (`AGENTS-rafi.md` or `CLAUDE-rafi.md`) and inserts a compact managed reference block near the top of the root file. Claude `@file` imports still load into Claude's context; this keeps root files short, but it is not a Claude context-reduction mechanism.
 - `rafi plan`, `rafi start`, `ai-foreman start`, and `tickets populate` use a single `harness.targets` value from `rafi-config.yaml` when `--agent` is omitted. Missing config or both targets default to Claude.
 - Interactive runtime auth/readiness failures offer retry, verified switch to the other runtime, or cancel. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because session IDs are runtime-specific.
-- `rafi plan` writes versioned history to `<docs.root>/rafi-plans/<timestamp>.md` and refreshes `<docs.root>/rafi-plan.md`.
+- `rafi plan` accepts only `STEP_STATUS: plan_complete` as a successful planner result, validates required plan sections before writing, writes versioned history to `<docs.root>/rafi-plans/<timestamp>.md`, and refreshes `<docs.root>/rafi-plan.md`.
+- `rafi tickets populate` uses explicit `--sources` first. When omitted, it checks `<docs.root>/rafi-plan.md` from `rafi-config.yaml`, legacy `project.yaml`, the ticket progress-doc directory, and `docs/rafi-plan.md` before falling back to repository scanning.
 
 ## `rafi`
 

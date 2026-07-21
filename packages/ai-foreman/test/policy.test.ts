@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PermissionPolicy } from "../src/permissions/policy.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
+import { readOnlyPermissionConfig } from "../src/agentRun.js";
 import {
   parseStepStatus,
   looksLikeQuestion,
@@ -12,6 +13,7 @@ import {
 
 const CWD = "/work/project";
 const policy = new PermissionPolicy(DEFAULT_CONFIG.permissions, CWD);
+const readOnlyPolicy = new PermissionPolicy(readOnlyPermissionConfig(), CWD);
 
 test("allows routine bash commands", () => {
   assert.equal(
@@ -73,6 +75,13 @@ test("escalates shell redirection and substitution", () => {
   );
 });
 
+test("normal implementation permissions preserve compact redirection behavior", () => {
+  assert.equal(
+    policy.classify({ toolName: "Bash", input: { command: "cat package.json>out.txt" } }).decision,
+    "allow",
+  );
+});
+
 test("allows file edits inside the worktree, escalates outside", () => {
   assert.equal(
     policy.classify({ toolName: "Edit", input: { file_path: "/work/project/src/a.ts" } }).decision,
@@ -97,6 +106,46 @@ test("escalates network tools and unknown tools", () => {
     policy.classify({ toolName: "MysteryTool", input: {} }).decision,
     "escalate",
   );
+});
+
+test("read-only planning allows fixed inspection git commands", () => {
+  for (const command of [
+    "git status --short",
+    "git diff --stat HEAD",
+    "git diff --name-only HEAD",
+    "git log --oneline -5",
+    "git show --stat HEAD",
+    "git ls-files src",
+    "git grep Ticket-Maker",
+  ]) {
+    assert.equal(
+      readOnlyPolicy.classify({ toolName: "Bash", input: { command } }).decision,
+      "allow",
+      command,
+    );
+  }
+});
+
+test("read-only planning escalates broad git forms and write-capable flags", () => {
+  for (const command of [
+    "git diff src/index.ts",
+    "git log --format=%H",
+    "git show HEAD:package.json",
+    "git diff --name-only --output=files.txt",
+    "git show --stat -o files.txt",
+    "git log --oneline --exec echo",
+    "cat package.json>out.txt",
+    "sed -n 1p package.json>out.txt",
+    "rg foo>out.txt",
+    "git diff --stat>out.txt",
+    "git show --stat>out.txt",
+  ]) {
+    assert.equal(
+      readOnlyPolicy.classify({ toolName: "Bash", input: { command } }).decision,
+      "escalate",
+      command,
+    );
+  }
 });
 
 test("parseStepStatus reads the marker line", () => {

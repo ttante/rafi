@@ -21,6 +21,28 @@ import {
 import { validateDocsRoot } from "./docs.js";
 import { DEFAULT_DOCS_ROOT, LEGACY_PROJECT_CONFIG_FILE, RAFI_CONFIG_FILE } from "./project.js";
 
+export const REQUIRED_PLAN_SECTIONS = [
+  "Goal",
+  "Problem Statement",
+  "Repo Findings",
+  "Locked Decisions",
+  "Open Questions",
+  "Scope",
+  "Out Of Scope",
+  "Risks",
+  "Rollback Notes",
+  "Ticket-Maker Guidance",
+] as const;
+
+const TICKET_GUIDANCE_REQUIREMENTS = [
+  { label: "ticket slices", pattern: /\b(ticket\s+)?slices?\b|\bproposed tickets?\b/i },
+  { label: "dependencies", pattern: /\bdependencies?\b|\bdepends_on\b/i },
+  { label: "acceptance criteria", pattern: /\bacceptance\s+criteria\b/i },
+  { label: "required tests", pattern: /\brequired\s+tests?\b|\btests?\s+required\b/i },
+  { label: "likely files", pattern: /\blikely\s+files?\b/i },
+  { label: "branch/batch strategy", pattern: /(?=[\s\S]*\bbranch\b)(?=[\s\S]*\bbatch\b)(?=[\s\S]*\bstrategy\b)[\s\S]*/i },
+] as const;
+
 export interface PlanInstructionOptions {
   brief: string;
   sources?: string[];
@@ -141,6 +163,47 @@ export function writePlanArtifacts(
   return paths;
 }
 
+export function writeValidatedPlanArtifacts(
+  projectDir: string,
+  docsRoot: string,
+  planMarkdown: string,
+  now = new Date(),
+): PlanArtifactPaths {
+  const missing = validatePlanMarkdown(planMarkdown);
+  if (missing.length > 0) {
+    throw new Error(formatPlanValidationFailures(missing));
+  }
+  return writePlanArtifacts(projectDir, docsRoot, planMarkdown, now);
+}
+
+export function isSuccessfulPlanStatus(kind: string): boolean {
+  return kind === "plan_complete";
+}
+
+export function validatePlanMarkdown(planMarkdown: string): string[] {
+  const missing: string[] = [];
+  const markdown = stripFinalStepStatusMarker(planMarkdown);
+
+  for (const section of REQUIRED_PLAN_SECTIONS) {
+    if (!findSection(markdown, section)) missing.push(`section: ${section}`);
+  }
+
+  const guidance = findSection(markdown, "Ticket-Maker Guidance");
+  if (guidance) {
+    for (const requirement of TICKET_GUIDANCE_REQUIREMENTS) {
+      if (!requirement.pattern.test(guidance.content)) {
+        missing.push(`Ticket-Maker Guidance: ${requirement.label}`);
+      }
+    }
+  }
+
+  return missing;
+}
+
+export function formatPlanValidationFailures(missing: string[]): string {
+  return `planner returned an incomplete plan:\n${missing.map((item) => `- missing ${item}`).join("\n")}`;
+}
+
 export function stripFinalStepStatusMarker(text: string): string {
   const lines = text.trimEnd().split(/\r?\n/);
   if (/^STEP_STATUS:/i.test(lines[lines.length - 1] ?? "")) {
@@ -225,14 +288,14 @@ export function buildPlanCommand(): Command {
           console.error(`rafi plan: blocked - ${turn.status.reason ?? "planner reported blocked"}`);
           process.exit(2);
         }
-        if (turn.status.kind !== "plan_complete" && turn.status.kind !== "done") {
+        if (!isSuccessfulPlanStatus(turn.status.kind)) {
           console.error(`rafi plan: needs human - ${turn.status.error ?? "planner did not emit plan_complete"}`);
           process.exit(2);
         }
 
         const planMarkdown = stripFinalStepStatusMarker(turn.result.text);
         if (!planMarkdown.trim()) fail("planner returned an empty plan");
-        const written = writePlanArtifacts(projectDir, docsRoot, planMarkdown);
+        const written = writeValidatedPlanArtifacts(projectDir, docsRoot, planMarkdown);
 
         console.log(`\nrafi plan: wrote ${written.historyRel}`);
         console.log(`rafi plan: refreshed ${written.latestRel}`);
@@ -248,8 +311,8 @@ function normalizePlanMarkdown(planMarkdown: string): string {
   return `${stripFinalStepStatusMarker(planMarkdown).trimEnd()}\n`;
 }
 
-async function resolveBrief(opts: { brief?: string; briefFile?: string }): Promise<string> {
-  if (opts.brief && opts.briefFile) {
+export async function resolveBrief(opts: { brief?: string; briefFile?: string }): Promise<string> {
+  if (opts.brief !== undefined && opts.briefFile !== undefined) {
     throw new Error("choose either --brief or --brief-file, not both");
   }
   if (opts.brief !== undefined) {
@@ -338,6 +401,34 @@ function realOrResolved(path: string): string {
   } catch {
     return resolve(path);
   }
+}
+
+function findSection(markdown: string, section: string): { content: string } | undefined {
+  const lines = markdown.split(/\r?\n/);
+  const escaped = escapeRegExp(section);
+  const heading = new RegExp(`^(#{1,6})\\s+(?:\\d+\\.\\s*)?${escaped}\\s*:?(?:\\s+#+)?\\s*$`, "i");
+
+  for (let index = 0; index < lines.length; index++) {
+    const match = heading.exec(lines[index] ?? "");
+    if (!match) continue;
+
+    const level = match[1].length;
+    let end = lines.length;
+    for (let cursor = index + 1; cursor < lines.length; cursor++) {
+      const next = /^(#{1,6})\s+/.exec(lines[cursor] ?? "");
+      if (next && next[1].length <= level) {
+        end = cursor;
+        break;
+      }
+    }
+    return { content: lines.slice(index + 1, end).join("\n").trim() };
+  }
+
+  return undefined;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function shellQuote(value: string): string {

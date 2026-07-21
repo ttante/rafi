@@ -129,7 +129,7 @@ If a target repo already has a `docs/` path, `rafi create` keeps those app docs 
   rafi tickets populate --sources docs/rafi-plan.md
   ```
 - `rafi tickets init` reads `docs.root` from `rafi-config.yaml`; pass `--docs-root <dir>` to override it for standalone ticket setup.
-- `rafi tickets populate` prefers `docs/rafi-plan.md` when it exists, and otherwise scans relevant planning docs automatically; pass `--sources docs/tickets.md docs/plans/**` when you want the agent to check specific files, folders, or globs first.
+- `rafi tickets populate` prefers `<docs.root>/rafi-plan.md` from `rafi-config.yaml` when it exists, and otherwise checks the ticket docs root, `docs/rafi-plan.md`, then scans relevant planning docs automatically; pass `--sources docs/tickets.md docs/plans/**` when you want the agent to check specific files, folders, or globs first.
 - Run the builder to implement tickets one by one, with QA after each step
   ```sh
   rafi start . --steps 10
@@ -200,8 +200,8 @@ Current package versions:
 
 | Package | Version |
 |---|---|
-| `@rafi-ai/cli` | `0.5.0` |
-| `ai-foreman` | `1.2.0` |
+| `@rafi-ai/cli` | `0.6.0` |
+| `ai-foreman` | `1.3.0` |
 | `special-agents` | `0.4.0` |
 | `rafi-spec` | `0.4.0` |
 
@@ -315,7 +315,7 @@ Asks the `ticket-maker` role to populate `.tickets/tickets.yaml` from existing p
 | `-a, --agent <agent>` | Builder agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `-m, --model <model>` | Override the builder's model. |
 | `--effort <level>` | Reasoning effort level. Valid values: `low`, `medium`, `high`, `xhigh`. |
-| `--sources <paths...>` | Source hint files, folders, or globs to check first. When omitted, `tickets populate` prefers `<docs.root>/rafi-plan.md` if it exists. |
+| `--sources <paths...>` | Source hint files, folders, or globs to check first. When omitted, `tickets populate` prefers the configured Rafi `<docs.root>/rafi-plan.md`, then the ticket docs root, then `docs/rafi-plan.md`, if they exist. |
 | `--fast` | Fast mode with lower latency. |
 | `-y, --yes` | Skip the confirmation prompt before letting the builder edit tickets. |
 
