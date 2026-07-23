@@ -4,6 +4,21 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.6.2 / ai-foreman 1.3.1 - 2026-07-23
+
+### Changed
+
+- Split ticket queue sizing into `implementation_limit` for generated progress docs and Foreman ticket selection, and `view_limit` for the display queue command.
+- Added `--implementation-limit` and `--view-limit` to `tickets init`; kept `--queue-limit` as a deprecated alias for the implementation limit.
+- Existing tracker configs with `queue_limit` continue to load as the implementation limit, with the old default value `50` upgraded to the new default `500`.
+
+### Packages
+
+- Bumped `ai-foreman` to `1.3.1`.
+- Bumped `@rafi-ai/cli` to `0.6.2`.
+- Kept `special-agents` at `0.4.0`.
+- Kept `rafi-spec` at `0.4.0`.
+
 ## @rafi-ai/cli 0.6.1 - 2026-07-21
 
 ### Changed

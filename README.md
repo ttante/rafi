@@ -200,8 +200,8 @@ Current package versions:
 
 | Package | Version |
 |---|---|
-| `@rafi-ai/cli` | `0.6.1` |
-| `ai-foreman` | `1.3.0` |
+| `@rafi-ai/cli` | `0.6.2` |
+| `ai-foreman` | `1.3.1` |
 | `special-agents` | `0.4.0` |
 | `rafi-spec` | `0.4.0` |
 
