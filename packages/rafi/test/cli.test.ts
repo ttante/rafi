@@ -48,7 +48,9 @@ test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nod
   const cases = [
     { heading: "rafi --help", command: program },
     { heading: "rafi plan --help", command: commandByPath(["plan"]) },
+    { heading: "rafi tickets init --help", command: commandByPath(["tickets", "init"]) },
     { heading: "rafi tickets populate --help", command: commandByPath(["tickets", "populate"]) },
+    { heading: "rafi tickets queue --help", command: commandByPath(["tickets", "queue"]) },
   ];
 
   for (const item of cases) {

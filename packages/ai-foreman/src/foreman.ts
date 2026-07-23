@@ -11,7 +11,7 @@ import type { PermissionPolicy } from "./permissions/policy.js";
 import type { Log } from "./log.js";
 import { fireNotification } from "./notify.js";
 import { isTicketsInitialized, loadTicketsConfig } from "./tickets/config.js";
-import { cmdUpdate, cmdComplete, cmdBlock, cmdQueue } from "./tickets/commands.js";
+import { cmdUpdate, cmdComplete, cmdBlock, cmdImplementationQueue } from "./tickets/commands.js";
 
 /** Parsed STEP_STATUS marker from a builder's turn. */
 export interface StepStatus {
@@ -402,7 +402,7 @@ export class Foreman {
       let pendingTicketId: string | undefined;
       if (this.ticketsEnabled && this.projectDir) {
         try {
-          const queue = cmdQueue(this.projectDir);
+          const queue = cmdImplementationQueue(this.projectDir);
           const next = queue.find((r) => r.status === "next");
           if (next) {
             pendingTicketId = next.ticket;

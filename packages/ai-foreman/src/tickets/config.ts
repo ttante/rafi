@@ -29,7 +29,8 @@ export interface TicketsBehavior {
 
 export interface TicketsConfig {
   appName: string;
-  queueLimit: number;
+  implementationLimit: number;
+  viewLimit: number;
   timezone: string;
   paths: TicketsPaths;
   rendering: TicketsRendering;
@@ -38,7 +39,8 @@ export interface TicketsConfig {
 
 export const DEFAULT_TICKETS_CONFIG: TicketsConfig = {
   appName: "My App",
-  queueLimit: 50,
+  implementationLimit: 500,
+  viewLimit: 20_000,
   timezone: "UTC",
   paths: {
     tickets: ".tickets/tickets.yaml",
@@ -165,7 +167,8 @@ export function loadTicketsConfig(projectDir: string): TicketsConfig {
   assertPlainObject(raw.behavior, "behavior", configPath);
   const config = {
     appName: (raw.app_name as string) ?? DEFAULT_TICKETS_CONFIG.appName,
-    queueLimit: (raw.queue_limit as number) ?? DEFAULT_TICKETS_CONFIG.queueLimit,
+    implementationLimit: resolveImplementationLimit(raw),
+    viewLimit: (raw.view_limit as number) ?? DEFAULT_TICKETS_CONFIG.viewLimit,
     timezone: (raw.timezone as string) ?? DEFAULT_TICKETS_CONFIG.timezone,
     paths: {
       ...DEFAULT_TICKETS_CONFIG.paths,
@@ -184,6 +187,18 @@ export function loadTicketsConfig(projectDir: string): TicketsConfig {
   return config;
 }
 
+function resolveImplementationLimit(raw: Record<string, unknown>): number {
+  if (raw.implementation_limit !== undefined) {
+    return raw.implementation_limit as number;
+  }
+  if (raw.queue_limit !== undefined) {
+    return raw.queue_limit === 50
+      ? DEFAULT_TICKETS_CONFIG.implementationLimit
+      : raw.queue_limit as number;
+  }
+  return DEFAULT_TICKETS_CONFIG.implementationLimit;
+}
+
 function assertPlainObject(value: unknown, name: string, configPath: string): void {
   if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) {
     throw new Error(`${configPath}: ${name} must be an object`);
@@ -194,8 +209,11 @@ function validateTicketsConfig(config: TicketsConfig, configPath: string): void 
   if (!config.appName || typeof config.appName !== "string") {
     throw new Error(`${configPath}: app_name must be a non-empty string`);
   }
-  if (!Number.isInteger(config.queueLimit) || config.queueLimit < 1) {
-    throw new Error(`${configPath}: queue_limit must be a positive integer`);
+  if (!Number.isInteger(config.implementationLimit) || config.implementationLimit < 1) {
+    throw new Error(`${configPath}: implementation_limit must be a positive integer`);
+  }
+  if (!Number.isInteger(config.viewLimit) || config.viewLimit < 1) {
+    throw new Error(`${configPath}: view_limit must be a positive integer`);
   }
   if (!config.timezone || typeof config.timezone !== "string") {
     throw new Error(`${configPath}: timezone must be a non-empty IANA timezone string`);

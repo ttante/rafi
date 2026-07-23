@@ -44,12 +44,12 @@ export function runAllValidation(
   }
 
   // Pass 3: queue validation
-  const queueRows = buildNextQueue(ticketDefs, states, config.queueLimit);
+  const queueRows = buildNextQueue(ticketDefs, states, config.implementationLimit);
   const remaining = ticketDefs.filter((t) => {
     const s = states.get(t.id);
     return s?.status !== "done" && s?.status !== "canceled";
   });
-  const expectedLen = Math.min(config.queueLimit, remaining.length);
+  const expectedLen = Math.min(config.implementationLimit, remaining.length);
   if (queueRows.length !== expectedLen) {
     issues.push({ pass: 3, severity: "error", message: `[queue] expected ${expectedLen} rows, got ${queueRows.length}` });
   }

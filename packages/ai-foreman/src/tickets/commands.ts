@@ -4,6 +4,7 @@ import { stringify } from "yaml";
 import type { TicketDef } from "./ticketSchema.js";
 import type { ValidationResult } from "./stateDb.js";
 import {
+  DEFAULT_TICKETS_CONFIG,
   type TicketsConfig,
   initDocsRoot,
   loadTicketsConfig,
@@ -55,6 +56,9 @@ function renderAfterUpdate(ctx: TicketContext): void {
 export interface InitOptions {
   appName?: string;
   timezone?: string;
+  implementationLimit?: number;
+  viewLimit?: number;
+  /** @deprecated Use implementationLimit. */
   queueLimit?: number;
   docsRoot?: string;
 }
@@ -62,6 +66,9 @@ export interface InitOptions {
 export function cmdInit(projectDir: string, opts: InitOptions): void {
   if (isTicketsInitialized(projectDir)) {
     throw new Error(".tickets/config.yaml already exists — already initialized.");
+  }
+  if (opts.implementationLimit !== undefined && opts.queueLimit !== undefined) {
+    throw new Error("--implementation-limit and deprecated --queue-limit cannot both be set");
   }
 
   const ticketsDir = join(projectDir, ".tickets");
@@ -82,7 +89,8 @@ export function cmdInit(projectDir: string, opts: InitOptions): void {
 
   const config = {
     app_name: opts.appName ?? "My App",
-    queue_limit: opts.queueLimit ?? 50,
+    implementation_limit: opts.implementationLimit ?? opts.queueLimit ?? DEFAULT_TICKETS_CONFIG.implementationLimit,
+    view_limit: opts.viewLimit ?? DEFAULT_TICKETS_CONFIG.viewLimit,
     timezone: opts.timezone ?? "UTC",
     timestamp_format: "iso8601_offset",
     paths: {
@@ -564,7 +572,14 @@ export function cmdValidate(projectDir: string): ValidateResult {
 export function cmdQueue(projectDir: string, limit?: number) {
   return withContext(projectDir, (ctx) => {
     const states = ctx.db.getAllStates();
-    return buildNextQueue(ctx.tickets, states, limit ?? ctx.config.queueLimit);
+    return buildNextQueue(ctx.tickets, states, limit ?? ctx.config.viewLimit);
+  });
+}
+
+export function cmdImplementationQueue(projectDir: string) {
+  return withContext(projectDir, (ctx) => {
+    const states = ctx.db.getAllStates();
+    return buildNextQueue(ctx.tickets, states, ctx.config.implementationLimit);
   });
 }
 

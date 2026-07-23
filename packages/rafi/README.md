@@ -87,7 +87,7 @@ rafi tickets init --app-name "My App"   # initialize .tickets/ in the project
 rafi tickets init --docs-root docs-rafi  # override tracker docs root
 rafi tickets populate                    # agent fills tickets from rafi-plan.md or existing docs
 rafi tickets populate --sources docs/tickets.md docs/plans/**
-rafi tickets queue                       # show the next-N queue
+rafi tickets queue                       # show the display queue
 rafi tickets validate                    # run all 4 validation passes
 rafi tickets render                      # regenerate the configured progress doc
 ```
@@ -105,6 +105,10 @@ rafi tickets render                      # regenerate the configured progress do
 `--tickets` is for `rafi start`, not `rafi tickets populate`. Use `--sources` when populate should read specific planning files. `tickets populate` runs with the `ticket-maker` role bundle.
 
 `rafi tickets init` reads `docs.root` from `rafi-config.yaml` when present and writes `ticket-progress.md` / `ticket-archive.md` under that root. If the selected progress doc already exists, init stops and asks you to choose another root.
+
+Use `--implementation-limit <n>` to set the generated-doc and Foreman selection window, and `--view-limit <n>` to set the default `rafi tickets queue` display size. `--queue-limit <n>` remains as a deprecated alias for `--implementation-limit`.
+
+The selected limits live in `.tickets/config.yaml` as `implementation_limit` and `view_limit`; they are not part of `rafi-config.yaml`.
 
 ### Run the builder
 

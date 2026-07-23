@@ -302,8 +302,12 @@ Initializes the `.tickets/` structure in a project directory.
 | `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
 | `--app-name <name>` | Application name. |
 | `--timezone <tz>` | IANA timezone. Default: `UTC`. |
-| `--queue-limit <n>` | Next-queue window size. Default: `50`. |
+| `--implementation-limit <n>` | Implementation queue window size for generated docs and Foreman selection. Default: `500`. |
+| `--view-limit <n>` | Default row limit for `rafi tickets queue`. Default: `20000`. |
+| `--queue-limit <n>` | Deprecated alias for `--implementation-limit`. |
 | `--docs-root <dir>` | Override the generated ticket docs root. |
+
+`tickets init` writes `implementation_limit` and `view_limit` to `.tickets/config.yaml`. Existing configs with `queue_limit` still load as an implementation limit, with the old default value `50` upgraded to `500`.
 
 #### `rafi tickets populate`
 
@@ -440,12 +444,12 @@ Runs all four validation passes and exits with status `1` on error.
 
 #### `rafi tickets queue`
 
-Prints the next-N queue to stdout.
+Prints the ticket queue to stdout. By default it uses the tracker `view_limit`.
 
 | Option | Description |
 |---|---|
 | `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--limit <n>` | Override the queue limit. |
+| `--limit <n>` | Override the view limit. |
 
 #### `rafi tickets archive`
 

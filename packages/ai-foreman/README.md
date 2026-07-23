@@ -258,10 +258,14 @@ Init options:
 | `-p, --project <dir>` | `./my-project` / `../repo` | current directory | Project to initialize. |
 | `--app-name <name>` | `"My App"` | none | Application name stored in tracker config. |
 | `--timezone <tz>` | `America/Chicago` / `UTC` | `UTC` | IANA timezone. |
-| `--queue-limit <n>` | `25` / `50` / `100` | `50` | Next-queue window size. |
+| `--implementation-limit <n>` | `250` / `500` / `1000` | `500` | Implementation queue window for generated docs and Foreman selection. |
+| `--view-limit <n>` | `1000` / `20000` | `20000` | Default row limit for the display queue command. |
+| `--queue-limit <n>` | `250` / `500` / `1000` | none | Deprecated alias for `--implementation-limit`. |
 | `--docs-root <dir>` | `docs` / `docs-rafi` | `rafi-config.yaml` docs.root, then `docs` | Root for generated progress/archive docs. |
 
 `tickets init` reads `docs.root` from `rafi-config.yaml` when present. `--docs-root` overrides that value. The selected root must be a safe repo-relative directory, and init refuses to overwrite an existing selected `ticket-progress.md`.
+
+Init writes `implementation_limit` and `view_limit` to `.tickets/config.yaml`. Existing configs with `queue_limit` still load as an implementation limit, with the old default value `50` upgraded to `500`.
 
 This creates:
 

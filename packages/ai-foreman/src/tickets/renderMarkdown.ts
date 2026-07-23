@@ -84,7 +84,7 @@ export function renderProgressDoc(input: RenderInput): string {
   const { config, projectDir, ticketDefs, states, db } = input;
   const now = input.now ?? DateTime.now().setZone(config.timezone).toISO()!;
 
-  const queueRows = buildNextQueue(ticketDefs, states, config.queueLimit);
+  const queueRows = buildNextQueue(ticketDefs, states, config.implementationLimit);
   const activeRows = buildActiveStatusRows(queueRows, ticketDefs, states);
   const futureWork = db.getFutureWork();
   const recentEvents = db.getRecentEvents(config.rendering.maxWorkLogRows);
@@ -113,7 +113,8 @@ export function renderProgressDoc(input: RenderInput): string {
     ["Field", "Value"],
     [
       ["App", config.appName],
-      ["Queue Limit", String(config.queueLimit)],
+      ["Implementation Limit", String(config.implementationLimit)],
+      ["View Limit", String(config.viewLimit)],
       ["Timezone", config.timezone],
       ["Generated At", now],
       ["Remaining Tickets", String(queueRows.length > 0 ? "≥" + queueRows.length : "0")],

@@ -3,12 +3,22 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 
 import { buildNextQueue } from "../src/tickets/queue.js";
 import { computeDisplayStatus, resolveBlockers } from "../src/tickets/blockers.js";
 import { validateTicketDefs, detectCycles } from "../src/tickets/ticketLoader.js";
-import { cmdInit, cmdUpdate, cmdComplete, cmdBlock, cmdQueue, cmdDiscover, cmdValidate } from "../src/tickets/commands.js";
+import {
+  cmdInit,
+  cmdUpdate,
+  cmdComplete,
+  cmdBlock,
+  cmdQueue,
+  cmdImplementationQueue,
+  cmdDiscover,
+  cmdValidate,
+  cmdRender,
+} from "../src/tickets/commands.js";
 import { Log } from "../src/log.js";
 import {
   buildPopulateAgentRunOptions,
@@ -66,8 +76,19 @@ function makeState(ticketId: string, status: TicketState["status"]): [string, Ti
   }];
 }
 
+function makeDefs(count: number): TicketDef[] {
+  return Array.from({ length: count }, (_, i) =>
+    makeDef(`T${String(i + 1).padStart(3, "0")}`, (i + 1) * 1000),
+  );
+}
+
 function makeTmpDir(): string {
   return mkdtempSync(join(tmpdir(), "foreman-tickets-test-"));
+}
+
+function writeTrackerConfig(dir: string, config: Record<string, unknown>): void {
+  mkdirSync(join(dir, ".tickets"), { recursive: true });
+  writeFileSync(join(dir, ".tickets", "config.yaml"), stringify(config), "utf8");
 }
 
 // ── populate instruction ─────────────────────────────────────────────────────
@@ -372,6 +393,85 @@ test("init creates expected files", () => {
     assert.ok(existsSync(join(dir, ".tickets/tracker-rules.md")));
     assert.ok(existsSync(join(dir, ".tickets/ticket-state.sqlite")));
     assert.ok(existsSync(join(dir, "docs/ticket-progress.md")));
+    const rawConfig = parse(readFileSync(join(dir, ".tickets/config.yaml"), "utf8")) as Record<string, unknown>;
+    assert.equal(rawConfig.implementation_limit, 500);
+    assert.equal(rawConfig.view_limit, 20_000);
+    assert.equal(rawConfig.queue_limit, undefined);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("config loads implementation and view limits", () => {
+  const dir = makeTmpDir();
+  try {
+    writeTrackerConfig(dir, {
+      app_name: "Test",
+      implementation_limit: 123,
+      view_limit: 456,
+      timezone: "UTC",
+    });
+
+    const config = loadTicketsConfig(dir);
+
+    assert.equal(config.implementationLimit, 123);
+    assert.equal(config.viewLimit, 456);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("config upgrades legacy queue_limit 50 to default implementation limit", () => {
+  const dir = makeTmpDir();
+  try {
+    writeTrackerConfig(dir, {
+      app_name: "Test",
+      ["queue_limit"]: 50,
+      timezone: "UTC",
+    });
+
+    const config = loadTicketsConfig(dir);
+
+    assert.equal(config.implementationLimit, 500);
+    assert.equal(config.viewLimit, 20_000);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("config preserves non-50 legacy queue_limit as implementation limit", () => {
+  const dir = makeTmpDir();
+  try {
+    writeTrackerConfig(dir, {
+      app_name: "Test",
+      queue_limit: 75,
+      timezone: "UTC",
+    });
+
+    const config = loadTicketsConfig(dir);
+
+    assert.equal(config.implementationLimit, 75);
+    assert.equal(config.viewLimit, 20_000);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("config lets implementation_limit override legacy queue_limit", () => {
+  const dir = makeTmpDir();
+  try {
+    writeTrackerConfig(dir, {
+      app_name: "Test",
+      queue_limit: 75,
+      implementation_limit: 125,
+      view_limit: 250,
+      timezone: "UTC",
+    });
+
+    const config = loadTicketsConfig(dir);
+
+    assert.equal(config.implementationLimit, 125);
+    assert.equal(config.viewLimit, 250);
   } finally {
     rmSync(dir, { recursive: true });
   }
@@ -530,19 +630,60 @@ test("discover adds to future work inbox and appears in progress doc", () => {
   }
 });
 
-test("queue with 55 tickets: completing T001 puts T051 into the 50-slot window", () => {
+test("generated progress doc uses the implementation limit", () => {
   const dir = makeTmpDir();
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
-    const defs = Array.from({ length: 55 }, (_, i) =>
-      makeDef(`T${String(i + 1).padStart(3, "0")}`, (i + 1) * 1000),
-    );
-    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: defs }));
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: makeDefs(505) }));
 
-    let rows = cmdQueue(dir);
-    assert.equal(rows.length, 50);
-    assert.ok(rows.some((r) => r.ticket === "T050"));
-    assert.ok(!rows.some((r) => r.ticket === "T051"));
+    cmdRender(dir);
+
+    const doc = readFileSync(join(dir, "docs/ticket-progress.md"), "utf8");
+    const queueBlock = doc.match(/<!-- LLM_NEXT_QUEUE_START -->\n([\s\S]*?)\n<!-- LLM_NEXT_QUEUE_END -->/)?.[1] ?? "";
+    const queueRows = queueBlock.split("\n").filter((line) => /^\| \d+ \|/.test(line));
+    assert.equal(queueRows.length, 500);
+    assert.match(queueBlock, /\| 500 \| T500 \|/);
+    assert.doesNotMatch(queueBlock, /\| 501 \| T501 \|/);
+    assert.match(doc, /\| Implementation Limit \| 500 \|/);
+    assert.match(doc, /\| View Limit \| 20000 \|/);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("command queues use implementation and view limits separately", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: makeDefs(600) }));
+
+    const implementationRows = cmdImplementationQueue(dir);
+    assert.equal(implementationRows.length, 500);
+    assert.equal(implementationRows[499].ticket, "T500");
+    assert.ok(!implementationRows.some((r) => r.ticket === "T501"));
+
+    const viewRows = cmdQueue(dir);
+    assert.equal(viewRows.length, 600);
+    assert.equal(viewRows[599].ticket, "T600");
+
+    const limitedViewRows = cmdQueue(dir, 3);
+    assert.equal(limitedViewRows.length, 3);
+    assert.equal(limitedViewRows[2].ticket, "T003");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("implementation queue with 505 tickets: completing T001 puts T501 into the 500-slot window", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: makeDefs(505) }));
+
+    let rows = cmdImplementationQueue(dir);
+    assert.equal(rows.length, 500);
+    assert.ok(rows.some((r) => r.ticket === "T500"));
+    assert.ok(!rows.some((r) => r.ticket === "T501"));
 
     cmdComplete(dir, "T001", {
       actor: "test",
@@ -551,10 +692,10 @@ test("queue with 55 tickets: completing T001 puts T051 into the 50-slot window",
       evidence: "tests pass",
     });
 
-    rows = cmdQueue(dir);
-    assert.equal(rows.length, 50);
+    rows = cmdImplementationQueue(dir);
+    assert.equal(rows.length, 500);
     assert.ok(!rows.some((r) => r.ticket === "T001"), "T001 should leave queue");
-    assert.ok(rows.some((r) => r.ticket === "T051"), "T051 should enter queue");
+    assert.ok(rows.some((r) => r.ticket === "T501"), "T501 should enter queue");
   } finally {
     rmSync(dir, { recursive: true });
   }

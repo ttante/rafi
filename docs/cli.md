@@ -146,7 +146,7 @@ Commands:
   reorder [options] <ticketId>                 Change the canonical implementation order of a ticket.
   render [options]                             Regenerate the configured ticket progress doc from current structured sources.
   validate [options]                           Run all 4 validation passes. Exits 1 on error.
-  queue [options]                              Print the next-N queue to stdout.
+  queue [options]                              Print the ticket queue to stdout.
   archive [options]                            Update the configured ticket archive doc and prune old completed rows.
   import [options]                             (stub) Migrate an existing Markdown tracker.
   help [command]                               display help for command
@@ -160,12 +160,15 @@ Usage: rafi tickets init [options]
 Initialize .tickets/ structure in a project directory.
 
 Options:
-  -p, --project <dir>  project directory (default: cwd)
-  --app-name <name>    application name
-  --timezone <tz>      IANA timezone (e.g. America/Chicago) (default: "UTC")
-  --queue-limit <n>    next-queue window size (default: "50")
-  --docs-root <dir>    repo-relative directory for generated ticket docs
-  -h, --help           display help for command
+  -p, --project <dir>         project directory (default: cwd)
+  --app-name <name>           application name
+  --timezone <tz>             IANA timezone (e.g. America/Chicago) (default:
+                              "UTC")
+  --implementation-limit <n>  implementation queue window size (default: "500")
+  --view-limit <n>            ticket queue display limit (default: "20000")
+  --queue-limit <n>           deprecated alias for --implementation-limit
+  --docs-root <dir>           repo-relative directory for generated ticket docs
+  -h, --help                  display help for command
 ```
 
 ### `rafi tickets populate --help`
@@ -355,11 +358,11 @@ Options:
 ```text
 Usage: rafi tickets queue [options]
 
-Print the next-N queue to stdout.
+Print the ticket queue to stdout.
 
 Options:
   -p, --project <dir>  project directory (default: cwd)
-  --limit <n>          override queue limit
+  --limit <n>          override view limit
   -h, --help           display help for command
 ```
 
@@ -508,7 +511,7 @@ Commands:
   reorder [options] <ticketId>                 Change the canonical implementation order of a ticket.
   render [options]                             Regenerate the configured ticket progress doc from current structured sources.
   validate [options]                           Run all 4 validation passes. Exits 1 on error.
-  queue [options]                              Print the next-N queue to stdout.
+  queue [options]                              Print the ticket queue to stdout.
   archive [options]                            Update the configured ticket archive doc and prune old completed rows.
   import [options]                             (stub) Migrate an existing Markdown tracker.
   help [command]                               display help for command

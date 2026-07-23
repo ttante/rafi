@@ -7,7 +7,7 @@ This file is the operational build tracker for humans and LLM builders. It recor
 
 ## Improvements Added From Tracker Review
 This template keeps the original queue-first workflow and adds fields that make the tracker easier to reuse across apps:
-- Tracker metadata for app name, backlog path, archive path, queue limit, timezone, and template version.
+- Tracker metadata for app name, backlog path, archive path, implementation limit, view limit, timezone, and template version.
 - `Title`, `Area`, `Owner`, `Risk`, and `Evidence` fields so tickets are understandable without opening the full backlog first.
 - A dedicated `Blocked Tickets` table so blockers are easy to scan and resolve.
 - A `Discovered Future Work Inbox` so new ideas are captured without immediately disrupting implementation order.
@@ -23,7 +23,8 @@ This template keeps the original queue-first workflow and adds fields that make 
 | Canonical Backlog | configured backlog docs | Source of truth for full stories and ticket definitions. |
 | Progress Tracker | configured progress doc | This operational tracker after the template is copied into a project. |
 | Archive File | configured archive doc | Destination for old `done` and `canceled` tickets after reset. |
-| Queue Limit | `50` | Keep `LLM_NEXT_QUEUE` filled with the next 50 remaining tickets, or all remaining if fewer than 50 exist. |
+| Implementation Limit | `<IMPLEMENTATION_LIMIT>` | Keep `LLM_NEXT_QUEUE` filled with the configured number of remaining tickets, or all remaining if fewer exist. |
+| View Limit | `<VIEW_LIMIT>` | Default row limit for the ticket queue display command. |
 | Timezone | `<IANA_TIMEZONE>` | Example: `America/Chicago`. Use this for every timestamp. |
 | Timestamp Format | ISO 8601 with offset | Example: `2026-05-25T13:11:35-05:00`. |
 | Template Version | `1.0.0` | Increment when tracker structure changes. |
@@ -47,7 +48,7 @@ This template keeps the original queue-first workflow and adds fields that make 
 5. Do not scan archived tickets to choose next work unless the active queue is empty or the user explicitly asks for history.
 
 ## Required Queue Maintenance Rule
-Every time any ticket status table is updated, the `LLM_NEXT_QUEUE` block must also be reviewed and updated. Keep it filled with the next 50 remaining tickets in correct implementation order. If fewer than 50 tickets remain, include all remaining tickets.
+Every time any ticket status table is updated, the `LLM_NEXT_QUEUE` block must also be reviewed and updated. Keep it filled to the configured implementation limit in correct implementation order. If fewer tickets remain, include all remaining tickets.
 
 Queue rows must satisfy these invariants:
 - Ranks start at `1` and increase by `1` without gaps.
@@ -81,7 +82,7 @@ Current archive state:
 | `next` | Eligible upcoming work in implementation order. | Yes |
 | `in_progress` | Currently being implemented. | Yes |
 | `blocked` | Cannot proceed without external input, dependency, or decision. | Yes, but not implementable until unblocked |
-| `planned` | Accepted future work, not yet in the next execution window. | No, unless fewer than 50 remaining tickets exist |
+| `planned` | Accepted future work, not yet in the next execution window. | No, unless fewer tickets remain than the implementation limit |
 | `done` | Implemented, validated, and documented. | No |
 | `canceled` | Intentionally not doing. | No |
 
@@ -143,8 +144,8 @@ Record the most recent validation runs. Keep this table short; detailed logs bel
 
 Template usage:
 - Replace example rows with real remaining tickets.
-- Keep at most 50 queue rows.
-- If fewer than 50 remaining tickets exist, include all remaining tickets.
+- Keep at most the configured implementation limit of queue rows.
+- If fewer remaining tickets exist, include all remaining tickets.
 - Keep ticket order aligned with canonical implementation order.
 
 ## Active Ticket Status
@@ -210,7 +211,7 @@ Use this workflow whenever implementation or planning changes the tracker.
 3. Update `Blocked Tickets` if any ticket is blocked or unblocked.
 4. Update `Recently Completed Context` only for completed work that helps upcoming implementation.
 5. Move stale `done` or `canceled` tickets to the archive when active context is too large.
-6. Rebuild `LLM_NEXT_QUEUE` with the next 50 remaining tickets, or all remaining tickets if fewer than 50 exist.
+6. Rebuild `LLM_NEXT_QUEUE` with the configured implementation limit of remaining tickets, or all remaining tickets if fewer exist.
 7. Add a `Work Log` entry.
 8. Add or update `Last Validation Snapshot` when validation commands were run.
 9. Run the four-pass validation checklist below before final response or commit.
@@ -220,7 +221,7 @@ Run these checks every time this file is updated.
 
 Pass 1: Queue shape
 - `LLM_NEXT_QUEUE` exists with `LLM_NEXT_QUEUE_START` and `LLM_NEXT_QUEUE_END` markers.
-- Queue has 50 rows, or all remaining tickets if fewer than 50 remain.
+- Queue has the configured implementation-limit row count, or all remaining tickets if fewer remain.
 - Ranks are sequential and start at `1`.
 - Queue contains no `done` or `canceled` tickets.
 
@@ -246,7 +247,7 @@ Pass 4: Hygiene and history
 Projects should add a lightweight parser or CI gate when possible.
 
 Recommended checks:
-- Validate `LLM_NEXT_QUEUE` row count is `min(50, remaining_ticket_count)`.
+- Validate `LLM_NEXT_QUEUE` row count is `min(implementation_limit, remaining_ticket_count)`.
 - Validate queue ranks are sequential.
 - Validate queued tickets exist in `Active Ticket Status`.
 - Validate queue contains no `done` or `canceled` statuses.
@@ -258,7 +259,7 @@ Recommended checks:
 ## Update Checklist For Future Builders
 - Update `Active Ticket Status` before the final response whenever any ticket status changes.
 - Update `LLM_NEXT_QUEUE` every time `Active Ticket Status` changes.
-- Keep `LLM_NEXT_QUEUE` filled with the next 50 tickets in implementation order, or all remaining tickets if fewer than 50 remain.
+- Keep `LLM_NEXT_QUEUE` filled to the configured implementation limit in implementation order, or all remaining tickets if fewer remain.
 - If a ticket is touched but not completed, update `last_worked_at`, status, blocker, and next action.
 - If a new future task is discovered, add it to `Discovered Future Work Inbox` or insert it into `LLM_NEXT_QUEUE` and `Active Ticket Status` when accepted.
 - Move old `done` or `canceled` tickets out of active status during ticket reset.

@@ -23,7 +23,7 @@ import {
   cmdQueue,
   cmdArchive,
 } from "../tickets/commands.js";
-import { isTicketsInitialized, loadTicketsConfig } from "../tickets/config.js";
+import { DEFAULT_TICKETS_CONFIG, isTicketsInitialized, loadTicketsConfig } from "../tickets/config.js";
 import { validateDocsRoot } from "../tickets/config.js";
 import { importFromMarkdown } from "../tickets/importer.js";
 import { formatValidationIssues } from "../tickets/validate.js";
@@ -46,6 +46,11 @@ function cwd(opts: { project?: string }): string {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function optionWasProvided(command: Command, name: string): boolean {
+  const source = command.getOptionValueSource(name);
+  return source !== undefined && source !== "default";
 }
 
 const TICKET_POPULATE_ROLE = "ticket-maker";
@@ -179,15 +184,24 @@ export function buildTicketsCommand(): Command {
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--app-name <name>", "application name")
     .option("--timezone <tz>", "IANA timezone (e.g. America/Chicago)", "UTC")
-    .option("--queue-limit <n>", "next-queue window size", "50")
+    .option("--implementation-limit <n>", "implementation queue window size", String(DEFAULT_TICKETS_CONFIG.implementationLimit))
+    .option("--view-limit <n>", "ticket queue display limit", String(DEFAULT_TICKETS_CONFIG.viewLimit))
+    .option("--queue-limit <n>", "deprecated alias for --implementation-limit")
     .option("--docs-root <dir>", "repo-relative directory for generated ticket docs")
-    .action((opts) => {
+    .action((opts, command: Command) => {
       const dir = cwd(opts);
       try {
+        const hasImplementationLimit = optionWasProvided(command, "implementationLimit");
+        const hasLegacyQueueLimit = optionWasProvided(command, "queueLimit");
+        if (hasImplementationLimit && hasLegacyQueueLimit) {
+          fail("--implementation-limit and deprecated --queue-limit cannot both be passed");
+        }
         cmdInit(dir, {
           appName: opts.appName as string | undefined,
           timezone: opts.timezone as string,
-          queueLimit: Number(opts.queueLimit),
+          implementationLimit: hasImplementationLimit ? Number(opts.implementationLimit) : undefined,
+          viewLimit: optionWasProvided(command, "viewLimit") ? Number(opts.viewLimit) : undefined,
+          queueLimit: hasLegacyQueueLimit ? Number(opts.queueLimit) : undefined,
           docsRoot: opts.docsRoot as string | undefined,
         });
         console.log(`foreman tickets: initialized .tickets/ in ${dir}`);
@@ -551,12 +565,12 @@ export function buildTicketsCommand(): Command {
 
   tickets
     .command("queue")
-    .description("Print the next-N queue to stdout.")
+    .description("Print the ticket queue to stdout.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
-    .option("--limit <n>", "override queue limit")
+    .option("--limit <n>", "override view limit")
     .action((opts) => {
       try {
-        const rows = cmdQueue(cwd(opts), opts.limit ? Number(opts.limit) : undefined);
+        const rows = cmdQueue(cwd(opts), opts.limit !== undefined ? Number(opts.limit) : undefined);
         if (rows.length === 0) {
           console.log("No remaining tickets.");
         } else {
