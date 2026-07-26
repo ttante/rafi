@@ -91,6 +91,80 @@ const artifactPathMap = {
   additionalProperties: runtimeArtifactPaths,
 } as const;
 
+const ticketSetupSource = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "paths"],
+      properties: {
+        type: { const: "local" },
+        paths: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type"],
+      properties: {
+        type: { const: "linear" },
+        api_key_env: { type: "string", minLength: 1 },
+        team_key: { type: ["string", "null"] },
+        filter: { type: ["string", "null"] },
+      },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "site", "jql"],
+      properties: {
+        type: { const: "jira" },
+        site: { type: "string", minLength: 1 },
+        email_env: { type: "string", minLength: 1 },
+        token_env: { type: "string", minLength: 1 },
+        jql: { type: "string", minLength: 1 },
+      },
+    },
+  ],
+} as const;
+
+const ticketsSetupConfig = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    sources: {
+      type: "array",
+      items: ticketSetupSource,
+    },
+    populate: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        source_handling: { enum: ["saved", "prompt", "manual"] },
+        agent_preference: { enum: ["configured", "claude", "codex"] },
+        import_cap: { type: "integer", minimum: 1 },
+        comment_limit: { type: "integer", minimum: 0 },
+        enrichment: { enum: ["none", "recommendations", "agent"] },
+        recommend_split_for_xl: { type: "boolean" },
+      },
+    },
+    build: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        branch_strategy: { enum: ["branch-per-ticket", "batch"] },
+        completion: { enum: ["pr", "auto-merge", "direct-merge", "none"] },
+        provider: { enum: ["auto", "github", "gitlab", "local"] },
+        pr_ready: { type: "boolean" },
+        merge_method: { enum: ["squash", "merge", "rebase"] },
+        cleanup: { type: "boolean" },
+        auto_merge_wait: { type: "boolean" },
+        auto_merge_timeout_minutes: { type: ["integer", "null"], minimum: 1 },
+      },
+    },
+  },
+} as const;
+
 export const projectConfigSchema = {
   $id: "rafi/projectConfig",
   type: "object",
@@ -132,6 +206,7 @@ export const projectConfigSchema = {
         root: { type: "string", minLength: 1 },
       },
     },
+    tickets: ticketsSetupConfig,
     agents: artifactPathMap,
     skills: artifactPathMap,
   },

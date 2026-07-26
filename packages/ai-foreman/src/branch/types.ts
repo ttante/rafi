@@ -33,13 +33,17 @@ export interface BranchIssue {
 
 export type GitHubFailureCode =
   | "gh_missing"
+  | "glab_missing"
   | "gh_not_authenticated"
+  | "glab_not_authenticated"
   | "remote_missing"
   | "remote_not_github"
+  | "remote_not_gitlab"
   | "repo_unreachable"
   | "git_remote_unreachable"
   | "push_failed"
   | "pr_create_failed"
+  | "mr_create_failed"
   | "network_or_timeout"
   | "unknown";
 
@@ -64,6 +68,7 @@ export interface GitHubRemote {
 export type GitHubRemoteResult = { ok: true; remote: GitHubRemote } | GitHubFailure;
 export type GitHubReadinessResult = { ok: true; remote: GitHubRemote } | GitHubFailure;
 export type GitHubOperationResult = { ok: true; output?: string } | GitHubFailure;
+export type ReviewMergeStatus = { ok: true; merged: boolean; state?: string; url?: string } | GitHubFailure;
 
 export interface BranchPlan {
   baseRef: string;
@@ -71,8 +76,11 @@ export interface BranchPlan {
   issues: BranchIssue[];
 }
 
+export type CompletionMode = "none" | "pr" | "auto-merge" | "direct-merge";
+export type ReviewProvider = "github" | "gitlab";
+
 export interface PrResult {
-  status: "created" | "existing" | "failed" | "skipped";
+  status: "created" | "existing" | "failed" | "skipped" | "auto_merge_enabled" | "merged";
   url?: string;
   error?: string;
   code?: GitHubFailureCode;

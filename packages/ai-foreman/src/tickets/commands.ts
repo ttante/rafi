@@ -18,6 +18,7 @@ import { nowTimestamp, logEvent } from "./events.js";
 import { renderAndWrite, renderTrackerRules } from "./renderMarkdown.js";
 import { runAllValidation } from "./validate.js";
 import { buildNextQueue } from "./queue.js";
+import { cmdReviewRecommendations, type ReviewCommandOptions, type ReviewCommandResult } from "./recommendations.js";
 
 // ── Context helper ────────────────────────────────────────────────────────────
 
@@ -119,6 +120,18 @@ export function cmdInit(projectDir: string, opts: InitOptions): void {
   writeFileSync(join(ticketsDir, "config.yaml"), stringify(config, { lineWidth: 80 }), "utf8");
 
   writeFileSync(join(ticketsDir, "tickets.yaml"), "tickets: []\n", "utf8");
+  writeFileSync(
+    join(ticketsDir, ".gitignore"),
+    [
+      "imports/",
+      "ticket-state.sqlite",
+      "ticket-state.sqlite-shm",
+      "ticket-state.sqlite-wal",
+      "backups/",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
 
   writeFileSync(join(ticketsDir, "tracker-rules.md"), renderTrackerRules(progressDoc), "utf8");
 
@@ -143,6 +156,20 @@ export function cmdInit(projectDir: string, opts: InitOptions): void {
       likely_files: { type: "array", items: { type: "string" } },
       rollback: { type: ["string", "null"] },
       notes: { type: ["string", "null"] },
+      external_refs: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["provider", "id"],
+          additionalProperties: true,
+          properties: {
+            provider: { type: "string", minLength: 1 },
+            id: { type: "string", minLength: 1 },
+            key: { type: ["string", "null"] },
+            url: { type: ["string", "null"] },
+          },
+        },
+      },
     },
   };
   writeFileSync(join(ticketsDir, "schema", "tickets.schema.json"), JSON.stringify(ticketSchema, null, 2), "utf8");
@@ -599,4 +626,10 @@ export function cmdArchive(projectDir: string, _opts: { olderThanDays?: number }
     });
     renderAfterUpdate(ctx);
   });
+}
+
+// ── review recommendations ──────────────────────────────────────────────────
+
+export function cmdReview(projectDir: string, opts: ReviewCommandOptions = {}): ReviewCommandResult {
+  return cmdReviewRecommendations(projectDir, opts);
 }

@@ -917,6 +917,78 @@ test("runBranchPlan reuses an existing branch commit when retrying PR creation",
   }
 });
 
+test("runBranchPlan skips auto-merge dependent tickets until dependency PRs are merged", async () => {
+  const repo = initGitRepo("foreman-auto-merge-dependency-test-");
+  const remote = join(repo.root, "origin.git");
+  const binDir = join(repo.root, "bin");
+  const oldPath = process.env.PATH;
+  try {
+    const first = makeDef("T001", 1000);
+    const second = makeDef("T002", 2000, { depends_on: ["T001"] });
+    cmdInit(repo.project, {});
+    saveTickets(join(repo.project, ".tickets", "tickets.yaml"), [first, second]);
+    git(repo.project, [
+      "add",
+      ".tickets/config.yaml",
+      ".tickets/tickets.yaml",
+      ".tickets/tracker-rules.md",
+      ".tickets/schema",
+      ".tickets/migrations",
+    ]);
+    git(repo.project, ["commit", "-m", "add tickets"]);
+    execFileSync("git", ["init", "--bare", remote], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    git(repo.project, ["remote", "add", "origin", remote]);
+    git(repo.project, ["push", "-u", "origin", "main"]);
+
+    mkdirSync(binDir, { recursive: true });
+    writeExecutable(join(binDir, "gh"), [
+      "#!/usr/bin/env bash",
+      "if [ \"$1 $2\" = \"pr list\" ]; then exit 0; fi",
+      "if [ \"$1 $2\" = \"pr create\" ]; then echo 'https://example.test/pr/1'; exit 0; fi",
+      "if [ \"$1 $2\" = \"pr merge\" ]; then echo 'auto merge enabled'; exit 0; fi",
+      "if [ \"$1 $2\" = \"pr view\" ]; then printf 'OPEN\\thttps://example.test/pr/1\\n'; exit 0; fi",
+      "exit 2",
+    ]);
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    const firstNode = makeNode(first);
+    const secondNode = {
+      ...makeNode(second),
+      dependencies: ["T001"],
+      baseBranch: "main",
+      depth: 2,
+    };
+    const summaries = await runBranchPlan({
+      projectDir: repo.project,
+      runId: "run",
+      plan: { baseRef: "main", nodes: [firstNode, secondNode], issues: [] },
+      log: new Log(join(repo.project, ".foreman", "auto-merge-dependency.jsonl")),
+      agent: "codex",
+      notificationsEnabled: false,
+      qaEnabled: false,
+      createPr: true,
+      completionMode: "auto-merge",
+      reviewProvider: "github",
+      prReady: true,
+      keepWorktrees: false,
+      allowedBaseDirtyPaths: generatedTrackerDirtyPaths({
+        stateDb: ".tickets/ticket-state.sqlite",
+        progressDoc: "docs/ticket-progress.md",
+      }),
+      createBuilder: async (cwd) => new FakeBuilder(cwd),
+    });
+
+    assert.equal(summaries.length, 2);
+    assert.equal(summaries[0]?.buildStatus, "done");
+    assert.equal(summaries[0]?.pr?.status, "auto_merge_enabled");
+    assert.equal(summaries[1]?.buildStatus, "skipped");
+    assert.match(summaries[1]?.detail ?? "", /has not merged/);
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
 test("findResumableBranchSessions returns unfinished ticket sessions and command hints", () => {
   const dir = mkdtempSync(join(tmpdir(), "foreman-branch-resume-test-"));
   const foremanDir = join(dir, ".foreman");

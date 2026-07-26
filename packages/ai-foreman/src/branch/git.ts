@@ -38,7 +38,7 @@ export function generatedTrackerDirtyPaths(paths: { stateDb: string; progressDoc
 }
 
 export function ensureCleanBaseWorktree(cwd: string, opts: BaseWorktreeCleanOptions = {}): void {
-  const allowedDirtyPaths = new Set((opts.allowedDirtyPaths ?? []).map(normalizeRepoPath));
+  const allowedDirtyPaths = new Set([".tickets/.gitignore", ...(opts.allowedDirtyPaths ?? []).map(normalizeRepoPath)]);
   const status = runGit(cwd, ["status", "--porcelain", "--untracked-files=all"]).stdout;
   const dirty = status.split("\n").filter(Boolean).filter((line) => {
     const path = normalizeRepoPath(line.slice(3));
@@ -123,6 +123,29 @@ export function headCommitIfAhead(worktreePath: string, base: string): string | 
 
 export function pushBranch(worktreePath: string, branch: string): void {
   runGit(worktreePath, ["push", "-u", "origin", branch]);
+}
+
+export function squashMergeBranchToLocalBase(
+  projectDir: string,
+  branch: string,
+  baseBranch: string,
+  message: string,
+): string {
+  const current = currentGitRef(projectDir);
+  if (current !== baseBranch) {
+    runGit(projectDir, ["checkout", baseBranch]);
+  }
+  runGit(projectDir, ["merge", "--squash", branch]);
+  runGit(projectDir, ["commit", "-m", message]);
+  return runGit(projectDir, ["rev-parse", "--short", "HEAD"]).stdout;
+}
+
+export function deleteLocalBranch(projectDir: string, branch: string): void {
+  try {
+    runGit(projectDir, ["branch", "-D", branch]);
+  } catch {
+    // Branch cleanup is best-effort; worktree removal already frees the checkout.
+  }
 }
 
 function normalizeRepoPath(path: string): string {

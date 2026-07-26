@@ -26,7 +26,8 @@ Runtime behavior not fully expressible in Commander help:
 - `rafi plan`, `rafi start`, `ai-foreman start`, and `tickets populate` use a single `harness.targets` value from `rafi-config.yaml` when `--agent` is omitted. Missing config or both targets default to Claude.
 - Interactive runtime auth/readiness failures offer retry, verified switch to the other runtime, or cancel. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because session IDs are runtime-specific.
 - `rafi plan` accepts only `STEP_STATUS: plan_complete` as a successful planner result, validates required plan sections before writing, writes versioned history to `<docs.root>/rafi-plans/<timestamp>.md`, and refreshes `<docs.root>/rafi-plan.md`.
-- `rafi tickets populate` uses explicit `--sources` first. When omitted, it checks `<docs.root>/rafi-plan.md` from `rafi-config.yaml`, legacy `project.yaml`, the ticket progress-doc directory, and `docs/rafi-plan.md` before falling back to repository scanning.
+- `rafi tickets populate` uses explicit `--sources` first, then saved `tickets.sources` from `rafi-config.yaml`. When omitted, it checks `<docs.root>/rafi-plan.md`; interactive runs ask before using it, while non-interactive runs print next-step options when no source is available.
+- `rafi start` and `ai-foreman start` can read saved `tickets.build` defaults from `rafi-config.yaml`; explicit flags such as `--completion`, `--no-branch-per-ticket`, `--no-create-pr`, and `--auto-merge-wait` / `--no-auto-merge-wait` win for the current run.
 
 ## `rafi`
 
@@ -134,6 +135,8 @@ Options:
   -h, --help                                   display help for command
 
 Commands:
+  setup:init [options]                         Configure ticket sources, populate defaults, and build defaults in rafi-config.yaml.
+  setup:update [options]                       Update selected ticket setup sections in rafi-config.yaml.
   init [options]                               Initialize .tickets/ structure in a project directory.
   populate [options]                           Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
   update [options] <ticketId>                  Update ticket status or progress fields.
@@ -144,12 +147,95 @@ Commands:
   discover [options]                           Add newly discovered future work to the inbox.
   accept-future-work [options] <futureWorkId>  Promote a future-work item into tickets.yaml as a new ticket.
   reorder [options] <ticketId>                 Change the canonical implementation order of a ticket.
+  review [options]                             Review pending split/combine/duplicate ticket recommendations.
   render [options]                             Regenerate the configured ticket progress doc from current structured sources.
   validate [options]                           Run all 4 validation passes. Exits 1 on error.
   queue [options]                              Print the ticket queue to stdout.
   archive [options]                            Update the configured ticket archive doc and prune old completed rows.
   import [options]                             (stub) Migrate an existing Markdown tracker.
   help [command]                               display help for command
+```
+
+### `rafi tickets setup:init --help`
+
+```text
+Usage: rafi tickets setup:init [options]
+
+Configure ticket sources, populate defaults, and build defaults in
+rafi-config.yaml.
+
+Options:
+  -p, --project <dir>         project directory (default: cwd)
+  --defaults                  skip prompts and use recommended ticket setup
+                              defaults
+  -y, --yes                   skip prompts where possible
+  --app-name <name>           application name for a new minimal
+                              rafi-config.yaml
+  --docs-root <dir>           repo-relative docs root for a new minimal
+                              rafi-config.yaml and ticket docs
+  --runtime <runtime>         runtime targets for a new minimal
+                              rafi-config.yaml (both | claude | codex)
+  --local-source <paths...>   saved local ticket source files, folders, or
+                              globs
+  --linear                    add a Linear source using LINEAR_API_KEY
+  --linear-team-key <key>     Linear team key filter
+  --linear-filter <filter>    Linear IssueFilter JSON or title search text
+  --jira-site <url>           Jira Cloud site URL
+  --jira-jql <jql>            Jira JQL query
+  --agent-preference <agent>  populate runtime preference (configured | claude
+                              | codex)
+  --completion <mode>         build completion default (pr | auto-merge |
+                              direct-merge | none)
+  --provider <provider>       PR/MR provider default (auto | github | gitlab |
+                              local)
+  --auto-merge-wait           wait for dependency PR/MRs to merge before
+                              starting dependent tickets
+  --auto-merge-timeout-minutes <n>
+                              auto-merge dependency wait timeout in minutes
+                              (blank means no timeout)
+  --skip-access-check         do not validate Linear/Jira access during setup
+  -h, --help                  display help for command
+```
+
+### `rafi tickets setup:update --help`
+
+```text
+Usage: rafi tickets setup:update [options]
+
+Update selected ticket setup sections in rafi-config.yaml.
+
+Options:
+  -p, --project <dir>         project directory (default: cwd)
+  --defaults                  skip prompts and keep existing values unless
+                              explicit options are provided
+  -y, --yes                   skip prompts where possible
+  --app-name <name>           application name for a new minimal
+                              rafi-config.yaml
+  --docs-root <dir>           repo-relative docs root for a new minimal
+                              rafi-config.yaml and ticket docs
+  --runtime <runtime>         runtime targets for a new minimal
+                              rafi-config.yaml (both | claude | codex)
+  --local-source <paths...>   replace saved local ticket source files, folders,
+                              or globs
+  --linear                    replace saved sources with a Linear source using
+                              LINEAR_API_KEY
+  --linear-team-key <key>     Linear team key filter
+  --linear-filter <filter>    Linear IssueFilter JSON or title search text
+  --jira-site <url>           Jira Cloud site URL
+  --jira-jql <jql>            Jira JQL query
+  --agent-preference <agent>  populate runtime preference (configured | claude
+                              | codex)
+  --completion <mode>         build completion default (pr | auto-merge |
+                              direct-merge | none)
+  --provider <provider>       PR/MR provider default (auto | github | gitlab |
+                              local)
+  --auto-merge-wait           wait for dependency PR/MRs to merge before
+                              starting dependent tickets
+  --auto-merge-timeout-minutes <n>
+                              auto-merge dependency wait timeout in minutes
+                              (blank means no timeout)
+  --skip-access-check         do not validate Linear/Jira access during setup
+  -h, --help                  display help for command
 ```
 
 ### `rafi tickets init --help`
@@ -168,6 +254,8 @@ Options:
   --view-limit <n>            ticket queue display limit (default: "20000")
   --queue-limit <n>           deprecated alias for --implementation-limit
   --docs-root <dir>           repo-relative directory for generated ticket docs
+  -y, --yes                   skip app-name prompt when no config/package
+                              default exists
   -h, --help                  display help for command
 ```
 
@@ -379,6 +467,25 @@ Options:
   -h, --help             display help for command
 ```
 
+### `rafi tickets review --help`
+
+```text
+Usage: rafi tickets review [options]
+
+Review pending split/combine/duplicate ticket recommendations.
+
+Options:
+  -p, --project <dir>  project directory (default: cwd)
+  --id <n>             recommendation id to review
+  --accept             accept the selected recommendation
+  --dismiss            dismiss the selected recommendation
+  --defer              defer the selected recommendation
+  --accept-all         accept every pending recommendation
+  --dismiss-all        dismiss every pending recommendation
+  --defer-all          defer every pending recommendation
+  -h, --help           display help for command
+```
+
 ### `rafi tickets import --help`
 
 ```text
@@ -418,8 +525,22 @@ Options:
   --no-qa                   disable per-ticket QA review (enabled by default)
   --branch-per-ticket       run each selected structured ticket in an isolated
                             git worktree and branch
+  --no-branch-per-ticket    disable saved branch-per-ticket defaults for this
+                            run
   --create-pr               push each successful ticket branch and create a
                             GitHub PR (implies --branch-per-ticket)
+  --no-create-pr            disable saved PR/MR creation defaults for this run
+  --completion <mode>       ticket branch completion behavior (pr | auto-merge
+                            | direct-merge | none)
+  --provider <provider>     PR/MR provider for branch completion (auto | github
+                            | gitlab)
+  --auto-merge-wait         wait for dependency PR/MRs to merge before starting
+                            dependent tickets
+  --no-auto-merge-wait      do not wait for dependency PR/MRs before dependent
+                            tickets
+  --auto-merge-timeout-minutes <n>
+                            auto-merge dependency wait timeout in minutes
+                            (blank means no timeout)
   --base <ref>              base ref for root ticket branches (default: current
                             branch or HEAD)
   --branch-prefix <prefix>  branch name prefix for ticket branches (default:
@@ -499,6 +620,8 @@ Options:
   -h, --help                                   display help for command
 
 Commands:
+  setup:init [options]                         Configure ticket sources, populate defaults, and build defaults in rafi-config.yaml.
+  setup:update [options]                       Update selected ticket setup sections in rafi-config.yaml.
   init [options]                               Initialize .tickets/ structure in a project directory.
   populate [options]                           Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
   update [options] <ticketId>                  Update ticket status or progress fields.
@@ -509,6 +632,7 @@ Commands:
   discover [options]                           Add newly discovered future work to the inbox.
   accept-future-work [options] <futureWorkId>  Promote a future-work item into tickets.yaml as a new ticket.
   reorder [options] <ticketId>                 Change the canonical implementation order of a ticket.
+  review [options]                             Review pending split/combine/duplicate ticket recommendations.
   render [options]                             Regenerate the configured ticket progress doc from current structured sources.
   validate [options]                           Run all 4 validation passes. Exits 1 on error.
   queue [options]                              Print the ticket queue to stdout.
@@ -543,8 +667,22 @@ Options:
   --no-qa                   disable per-ticket QA review (enabled by default)
   --branch-per-ticket       run each selected structured ticket in an isolated
                             git worktree and branch
+  --no-branch-per-ticket    disable saved branch-per-ticket defaults for this
+                            run
   --create-pr               push each successful ticket branch and create a
                             GitHub PR (implies --branch-per-ticket)
+  --no-create-pr            disable saved PR/MR creation defaults for this run
+  --completion <mode>       ticket branch completion behavior (pr | auto-merge
+                            | direct-merge | none)
+  --provider <provider>     PR/MR provider for branch completion (auto | github
+                            | gitlab)
+  --auto-merge-wait         wait for dependency PR/MRs to merge before starting
+                            dependent tickets
+  --no-auto-merge-wait      do not wait for dependency PR/MRs before dependent
+                            tickets
+  --auto-merge-timeout-minutes <n>
+                            auto-merge dependency wait timeout in minutes
+                            (blank means no timeout)
   --base <ref>              base ref for root ticket branches (default: current
                             branch or HEAD)
   --branch-prefix <prefix>  branch name prefix for ticket branches (default:

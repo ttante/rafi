@@ -2,6 +2,13 @@ export type TicketPriority = "P0" | "P1" | "P2" | "P3";
 export type TicketSize = "XS" | "S" | "M" | "L" | "XL";
 export type TicketRisk = "Low" | "Medium" | "High";
 
+export interface TicketExternalRef {
+  provider: "linear" | "jira" | string;
+  id: string;
+  key?: string | null;
+  url?: string | null;
+}
+
 export interface TicketDef {
   id: string;
   order: number;
@@ -17,6 +24,7 @@ export interface TicketDef {
   likely_files: string[];
   rollback?: string | null;
   notes?: string | null;
+  external_refs?: TicketExternalRef[];
 }
 
 export const TICKET_JSON_SCHEMA = {
@@ -41,6 +49,20 @@ export const TICKET_JSON_SCHEMA = {
     likely_files: { type: "array", items: { type: "string" } },
     rollback: { type: ["string", "null"] },
     notes: { type: ["string", "null"] },
+    external_refs: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["provider", "id"],
+        additionalProperties: true,
+        properties: {
+          provider: { type: "string", minLength: 1 },
+          id: { type: "string", minLength: 1 },
+          key: { type: ["string", "null"] },
+          url: { type: ["string", "null"] },
+        },
+      },
+    },
   },
 } as const;
 

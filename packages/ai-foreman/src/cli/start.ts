@@ -20,13 +20,15 @@ import { StateDb } from "../tickets/stateDb.js";
 import { buildBranchAuditInstruction, buildBranchPlan, parseAuditDependencies } from "../branch/planner.js";
 import { currentGitRef, ensureCleanBaseWorktree, generatedTrackerDirtyPaths } from "../branch/git.js";
 import { formatGitHubFailure, preflightGh } from "../branch/github.js";
+import { preflightGlab } from "../branch/gitlab.js";
 import { runBranchPlan } from "../branch/runner.js";
 import {
   findResumableBranchSessions,
   formatBranchContinueCommand,
   formatBranchSummaryFollowupCommands,
 } from "../branch/resume.js";
-import type { BranchPlan, BranchPlanNode } from "../branch/types.js";
+import type { BranchPlan, BranchPlanNode, CompletionMode, ReviewProvider } from "../branch/types.js";
+import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig.js";
 
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
@@ -55,6 +57,98 @@ function collectTicket(value: string, previous: string[]): string[] {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function optionWasProvided(command: Command, name: string): boolean {
+  const source = command.getOptionValueSource(name);
+  return source !== undefined && source !== "default";
+}
+
+interface ResolvedStartBranchDefaults {
+  branchMode: boolean;
+  completionMode: CompletionMode;
+  reviewProvider?: ReviewProvider;
+  createReview: boolean;
+  prReady: boolean;
+  cleanupBranches: boolean;
+  rootBaseBranches: boolean;
+  autoMergeWait: boolean;
+  autoMergeTimeoutMinutes: number | null;
+}
+
+function resolveStartBranchDefaults(
+  cwd: string,
+  opts: Record<string, unknown>,
+  command: Command,
+): ResolvedStartBranchDefaults {
+  const setup = loadTicketSetupConfig(cwd);
+  const savedBuild = setup?.build;
+  const branchFlagProvided = optionWasProvided(command, "branchPerTicket");
+  const branchFlagOn = branchFlagProvided && opts.branchPerTicket !== false;
+  const createPrFlagProvided = optionWasProvided(command, "createPr");
+  const createPrFlagOn = createPrFlagProvided && opts.createPr !== false;
+  const completionFromFlag = typeof opts.completion === "string"
+    ? parseCompletionMode(opts.completion)
+    : undefined;
+  let completionMode: CompletionMode =
+    completionFromFlag
+    ?? (createPrFlagOn ? "pr" : undefined)
+    ?? savedBuild?.completion
+    ?? "none";
+
+  if (createPrFlagProvided && opts.createPr === false) {
+    completionMode = "none";
+  }
+
+  const savedBranchMode = savedBuild?.branch_strategy === "branch-per-ticket";
+  let branchMode = Boolean(savedBranchMode || branchFlagOn || createPrFlagOn || completionMode !== "none");
+  if (branchFlagProvided && opts.branchPerTicket === false) {
+    branchMode = false;
+    completionMode = "none";
+  }
+  if (completionMode !== "none") branchMode = true;
+
+  const providerFromFlag = typeof opts.provider === "string" ? parseReviewProviderOption(opts.provider, cwd) : undefined;
+  const provider = providerFromFlag ?? (createPrFlagOn ? "github" : providerFromSaved(savedBuild?.provider, cwd));
+  const autoMergeWaitProvided = optionWasProvided(command, "autoMergeWait");
+  const autoMergeTimeoutMinutes = typeof opts.autoMergeTimeoutMinutes === "string"
+    ? parseOptionalPositiveInteger(opts.autoMergeTimeoutMinutes, "--auto-merge-timeout-minutes")
+    : savedBuild?.auto_merge_timeout_minutes ?? null;
+  return {
+    branchMode,
+    completionMode,
+    reviewProvider: provider,
+    createReview: completionMode === "pr" || completionMode === "auto-merge",
+    prReady: Boolean(opts.prReady || savedBuild?.pr_ready || completionMode === "auto-merge"),
+    cleanupBranches: opts.keepWorktrees ? false : savedBuild?.cleanup ?? true,
+    rootBaseBranches: completionMode === "auto-merge" || completionMode === "direct-merge",
+    autoMergeWait: autoMergeWaitProvided ? opts.autoMergeWait !== false : savedBuild?.auto_merge_wait ?? false,
+    autoMergeTimeoutMinutes,
+  };
+}
+
+function parseCompletionMode(value: string): CompletionMode {
+  if (["pr", "auto-merge", "direct-merge", "none"].includes(value)) return value as CompletionMode;
+  fail("--completion must be one of: pr, auto-merge, direct-merge, none");
+}
+
+function parseReviewProviderOption(value: string, cwd: string): ReviewProvider | undefined {
+  if (value === "auto") return providerFromSaved("auto", cwd);
+  if (value === "github" || value === "gitlab") return value;
+  fail("--provider must be one of: auto, github, gitlab");
+}
+
+function parseOptionalPositiveInteger(value: string, label: string): number | null {
+  if (!value.trim()) return null;
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  fail(`${label} must be a positive integer or blank`);
+}
+
+function providerFromSaved(value: string | undefined, cwd: string): ReviewProvider | undefined {
+  if (value === "github" || value === "gitlab") return value;
+  if (value === "local") return undefined;
+  return detectGitProvider(cwd);
 }
 
 function branchContinueTicketHelp(cwd: string, flag = "--continue"): string {
@@ -108,6 +202,43 @@ async function ensureGitHubReadyForCreatePr(cwd: string, log: Log, yes: boolean)
   }
 }
 
+async function ensureReviewProviderReady(cwd: string, provider: ReviewProvider, log: Log, yes: boolean): Promise<void> {
+  if (provider === "github") {
+    await ensureGitHubReadyForCreatePr(cwd, log, yes);
+    return;
+  }
+  while (true) {
+    const result = preflightGlab(cwd);
+    if (result.ok) return;
+
+    log.write("gitlab-readiness-failed", {
+      code: result.code,
+      message: result.message,
+      repairCommands: result.repairCommands,
+      command: result.command,
+      output: result.output,
+    });
+
+    const detail = formatGitHubFailure(result);
+    if (yes || !process.stdin.isTTY || !process.stdout.isTTY) {
+      fail(`GitLab MR setup failed before building:\n${detail}`);
+    }
+
+    console.error(`foreman: GitLab MR setup failed before building:\n${detail}\n`);
+    const action = await select({
+      message: "Retry GitLab readiness check?",
+      options: [
+        { value: "retry", label: "Retry" },
+        { value: "cancel", label: "Cancel" },
+      ],
+    });
+    if (isCancel(action) || action === "cancel") {
+      console.log("ai-foreman: cancelled");
+      process.exit(0);
+    }
+  }
+}
+
 export function buildStartCommand(): Command {
   return new Command("start")
     .description("Enlist a builder and drive it through a batch of N steps.")
@@ -123,14 +254,21 @@ export function buildStartCommand(): Command {
     .option("--fast", "fast mode — lower latency (maps to effort=low for codex)")
     .option("--no-qa", "disable per-ticket QA review (enabled by default)")
     .option("--branch-per-ticket", "run each selected structured ticket in an isolated git worktree and branch")
+    .option("--no-branch-per-ticket", "disable saved branch-per-ticket defaults for this run")
     .option("--create-pr", "push each successful ticket branch and create a GitHub PR (implies --branch-per-ticket)")
+    .option("--no-create-pr", "disable saved PR/MR creation defaults for this run")
+    .option("--completion <mode>", "ticket branch completion behavior (pr | auto-merge | direct-merge | none)")
+    .option("--provider <provider>", "PR/MR provider for branch completion (auto | github | gitlab)")
+    .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
+    .option("--no-auto-merge-wait", "do not wait for dependency PR/MRs before dependent tickets")
+    .option("--auto-merge-timeout-minutes <n>", "auto-merge dependency wait timeout in minutes (blank means no timeout)")
     .option("--base <ref>", "base ref for root ticket branches (default: current branch or HEAD)")
     .option("--branch-prefix <prefix>", "branch name prefix for ticket branches", "rafi")
     .option("--max-branch-depth <n>", "maximum selected branch stack depth", "2")
     .option("--pr-ready", "create ready-for-review PRs instead of draft PRs")
     .option("--keep-worktrees", "keep successful ticket worktrees for inspection")
     .option("--ticket <id>", "ticket id to continue in branch mode; repeat for multiple tickets", collectTicket, [])
-    .action(async (project: string, opts) => {
+    .action(async (project: string, opts, command: Command) => {
       const steps = Number.parseInt(opts.steps, 10);
       if (!Number.isInteger(steps) || steps < 1) {
         fail("--steps must be a positive integer");
@@ -142,6 +280,7 @@ export function buildStartCommand(): Command {
 
       const cwd = resolve(project);
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
+      const branchDefaults = resolveStartBranchDefaults(cwd, opts as Record<string, unknown>, command);
       let agent: AgentRuntime;
       try {
         agent = resolveAgentForProject(cwd, opts.agent as string | undefined);
@@ -181,7 +320,7 @@ export function buildStartCommand(): Command {
         fail("choose either --resume <sessionId> or --continue, not both");
       }
 
-      const branchMode = Boolean(opts.branchPerTicket || opts.createPr);
+      const branchMode = branchDefaults.branchMode;
       const continueTickets = (opts.ticket as string[] | undefined) ?? [];
       const maxBranchDepth = Number.parseInt(opts.maxBranchDepth, 10);
       if (!Number.isInteger(maxBranchDepth) || maxBranchDepth < 1) {
@@ -202,6 +341,9 @@ export function buildStartCommand(): Command {
         }
         if (opts.tickets) fail("--tickets is not supported with --branch-per-ticket; initialize and use .tickets/tickets.yaml");
         if (!isTicketsInitialized(cwd)) fail("--branch-per-ticket requires initialized .tickets/ (run ai-foreman tickets init)");
+        if (branchDefaults.createReview && !branchDefaults.reviewProvider) {
+          fail("PR/MR completion is enabled but no GitHub or GitLab origin remote was detected; pass --provider github|gitlab or --completion none");
+        }
       }
 
       const resumeSessionId =
@@ -244,8 +386,8 @@ export function buildStartCommand(): Command {
         } catch (err) {
           fail(err instanceof Error ? err.message : String(err));
         }
-        if (opts.createPr) {
-          await ensureGitHubReadyForCreatePr(cwd, log, Boolean(opts.yes));
+        if (branchDefaults.createReview && branchDefaults.reviewProvider) {
+          await ensureReviewProviderReady(cwd, branchDefaults.reviewProvider, log, Boolean(opts.yes));
         }
 
         const ready = await ensureRuntimeReadyForCommand(cwd, agent, {
@@ -310,6 +452,7 @@ export function buildStartCommand(): Command {
             baseRef: (opts.base as string | undefined) ?? currentGitRef(cwd),
             branchPrefix: opts.branchPrefix as string,
             maxBranchDepth,
+            rootBaseBranches: branchDefaults.rootBaseBranches,
           });
 
           let auditBuilder: BuilderAdapter | undefined;
@@ -325,6 +468,7 @@ export function buildStartCommand(): Command {
               branchPrefix: opts.branchPrefix as string,
               maxBranchDepth,
               auditDependencies,
+              rootBaseBranches: branchDefaults.rootBaseBranches,
             });
             log.write("branch-plan", {
               baseRef: plan.baseRef,
@@ -376,9 +520,14 @@ export function buildStartCommand(): Command {
           fast: opts.fast as boolean | undefined,
           notificationsEnabled: config.notifications.enabled,
           qaEnabled,
-          createPr: Boolean(opts.createPr),
-          prReady: Boolean(opts.prReady),
+          createPr: branchDefaults.createReview,
+          completionMode: branchDefaults.completionMode,
+          reviewProvider: branchDefaults.reviewProvider,
+          prReady: branchDefaults.prReady,
           keepWorktrees: Boolean(opts.keepWorktrees),
+          cleanupBranches: branchDefaults.cleanupBranches,
+          autoMergeWait: branchDefaults.autoMergeWait,
+          autoMergeTimeoutMinutes: branchDefaults.autoMergeTimeoutMinutes,
           allowedBaseDirtyPaths,
           trackerPaths: {
             progressDoc: ticketsConfig.paths.progressDoc,
@@ -390,7 +539,7 @@ export function buildStartCommand(): Command {
         });
 
         console.log("foreman: branch run summary");
-        console.log("ticket\tbranch\tbase\tstatus\tcommit\tpush\tpr");
+        console.log("ticket\tbranch\tbase\tstatus\tcommit\tpush\tcompletion");
         for (const row of summaries) {
           console.log([
             row.ticket,

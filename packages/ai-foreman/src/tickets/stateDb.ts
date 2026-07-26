@@ -79,6 +79,21 @@ export interface ArchiveIndexEntry {
   notes: string | null;
 }
 
+export type ReviewRecommendationStatus = "pending" | "accepted" | "deferred" | "dismissed";
+
+export interface ReviewRecommendation {
+  id?: number;
+  created_at: string;
+  kind: string;
+  status: ReviewRecommendationStatus;
+  summary: string;
+  rationale: string | null;
+  ticket_ids_json: string;
+  patch_json: string;
+  source_json: string;
+  updated_at: string | null;
+}
+
 const INIT_SQL = `
 PRAGMA foreign_keys = ON;
 
@@ -160,11 +175,26 @@ CREATE TABLE IF NOT EXISTS archive_index (
   notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS review_recommendations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  summary TEXT NOT NULL,
+  rationale TEXT,
+  ticket_ids_json TEXT NOT NULL DEFAULT '[]',
+  patch_json TEXT NOT NULL DEFAULT '{}',
+  source_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT,
+  CHECK (status IN ('pending','accepted','deferred','dismissed'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_ticket_state_status ON ticket_state(status);
 CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket_id ON ticket_events(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ticket_events_timestamp ON ticket_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_validation_snapshots_timestamp ON validation_snapshots(timestamp);
 CREATE INDEX IF NOT EXISTS idx_future_work_disposition ON future_work(disposition);
+CREATE INDEX IF NOT EXISTS idx_review_recommendations_status ON review_recommendations(status);
 `;
 
 export class StateDb {
@@ -348,6 +378,42 @@ export class StateDb {
     return this.db
       .prepare("SELECT * FROM archive_index ORDER BY last_updated DESC")
       .all() as ArchiveIndexEntry[];
+  }
+
+  // ── review_recommendations ────────────────────────────────────────────────
+
+  insertReviewRecommendation(item: Omit<ReviewRecommendation, "id">): number {
+    const r = this.db.prepare(`
+      INSERT INTO review_recommendations (
+        created_at,kind,status,summary,rationale,ticket_ids_json,patch_json,source_json,updated_at
+      ) VALUES (
+        @created_at,@kind,@status,@summary,@rationale,@ticket_ids_json,@patch_json,@source_json,@updated_at
+      )
+    `).run(item);
+    return r.lastInsertRowid as number;
+  }
+
+  getReviewRecommendations(status?: ReviewRecommendationStatus): ReviewRecommendation[] {
+    if (status) {
+      return this.db
+        .prepare("SELECT * FROM review_recommendations WHERE status = ? ORDER BY id")
+        .all(status) as ReviewRecommendation[];
+    }
+    return this.db
+      .prepare("SELECT * FROM review_recommendations ORDER BY id")
+      .all() as ReviewRecommendation[];
+  }
+
+  getReviewRecommendation(id: number): ReviewRecommendation | undefined {
+    return this.db
+      .prepare("SELECT * FROM review_recommendations WHERE id = ?")
+      .get(id) as ReviewRecommendation | undefined;
+  }
+
+  updateReviewRecommendationStatus(id: number, status: ReviewRecommendationStatus, updatedAt: string): void {
+    this.db
+      .prepare("UPDATE review_recommendations SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, updatedAt, id);
   }
 
   // ── transactions ──────────────────────────────────────────────────────────

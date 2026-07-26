@@ -15,6 +15,8 @@ export interface BranchResumeSession {
   fast?: boolean;
   qaEnabled?: boolean;
   createPr?: boolean;
+  completionMode?: string;
+  reviewProvider?: string;
   prReady?: boolean;
   keepWorktrees?: boolean;
   ts?: string;
@@ -60,6 +62,8 @@ export function findResumableBranchSessions(foremanDir: string): BranchResumeSes
           fast: booleanField(record.fast),
           qaEnabled: booleanField(record.qaEnabled),
           createPr: booleanField(record.createPr),
+          completionMode: stringField(record.completionMode),
+          reviewProvider: stringField(record.reviewProvider),
           prReady: booleanField(record.prReady),
           keepWorktrees: booleanField(record.keepWorktrees),
           ts: stringField(record.ts),
@@ -84,7 +88,9 @@ export function formatBranchContinueCommand(projectDir: string, session: BranchR
     shellQuote(projectDir),
     "--steps",
     "1",
-    session.createPr ? "--create-pr" : "--branch-per-ticket",
+    ...(session.completionMode && session.completionMode !== "none"
+      ? ["--completion", shellQuote(session.completionMode)]
+      : [session.createPr ? "--create-pr" : "--branch-per-ticket"]),
     "--continue",
     "--ticket",
     shellQuote(session.ticket),
@@ -92,6 +98,7 @@ export function formatBranchContinueCommand(projectDir: string, session: BranchR
   if (session.agent && session.agent !== "claude") args.push("--agent", shellQuote(session.agent));
   if (session.model) args.push("--model", shellQuote(session.model));
   if (session.effort) args.push("--effort", shellQuote(session.effort));
+  if (session.reviewProvider) args.push("--provider", shellQuote(session.reviewProvider));
   if (session.fast) args.push("--fast");
   if (session.qaEnabled === false) args.push("--no-qa");
   if (session.prReady) args.push("--pr-ready");

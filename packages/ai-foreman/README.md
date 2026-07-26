@@ -123,8 +123,12 @@ Branch-mode examples:
 ```bash
 ai-foreman start ./my-project --steps 3 --branch-per-ticket --agent codex
 ai-foreman start ./my-project --steps 3 --create-pr --pr-ready --agent codex
+ai-foreman start ./my-project --steps 3 --completion auto-merge --provider gitlab
+ai-foreman start ./my-project --steps 3 --completion direct-merge
 ai-foreman start ./my-project --steps 1 --branch-per-ticket --continue --ticket T001
 ```
+
+Saved `tickets.build` defaults in `rafi-config.yaml` can enable branch-per-ticket and completion behavior automatically. Use `--completion pr|auto-merge|direct-merge|none`, `--no-branch-per-ticket`, `--no-create-pr`, or `--auto-merge-wait` / `--no-auto-merge-wait` to override saved defaults for one run.
 
 ### GitHub PR Failure Recovery
 
@@ -163,6 +167,10 @@ gh repo view <host>/<owner>/<repo>
 | `--sources <paths...>` | `docs/tickets.md docs/plans/**` | Configured Rafi `<docs.root>/rafi-plan.md`, then ticket docs root, then `docs/rafi-plan.md`, otherwise scans | Optional files, folders, or globs for the agent to check first. Any reasonable planning format is OK. |
 | `--fast` | flag | off | Lower latency. |
 | `-y, --yes` | flag | off | Skips confirmation before builder edits ticket files. |
+
+Use `ai-foreman tickets setup:init` or `setup:update` to save local, Linear, or Jira Cloud ticket sources in `rafi-config.yaml`. Linear imports use `LINEAR_API_KEY`; Jira Cloud imports use `JIRA_EMAIL` and `JIRA_API_TOKEN`. Imported provider payloads are snapshotted under ignored `.tickets/imports/`, and mirrored tickets carry `external_refs`.
+
+Use `ai-foreman tickets review` to accept, defer, or dismiss pending split/combine/duplicate recommendations rendered in the progress doc.
 
 ## What Foreman Does
 

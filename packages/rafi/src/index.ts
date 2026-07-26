@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { resolve, join } from "node:path";
 import { existsSync, realpathSync } from "node:fs";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { ProjectConfig } from "rafi-spec";
@@ -32,6 +33,7 @@ import {
   parseRuntimeSelection,
   RAFI_CONFIG_FILE,
   runtimeSelectionToTargets,
+  type WalkthroughAnswers,
 } from "./project.js";
 import { docsRootPathExists, firstAvailableDocsRoot, validateDocsRoot } from "./docs.js";
 import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
@@ -274,22 +276,7 @@ program
 
     console.log(`rafi: verified agent runtime auth for ${config.harness.targets.join(" and ")}.`);
 
-    if (answers.planningSources) {
-      const sourceArgs = parsePlanningSources(answers.planningSources).map(shellQuote).join(" ");
-      console.log(`\nrafi: to import your existing tickets or plans, run:`);
-      console.log(`  ${ticketsInitCommand(answers.appName, config.docs?.root ?? DEFAULT_DOCS_ROOT)}`);
-      if (sourceArgs) {
-        console.log(`  rafi tickets populate --sources ${sourceArgs}`);
-      } else {
-        console.log(`  rafi tickets populate`);
-      }
-      console.log(`rafi: any format is OK; the populate agent interprets the docs and also scans relevant planning files.`);
-    } else {
-      console.log(`\nrafi: to set up your ticket queue, run:`);
-      console.log(`  ${ticketsInitCommand(answers.appName, config.docs?.root ?? DEFAULT_DOCS_ROOT)}`);
-      console.log(`  rafi tickets populate`);
-      console.log(`rafi: \`rafi tickets populate\` scans relevant ticket, plan, roadmap, TODO, spec, and milestone docs.`);
-    }
+    await runCreateTicketHandoff(targetDir, config, answers, Boolean(opts.defaults));
   });
 
 function loadRafiConfig(targetDir: string): { config: ProjectConfig; migrated: boolean } | undefined {
@@ -516,6 +503,72 @@ async function chooseDocsRootForCreate(
 function ticketsInitCommand(appName: string, docsRoot: string): string {
   const docsArg = docsRoot === DEFAULT_DOCS_ROOT ? "" : ` --docs-root ${shellQuote(docsRoot)}`;
   return `rafi tickets init --app-name ${shellQuote(appName)}${docsArg}`;
+}
+
+async function runCreateTicketHandoff(
+  targetDir: string,
+  config: ProjectConfig,
+  answers: WalkthroughAnswers,
+  defaultsMode: boolean,
+): Promise<void> {
+  const docsRoot = config.docs?.root ?? DEFAULT_DOCS_ROOT;
+  const setupCommand = setupInitCommand(targetDir, answers, docsRoot);
+  const planCommand = `rafi plan ${shellQuote(targetDir)}`;
+  const populateCommand = `rafi tickets populate --project ${shellQuote(targetDir)}`;
+  const interactive = !defaultsMode && process.stdin.isTTY && process.stdout.isTTY;
+
+  if (!interactive) {
+    console.log("\nrafi: next steps:");
+    console.log(`  ${planCommand}`);
+    console.log(`  ${setupCommand}`);
+    console.log(`  ${populateCommand}`);
+    return;
+  }
+
+  const { confirm, isCancel } = await import("@clack/prompts");
+  const runPlan = await confirm({
+    message: "Run `rafi plan .` now?",
+    initialValue: false,
+  });
+  if (isCancel(runPlan)) process.exit(0);
+  if (runPlan) runSelfCommand(["plan", targetDir]);
+
+  const runSetup = await confirm({
+    message: "Run `rafi tickets setup:init` now?",
+    initialValue: true,
+  });
+  if (isCancel(runSetup)) process.exit(0);
+  if (runSetup) {
+    runSelfCommand(["tickets", "setup:init", "--project", targetDir]);
+  } else {
+    console.log("\nrafi: ticket setup commands:");
+    console.log(`  ${setupCommand}`);
+    console.log(`  ${populateCommand}`);
+  }
+}
+
+function setupInitCommand(targetDir: string, answers: WalkthroughAnswers, docsRoot: string): string {
+  const args = [
+    "rafi tickets setup:init",
+    "--project",
+    shellQuote(targetDir),
+    "--app-name",
+    shellQuote(answers.appName),
+  ];
+  if (docsRoot !== DEFAULT_DOCS_ROOT) args.push("--docs-root", shellQuote(docsRoot));
+  if (answers.planningSources) {
+    args.push("--local-source", ...parsePlanningSources(answers.planningSources).map(shellQuote));
+  }
+  return args.join(" ");
+}
+
+function runSelfCommand(args: string[]): void {
+  const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...args], {
+    stdio: "inherit",
+  });
+  if (result.status && result.status !== 0) {
+    process.exit(result.status);
+  }
 }
 
 function artifactCollisions(

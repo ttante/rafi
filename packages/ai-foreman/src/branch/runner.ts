@@ -3,19 +3,22 @@ import { Foreman, MARKER_SPEC } from "../foreman.js";
 import type { Log } from "../log.js";
 import { fireNotification } from "../notify.js";
 import { cmdBlock, cmdComplete, cmdUpdate } from "../tickets/commands.js";
-import type { BranchPlan, BranchPlanNode, BranchRunSummary, GitHubFailureCode, PrResult } from "./types.js";
+import type { BranchPlan, BranchPlanNode, BranchRunSummary, CompletionMode, GitHubFailureCode, PrResult, ReviewProvider } from "./types.js";
 import {
   commitAll,
   createTicketWorktree,
   currentWorktreeBranch,
+  deleteLocalBranch,
   ensureCleanBaseWorktree,
   ensureForemanExcluded,
   hasTrackerChanges,
   hasWorktreeChanges,
   headCommitIfAhead,
   removeTicketWorktree,
+  squashMergeBranchToLocalBase,
 } from "./git.js";
-import { createOrReusePr, pushBranchForPr } from "./github.js";
+import { checkGitHubPrMerged, createOrReusePr, enableGitHubAutoMerge, pushBranchForPr } from "./github.js";
+import { checkGitLabMrMerged, createOrReuseMr, enableGitLabAutoMerge, pushBranchForMr } from "./gitlab.js";
 
 export interface BranchRunnerOptions {
   projectDir: string;
@@ -29,8 +32,13 @@ export interface BranchRunnerOptions {
   notificationsEnabled: boolean;
   qaEnabled: boolean;
   createPr: boolean;
+  completionMode?: CompletionMode;
+  reviewProvider?: ReviewProvider;
   prReady: boolean;
   keepWorktrees: boolean;
+  cleanupBranches?: boolean;
+  autoMergeWait?: boolean;
+  autoMergeTimeoutMinutes?: number | null;
   allowedBaseDirtyPaths?: string[];
   trackerPaths?: { progressDoc: string; archiveDoc: string };
   resumeSessions?: Map<string, { worktreePath: string; sessionId: string }>;
@@ -42,6 +50,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
   ensureCleanBaseWorktree(opts.projectDir, { allowedDirtyPaths: opts.allowedBaseDirtyPaths });
   ensureForemanExcluded(opts.projectDir);
 
+  const completionMode: CompletionMode = opts.completionMode ?? (opts.createPr ? "pr" : "none");
+  const reviewProvider: ReviewProvider = opts.reviewProvider ?? "github";
+  const createsReview = completionMode === "pr" || completionMode === "auto-merge";
   const summaries: BranchRunSummary[] = [];
   const successfulBranches = new Set<string>();
   const pushedBranches = new Set<string>();
@@ -76,7 +87,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       continue;
     }
 
-    if (opts.createPr) {
+    if (createsReview) {
       const missingPush = node.dependencies.find((dep) => {
         const depNode = opts.plan.nodes.find((candidate) => candidate.ticket.id === dep);
         return depNode && !pushedBranches.has(depNode.branch);
@@ -91,6 +102,24 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           blocking: false,
         });
         notifyIssue(opts.notificationsEnabled, detail);
+        continue;
+      }
+    }
+
+    if (completionMode === "auto-merge" && node.dependencies.length > 0) {
+      const mergeReadiness = await waitForAutoMergeDependencies(opts, node, reviewProvider);
+      if (!mergeReadiness.ok) {
+        summaries.push(summaryFor(node, "skipped", mergeReadiness.message, "skipped"));
+        opts.log.write("branch-issue", {
+          ticket: node.ticket.id,
+          code: mergeReadiness.code,
+          message: mergeReadiness.message,
+          blocking: false,
+          repairCommands: mergeReadiness.repairCommands,
+          command: mergeReadiness.command,
+          output: mergeReadiness.output,
+        });
+        notifyIssue(opts.notificationsEnabled, `${node.ticket.id}: ${mergeReadiness.message}`);
         continue;
       }
     }
@@ -153,7 +182,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           effort: opts.effort,
           fast: opts.fast,
           qaEnabled: opts.qaEnabled,
-          createPr: opts.createPr,
+          createPr: createsReview,
+          completionMode,
+          reviewProvider,
           prReady: opts.prReady,
           keepWorktrees: opts.keepWorktrees,
         });
@@ -212,15 +243,17 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       if (hasWorktreeChanges(worktreePath)) {
         commit = commitAll(worktreePath, `${node.ticket.id}: ${node.ticket.title}`);
       }
-      if (!commit && opts.createPr) {
+      if (!commit && (createsReview || completionMode === "direct-merge")) {
         commit = headCommitIfAhead(worktreePath, node.baseBranch);
       }
 
       const summary = summaryFor(node, "done", commit ? undefined : "no_changes");
       summary.commit = commit;
 
-      if (commit && opts.createPr) {
-        const push = pushBranchForPr(worktreePath, node.branch);
+      if (commit && createsReview) {
+        const push = reviewProvider === "gitlab"
+          ? pushBranchForMr(worktreePath, node.branch)
+          : pushBranchForPr(worktreePath, node.branch);
         if (push.ok) {
           opts.log.write("branch-push", { ticket: node.ticket.id, branch: node.branch, status: "pushed" });
           summary.pushStatus = "pushed";
@@ -251,32 +284,93 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         }
 
         pushedBranches.add(node.branch);
-        const pr = createOrReusePr(opts.projectDir, {
-          node,
-          ready: opts.prReady,
-          runId: opts.runId,
-          qaEvidence: qaSummary,
-          commit,
-        });
+        const pr = reviewProvider === "gitlab"
+          ? createOrReuseMr(opts.projectDir, {
+            node,
+            ready: opts.prReady || completionMode === "auto-merge",
+            runId: opts.runId,
+            qaEvidence: qaSummary,
+            commit,
+            autoMerge: completionMode === "auto-merge",
+            cleanup: opts.cleanupBranches ?? true,
+          })
+          : createOrReusePr(opts.projectDir, {
+            node,
+            ready: opts.prReady || completionMode === "auto-merge",
+            runId: opts.runId,
+            qaEvidence: qaSummary,
+            commit,
+          });
         summary.pr = pr;
-        if (pr.status === "created") opts.log.write("pr-created", { ticket: node.ticket.id, branch: node.branch, url: pr.url });
-        if (pr.status === "existing") opts.log.write("pr-existing", { ticket: node.ticket.id, branch: node.branch, url: pr.url });
+        if (pr.status === "created") opts.log.write(reviewProvider === "gitlab" ? "mr-created" : "pr-created", { ticket: node.ticket.id, branch: node.branch, url: pr.url });
+        if (pr.status === "existing") opts.log.write(reviewProvider === "gitlab" ? "mr-existing" : "pr-existing", { ticket: node.ticket.id, branch: node.branch, url: pr.url });
         if (pr.status === "failed") {
-          opts.log.write("pr-failed", failureLogFields(node, pr));
+          opts.log.write(reviewProvider === "gitlab" ? "mr-failed" : "pr-failed", failureLogFields(node, pr));
           blockBranchIssue(
             opts,
             node,
             summary,
-            pr.code ?? "pr_create_failed",
-            `PR creation failed: ${pr.message ?? pr.error ?? "unknown error"}`,
+            pr.code ?? (reviewProvider === "gitlab" ? "mr_create_failed" : "pr_create_failed"),
+            `${reviewProvider === "gitlab" ? "MR" : "PR"} creation failed: ${pr.message ?? pr.error ?? "unknown error"}`,
             pr,
           );
           summaries.push(summary);
           continue;
         }
-      } else if (opts.createPr) {
+        if (completionMode === "auto-merge" && reviewProvider === "github") {
+          const autoMerge = enableGitHubAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true);
+          summary.pr = autoMerge.status === "failed" ? autoMerge : { ...pr, status: "auto_merge_enabled", url: autoMerge.url ?? pr.url };
+          if (autoMerge.status === "failed") {
+            opts.log.write("pr-auto-merge-failed", failureLogFields(node, autoMerge));
+            blockBranchIssue(
+              opts,
+              node,
+              summary,
+              autoMerge.code ?? "pr_create_failed",
+              `PR auto-merge failed: ${autoMerge.message ?? autoMerge.error ?? "unknown error"}`,
+              autoMerge,
+            );
+            summaries.push(summary);
+            continue;
+          }
+          opts.log.write("pr-auto-merge-enabled", { ticket: node.ticket.id, branch: node.branch, url: summary.pr.url });
+        } else if (completionMode === "auto-merge" && reviewProvider === "gitlab" && pr.status === "existing") {
+          const autoMerge = enableGitLabAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true);
+          summary.pr = autoMerge.status === "failed" ? autoMerge : { ...pr, status: "auto_merge_enabled", url: autoMerge.url ?? pr.url };
+          if (autoMerge.status === "failed") {
+            opts.log.write("mr-auto-merge-failed", failureLogFields(node, autoMerge));
+            blockBranchIssue(
+              opts,
+              node,
+              summary,
+              autoMerge.code ?? "mr_create_failed",
+              `MR auto-merge failed: ${autoMerge.message ?? autoMerge.error ?? "unknown error"}`,
+              autoMerge,
+            );
+            summaries.push(summary);
+            continue;
+          }
+          opts.log.write("mr-auto-merge-enabled", { ticket: node.ticket.id, branch: node.branch, url: summary.pr.url });
+        }
+      } else if (createsReview) {
         summary.pushStatus = "skipped";
         summary.pr = { status: "skipped", error: commit ? undefined : "no_changes" };
+      } else if (commit && completionMode === "direct-merge") {
+        if (!opts.keepWorktrees) removeTicketWorktree(opts.projectDir, worktreePath);
+        const mergeCommit = squashMergeBranchToLocalBase(
+          opts.projectDir,
+          node.branch,
+          node.baseBranch,
+          `${node.ticket.id}: ${node.ticket.title}`,
+        );
+        summary.pr = { status: "merged", url: mergeCommit };
+        opts.log.write("branch-direct-merge", {
+          ticket: node.ticket.id,
+          branch: node.branch,
+          base: node.baseBranch,
+          commit: mergeCommit,
+        });
+        if (opts.cleanupBranches ?? true) deleteLocalBranch(opts.projectDir, node.branch);
       }
 
       cmdComplete(opts.projectDir, node.ticket.id, {
@@ -297,7 +391,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         detail: summary.detail,
       });
 
-      if (!opts.keepWorktrees) removeTicketWorktree(opts.projectDir, worktreePath);
+      if (!opts.keepWorktrees && completionMode !== "direct-merge") removeTicketWorktree(opts.projectDir, worktreePath);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const code: "branch_switch" | "tracker_touched" | "builder_error" = message.includes("switched branch")
@@ -316,6 +410,86 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
   }
 
   return summaries;
+}
+
+interface AutoMergeDependencyResult {
+  ok: boolean;
+  code?: GitHubFailureCode | "dependency_unavailable";
+  message?: string;
+  repairCommands?: string[];
+  command?: string;
+  output?: string;
+}
+
+async function waitForAutoMergeDependencies(
+  opts: BranchRunnerOptions,
+  node: BranchPlanNode,
+  provider: ReviewProvider,
+): Promise<AutoMergeDependencyResult> {
+  const dependencyNodes = node.dependencies
+    .map((dep) => opts.plan.nodes.find((candidate) => candidate.ticket.id === dep))
+    .filter((dep): dep is BranchPlanNode => Boolean(dep));
+  if (dependencyNodes.length === 0) return { ok: true };
+
+  const timeoutMs = opts.autoMergeTimeoutMinutes === null || opts.autoMergeTimeoutMinutes === undefined
+    ? null
+    : opts.autoMergeTimeoutMinutes * 60_000;
+  const deadline = opts.autoMergeWait && timeoutMs !== null ? Date.now() + timeoutMs : null;
+
+  while (true) {
+    const pending: string[] = [];
+    for (const dep of dependencyNodes) {
+      const status = provider === "gitlab"
+        ? checkGitLabMrMerged(opts.projectDir, dep.branch)
+        : checkGitHubPrMerged(opts.projectDir, dep.branch);
+      if (!status.ok) {
+        return {
+          ok: false,
+          code: status.code,
+          message: `dependency ${dep.ticket.id} merge check failed: ${status.message}`,
+          repairCommands: status.repairCommands,
+          command: status.command,
+          output: status.output,
+        };
+      }
+      if (!status.merged) pending.push(`${dep.ticket.id}${status.state ? ` (${status.state})` : ""}`);
+    }
+    if (pending.length === 0) return { ok: true };
+
+    const message = `auto-merge dependency ${pending.join(", ")} has not merged into the root base yet`;
+    if (!opts.autoMergeWait) {
+      return {
+        ok: false,
+        code: "dependency_unavailable",
+        message: `${message}; rerun after it merges or enable auto-merge wait in ticket setup`,
+      };
+    }
+    if (deadline !== null && Date.now() >= deadline) {
+      return {
+        ok: false,
+        code: "dependency_unavailable",
+        message: `${message}; timed out waiting for dependency merge`,
+      };
+    }
+
+    opts.log.write("branch-auto-merge-wait", {
+      ticket: node.ticket.id,
+      pending,
+      timeoutMinutes: opts.autoMergeTimeoutMinutes ?? null,
+    });
+    await sleep(autoMergePollMs());
+  }
+}
+
+function autoMergePollMs(): number {
+  const raw = process.env.RAFI_AUTO_MERGE_POLL_MS;
+  if (!raw) return 30_000;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 30_000;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function notifyIssue(enabled: boolean, message: string): void {

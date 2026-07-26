@@ -14,6 +14,7 @@ export interface BuildBranchPlanOptions {
   branchPrefix: string;
   maxBranchDepth: number;
   auditDependencies?: AuditDependency[];
+  rootBaseBranches?: boolean;
 }
 
 export function buildBranchPlan(
@@ -86,7 +87,9 @@ export function buildBranchPlan(
     const dependencies = dependencyMap.get(ticket.id) ?? [];
     const branch = branchById.get(ticket.id)!;
     const baseTicket = chooseBaseDependency(dependencies, dependencyMap);
-    const baseBranch = baseTicket ? (branchById.get(baseTicket) ?? opts.baseRef) : opts.baseRef;
+    const baseBranch = opts.rootBaseBranches
+      ? opts.baseRef
+      : baseTicket ? (branchById.get(baseTicket) ?? opts.baseRef) : opts.baseRef;
     const node: BranchPlanNode = {
       ticket,
       branch,

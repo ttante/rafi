@@ -4,6 +4,29 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.7.0 / ai-foreman 1.4.0 / special-agents 0.5.0 / rafi-spec 0.5.0 - 2026-07-24
+
+### Added
+
+- Added `tickets setup:init`, `tickets setup:update`, and `tickets review` under both `rafi` and `ai-foreman`.
+- Added optional top-level `tickets:` setup preferences in `rafi-config.yaml` for ordered sources, populate defaults, and branch/build completion defaults.
+- Added native Linear and Jira Cloud ticket imports with ignored `.tickets/imports/` snapshots and `external_refs` on imported tickets.
+- Added SQLite-backed review recommendations rendered into the ticket progress doc and accepted through deterministic ticket patches.
+- Added `start --completion pr|auto-merge|direct-merge|none`, `--provider auto|github|gitlab`, `--no-branch-per-ticket`, `--no-create-pr`, and auto-merge dependency wait overrides.
+
+### Changed
+
+- `tickets populate` now uses explicit `--sources`, then saved setup sources, then the configured Rafi plan; no-source non-interactive runs print next-step options instead of silently scanning.
+- `rafi create` now hands off to `rafi plan` and `rafi tickets setup:init` interactively, while defaults/non-interactive runs print next-step commands.
+- `rafi plan` includes saved ticket setup preferences in planner instructions when present.
+
+### Packages
+
+- Bumped `@rafi-ai/cli` to `0.7.0`.
+- Bumped `ai-foreman` to `1.4.0`.
+- Bumped `special-agents` to `0.5.0`.
+- Bumped `rafi-spec` to `0.5.0`.
+
 ## @rafi-ai/cli 0.6.2 / ai-foreman 1.3.1 - 2026-07-23
 
 ### Changed

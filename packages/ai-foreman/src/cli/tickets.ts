@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { select, isCancel } from "@clack/prompts";
+import { select, text, confirm, isCancel } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
 import { Foreman } from "../foreman.js";
@@ -22,10 +22,11 @@ import {
   cmdValidate,
   cmdQueue,
   cmdArchive,
+  cmdReview,
 } from "../tickets/commands.js";
 import { DEFAULT_TICKETS_CONFIG, isTicketsInitialized, loadTicketsConfig } from "../tickets/config.js";
 import { validateDocsRoot } from "../tickets/config.js";
-import { importFromMarkdown } from "../tickets/importer.js";
+import { importExternalSources, importFromMarkdown, validateExternalSourceAccess } from "../tickets/importer.js";
 import { formatValidationIssues } from "../tickets/validate.js";
 import {
   assertEffortLevel,
@@ -34,6 +35,24 @@ import {
   type RoleBuilderOptions,
 } from "../agentRun.js";
 import type { TicketsConfig } from "../tickets/config.js";
+import {
+  DEFAULT_TICKET_SETUP,
+  defaultAppName,
+  detectPackageName,
+  ensureRafiConfigForTicketSetup,
+  externalSources,
+  hasTicketSetupConfig,
+  loadTicketSetupConfig,
+  loadTicketSetupConfigWithDefaults,
+  localSourcePaths,
+  mergeTicketSetup,
+  recommendedBuildDefaults,
+  saveTicketSetupConfig,
+  type HarnessTarget,
+  type TicketBuildCompletionMode,
+  type TicketSourceConfig,
+  type TicketsSetupConfig,
+} from "../tickets/setupConfig.js";
 
 function fail(msg: string): never {
   console.error(`foreman tickets: ${msg}`);
@@ -121,6 +140,9 @@ export function resolvePopulateSources(
   ticketsConfig: TicketsConfig,
 ): string[] | undefined {
   if (explicitSources && explicitSources.length > 0) return explicitSources;
+  const setup = loadTicketSetupConfig(projectDir);
+  const savedLocalSources = localSourcePaths(setup);
+  if (savedLocalSources.length > 0) return savedLocalSources;
   const rafiPlan = resolveConfiguredRafiPlanSource(projectDir, "rafi-config.yaml");
   if (rafiPlan) return [rafiPlan];
   const legacyPlan = resolveConfiguredRafiPlanSource(projectDir, "project.yaml");
@@ -171,10 +193,691 @@ export function buildPopulateAgentRunOptions(opts: {
   };
 }
 
+interface SetupCommandOptions {
+  project?: string;
+  defaults?: boolean;
+  yes?: boolean;
+  appName?: string;
+  docsRoot?: string;
+  runtime?: string;
+  localSource?: string[];
+  linear?: boolean;
+  linearTeamKey?: string;
+  linearFilter?: string;
+  jiraSite?: string;
+  jiraJql?: string;
+  completion?: string;
+  provider?: string;
+  autoMergeWait?: boolean;
+  autoMergeTimeoutMinutes?: string;
+  agentPreference?: string;
+  skipAccessCheck?: boolean;
+}
+
+interface PopulateCommandOptions {
+  project?: string;
+  agent?: string;
+  model?: string;
+  effort?: string;
+  sources?: string[];
+  fast?: boolean;
+  yes?: boolean;
+}
+
+async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
+  const dir = cwd(opts);
+  if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
+  if (hasTicketSetupConfig(dir)) {
+    console.log("foreman tickets setup: existing setup found; opening setup:update");
+    await cmdSetupUpdateCli(opts);
+    return;
+  }
+
+  const answers = await collectTicketSetup(dir, opts, undefined);
+  ensureRafiConfigForTicketSetup(dir, {
+    appName: opts.appName ?? defaultAppName(dir),
+    docsRoot: opts.docsRoot,
+    targets: parseRuntimeTargets(opts.runtime),
+  });
+  saveTicketSetupConfig(dir, answers, {
+    appName: opts.appName ?? defaultAppName(dir),
+    docsRoot: opts.docsRoot,
+    targets: parseRuntimeTargets(opts.runtime),
+  });
+  console.log(`foreman tickets setup: saved ticket setup in ${join(dir, "rafi-config.yaml")}`);
+
+  await validateConfiguredSourcesIfRequested(answers, Boolean(opts.skipAccessCheck));
+
+  if (!isTicketsInitialized(dir)) {
+    cmdInit(dir, {
+      appName: opts.appName ?? defaultAppName(dir),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      docsRoot: opts.docsRoot,
+    });
+    console.log("foreman tickets setup: initialized .tickets/");
+  }
+
+  if (shouldPrompt(opts)) {
+    const populate = await confirm({
+      message: "Run ticket population now?",
+      initialValue: answers.sources.length > 0,
+    });
+    if (isCancel(populate)) process.exit(0);
+    if (populate) {
+      await cmdPopulateCli({ project: dir, yes: true });
+    }
+  } else {
+    console.log(`foreman tickets setup: next — run \`foreman tickets populate --project ${shellQuote(dir)}\``);
+  }
+}
+
+async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
+  const dir = cwd(opts);
+  if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
+  const current = loadTicketSetupConfigWithDefaults(dir);
+  const patch = await collectTicketSetupPatch(dir, opts, current);
+  const next = mergeTicketSetup(current, patch);
+  ensureRafiConfigForTicketSetup(dir, {
+    appName: opts.appName ?? defaultAppName(dir),
+    docsRoot: opts.docsRoot,
+    targets: parseRuntimeTargets(opts.runtime),
+  });
+  saveTicketSetupConfig(dir, next, {
+    appName: opts.appName ?? defaultAppName(dir),
+    docsRoot: opts.docsRoot,
+    targets: parseRuntimeTargets(opts.runtime),
+  });
+  console.log(`foreman tickets setup: updated ticket setup in ${join(dir, "rafi-config.yaml")}`);
+
+  await validateConfiguredSourcesIfRequested(next, Boolean(opts.skipAccessCheck));
+
+  if (isTicketsInitialized(dir)) {
+    const rows = cmdQueue(dir, 1);
+    if (rows.length === 0) {
+      console.log(`foreman tickets setup: queue is empty; run \`foreman tickets populate --project ${shellQuote(dir)}\` to import or refresh tickets.`);
+    }
+  }
+}
+
+async function collectTicketSetup(
+  dir: string,
+  opts: SetupCommandOptions,
+  current: TicketsSetupConfig | undefined,
+): Promise<TicketsSetupConfig> {
+  const patch = await collectTicketSetupPatch(dir, opts, current ?? DEFAULT_TICKET_SETUP);
+  const build = patch.build ?? {};
+  return mergeTicketSetup(current, {
+    ...patch,
+    build: Object.keys(build).length > 0 ? build : recommendedBuildDefaults(dir),
+  });
+}
+
+async function collectTicketSetupPatch(
+  dir: string,
+  opts: SetupCommandOptions,
+  current: TicketsSetupConfig,
+): Promise<Partial<{ sources: TicketSourceConfig[]; populate: Partial<TicketsSetupConfig["populate"]>; build: Partial<TicketsSetupConfig["build"]> }>> {
+  const nonInteractiveSources = sourcesFromSetupOptions(opts);
+  const populatePatch: Partial<TicketsSetupConfig["populate"]> = {};
+  const buildPatch: Partial<TicketsSetupConfig["build"]> = {};
+
+  if (opts.agentPreference) populatePatch.agent_preference = parseAgentPreference(opts.agentPreference);
+  if (opts.completion) buildPatch.completion = parseCompletionMode(opts.completion);
+  if (opts.provider) buildPatch.provider = parseProvider(opts.provider);
+  if (opts.autoMergeWait !== undefined) buildPatch.auto_merge_wait = Boolean(opts.autoMergeWait);
+  if (opts.autoMergeTimeoutMinutes !== undefined) {
+    buildPatch.auto_merge_timeout_minutes = parseOptionalPositiveInteger(opts.autoMergeTimeoutMinutes, "--auto-merge-timeout-minutes");
+  }
+
+  if (!shouldPrompt(opts)) {
+    return {
+      sources: nonInteractiveSources.length > 0 ? nonInteractiveSources : current.sources,
+      populate: populatePatch,
+      build: Object.keys(buildPatch).length > 0 ? buildPatch : {},
+    };
+  }
+
+  const section = await select({
+    message: "Which ticket setup section should be configured?",
+    options: [
+      { value: "sources", label: "Ticket sources" },
+      { value: "populate", label: "Populate defaults" },
+      { value: "build", label: "Build defaults" },
+      { value: "all", label: "All sections" },
+    ],
+  });
+  if (isCancel(section)) process.exit(0);
+
+  let sources = nonInteractiveSources.length > 0 ? nonInteractiveSources : current.sources;
+  if (section === "sources" || section === "all") {
+    sources = await promptTicketSources(dir, current.sources);
+  }
+  if (section === "populate" || section === "all") {
+    const agent = await select({
+      message: "When both runtimes are configured, which should populate use?",
+      initialValue: current.populate.agent_preference,
+      options: [
+        { value: "configured", label: "Configured project default" },
+        { value: "claude", label: "Claude" },
+        { value: "codex", label: "Codex" },
+      ],
+    });
+    if (isCancel(agent)) process.exit(0);
+    populatePatch.agent_preference = agent as TicketsSetupConfig["populate"]["agent_preference"];
+  }
+  if (section === "build" || section === "all") {
+    const recommended = recommendedBuildDefaults(dir);
+    const completion = await select({
+      message: "Default completion behavior for branch ticket runs:",
+      initialValue: current.build.completion === "none" ? recommended.completion : current.build.completion,
+      options: [
+        { value: "auto-merge", label: "PR/MR auto-merge, squash when checks pass" },
+        { value: "pr", label: "Create PR/MR only" },
+        { value: "direct-merge", label: "Direct local squash merge" },
+        { value: "none", label: "No branch completion action" },
+      ],
+    });
+    if (isCancel(completion)) process.exit(0);
+    buildPatch.branch_strategy = "branch-per-ticket";
+    buildPatch.completion = completion as TicketBuildCompletionMode;
+    buildPatch.provider = recommended.provider;
+    buildPatch.pr_ready = completion === "auto-merge";
+    buildPatch.merge_method = "squash";
+    buildPatch.cleanup = true;
+    if (completion === "auto-merge") {
+      const wait = await confirm({
+        message: "Wait for dependency PR/MRs to merge before starting dependent tickets?",
+        initialValue: current.build.auto_merge_wait,
+      });
+      if (isCancel(wait)) process.exit(0);
+      buildPatch.auto_merge_wait = Boolean(wait);
+      if (wait) {
+        const timeout = await text({
+          message: "Auto-merge dependency wait timeout in minutes (blank for no timeout):",
+          initialValue: current.build.auto_merge_timeout_minutes === null ? "" : String(current.build.auto_merge_timeout_minutes),
+          defaultValue: "",
+          validate: (value) => {
+            const textValue = String(value ?? "").trim();
+            if (!textValue) return undefined;
+            const parsed = Number.parseInt(textValue, 10);
+            return Number.isInteger(parsed) && parsed > 0 ? undefined : "Enter a positive integer or leave blank";
+          },
+        });
+        if (isCancel(timeout)) process.exit(0);
+        buildPatch.auto_merge_timeout_minutes = String(timeout).trim()
+          ? Number.parseInt(String(timeout).trim(), 10)
+          : null;
+      } else {
+        buildPatch.auto_merge_timeout_minutes = null;
+      }
+    } else {
+      buildPatch.auto_merge_wait = false;
+      buildPatch.auto_merge_timeout_minutes = null;
+    }
+  }
+
+  return {
+    sources,
+    populate: populatePatch,
+    build: buildPatch,
+  };
+}
+
+async function promptTicketSources(dir: string, current: TicketSourceConfig[]): Promise<TicketSourceConfig[]> {
+  const kind = await select({
+    message: "Primary ticket source:",
+    options: [
+      { value: "local", label: "Local docs, files, folders, or globs" },
+      { value: "linear", label: "Linear" },
+      { value: "jira", label: "Jira Cloud" },
+      { value: "none", label: "No saved source" },
+    ],
+  });
+  if (isCancel(kind)) process.exit(0);
+  if (kind === "none") return [];
+  if (kind === "local") {
+    const existing = current.find((source) => source.type === "local") as Extract<TicketSourceConfig, { type: "local" }> | undefined;
+    const answer = await text({
+      message: "Local source paths or globs, comma-separated:",
+      initialValue: existing?.paths.join(", ") || `${configuredDocsPlanPath(dir)}`,
+      defaultValue: existing?.paths.join(", ") || `${configuredDocsPlanPath(dir)}`,
+    });
+    if (isCancel(answer)) process.exit(0);
+    return [{ type: "local", paths: splitCommaList(String(answer)) }];
+  }
+  if (kind === "linear") {
+    const team = await text({ message: "Linear team key (optional):" });
+    if (isCancel(team)) process.exit(0);
+    const filter = await text({ message: "Linear IssueFilter JSON or title search text (optional):" });
+    if (isCancel(filter)) process.exit(0);
+    return [{
+      type: "linear",
+      api_key_env: "LINEAR_API_KEY",
+      team_key: String(team).trim() || null,
+      filter: String(filter).trim() || null,
+    }];
+  }
+  const site = await text({
+    message: "Jira Cloud site URL:",
+    placeholder: "https://your-domain.atlassian.net",
+    validate: (value) => String(value ?? "").trim() ? undefined : "Enter a Jira Cloud site URL",
+  });
+  if (isCancel(site)) process.exit(0);
+  const jql = await text({
+    message: "Jira JQL:",
+    initialValue: "resolution = Unresolved ORDER BY priority DESC, updated DESC",
+    defaultValue: "resolution = Unresolved ORDER BY priority DESC, updated DESC",
+  });
+  if (isCancel(jql)) process.exit(0);
+  return [{
+    type: "jira",
+    site: String(site).trim(),
+    email_env: "JIRA_EMAIL",
+    token_env: "JIRA_API_TOKEN",
+    jql: String(jql).trim(),
+  }];
+}
+
+function sourcesFromSetupOptions(opts: SetupCommandOptions): TicketSourceConfig[] {
+  const sources: TicketSourceConfig[] = [];
+  if (opts.localSource?.length) sources.push({ type: "local", paths: opts.localSource });
+  if (opts.linear || opts.linearTeamKey || opts.linearFilter) {
+    sources.push({
+      type: "linear",
+      api_key_env: "LINEAR_API_KEY",
+      team_key: opts.linearTeamKey ?? null,
+      filter: opts.linearFilter ?? null,
+    });
+  }
+  if (opts.jiraSite || opts.jiraJql) {
+    if (!opts.jiraSite || !opts.jiraJql) fail("--jira-site and --jira-jql must be passed together");
+    sources.push({
+      type: "jira",
+      site: opts.jiraSite,
+      email_env: "JIRA_EMAIL",
+      token_env: "JIRA_API_TOKEN",
+      jql: opts.jiraJql,
+    });
+  }
+  return sources;
+}
+
+async function validateConfiguredSourcesIfRequested(setup: TicketsSetupConfig, skip: boolean): Promise<void> {
+  if (skip) return;
+  for (const source of externalSources(setup)) {
+    try {
+      await validateExternalSourceAccess(source);
+      console.log(`foreman tickets setup: validated ${source.type} access`);
+    } catch (err) {
+      console.log(`foreman tickets setup: ${source.type} access check skipped/failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
+function shouldPrompt(opts: { defaults?: boolean; yes?: boolean }): boolean {
+  return !opts.defaults && !opts.yes && process.stdin.isTTY && process.stdout.isTTY;
+}
+
+function parseRuntimeTargets(value: string | undefined): HarnessTarget[] | undefined {
+  if (!value) return undefined;
+  if (value === "both") return ["claude", "codex"];
+  if (value === "claude" || value === "codex") return [value];
+  fail("--runtime must be one of: both, claude, codex");
+}
+
+function parseCompletionMode(value: string): TicketBuildCompletionMode {
+  if (["pr", "auto-merge", "direct-merge", "none"].includes(value)) return value as TicketBuildCompletionMode;
+  fail("--completion must be one of: pr, auto-merge, direct-merge, none");
+}
+
+function parseProvider(value: string): TicketsSetupConfig["build"]["provider"] {
+  if (["auto", "github", "gitlab", "local"].includes(value)) return value as TicketsSetupConfig["build"]["provider"];
+  fail("--provider must be one of: auto, github, gitlab, local");
+}
+
+function parseAgentPreference(value: string): TicketsSetupConfig["populate"]["agent_preference"] {
+  if (["configured", "claude", "codex"].includes(value)) return value as TicketsSetupConfig["populate"]["agent_preference"];
+  fail("--agent-preference must be one of: configured, claude, codex");
+}
+
+function parseOptionalPositiveInteger(value: string, label: string): number | null {
+  if (!value.trim()) return null;
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  fail(`${label} must be a positive integer or blank`);
+}
+
+function splitCommaList(value: string): string[] {
+  return value.split(",").map((part) => part.trim()).filter(Boolean);
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\"'\"'")}'`;
+}
+
+function configuredDocsPlanPath(dir: string): string {
+  const raw = loadTicketSetupConfig(dir);
+  const local = localSourcePaths(raw)[0];
+  if (local) return local;
+  const configPath = join(dir, "rafi-config.yaml");
+  if (existsSync(configPath)) {
+    const parsed = parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown> | undefined;
+    const docs = parsed?.docs as Record<string, unknown> | undefined;
+    if (typeof docs?.root === "string") return `${docs.root}/rafi-plan.md`;
+  }
+  return "docs/rafi-plan.md";
+}
+
+async function resolveInitAppName(dir: string, yes: boolean): Promise<string | undefined> {
+  const configured = defaultAppName(dir);
+  if (configured !== "My App") return configured;
+  if (yes || !process.stdin.isTTY || !process.stdout.isTTY) return configured;
+  const answer = await text({
+    message: "App name:",
+    initialValue: configured,
+    defaultValue: configured,
+  });
+  if (isCancel(answer)) process.exit(0);
+  return String(answer).trim() || configured;
+}
+
+async function resolvePopulateSourceSelection(
+  dir: string,
+  explicitSources: string[] | undefined,
+  ticketsConfig: TicketsConfig,
+  yes: boolean,
+): Promise<string[] | undefined> {
+  if (explicitSources?.length) return explicitSources;
+  const setup = loadTicketSetupConfig(dir);
+  const saved = localSourcePaths(setup);
+  if (saved.length > 0) return saved;
+
+  const defaultPlan = resolvePopulateSources(dir, undefined, ticketsConfig);
+  if (defaultPlan?.length) {
+    if (yes || !process.stdin.isTTY || !process.stdout.isTTY) return defaultPlan;
+    const usePlan = await confirm({
+      message: `Use ${defaultPlan.join(", ")} as the ticket population source?`,
+      initialValue: true,
+    });
+    if (isCancel(usePlan)) process.exit(0);
+    return usePlan ? defaultPlan : undefined;
+  }
+
+  if (yes || !process.stdin.isTTY || !process.stdout.isTTY) {
+    console.log("foreman tickets: no ticket sources were found.");
+    console.log("foreman tickets: options:");
+    console.log("  rafi plan .");
+    console.log("  rafi tickets setup:init");
+    console.log("  rafi tickets populate --sources <files-or-globs>");
+    console.log("  edit .tickets/tickets.yaml manually");
+    process.exit(2);
+  }
+
+  const action = await select({
+    message: "No ticket sources were found. What should happen next?",
+    options: [
+      { value: "plan", label: "Run planner first - rafi plan ." },
+      { value: "setup", label: "Configure ticket setup" },
+      { value: "manual", label: "Enter source paths now" },
+      { value: "none", label: "Do nothing" },
+    ],
+  });
+  if (isCancel(action) || action === "none") {
+    console.log("foreman tickets: cancelled");
+    process.exit(0);
+  }
+  if (action === "setup") {
+    await cmdSetupInitCli({ project: dir });
+    process.exit(0);
+  }
+  if (action === "plan") {
+    console.log(`foreman tickets: run \`rafi plan ${shellQuote(dir)}\`, then \`rafi tickets populate --project ${shellQuote(dir)}\`.`);
+    process.exit(0);
+  }
+
+  const entered = await text({
+    message: "Source paths or globs, comma-separated:",
+    validate: (value) => String(value ?? "").trim() ? undefined : "Enter at least one source path or glob",
+  });
+  if (isCancel(entered)) process.exit(0);
+  return splitCommaList(String(entered));
+}
+
+function reviewActionFromOptions(opts: {
+  id?: string;
+  accept?: boolean;
+  dismiss?: boolean;
+  defer?: boolean;
+  acceptAll?: boolean;
+  dismissAll?: boolean;
+  deferAll?: boolean;
+}): { action: "accept" | "dismiss" | "defer"; all: boolean; id?: number } | undefined {
+  const selected = [
+    opts.accept ? "accept" : null,
+    opts.dismiss ? "dismiss" : null,
+    opts.defer ? "defer" : null,
+    opts.acceptAll ? "acceptAll" : null,
+    opts.dismissAll ? "dismissAll" : null,
+    opts.deferAll ? "deferAll" : null,
+  ].filter(Boolean) as string[];
+  if (selected.length === 0) return undefined;
+  if (selected.length > 1) fail("choose only one review action");
+  const raw = selected[0]!;
+  const all = raw.endsWith("All");
+  const action = raw.replace(/All$/, "") as "accept" | "dismiss" | "defer";
+  if (!all && opts.id === undefined) fail("--id <n> is required unless using an all action");
+  const id = opts.id !== undefined ? Number(opts.id) : undefined;
+  if (id !== undefined && (!Number.isInteger(id) || id < 1)) fail("--id must be a positive integer");
+  return { action, all, id };
+}
+
+export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void> {
+  const dir = cwd(opts);
+  validateEffort(opts.effort);
+
+  if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
+
+  if (!isTicketsInitialized(dir)) {
+    fail(`ticket tracker is not initialized in ${dir}; run \`foreman tickets init --project ${dir}\` first`);
+  }
+
+  const ticketsConfig = loadTicketsConfig(dir);
+  const setup = loadTicketSetupConfig(dir);
+  const explicitSources = opts.sources;
+  const configuredExternalSources = explicitSources?.length ? [] : externalSources(setup);
+  const savedLocalSources = explicitSources?.length ? [] : localSourcePaths(setup);
+  const sourceHints = configuredExternalSources.length > 0 && savedLocalSources.length === 0
+    ? undefined
+    : await resolvePopulateSourceSelection(dir, explicitSources, ticketsConfig, Boolean(opts.yes));
+  const populateAgent = opts.agent
+    ?? (setup?.populate.agent_preference && setup.populate.agent_preference !== "configured"
+      ? setup.populate.agent_preference
+      : undefined);
+
+  if (configuredExternalSources.length > 0) {
+    if (!opts.yes) {
+      const action = await select({
+        message: `Import ${configuredExternalSources.length} configured external ticket source(s)?`,
+        options: [
+          { value: "proceed", label: "Proceed - fetch external tickets and update .tickets" },
+          { value: "cancel", label: "Cancel" },
+        ],
+      });
+      if (isCancel(action) || action === "cancel") {
+        console.log("foreman tickets: cancelled");
+        process.exit(0);
+      }
+    }
+    const results = await importExternalSources(dir, configuredExternalSources, {
+      importCap: setup?.populate.import_cap ?? DEFAULT_TICKET_SETUP.populate.import_cap,
+      commentLimit: setup?.populate.comment_limit ?? DEFAULT_TICKET_SETUP.populate.comment_limit,
+      recommendSplitForXl: setup?.populate.recommend_split_for_xl ?? DEFAULT_TICKET_SETUP.populate.recommend_split_for_xl,
+    });
+    for (const result of results) {
+      console.log(`foreman tickets: imported ${result.fetched} ${result.provider} item(s) from ${result.sourceLabel} (${result.created} created, ${result.updated} updated)`);
+      console.log(`foreman tickets: snapshot ${result.snapshotPath}`);
+    }
+    cmdRender(dir);
+    const validation = cmdValidate(dir);
+    if (validation.issues.length > 0) {
+      console.log(`foreman tickets: ${validation.issues.length} validation issue(s) found:`);
+      console.log(formatValidationIssues(validation.issues));
+      if (!validation.clean) process.exit(1);
+    }
+    if (!sourceHints?.length) {
+      console.log(`foreman tickets: imported external tickets and rendered ${ticketsConfig.paths.progressDoc}`);
+      return;
+    }
+  }
+
+  if (!opts.yes) {
+    const action = await select({
+      message: "Populate .tickets/tickets.yaml by letting the builder edit this project?",
+      options: [
+        { value: "proceed", label: "Proceed - builder may edit ticket files" },
+        { value: "cancel", label: "Cancel" },
+      ],
+    });
+    if (isCancel(action) || action === "cancel") {
+      console.log("foreman tickets: cancelled");
+      process.exit(0);
+    }
+  }
+
+  const logPath = makeLogPath(dir, "tickets-populate");
+  const log = new Log(logPath);
+  const config = loadConfig(join(dir, "foreman.yaml"));
+  let builder: Awaited<ReturnType<typeof createRoleBuilder>>["builder"] | undefined;
+  let viewer: Promise<void> | undefined;
+
+  try {
+    const roleBuilder = await createRoleBuilder(buildPopulateAgentRunOptions({
+      projectDir: dir,
+      agent: populateAgent,
+      model: opts.model,
+      effort: opts.effort as EffortLevel | undefined,
+      fast: opts.fast,
+      yes: Boolean(opts.yes),
+      log,
+    }));
+    builder = roleBuilder.builder;
+    viewer = printEvents(builder.events());
+    const foreman = new Foreman(builder, log, config.notifications.enabled, false, 3, dir);
+
+    console.log(`foreman tickets: populating tickets with ${roleBuilder.runtime}`);
+    console.log(`foreman tickets: project ${dir}`);
+    console.log(`foreman tickets: role ${TICKET_POPULATE_ROLE}`);
+    console.log(`foreman tickets: log ${logPath}\n`);
+
+    if (sourceHints?.length) {
+      console.log(`foreman tickets: source hints ${sourceHints.join(" ")}`);
+    }
+    const turn = await foreman.runInstruction(buildPopulateInstruction(sourceHints, ticketsConfig.paths.progressDoc));
+    await builder.close();
+    await viewer;
+
+    log.write("ticket-populate", {
+      statusKind: turn.status.kind,
+      summary: turn.status.summary,
+      reason: turn.status.reason,
+      costUsd: turn.result.costUsd,
+      isError: turn.result.isError,
+    });
+
+    if (turn.result.isError) {
+      fail(`builder turn errored: ${turn.result.text.slice(0, 200)}`);
+    }
+    if (turn.status.kind === "blocked") {
+      console.error(`foreman tickets: blocked — ${turn.status.reason ?? "builder reported blocked"}`);
+      process.exit(2);
+    }
+    if (turn.status.kind !== "done" && turn.status.kind !== "plan_complete") {
+      console.error(`foreman tickets: needs human — ${turn.status.error ?? "builder did not emit done"}`);
+      process.exit(2);
+    }
+
+    cmdRender(dir);
+    const validation = cmdValidate(dir);
+    if (validation.issues.length > 0) {
+      console.log(`foreman tickets: ${validation.issues.length} validation issue(s) found:`);
+      console.log(formatValidationIssues(validation.issues));
+      if (!validation.clean) process.exit(1);
+    } else {
+      console.log("foreman tickets: validation passed — all 4 passes clean");
+    }
+    console.log(`foreman tickets: populated .tickets/tickets.yaml and rendered ${ticketsConfig.paths.progressDoc}`);
+  } catch (err) {
+    await builder?.close().catch(() => {});
+    await viewer?.catch(() => {});
+    fail(String(err instanceof Error ? err.message : err));
+  }
+}
+
 export function buildTicketsCommand(): Command {
   const tickets = new Command("tickets").description(
     "Manage the structured ticket tracker for a project.",
   );
+
+  // ── setup:init / setup:update ─────────────────────────────────────────────
+
+  tickets
+    .command("setup:init")
+    .description("Configure ticket sources, populate defaults, and build defaults in rafi-config.yaml.")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("--defaults", "skip prompts and use recommended ticket setup defaults")
+    .option("-y, --yes", "skip prompts where possible")
+    .option("--app-name <name>", "application name for a new minimal rafi-config.yaml")
+    .option("--docs-root <dir>", "repo-relative docs root for a new minimal rafi-config.yaml and ticket docs")
+    .option("--runtime <runtime>", "runtime targets for a new minimal rafi-config.yaml (both | claude | codex)")
+    .option("--local-source <paths...>", "saved local ticket source files, folders, or globs")
+    .option("--linear", "add a Linear source using LINEAR_API_KEY")
+    .option("--linear-team-key <key>", "Linear team key filter")
+    .option("--linear-filter <filter>", "Linear IssueFilter JSON or title search text")
+    .option("--jira-site <url>", "Jira Cloud site URL")
+    .option("--jira-jql <jql>", "Jira JQL query")
+    .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
+    .option("--completion <mode>", "build completion default (pr | auto-merge | direct-merge | none)")
+    .option("--provider <provider>", "PR/MR provider default (auto | github | gitlab | local)")
+    .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
+    .option("--auto-merge-timeout-minutes <n>", "auto-merge dependency wait timeout in minutes (blank means no timeout)")
+    .option("--skip-access-check", "do not validate Linear/Jira access during setup")
+    .action(async (opts) => {
+      try {
+        await cmdSetupInitCli(opts);
+      } catch (err) {
+        fail(String(err instanceof Error ? err.message : err));
+      }
+    });
+
+  tickets
+    .command("setup:update")
+    .description("Update selected ticket setup sections in rafi-config.yaml.")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("--defaults", "skip prompts and keep existing values unless explicit options are provided")
+    .option("-y, --yes", "skip prompts where possible")
+    .option("--app-name <name>", "application name for a new minimal rafi-config.yaml")
+    .option("--docs-root <dir>", "repo-relative docs root for a new minimal rafi-config.yaml and ticket docs")
+    .option("--runtime <runtime>", "runtime targets for a new minimal rafi-config.yaml (both | claude | codex)")
+    .option("--local-source <paths...>", "replace saved local ticket source files, folders, or globs")
+    .option("--linear", "replace saved sources with a Linear source using LINEAR_API_KEY")
+    .option("--linear-team-key <key>", "Linear team key filter")
+    .option("--linear-filter <filter>", "Linear IssueFilter JSON or title search text")
+    .option("--jira-site <url>", "Jira Cloud site URL")
+    .option("--jira-jql <jql>", "Jira JQL query")
+    .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
+    .option("--completion <mode>", "build completion default (pr | auto-merge | direct-merge | none)")
+    .option("--provider <provider>", "PR/MR provider default (auto | github | gitlab | local)")
+    .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
+    .option("--auto-merge-timeout-minutes <n>", "auto-merge dependency wait timeout in minutes (blank means no timeout)")
+    .option("--skip-access-check", "do not validate Linear/Jira access during setup")
+    .action(async (opts) => {
+      try {
+        await cmdSetupUpdateCli(opts);
+      } catch (err) {
+        fail(String(err instanceof Error ? err.message : err));
+      }
+    });
 
   // ── init ────────────────────────────────────────────────────────────────────
 
@@ -188,7 +891,8 @@ export function buildTicketsCommand(): Command {
     .option("--view-limit <n>", "ticket queue display limit", String(DEFAULT_TICKETS_CONFIG.viewLimit))
     .option("--queue-limit <n>", "deprecated alias for --implementation-limit")
     .option("--docs-root <dir>", "repo-relative directory for generated ticket docs")
-    .action((opts, command: Command) => {
+    .option("-y, --yes", "skip app-name prompt when no config/package default exists")
+    .action(async (opts, command: Command) => {
       const dir = cwd(opts);
       try {
         const hasImplementationLimit = optionWasProvided(command, "implementationLimit");
@@ -196,8 +900,9 @@ export function buildTicketsCommand(): Command {
         if (hasImplementationLimit && hasLegacyQueueLimit) {
           fail("--implementation-limit and deprecated --queue-limit cannot both be passed");
         }
+        const appName = opts.appName as string | undefined ?? await resolveInitAppName(dir, Boolean(opts.yes));
         cmdInit(dir, {
-          appName: opts.appName as string | undefined,
+          appName,
           timezone: opts.timezone as string,
           implementationLimit: hasImplementationLimit ? Number(opts.implementationLimit) : undefined,
           viewLimit: optionWasProvided(command, "viewLimit") ? Number(opts.viewLimit) : undefined,
@@ -224,96 +929,9 @@ export function buildTicketsCommand(): Command {
     .option("--fast", "fast mode - lower latency")
     .option("-y, --yes", "skip confirmation prompt before letting the builder edit tickets")
     .action(async (opts) => {
-      const dir = cwd(opts);
-      validateEffort(opts.effort as string | undefined);
-
-      if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
-
-      if (!isTicketsInitialized(dir)) {
-        fail(`ticket tracker is not initialized in ${dir}; run \`foreman tickets init --project ${dir}\` first`);
-      }
-
-      if (!opts.yes) {
-        const action = await select({
-          message: "Populate .tickets/tickets.yaml by letting the builder edit this project?",
-          options: [
-            { value: "proceed", label: "Proceed - builder may edit ticket files" },
-            { value: "cancel", label: "Cancel" },
-          ],
-        });
-        if (isCancel(action) || action === "cancel") {
-          console.log("foreman tickets: cancelled");
-          process.exit(0);
-        }
-      }
-
-      const logPath = makeLogPath(dir, "tickets-populate");
-      const log = new Log(logPath);
-      const config = loadConfig(join(dir, "foreman.yaml"));
-      let builder: Awaited<ReturnType<typeof createRoleBuilder>>["builder"] | undefined;
-      let viewer: Promise<void> | undefined;
-
       try {
-        const roleBuilder = await createRoleBuilder(buildPopulateAgentRunOptions({
-          projectDir: dir,
-          agent: opts.agent as string | undefined,
-          model: opts.model as string | undefined,
-          effort: opts.effort as EffortLevel | undefined,
-          fast: opts.fast as boolean | undefined,
-          yes: Boolean(opts.yes),
-          log,
-        }));
-        builder = roleBuilder.builder;
-        viewer = printEvents(builder.events());
-        const foreman = new Foreman(builder, log, config.notifications.enabled, false, 3, dir);
-
-        console.log(`foreman tickets: populating tickets with ${roleBuilder.runtime}`);
-        console.log(`foreman tickets: project ${dir}`);
-        console.log(`foreman tickets: role ${TICKET_POPULATE_ROLE}`);
-        console.log(`foreman tickets: log ${logPath}\n`);
-
-        const ticketsConfig = loadTicketsConfig(dir);
-        const sourceHints = resolvePopulateSources(dir, opts.sources as string[] | undefined, ticketsConfig);
-        if (sourceHints?.length) {
-          console.log(`foreman tickets: source hints ${sourceHints.join(" ")}`);
-        }
-        const turn = await foreman.runInstruction(buildPopulateInstruction(sourceHints, ticketsConfig.paths.progressDoc));
-        await builder.close();
-        await viewer;
-
-        log.write("ticket-populate", {
-          statusKind: turn.status.kind,
-          summary: turn.status.summary,
-          reason: turn.status.reason,
-          costUsd: turn.result.costUsd,
-          isError: turn.result.isError,
-        });
-
-        if (turn.result.isError) {
-          fail(`builder turn errored: ${turn.result.text.slice(0, 200)}`);
-        }
-        if (turn.status.kind === "blocked") {
-          console.error(`foreman tickets: blocked — ${turn.status.reason ?? "builder reported blocked"}`);
-          process.exit(2);
-        }
-        if (turn.status.kind !== "done" && turn.status.kind !== "plan_complete") {
-          console.error(`foreman tickets: needs human — ${turn.status.error ?? "builder did not emit done"}`);
-          process.exit(2);
-        }
-
-        cmdRender(dir);
-        const validation = cmdValidate(dir);
-        if (validation.issues.length > 0) {
-          console.log(`foreman tickets: ${validation.issues.length} validation issue(s) found:`);
-          console.log(formatValidationIssues(validation.issues));
-          if (!validation.clean) process.exit(1);
-        } else {
-          console.log("foreman tickets: validation passed — all 4 passes clean");
-        }
-        console.log(`foreman tickets: populated .tickets/tickets.yaml and rendered ${ticketsConfig.paths.progressDoc}`);
+        await cmdPopulateCli(opts);
       } catch (err) {
-        await builder?.close().catch(() => {});
-        await viewer?.catch(() => {});
         fail(String(err instanceof Error ? err.message : err));
       }
     });
@@ -519,6 +1137,74 @@ export function buildTicketsCommand(): Command {
           actor: opts.actor as string | undefined,
         });
         console.log(`foreman tickets: reordered ${ticketId}`);
+      } catch (err) {
+        fail(String(err instanceof Error ? err.message : err));
+      }
+    });
+
+  // ── review recommendations ────────────────────────────────────────────────
+
+  tickets
+    .command("review")
+    .description("Review pending split/combine/duplicate ticket recommendations.")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("--id <n>", "recommendation id to review")
+    .option("--accept", "accept the selected recommendation")
+    .option("--dismiss", "dismiss the selected recommendation")
+    .option("--defer", "defer the selected recommendation")
+    .option("--accept-all", "accept every pending recommendation")
+    .option("--dismiss-all", "dismiss every pending recommendation")
+    .option("--defer-all", "defer every pending recommendation")
+    .action(async (opts) => {
+      try {
+        const dir = cwd(opts);
+        const action = reviewActionFromOptions(opts);
+        if (action) {
+          const result = cmdReview(dir, {
+            action: action.action,
+            all: action.all,
+            ids: action.id !== undefined ? [action.id] : undefined,
+          });
+          console.log(`foreman tickets: ${action.action}ed ${result.changed} recommendation(s)`);
+          if (result.pending.length > 0) console.log(`foreman tickets: ${result.pending.length} pending recommendation(s) remain`);
+          return;
+        }
+
+        const pending = cmdReview(dir).pending;
+        if (pending.length === 0) {
+          console.log("foreman tickets: no pending review recommendations");
+          return;
+        }
+        if (!process.stdin.isTTY || !process.stdout.isTTY) {
+          for (const rec of pending) {
+            console.log(`#${rec.id} [${rec.kind}] ${rec.summary}`);
+          }
+          console.log("foreman tickets: use --accept-all, --dismiss-all, --defer-all, or --id <n> --accept|--dismiss|--defer");
+          return;
+        }
+
+        const picked = await select({
+          message: "Pending recommendation:",
+          options: pending.map((rec) => ({
+            value: String(rec.id),
+            label: `#${rec.id} [${rec.kind}] ${rec.summary}`,
+          })),
+        });
+        if (isCancel(picked)) process.exit(0);
+        const disposition = await select({
+          message: "Apply recommendation?",
+          options: [
+            { value: "accept", label: "Accept and apply patch" },
+            { value: "defer", label: "Defer" },
+            { value: "dismiss", label: "Dismiss" },
+          ],
+        });
+        if (isCancel(disposition)) process.exit(0);
+        const result = cmdReview(dir, {
+          action: disposition as "accept" | "defer" | "dismiss",
+          ids: [Number(picked)],
+        });
+        console.log(`foreman tickets: ${disposition}ed ${result.changed} recommendation(s)`);
       } catch (err) {
         fail(String(err instanceof Error ? err.message : err));
       }

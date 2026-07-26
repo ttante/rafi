@@ -83,20 +83,24 @@ Plan output paths:
 ### Ticket lifecycle
 
 ```sh
+rafi tickets setup:init                 # save sources and build defaults in rafi-config.yaml
 rafi tickets init --app-name "My App"   # initialize .tickets/ in the project
 rafi tickets init --docs-root docs-rafi  # override tracker docs root
 rafi tickets populate                    # agent fills tickets from rafi-plan.md or existing docs
 rafi tickets populate --sources docs/tickets.md docs/plans/**
+rafi tickets review                      # accept/defer/dismiss split/combine/duplicate recommendations
 rafi tickets queue                       # show the display queue
 rafi tickets validate                    # run all 4 validation passes
 rafi tickets render                      # regenerate the configured progress doc
 ```
 
+`tickets setup:init` / `setup:update` stores optional local, Linear, and Jira Cloud sources plus populate/build defaults in `rafi-config.yaml`. Linear uses `LINEAR_API_KEY`; Jira Cloud uses `JIRA_EMAIL` and `JIRA_API_TOKEN`.
+
 `tickets populate` options:
 
 | Option | Notes |
 | --- | --- |
-| `--sources <paths...>` | Files, folders, or globs the agent should check first. When omitted, populate prefers the configured Rafi `<docs.root>/rafi-plan.md`, then the ticket docs root, then `docs/rafi-plan.md`, if they exist. |
+| `--sources <paths...>` | Files, folders, or globs the agent should check first. When omitted, populate uses saved setup sources, then asks about the configured Rafi plan when present. |
 | `--agent <agent>` | Selects Claude or Codex. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `--model <model>` / `--effort <level>` | Override the selected runtime's model and reasoning effort. |
 | `--fast` | Lower-latency mode. |
@@ -109,6 +113,8 @@ rafi tickets render                      # regenerate the configured progress do
 Use `--implementation-limit <n>` to set the generated-doc and Foreman selection window, and `--view-limit <n>` to set the default `rafi tickets queue` display size. `--queue-limit <n>` remains as a deprecated alias for `--implementation-limit`.
 
 The selected limits live in `.tickets/config.yaml` as `implementation_limit` and `view_limit`; they are not part of `rafi-config.yaml`.
+
+Native Linear/Jira imports write ignored snapshots under `.tickets/imports/` and add `external_refs` to mirrored tickets. Pending review recommendations render in the progress doc and are managed with `rafi tickets review`.
 
 ### Run the builder
 
@@ -126,6 +132,12 @@ rafi doctor .                         # check env, config, and readiness
 | `--agent <agent>` | Selects the Claude or Codex builder runtime. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `--tickets <path>` | Sends a one-off task file to the builder during start preflight. |
 | `--no-qa` | Skips the per-ticket QA review. |
+| `--branch-per-ticket` / `--no-branch-per-ticket` | Enable branch-per-ticket mode or disable the saved default for one run. |
+| `--completion <mode>` | Branch completion override: `pr`, `auto-merge`, `direct-merge`, or `none`. |
+| `--provider <provider>` | PR/MR provider override: `auto`, `github`, or `gitlab`. |
+| `--auto-merge-wait` / `--no-auto-merge-wait` | Override whether dependent auto-merge tickets wait for earlier PRs/MRs to merge. |
+| `--auto-merge-timeout-minutes <n>` | Override the dependency merge wait timeout. |
+| `--no-create-pr` | Disable saved PR/MR creation defaults for one run. |
 | `--continue` / `--resume <id>` | Resume the latest or a specific logged session. |
 | `rafi status <project>` | Summarizes the latest run, including branch/PR failures when present. |
 | `rafi doctor <project>` | Checks environment, config, ticket tracker, and readiness. |

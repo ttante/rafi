@@ -49,6 +49,7 @@ export interface PlanInstructionOptions {
   docsRoot: string;
   latestPlanPath: string;
   historyDirPath: string;
+  ticketSetupSummary?: string;
 }
 
 export interface PlanArtifactPaths {
@@ -74,6 +75,9 @@ ${opts.docsRoot}
 
 Planning source hints:
 ${sources}
+
+Saved ticket setup preferences:
+${opts.ticketSetupSummary ?? "- No saved ticket setup preferences found."}
 
 Role and skill requirements:
 - Use the planner role guidance for baseline planning.
@@ -246,6 +250,7 @@ export function buildPlanCommand(): Command {
           docsRoot,
           latestPlanPath: previewPaths.latestRel,
           historyDirPath: `${docsRoot}/rafi-plans`,
+          ticketSetupSummary: readTicketSetupSummary(projectDir),
         });
 
         if (!opts.yes) {
@@ -351,6 +356,38 @@ function readConfiguredDocsRoot(projectDir: string): string | undefined {
     if (typeof docs?.root === "string") return docs.root;
   }
   return undefined;
+}
+
+function readTicketSetupSummary(projectDir: string): string | undefined {
+  const path = join(projectDir, RAFI_CONFIG_FILE);
+  if (!existsSync(path)) return undefined;
+  const raw = parseYaml(readFileSync(path, "utf8")) as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.tickets === undefined) return undefined;
+  const tickets = raw.tickets as Record<string, unknown>;
+  const lines: string[] = [];
+  if (Array.isArray(tickets.sources)) {
+    lines.push("- Sources:");
+    for (const source of tickets.sources) {
+      if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+      const src = source as Record<string, unknown>;
+      if (src.type === "local" && Array.isArray(src.paths)) {
+        lines.push(`  - local: ${src.paths.join(", ")}`);
+      } else if (src.type === "linear") {
+        lines.push(`  - linear: env=${String(src.api_key_env ?? "LINEAR_API_KEY")}${src.team_key ? ` team=${src.team_key}` : ""}${src.filter ? ` filter=${src.filter}` : ""}`);
+      } else if (src.type === "jira") {
+        lines.push(`  - jira: site=${String(src.site ?? "")} jql=${String(src.jql ?? "")} email_env=${String(src.email_env ?? "JIRA_EMAIL")} token_env=${String(src.token_env ?? "JIRA_API_TOKEN")}`);
+      }
+    }
+  }
+  const populate = tickets.populate as Record<string, unknown> | undefined;
+  if (populate && typeof populate === "object") {
+    lines.push(`- Populate: agent=${String(populate.agent_preference ?? "configured")} cap=${String(populate.import_cap ?? 500)} comments=${String(populate.comment_limit ?? 10)} enrichment=${String(populate.enrichment ?? "recommendations")}`);
+  }
+  const build = tickets.build as Record<string, unknown> | undefined;
+  if (build && typeof build === "object") {
+    lines.push(`- Build: branch_strategy=${String(build.branch_strategy ?? "branch-per-ticket")} completion=${String(build.completion ?? "none")} provider=${String(build.provider ?? "auto")} merge=${String(build.merge_method ?? "squash")}`);
+  }
+  return lines.length > 0 ? lines.join("\n") : undefined;
 }
 
 function assertOutputPathInsideRepo(projectDir: string, outputPath: string, label: string): void {

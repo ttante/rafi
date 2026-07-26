@@ -125,11 +125,12 @@ If a target repo already has a `docs/` path, `rafi create` keeps those app docs 
   ```
 - Use the ticket-maker agent to convert the plan into a structured, ordered ticket queue
   ```sh
-  rafi tickets init --app-name "My App"
-  rafi tickets populate --sources docs/rafi-plan.md
+  rafi tickets setup:init
+  rafi tickets populate
   ```
 - `rafi tickets init` reads `docs.root` from `rafi-config.yaml`; pass `--docs-root <dir>` to override it for standalone ticket setup.
-- `rafi tickets populate` prefers `<docs.root>/rafi-plan.md` from `rafi-config.yaml` when it exists, and otherwise checks the ticket docs root, `docs/rafi-plan.md`, then scans relevant planning docs automatically; pass `--sources docs/tickets.md docs/plans/**` when you want the agent to check specific files, folders, or globs first.
+- `rafi tickets setup:init` saves ticket sources and populate/build defaults in `rafi-config.yaml`. Sources can be local docs/globs, Linear (`LINEAR_API_KEY`), or Jira Cloud (`JIRA_EMAIL` / `JIRA_API_TOKEN`).
+- `rafi tickets populate` uses explicit `--sources` first, then saved setup sources, then asks about `<docs.root>/rafi-plan.md` when present. Native Linear/Jira imports are mirrored into `.tickets/tickets.yaml` with provider refs and ignored snapshots under `.tickets/imports/`.
 - Run the builder to implement tickets one by one, with QA after each step
   ```sh
   rafi start . --steps 10
@@ -149,7 +150,7 @@ If a target repo already has a `docs/` path, `rafi create` keeps those app docs 
   ```
 - Turn your current repo into a managed plan through Rafi's interactive planning interview, or import your existing backlog from planning docs, ticket files, folders of notes, or markdown roadmaps. Any reasonable format is OK because an agent interprets the sources.
   ```sh
-  rafi tickets init --app-name "My App"
+  rafi tickets setup:init
   rafi plan . --sources docs/roadmap.md
   rafi tickets populate
   # or: rafi tickets populate --sources docs/tickets.md docs/plans/**
@@ -306,8 +307,23 @@ Initializes the `.tickets/` structure in a project directory.
 | `--view-limit <n>` | Default row limit for `rafi tickets queue`. Default: `20000`. |
 | `--queue-limit <n>` | Deprecated alias for `--implementation-limit`. |
 | `--docs-root <dir>` | Override the generated ticket docs root. |
+| `-y, --yes` | Skip the app-name prompt when no config/package default exists. |
 
 `tickets init` writes `implementation_limit` and `view_limit` to `.tickets/config.yaml`. Existing configs with `queue_limit` still load as an implementation limit, with the old default value `50` upgraded to `500`.
+
+#### `rafi tickets setup:init` / `setup:update`
+
+Saves optional `tickets:` preferences in `rafi-config.yaml`: ordered sources, populate defaults, and branch/build completion defaults. If setup runs before `rafi-config.yaml` exists, it writes a minimal valid config without running `rafi compile`.
+
+Useful scripted examples:
+
+```sh
+rafi tickets setup:init --local-source docs/rafi-plan.md --completion auto-merge --provider github
+rafi tickets setup:update --linear --linear-team-key ENG
+rafi tickets setup:update --jira-site https://example.atlassian.net --jira-jql "project = ENG"
+```
+
+For auto-merge runs, setup can also save whether dependent tickets should wait for earlier PRs/MRs to merge, plus an optional wait timeout.
 
 #### `rafi tickets populate`
 
@@ -319,9 +335,15 @@ Asks the `ticket-maker` role to populate `.tickets/tickets.yaml` from existing p
 | `-a, --agent <agent>` | Builder agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
 | `-m, --model <model>` | Override the builder's model. |
 | `--effort <level>` | Reasoning effort level. Valid values: `low`, `medium`, `high`, `xhigh`. |
-| `--sources <paths...>` | Source hint files, folders, or globs to check first. When omitted, `tickets populate` prefers the configured Rafi `<docs.root>/rafi-plan.md`, then the ticket docs root, then `docs/rafi-plan.md`, if they exist. |
+| `--sources <paths...>` | Source hint files, folders, or globs to check first. When omitted, populate uses saved setup sources before prompting for the configured Rafi plan. |
 | `--fast` | Fast mode with lower latency. |
 | `-y, --yes` | Skip the confirmation prompt before letting the builder edit tickets. |
+
+Configured Linear and Jira sources are imported natively before any local-doc populate agent runs. Rafi stores only env var names and non-secret filters in config, writes snapshots under ignored `.tickets/imports/`, and adds `external_refs` to imported tickets.
+
+#### `rafi tickets review`
+
+Reviews pending split/combine/duplicate recommendations stored in SQLite and rendered into the progress doc. Use `--accept-all`, `--dismiss-all`, `--defer-all`, or `--id <n> --accept|--dismiss|--defer`; accepted recommendations apply deterministic ticket patches, rerender, and validate.
 
 #### `rafi tickets update <ticketId>`
 
@@ -488,7 +510,13 @@ Enlists a builder and drives it through a batch of N steps.
 | `--fast` | Fast mode with lower latency. For Codex, maps to low effort. |
 | `--no-qa` | Disable per-ticket QA review. QA is enabled by default. |
 | `--branch-per-ticket` | Run each selected structured ticket in an isolated git worktree and branch. |
+| `--no-branch-per-ticket` | Disable saved branch-per-ticket defaults for this run. |
 | `--create-pr` | Push each successful ticket branch and create a GitHub PR. Implies `--branch-per-ticket`. |
+| `--no-create-pr` | Disable saved PR/MR creation defaults for this run. |
+| `--completion <mode>` | Branch completion override: `pr`, `auto-merge`, `direct-merge`, or `none`. |
+| `--provider <provider>` | PR/MR provider override: `auto`, `github`, or `gitlab`. |
+| `--auto-merge-wait` / `--no-auto-merge-wait` | Override whether dependent auto-merge tickets wait for earlier PRs/MRs to merge. |
+| `--auto-merge-timeout-minutes <n>` | Override the dependency merge wait timeout; blank setup value means no timeout. |
 | `--base <ref>` | Base ref for root ticket branches. Default: current branch or `HEAD`. |
 | `--branch-prefix <prefix>` | Branch name prefix for ticket branches. Default: `rafi`. |
 | `--max-branch-depth <n>` | Maximum selected branch stack depth. Default: `2`. |

@@ -196,6 +196,46 @@ test("project: optional docs root is accepted", () => {
   );
 });
 
+test("project: optional tickets setup is accepted", () => {
+  assert.equal(
+    validateProjectConfig({
+      ...validProject,
+      tickets: {
+        sources: [
+          { type: "local", paths: ["docs/rafi-plan.md"] },
+          { type: "linear", api_key_env: "LINEAR_API_KEY", team_key: "ENG", filter: null },
+          {
+            type: "jira",
+            site: "https://example.atlassian.net",
+            email_env: "JIRA_EMAIL",
+            token_env: "JIRA_API_TOKEN",
+            jql: "project = ENG",
+          },
+        ],
+        populate: {
+          source_handling: "saved",
+          agent_preference: "configured",
+          import_cap: 500,
+          comment_limit: 10,
+          enrichment: "recommendations",
+          recommend_split_for_xl: true,
+        },
+        build: {
+          branch_strategy: "branch-per-ticket",
+          completion: "auto-merge",
+          provider: "github",
+          pr_ready: true,
+          merge_method: "squash",
+          cleanup: true,
+          auto_merge_wait: false,
+          auto_merge_timeout_minutes: null,
+        },
+      },
+    }).valid,
+    true,
+  );
+});
+
 // ───────────────────────── assert* (throwing narrowers) ─────────────────────────
 // These are part of the public surface: foreman/special-agents call them to fail
 // fast on bad authoring inputs. They must pass through valid data and throw with a

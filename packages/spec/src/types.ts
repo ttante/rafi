@@ -136,6 +136,59 @@ export interface DocsConfig {
   root: string;
 }
 
+/** Ticket source configured in the top-level rafi-config.yaml. */
+export type TicketSetupSource =
+  | {
+      type: "local";
+      paths: string[];
+    }
+  | {
+      type: "linear";
+      api_key_env?: string;
+      team_key?: string | null;
+      filter?: string | null;
+    }
+  | {
+      type: "jira";
+      site: string;
+      email_env?: string;
+      token_env?: string;
+      jql: string;
+    };
+
+export type TicketPopulateAgentPreference = "configured" | "claude" | "codex";
+export type TicketPopulateEnrichmentPolicy = "none" | "recommendations" | "agent";
+export type TicketBuildBranchStrategy = "branch-per-ticket" | "batch";
+export type TicketBuildCompletionMode = "pr" | "auto-merge" | "direct-merge" | "none";
+export type TicketBuildProvider = "auto" | "github" | "gitlab" | "local";
+export type TicketBuildMergeMethod = "squash" | "merge" | "rebase";
+
+export interface TicketPopulateDefaultsConfig {
+  source_handling?: "saved" | "prompt" | "manual";
+  agent_preference?: TicketPopulateAgentPreference;
+  import_cap?: number;
+  comment_limit?: number;
+  enrichment?: TicketPopulateEnrichmentPolicy;
+  recommend_split_for_xl?: boolean;
+}
+
+export interface TicketBuildDefaultsConfig {
+  branch_strategy?: TicketBuildBranchStrategy;
+  completion?: TicketBuildCompletionMode;
+  provider?: TicketBuildProvider;
+  pr_ready?: boolean;
+  merge_method?: TicketBuildMergeMethod;
+  cleanup?: boolean;
+  auto_merge_wait?: boolean;
+  auto_merge_timeout_minutes?: number | null;
+}
+
+export interface TicketsSetupConfig {
+  sources?: TicketSetupSource[];
+  populate?: TicketPopulateDefaultsConfig;
+  build?: TicketBuildDefaultsConfig;
+}
+
 /** Per-runtime paths for a skill or agent artifact. */
 export type ArtifactSource = "rafi" | "existing";
 
@@ -157,6 +210,7 @@ export interface ProjectConfig {
   harness: HarnessConfig;
   agent_files: AgentFilesConfig;
   docs?: DocsConfig;
+  tickets?: TicketsSetupConfig;
   agents: Record<string, RuntimeArtifactConfig>;
   skills: Record<string, RuntimeArtifactConfig>;
 }

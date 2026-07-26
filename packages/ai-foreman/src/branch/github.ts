@@ -10,6 +10,7 @@ import type {
   GitHubRemote,
   GitHubRemoteResult,
   PrResult,
+  ReviewMergeStatus,
 } from "./types.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
@@ -202,6 +203,38 @@ export function createOrReusePr(cwd: string, opts: CreatePrOptions): PrResult {
   const created = runCommand(cwd, "gh", args);
   if (created.ok) return { status: "created", url: created.stdout };
   return prFailure(classifyPrFailure(created, opts.node.branch, "Failed to create GitHub PR.", remoteForRepair));
+}
+
+export function enableGitHubAutoMerge(cwd: string, branch: string, cleanup: boolean): PrResult {
+  const args = ["pr", "merge", branch, "--auto", "--squash"];
+  if (cleanup) args.push("--delete-branch");
+  const result = runCommand(cwd, "gh", args, 30_000);
+  if (result.ok) return { status: "auto_merge_enabled", url: result.stdout };
+  return prFailure(classifyPrFailure(result, branch, "Failed to enable GitHub PR auto-merge."));
+}
+
+export function checkGitHubPrMerged(cwd: string, branch: string): ReviewMergeStatus {
+  const remote = inspectGitHubRemote(cwd);
+  const remoteForRepair = remote.ok ? remote.remote : undefined;
+  const result = runCommand(cwd, "gh", [
+    "pr",
+    "view",
+    branch,
+    "--json",
+    "state,url",
+    "--jq",
+    "[.state, .url] | @tsv",
+  ]);
+  if (!result.ok) {
+    return classifyPrFailure(result, branch, "Failed to check GitHub PR merge state.", remoteForRepair);
+  }
+  const [state, url] = result.stdout.split(/\t/);
+  return {
+    ok: true,
+    merged: state === "MERGED",
+    state,
+    url: url || undefined,
+  };
 }
 
 export function formatGitHubFailure(failure: GitHubFailure): string {

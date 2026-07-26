@@ -21,11 +21,21 @@ import {
 } from "../src/tickets/commands.js";
 import { Log } from "../src/log.js";
 import {
+  cmdPopulateCli,
   buildPopulateAgentRunOptions,
   buildPopulateInstruction,
   resolvePopulateSources,
 } from "../src/cli/tickets.js";
 import { loadTicketsConfig } from "../src/tickets/config.js";
+import { applyImportedItems } from "../src/tickets/importer.js";
+import { cmdReview } from "../src/tickets/commands.js";
+import { createReviewRecommendation } from "../src/tickets/recommendations.js";
+import { StateDb } from "../src/tickets/stateDb.js";
+import {
+  loadTicketSetupConfig,
+  saveTicketSetupConfig,
+  DEFAULT_TICKET_SETUP,
+} from "../src/tickets/setupConfig.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import type { TicketState } from "../src/tickets/stateDb.js";
 
@@ -217,6 +227,178 @@ test("populate explicit sources override the latest Rafi plan default", () => {
     const sources = resolvePopulateSources(dir, ["docs/custom.md"], loadTicketsConfig(dir));
 
     assert.deepEqual(sources, ["docs/custom.md"]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("ticket setup config round-trips through rafi-config.yaml", () => {
+  const dir = makeTmpDir();
+  try {
+    saveTicketSetupConfig(dir, {
+      ...DEFAULT_TICKET_SETUP,
+      sources: [{ type: "local", paths: ["docs/plan.md"] }],
+      build: { ...DEFAULT_TICKET_SETUP.build, completion: "auto-merge", provider: "github", pr_ready: true },
+    }, { appName: "Config Test", docsRoot: "docs-rafi", targets: ["codex"] });
+
+    const raw = parse(readFileSync(join(dir, "rafi-config.yaml"), "utf8")) as Record<string, unknown>;
+    const loaded = loadTicketSetupConfig(dir);
+
+    assert.equal(raw.appName, "Config Test");
+    assert.deepEqual((raw.harness as Record<string, unknown>).targets, ["codex"]);
+    assert.deepEqual(loaded?.sources, [{ type: "local", paths: ["docs/plan.md"] }]);
+    assert.equal(loaded?.build.completion, "auto-merge");
+    assert.equal(loaded?.populate.import_cap, 500);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("populate uses saved local setup sources before rafi-plan fallback", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "docs-rafi" });
+    writeFileSync(join(dir, "docs-rafi", "rafi-plan.md"), "# Plan\n", "utf8");
+    saveTicketSetupConfig(dir, {
+      ...DEFAULT_TICKET_SETUP,
+      sources: [{ type: "local", paths: ["docs/backlog.md"] }],
+    });
+
+    const sources = resolvePopulateSources(dir, undefined, loadTicketsConfig(dir));
+
+    assert.deepEqual(sources, ["docs/backlog.md"]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("populate imports saved external-only setup without requiring a local source", async () => {
+  const dir = makeTmpDir();
+  const oldFetch = globalThis.fetch;
+  const oldKey = process.env.LINEAR_API_KEY;
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    saveTicketSetupConfig(dir, {
+      ...DEFAULT_TICKET_SETUP,
+      sources: [{ type: "linear", api_key_env: "LINEAR_API_KEY", team_key: "ENG", filter: null }],
+    });
+    process.env.LINEAR_API_KEY = "test-key";
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      data: {
+        issues: {
+          nodes: [{
+            id: "lin-1",
+            identifier: "ENG-1",
+            title: "External import only",
+            description: "Imported without a local source prompt",
+            priority: 2,
+            estimate: 2,
+            url: "https://linear.app/acme/issue/ENG-1/external-import-only",
+            state: { name: "Todo", type: "backlog" },
+            team: { key: "ENG", name: "Engineering" },
+            labels: { nodes: [] },
+            comments: { nodes: [] },
+          }],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    }), { status: 200 })) as typeof fetch;
+
+    await cmdPopulateCli({ project: dir, yes: true });
+
+    const raw = parse(readFileSync(join(dir, ".tickets/tickets.yaml"), "utf8")) as { tickets: TicketDef[] };
+    assert.equal(raw.tickets.length, 1);
+    assert.equal(raw.tickets[0]?.id, "T001");
+    assert.equal(raw.tickets[0]?.external_refs?.[0]?.provider, "linear");
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = oldKey;
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("external import creates stable tickets and updates repeat imports by external ref", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+
+    let applied = applyImportedItems(dir, [{
+      provider: "linear",
+      providerId: "lin-1",
+      key: "ENG-1",
+      url: "https://linear.app/acme/issue/ENG-1/test",
+      title: "Build importer",
+      description: "Importer details",
+      priority: 2,
+      size: 8,
+      status: "Todo",
+      statusCategory: "backlog",
+      labels: ["platform"],
+      comments: [{ author: "A", body: "First comment" }],
+      raw: { id: "lin-1" },
+    }]);
+
+    assert.equal(applied.created, 1);
+    assert.equal(applied.updated, 0);
+    assert.equal(applied.tickets[0].id, "T001");
+    assert.equal(applied.tickets[0].external_refs?.[0]?.provider, "linear");
+    assert.equal(applied.tickets[0].size, "XL");
+
+    applied = applyImportedItems(dir, [{
+      provider: "linear",
+      providerId: "lin-1",
+      key: "ENG-1",
+      url: "https://linear.app/acme/issue/ENG-1/test",
+      title: "Build importer v2",
+      description: "Importer details v2",
+      priority: 3,
+      size: 3,
+      status: "Done",
+      statusCategory: "completed",
+      labels: [],
+      comments: [],
+      raw: { id: "lin-1" },
+    }]);
+
+    assert.equal(applied.created, 0);
+    assert.equal(applied.updated, 1);
+    assert.equal(applied.tickets.length, 1);
+    assert.equal(applied.tickets[0].id, "T001");
+    assert.match(applied.tickets[0].title, /Build importer v2/);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("review accept applies deterministic ticket patch and rerenders", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001", 1000, { size: "XL" })] }));
+    const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try {
+      createReviewRecommendation(db, "2026-01-01T00:00:00Z", {
+        kind: "split",
+        summary: "Split T001",
+        ticketIds: ["T001"],
+        patch: {
+          update: [{ id: "T001", set: { size: "L", notes: "Accepted split review." } }],
+        },
+      });
+    } finally {
+      db.close();
+    }
+
+    const listed = cmdReview(dir);
+    assert.equal(listed.pending.length, 1);
+    const result = cmdReview(dir, { action: "accept", ids: [listed.pending[0].id!] });
+    const raw = parse(readFileSync(join(dir, ".tickets/tickets.yaml"), "utf8")) as { tickets: TicketDef[] };
+    const doc = readFileSync(join(dir, "docs/ticket-progress.md"), "utf8");
+
+    assert.equal(result.changed, 1);
+    assert.equal(raw.tickets[0].size, "L");
+    assert.match(doc, /No pending review recommendations/);
   } finally {
     rmSync(dir, { recursive: true });
   }

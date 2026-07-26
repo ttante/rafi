@@ -91,6 +91,7 @@ export function renderProgressDoc(input: RenderInput): string {
   const lastSnap = db.getRecentValidationSnapshot();
   const recentCompleted = db.getRecentCompleted();
   const archiveIndex = db.getArchiveIndex();
+  const pendingRecommendations = db.getReviewRecommendations("pending");
 
   const rulesPath = join(projectDir, config.paths.trackerRules);
   const rulesContent = existsSync(rulesPath)
@@ -223,6 +224,23 @@ export function renderProgressDoc(input: RenderInput): string {
   lines.push(section("DISCOVERED_FUTURE_WORK", futureContent));
   lines.push("");
 
+  // Review Recommendations
+  lines.push("## Review Recommendations");
+  const recommendationContent = pendingRecommendations.length === 0
+    ? "_No pending review recommendations._"
+    : table(
+        ["ID", "Kind", "Tickets", "Summary", "Rationale"],
+        pendingRecommendations.map((rec) => [
+          String(rec.id ?? ""),
+          rec.kind,
+          parseTicketIds(rec.ticket_ids_json).join(", ") || "N/A",
+          rec.summary,
+          rec.rationale ?? "N/A",
+        ]),
+      );
+  lines.push(section("REVIEW_RECOMMENDATIONS", recommendationContent));
+  lines.push("");
+
   // Archive Index
   lines.push("## Archive Index");
   const archiveContent = archiveIndex.length === 0
@@ -274,6 +292,15 @@ export function renderProgressDoc(input: RenderInput): string {
   lines.push("");
 
   return lines.join("\n");
+}
+
+function parseTicketIds(json: string): string[] {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 export function writeProgressDoc(
