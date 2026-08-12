@@ -104,6 +104,7 @@ export class CodexAdapter implements BuilderAdapter {
     const args: string[] = [
       "exec",
       "--json",
+      "--skip-git-repo-check",
       "--sandbox",
       this.opts.sandboxMode ?? "workspace-write",
       "-C",

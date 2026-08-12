@@ -327,7 +327,7 @@ function updateInstructionFileWithAgent(
     generated;
   try {
     if (runtime === "codex") {
-      execFileSync("codex", ["exec", "--sandbox", "workspace-write", "-C", targetDir, prompt], {
+      execFileSync("codex", ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "-C", targetDir, prompt], {
         cwd: targetDir,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],

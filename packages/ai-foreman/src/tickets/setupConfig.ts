@@ -176,6 +176,18 @@ export function localSourcePaths(setup: TicketsSetupConfig | undefined): string[
     .flatMap((source) => source.paths));
 }
 
+/**
+ * Create records planning hints separately from completed ticket setup.  Use
+ * them only as a setup prefill so `tickets.sources` remains the source of
+ * truth once the user has configured ticket ingestion.
+ */
+export function configuredPlanningSources(projectDir: string): string[] {
+  const raw = loadRafiConfigObject(projectDir);
+  const planning = raw?.planning as Record<string, unknown> | undefined;
+  if (!Array.isArray(planning?.sources)) return [];
+  return unique(planning.sources.filter((source): source is string => typeof source === "string" && source.trim().length > 0).map((source) => source.trim()));
+}
+
 export function externalSources(setup: TicketsSetupConfig | undefined): Extract<TicketSourceConfig, { type: "linear" | "jira" }>[] {
   return (setup?.sources ?? []).filter(
     (source): source is Extract<TicketSourceConfig, { type: "linear" | "jira" }> =>

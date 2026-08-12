@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -41,6 +41,24 @@ function docsHelpBlock(docs: string, heading: string): string {
   const end = docs.indexOf("\n```", contentStart);
   assert.notEqual(end, -1, `missing docs fence for ${heading}`);
   return docs.slice(contentStart, end).trimEnd();
+}
+
+function installReadyClaude(binDir: string): void {
+  mkdirSync(binDir, { recursive: true });
+  const claudePath = join(binDir, "claude");
+  writeFileSync(claudePath, "#!/bin/sh\nexit 0\n", "utf8");
+  chmodSync(claudePath, 0o755);
+}
+
+function writeSdkPackage(projectDir: string): void {
+  const packageDir = join(projectDir, "node_modules", "@anthropic-ai", "claude-agent-sdk");
+  mkdirSync(packageDir, { recursive: true });
+  writeFileSync(
+    join(packageDir, "package.json"),
+    JSON.stringify({ name: "@anthropic-ai/claude-agent-sdk", exports: "./index.js" }),
+    "utf8",
+  );
+  writeFileSync(join(packageDir, "index.js"), "export {};\n", "utf8");
 }
 
 test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
@@ -101,4 +119,25 @@ test("compile --root-file-mode append overrides update mode for the run", { skip
   assert.ok(content.startsWith("CUSTOM RULES\n"));
   assert.ok(content.includes("<!-- rafi:start -->"));
   assert.match(readFileSync(join(dir, "rafi-config.yaml"), "utf8"), /mode: update/);
+});
+
+test("create skips a resolvable Claude Agent SDK", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+  const dir = tempDir();
+  const binDir = join(dir, "bin");
+  installReadyClaude(binDir);
+  writeSdkPackage(dir);
+
+  const projectRoot = join(HERE, "..");
+  const output = execFileSync(
+    tsxBin(projectRoot),
+    ["src/index.ts", "create", dir, "--defaults", "--runtime", "claude"],
+    {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` },
+    },
+  );
+
+  assert.match(output, /Claude Agent SDK already installed; skipping\./);
+  assert.doesNotMatch(output, /installing Claude Agent SDK/);
 });

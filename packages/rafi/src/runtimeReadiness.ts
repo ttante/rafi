@@ -43,7 +43,7 @@ export function checkAgentRuntimeReady(targetDir: string, runtime: AgentRuntime)
         stdio: ["ignore", "pipe", "pipe"],
       });
     } else {
-      execFileSync("codex", ["exec", "-C", targetDir, "Return exactly OK"], {
+      execFileSync("codex", ["exec", "--skip-git-repo-check", "-C", targetDir, "Return exactly OK"], {
         cwd: targetDir,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],

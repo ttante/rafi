@@ -20,6 +20,16 @@ import {
 } from "ai-foreman/agent-run.js";
 import { validateDocsRoot } from "./docs.js";
 import { DEFAULT_DOCS_ROOT, LEGACY_PROJECT_CONFIG_FILE, RAFI_CONFIG_FILE } from "./project.js";
+import { normalizePlanningSources } from "./project.js";
+import {
+  checkpointInterview,
+  completeInterview,
+  createInterviewRecord,
+  failInterview,
+  fingerprintOutputs,
+  outputsChanged,
+  type InterviewRecord,
+} from "ai-foreman/interviews.js";
 
 export const REQUIRED_PLAN_SECTIONS = [
   "Goal",
@@ -36,10 +46,10 @@ export const REQUIRED_PLAN_SECTIONS = [
 
 const TICKET_GUIDANCE_REQUIREMENTS = [
   { label: "ticket slices", pattern: /\b(ticket\s+)?slices?\b|\bproposed tickets?\b/i },
-  { label: "dependencies", pattern: /\bdependencies?\b|\bdepends_on\b/i },
-  { label: "acceptance criteria", pattern: /\bacceptance\s+criteria\b/i },
-  { label: "required tests", pattern: /\brequired\s+tests?\b|\btests?\s+required\b/i },
-  { label: "likely files", pattern: /\blikely\s+files?\b/i },
+  { label: "dependencies", pattern: /\bdependenc(?:y|ies)\b|\bdepends?(?:\s+on)?\b|\bdependency\s+graph\b|\bdepends_on\b/i },
+  { label: "acceptance criteria", pattern: /\bacceptance(?:\s+criteria)?\b/i },
+  { label: "required tests", pattern: /\b(?:required\s+)?tests?\b|\btests?\s+required\b/i },
+  { label: "likely files", pattern: /\b(?:likely\s+)?files?\b/i },
   { label: "branch/batch strategy", pattern: /(?=[\s\S]*\bbranch\b)(?=[\s\S]*\bbatch\b)(?=[\s\S]*\bstrategy\b)[\s\S]*/i },
 ] as const;
 
@@ -110,6 +120,7 @@ export function buildPlanAgentRunOptions(opts: {
   effort?: EffortLevel;
   fast?: boolean;
   yes?: boolean;
+  resumeSessionId?: string;
   instruction: string;
   logPath?: string;
 }): RoleInstructionRunOptions {
@@ -122,6 +133,7 @@ export function buildPlanAgentRunOptions(opts: {
     effort: opts.effort,
     fast: opts.fast,
     yes: opts.yes,
+    resumeSessionId: opts.resumeSessionId,
     label: "rafi plan",
     logPath: opts.logPath,
     instruction: opts.instruction,
@@ -133,6 +145,20 @@ export function buildPlanAgentRunOptions(opts: {
 
 export function resolvePlanDocsRoot(projectDir: string): string {
   return validateDocsRoot(projectDir, readConfiguredDocsRoot(projectDir) ?? DEFAULT_DOCS_ROOT);
+}
+
+/** Explicit command sources win; otherwise continue the source choices from `rafi create`. */
+export function resolvePlanSources(projectDir: string, explicitSources?: string[]): string[] | undefined {
+  if (explicitSources && explicitSources.length > 0) return explicitSources;
+  for (const file of [RAFI_CONFIG_FILE, LEGACY_PROJECT_CONFIG_FILE]) {
+    const path = join(projectDir, file);
+    if (!existsSync(path)) continue;
+    const raw = parseYaml(readFileSync(path, "utf8")) as Record<string, unknown> | undefined;
+    const planning = raw?.planning as Record<string, unknown> | undefined;
+    const sources = normalizePlanningSources(planning?.sources);
+    if (sources.length > 0) return sources;
+  }
+  return undefined;
 }
 
 export function resolvePlanArtifactPaths(
@@ -234,19 +260,38 @@ export function buildPlanCommand(): Command {
     .option("-m, --model <model>", "override the planning agent's model")
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--fast", "fast mode - lower latency")
+    .option("--resume-session <id>", "resume a saved planner agent session")
     .option("-y, --yes", "skip confirmation prompt before running the planning agent")
     .action(async (project: string, opts) => {
+      const projectDir = resolve(project);
+      const interactiveInterview = !opts.yes && process.stdin.isTTY && process.stdout.isTTY;
+      let interview: InterviewRecord | undefined = interactiveInterview
+        ? createInterviewRecord({
+          workflow: "plan",
+          invocation: { projectDir, agent: opts.agent, model: opts.model, effort: opts.effort, fast: Boolean(opts.fast) },
+          checkpoint: "planning-brief",
+          outputs: ["docs/rafi-plan.md"],
+        })
+        : undefined;
       try {
-        const projectDir = resolve(project);
+        if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "planning-brief" });
         if (!existsSync(projectDir)) fail(`project directory not found: ${projectDir}`);
         assertEffortLevel(opts.effort as string | undefined);
 
         const docsRoot = resolvePlanDocsRoot(projectDir);
         const previewPaths = resolvePlanArtifactPaths(projectDir, docsRoot);
+        if (interview) interview = checkpointInterview(projectDir, interview, {
+          checkpoint: "planning-brief",
+          outputs: fingerprintOutputs(projectDir, [previewPaths.latestRel]),
+        });
         const brief = await resolveBrief(opts);
+        if (interview) interview = checkpointInterview(projectDir, interview, {
+          checkpoint: "confirm-agent-run",
+          answers: { ...interview.answers, brief },
+        });
         const instruction = buildPlanInstruction({
           brief,
-          sources: opts.sources as string[] | undefined,
+          sources: resolvePlanSources(projectDir, opts.sources as string[] | undefined),
           docsRoot,
           latestPlanPath: previewPaths.latestRel,
           historyDirPath: `${docsRoot}/rafi-plans`,
@@ -269,6 +314,7 @@ export function buildPlanCommand(): Command {
         }
 
         const logPath = makeLogPath(projectDir, "rafi-plan");
+        if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "agent-run" });
         console.log("rafi plan: running read-only planner");
         console.log(`rafi plan: project ${projectDir}`);
         console.log("rafi plan: role planner + skill grill-me");
@@ -281,6 +327,7 @@ export function buildPlanCommand(): Command {
           effort: opts.effort as EffortLevel | undefined,
           fast: opts.fast as boolean | undefined,
           yes: Boolean(opts.yes),
+          resumeSessionId: opts.resumeSession as string | undefined,
           instruction,
           logPath,
         }));
@@ -300,13 +347,32 @@ export function buildPlanCommand(): Command {
 
         const planMarkdown = stripFinalStepStatusMarker(turn.result.text);
         if (!planMarkdown.trim()) fail("planner returned an empty plan");
+        if (interview) {
+          const drifted = outputsChanged(projectDir, interview.outputs);
+          if (drifted.length > 0) {
+            interview = checkpointInterview(projectDir, interview, { status: "needs_review", checkpoint: "review-output-drift" });
+            throw new Error(`planned output changed during this interview: ${drifted.join(", ")}; review it and retry instead of overwriting`);
+          }
+        }
         const written = writeValidatedPlanArtifacts(projectDir, docsRoot, planMarkdown);
+        if (interview) {
+          interview = checkpointInterview(projectDir, interview, {
+            checkpoint: "write-plan-artifacts",
+            runtime: {
+              runtime: run.runtime,
+              model: run.model,
+              sessionId: run.sessionId,
+            },
+          });
+          completeInterview(projectDir, interview);
+        }
 
         console.log(`\nrafi plan: wrote ${written.historyRel}`);
         console.log(`rafi plan: refreshed ${written.latestRel}`);
         console.log("rafi plan: next:");
         console.log(`  ${nextPopulateCommand(projectDir, written.latestRel)}`);
       } catch (err) {
+        if (interview) failInterview(projectDir, interview, interview.checkpoint, err);
         fail(err instanceof Error ? err.message : String(err));
       }
     });

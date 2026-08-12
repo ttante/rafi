@@ -26,6 +26,8 @@ Runtime behavior not fully expressible in Commander help:
 - `rafi plan`, `rafi start`, `ai-foreman start`, and `tickets populate` use a single `harness.targets` value from `rafi-config.yaml` when `--agent` is omitted. Missing config or both targets default to Claude.
 - Interactive runtime auth/readiness failures offer retry, verified switch to the other runtime, or cancel. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because session IDs are runtime-specific.
 - `rafi plan` accepts only `STEP_STATUS: plan_complete` as a successful planner result, validates required plan sections before writing, writes versioned history to `<docs.root>/rafi-plans/<timestamp>.md`, and refreshes `<docs.root>/rafi-plan.md`.
+- Interactive `create`, `plan`, and ticket setup runs save compact, local recovery records under `.rafi/interviews/`, which Rafi adds to `.gitignore`. Records hold answers/checkpoints and redacted failure context—not transcripts or agent output. Use `rafi resume [project] --id <id>` to continue or `rafi resume [project] --discard <id>` to remove a record. Completed records are pruned after 30 days; incompatible records remain until discarded.
+- `rafi create` saves planning hints as `planning.sources`. `rafi plan` uses explicit `--sources` first, then those hints. Ticket setup uses those values only as its initial local-source prefill; completed ticket sources remain in `tickets.sources`.
 - `rafi tickets populate` uses explicit `--sources` first, then saved `tickets.sources` from `rafi-config.yaml`. When omitted, it checks `<docs.root>/rafi-plan.md`; interactive runs ask before using it, while non-interactive runs print next-step options when no source is available.
 - `rafi start` and `ai-foreman start` can read saved `tickets.build` defaults from `rafi-config.yaml`; explicit flags such as `--completion`, `--no-branch-per-ticket`, `--no-create-pr`, and `--auto-merge-wait` / `--no-auto-merge-wait` win for the current run.
 
@@ -47,6 +49,8 @@ Commands:
                                bundles from an existing rafi-config.yaml.
   create [options] <project>   Run the walkthrough, write rafi-config.yaml, and
                                compile the target repo.
+  resume [options] [project]   Resume or discard a saved interactive create,
+                               plan, or ticket-setup interview.
   plan [options] [project]     Create a ticket-maker-ready implementation plan
                                from a brief and repo inspection.
   tickets                      Manage the structured ticket tracker for a
@@ -58,6 +62,22 @@ Commands:
   doctor [options] [project]   Check Foreman, agent CLIs, config, and optional
                                ticket tracker readiness.
   help [command]               display help for command
+```
+
+### `rafi resume --help`
+
+```text
+Usage: rafi resume [options] [project]
+
+Resume or discard a saved interactive create, plan, or ticket-setup interview.
+
+Arguments:
+  project         path to the target repo (default: ".")
+
+Options:
+  --id <id>       saved interview id (or unique prefix) to resume
+  --discard <id>  discard a saved interview id (or unique prefix)
+  -h, --help      display help for command
 ```
 
 ### `rafi create --help`
@@ -109,19 +129,20 @@ Create a ticket-maker-ready implementation plan from a brief and repo
 inspection.
 
 Arguments:
-  project               path to the target repo (default: ".")
+  project                path to the target repo (default: ".")
 
 Options:
-  --brief <text>        planning brief
-  --brief-file <path>   file containing the planning brief
-  --sources <paths...>  source hint files, folders, or globs to check first
-  -a, --agent <agent>   planning agent (claude | codex)
-  -m, --model <model>   override the planning agent's model
-  --effort <level>      reasoning effort level (low|medium|high|xhigh)
-  --fast                fast mode - lower latency
-  -y, --yes             skip confirmation prompt before running the planning
-                        agent
-  -h, --help            display help for command
+  --brief <text>         planning brief
+  --brief-file <path>    file containing the planning brief
+  --sources <paths...>   source hint files, folders, or globs to check first
+  -a, --agent <agent>    planning agent (claude | codex)
+  -m, --model <model>    override the planning agent's model
+  --effort <level>       reasoning effort level (low|medium|high|xhigh)
+  --fast                 fast mode - lower latency
+  --resume-session <id>  resume a saved planner agent session
+  -y, --yes              skip confirmation prompt before running the planning
+                         agent
+  -h, --help             display help for command
 ```
 
 ### `rafi tickets --help`

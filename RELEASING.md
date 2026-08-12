@@ -10,6 +10,17 @@ pnpm -r test
 pnpm -r typecheck
 ```
 
+For a release candidate with authenticated local Claude and Codex runtimes,
+also run the explicit live acceptance journey:
+
+```sh
+pnpm run test:live-interview
+```
+
+It requires Linux `script`, Docker Compose, and both runtime CLIs already
+authenticated. It is intentionally on-demand: it is not hosted CI and does
+not manage credentials.
+
 For packages being published, also run npm dry-runs from each package directory:
 
 ```sh

@@ -1,0 +1,12 @@
+{
+  "name": "rafi-live-todo-web",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest"
+  },
+  "dependencies": { "@vitejs/plugin-react": "latest", "react": "latest", "react-dom": "latest", "vite": "latest", "typescript": "latest", "vitest": "latest" },
+  "devDependencies": { "@types/react": "latest", "@types/react-dom": "latest" }
+}

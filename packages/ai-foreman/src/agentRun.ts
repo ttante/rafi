@@ -54,6 +54,7 @@ export interface RoleInstructionRunResult {
   runtime: AgentRuntime;
   model?: string;
   effort?: EffortLevel;
+  sessionId?: string;
   logPath: string;
   roleBundle: RoleBundle;
   skills: string[];
@@ -192,6 +193,10 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
     if (opts.logEvent) {
       log.write(opts.logEvent, {
         role: opts.role,
+        runtime,
+        model,
+        effort,
+        sessionId: builder.sessionId(),
         statusKind: turn.status.kind,
         summary: turn.status.summary,
         reason: turn.status.reason,
@@ -200,7 +205,7 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
       });
     }
 
-    return { turn, runtime, model, effort, logPath, roleBundle, skills };
+    return { turn, runtime, model, effort, sessionId: builder.sessionId(), logPath, roleBundle, skills };
   } catch (err) {
     await builder.close().catch(() => {});
     await viewer.catch(() => {});

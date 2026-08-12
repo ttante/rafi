@@ -206,6 +206,13 @@ export const projectConfigSchema = {
         root: { type: "string", minLength: 1 },
       },
     },
+    planning: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        sources: { type: "array", items: { type: "string", minLength: 1 } },
+      },
+    },
     tickets: ticketsSetupConfig,
     agents: artifactPathMap,
     skills: artifactPathMap,

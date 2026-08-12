@@ -136,6 +136,11 @@ export interface DocsConfig {
   root: string;
 }
 
+/** Input documents carried from create into planning. Ticket setup has its own sources. */
+export interface PlanningConfig {
+  sources?: string[];
+}
+
 /** Ticket source configured in the top-level rafi-config.yaml. */
 export type TicketSetupSource =
   | {
@@ -210,6 +215,7 @@ export interface ProjectConfig {
   harness: HarnessConfig;
   agent_files: AgentFilesConfig;
   docs?: DocsConfig;
+  planning?: PlanningConfig;
   tickets?: TicketsSetupConfig;
   agents: Record<string, RuntimeArtifactConfig>;
   skills: Record<string, RuntimeArtifactConfig>;

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 
 const CLAUDE_AGENT_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
@@ -18,6 +19,13 @@ export interface BuildClaudeAgentSdkInstallCommandOptions {
     packageManager: KnownPackageManager,
     targetDir: string,
   ) => string | undefined;
+}
+
+export type ClaudeAgentSdkInstallResult = "installed" | "already-installed";
+
+export interface InstallClaudeAgentSdkOptions {
+  isInstalled?: (targetDir: string) => boolean;
+  execFile?: (command: string, args: string[], options: { cwd: string; stdio: "inherit" }) => void;
 }
 
 export function buildClaudeAgentSdkInstallCommand(
@@ -49,14 +57,33 @@ export function buildClaudeAgentSdkInstallCommand(
   }
 }
 
-export function installClaudeAgentSdk(targetDir: string, packageManager: string): void {
+/** Returns true when the target project can resolve the SDK without changing dependencies. */
+export function isClaudeAgentSdkInstalled(targetDir: string): boolean {
+  try {
+    createRequire(join(targetDir, "package.json")).resolve(CLAUDE_AGENT_SDK_PACKAGE);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function installClaudeAgentSdk(
+  targetDir: string,
+  packageManager: string,
+  options: InstallClaudeAgentSdkOptions = {},
+): ClaudeAgentSdkInstallResult {
+  const isInstalled = options.isInstalled ?? isClaudeAgentSdkInstalled;
+  if (isInstalled(targetDir)) return "already-installed";
+
   const install = buildClaudeAgentSdkInstallCommand(targetDir, packageManager);
   const fallback = install.fallbackFrom
     ? ` (unknown package manager \`${install.fallbackFrom}\`; falling back to npm)`
     : "";
   console.log(`rafi: installing Claude Agent SDK with \`${install.display}\`${fallback}...`);
   try {
-    execFileSync(install.command, install.args, { cwd: targetDir, stdio: "inherit" });
+    const execFile = options.execFile ?? execFileSync;
+    execFile(install.command, install.args, { cwd: targetDir, stdio: "inherit" });
+    return "installed";
   } catch (err) {
     throw new Error(
       `Claude Agent SDK install failed. Run manually from ${targetDir}: ${install.display}`,

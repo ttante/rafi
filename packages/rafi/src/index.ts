@@ -42,6 +42,16 @@ import { buildStatusCommand } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
 import { installClaudeAgentSdk } from "./sdkInstall.js";
 import { buildPlanCommand } from "./plan.js";
+import {
+  checkpointInterview,
+  completeInterview,
+  createInterviewRecord,
+  discardInterview,
+  findInterviewRecord,
+  pruneCompletedInterviews,
+  readInterviewRecords,
+  type InterviewRecord,
+} from "ai-foreman/interviews.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -108,6 +118,23 @@ program
       ...(targetPkgName ? { appName: targetPkgName } : {}),
       timezone: detectedTimezone,
     };
+    const interactiveInterview = !opts.defaults && process.stdin.isTTY && process.stdout.isTTY;
+    let interview: InterviewRecord | undefined = interactiveInterview
+      ? createInterviewRecord({
+        workflow: "create",
+        invocation: { projectDir: targetDir, force: Boolean(opts.force), docsRoot: docsRootOption, runtime: runtimeOption, rootFileMode },
+        checkpoint: "app-name",
+        outputs: [RAFI_CONFIG_FILE],
+      })
+      : undefined;
+    if (interview) interview = checkpointInterview(targetDir, interview, { checkpoint: "app-name" });
+    const checkpointCreateAnswer = (checkpoint: string, key: string, value: unknown): void => {
+      if (!interview) return;
+      interview = checkpointInterview(targetDir, interview, {
+        checkpoint,
+        answers: { ...interview.answers, [key]: value },
+      });
+    };
     if (runtimeOption) {
       answers.runtimeTargets = runtimeSelectionToTargets(runtimeOption);
     }
@@ -126,6 +153,7 @@ program
         defaultValue: answers.appName,
       });
       if (isCancel(appName)) process.exit(0);
+      checkpointCreateAnswer("frontend", "appName", String(appName));
 
       const frontendRaw = await text({
         message: `Frontend stack (Enter to accept, or type "No UI" for no frontend):`,
@@ -133,6 +161,7 @@ program
         defaultValue: answers.frontend,
       });
       if (isCancel(frontendRaw)) process.exit(0);
+      checkpointCreateAnswer("backend", "frontend", String(frontendRaw));
 
       const backend = await text({
         message: "Backend stack: (Enter to accept)",
@@ -140,6 +169,7 @@ program
         defaultValue: answers.backend,
       });
       if (isCancel(backend)) process.exit(0);
+      checkpointCreateAnswer("database", "backend", String(backend));
 
       const database = await text({
         message: "Database: (Enter to accept)",
@@ -147,6 +177,7 @@ program
         defaultValue: answers.database,
       });
       if (isCancel(database)) process.exit(0);
+      checkpointCreateAnswer("cloud", "database", String(database));
 
       const cloudRaw = await text({
         message: `Cloud provider (Enter to accept, or type "Local only" for no cloud):`,
@@ -154,6 +185,7 @@ program
         defaultValue: answers.cloud,
       });
       if (isCancel(cloudRaw)) process.exit(0);
+      checkpointCreateAnswer("package-manager", "cloud", String(cloudRaw));
 
       const packageManager = await text({
         message: "Package manager: (Enter to accept)",
@@ -161,12 +193,14 @@ program
         defaultValue: answers.packageManager,
       });
       if (isCancel(packageManager)) process.exit(0);
+      checkpointCreateAnswer("uses-ai", "packageManager", String(packageManager));
 
       const usesAI = await confirm({
         message: "Will this app call LLMs / do AI generation? (Enter to accept)",
         initialValue: answers.usesAI,
       });
       if (isCancel(usesAI)) process.exit(0);
+      checkpointCreateAnswer("runtime-targets", "usesAI", Boolean(usesAI));
 
       const runtimeSelection = runtimeOption ?? await select({
         message: "Agent runtime targets:",
@@ -178,6 +212,7 @@ program
         ],
       });
       if (isCancel(runtimeSelection)) process.exit(0);
+      checkpointCreateAnswer("docs-root", "runtimeTargets", String(runtimeSelection));
 
       const docsRoot = await chooseDocsRootForCreate(targetDir, docsRootOption, {
         interactive: true,
@@ -185,12 +220,14 @@ program
         text,
         isCancel,
       });
+      checkpointCreateAnswer("planning-sources-confirm", "docsRoot", docsRoot);
 
       const hasPlanningSources = await confirm({
         message: "Do you have existing ticket or planning docs you want the populate agent to use? (Enter to accept)",
         initialValue: false,
       });
       if (isCancel(hasPlanningSources)) process.exit(0);
+      checkpointCreateAnswer("planning-sources", "hasPlanningSources", Boolean(hasPlanningSources));
 
       let planningSources: string | undefined;
       if (hasPlanningSources) {
@@ -201,6 +238,7 @@ program
         });
         if (isCancel(planningSourcesRaw)) process.exit(0);
         planningSources = String(planningSourcesRaw) || undefined;
+        checkpointCreateAnswer("compile-config", "planningSources", planningSources);
       }
 
       answers = {
@@ -217,6 +255,10 @@ program
         docsRoot,
         planningSources,
       };
+      if (interview) interview = checkpointInterview(targetDir, interview, {
+        checkpoint: "compile-config",
+        answers: { ...answers },
+      });
 
       outro("Configuration collected — compiling...");
     } else {
@@ -228,6 +270,7 @@ program
     }
 
     let config = await applyCollisionChoices(targetDir, buildProjectConfig(answers), rootFileMode);
+    if (interview) interview = checkpointInterview(targetDir, interview, { checkpoint: "write-config" });
     writeRafiConfigYaml(targetDir, config);
     config = await compileCreateConfig(
       targetDir,
@@ -268,8 +311,12 @@ program
     console.log(`rafi: custom skills or agents can replace Rafi defaults by setting artifact_source: existing and editing their paths in ${RAFI_CONFIG_FILE}.`);
 
     if (config.harness.targets.includes("claude")) {
-      installClaudeAgentSdk(targetDir, answers.packageManager);
-      console.log("rafi: Claude Agent SDK installed.");
+      const sdkInstall = installClaudeAgentSdk(targetDir, answers.packageManager);
+      console.log(
+        sdkInstall === "installed"
+          ? "rafi: Claude Agent SDK installed."
+          : "rafi: Claude Agent SDK already installed; skipping.",
+      );
     } else {
       console.log("rafi: skipping Claude Agent SDK (Codex only).");
     }
@@ -277,6 +324,56 @@ program
     console.log(`rafi: verified agent runtime auth for ${config.harness.targets.join(" and ")}.`);
 
     await runCreateTicketHandoff(targetDir, config, answers, Boolean(opts.defaults));
+    if (interview) completeInterview(targetDir, interview);
+  });
+
+program
+  .command("resume")
+  .description("Resume or discard a saved interactive create, plan, or ticket-setup interview.")
+  .argument("[project]", "path to the target repo", ".")
+  .option("--id <id>", "saved interview id (or unique prefix) to resume")
+  .option("--discard <id>", "discard a saved interview id (or unique prefix)")
+  .action(async (project: string, opts) => {
+    const projectDir = resolve(project);
+    pruneCompletedInterviews(projectDir);
+    if (opts.discard) {
+      if (!discardInterview(projectDir, String(opts.discard))) throw new Error(`interview not found: ${opts.discard}`);
+      console.log(`rafi resume: discarded ${opts.discard}`);
+      return;
+    }
+    const available = readInterviewRecords(projectDir).records.filter((record) => record.status !== "completed");
+    if (available.length === 0) {
+      console.log("rafi resume: no unfinished interviews found");
+      return;
+    }
+    let record = opts.id ? findInterviewRecord(projectDir, String(opts.id)) : undefined;
+    if (!record && !opts.id) {
+      if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        throw new Error("provide --id <id> when stdin/stdout is not a TTY");
+      }
+      const { select, isCancel } = await import("@clack/prompts");
+      const chosen = await select({
+        message: "Which interview should Rafi resume?",
+        options: available.map((item) => ({
+          value: item.id,
+          label: `${item.workflow} — ${item.checkpoint} — ${item.failure?.summary ?? "interrupted"}`,
+          hint: item.updatedAt,
+        })),
+      });
+      if (isCancel(chosen)) return;
+      record = findInterviewRecord(projectDir, String(chosen));
+    }
+    if (!record) throw new Error(`interview not found: ${opts.id}`);
+    if (record.status === "incompatible") {
+      throw new Error(`interview ${record.id} uses an incompatible state version; use --discard ${record.id} to remove it`);
+    }
+    console.log(`rafi resume: ${record.workflow} at ${record.checkpoint}`);
+    if (record.runtime.sessionId) {
+      console.log(`rafi resume: saved ${record.runtime.runtime ?? "agent"} session ${record.runtime.sessionId} will be requested by the workflow.`);
+    } else if (record.checkpoint === "agent-run") {
+      console.log("rafi resume: the prior agent session is unavailable; the workflow will start a fresh session with the saved brief and answers.");
+    }
+    await resumeInterview(projectDir, record);
   });
 
 function loadRafiConfig(targetDir: string): { config: ProjectConfig; migrated: boolean } | undefined {
@@ -571,6 +668,39 @@ function runSelfCommand(args: string[]): void {
   }
 }
 
+async function resumeInterview(projectDir: string, record: InterviewRecord): Promise<void> {
+  const entry = fileURLToPath(import.meta.url);
+  const invocation = record.invocation;
+  let args: string[];
+  if (record.workflow === "plan") {
+    const brief = record.answers.brief;
+    if (typeof brief !== "string" || !brief.trim()) {
+      throw new Error("the saved plan interview has no brief yet; rerun `rafi plan` to answer the brief question");
+    }
+    args = ["plan", projectDir, "--brief", brief, "--yes"];
+    for (const [key, option] of [["agent", "--agent"], ["model", "--model"], ["effort", "--effort"]] as const) {
+      if (typeof invocation[key] === "string") args.push(option, invocation[key] as string);
+    }
+    if (invocation.fast) args.push("--fast");
+    if (record.runtime.sessionId) args.push("--resume-session", record.runtime.sessionId);
+  } else if (record.workflow === "create") {
+    // Create's saved values are retained for audit and recovery. Its historical
+    // prompt implementation does not yet accept answer injection, so re-enter
+    // the walkthrough rather than replacing configuration with defaults.
+    args = ["create", projectDir];
+    if (invocation.force) args.push("--force");
+    if (typeof invocation.docsRoot === "string") args.push("--docs-root", invocation.docsRoot);
+    if (typeof invocation.runtime === "string") args.push("--runtime", invocation.runtime);
+    if (typeof invocation.rootFileMode === "string") args.push("--root-file-mode", invocation.rootFileMode);
+  } else {
+    args = ["tickets", record.workflow === "tickets-setup-init" ? "setup:init" : "setup:update", "--project", projectDir];
+  }
+  const result = spawnSync(process.execPath, [entry, ...args], { stdio: "inherit" });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`resumed ${record.workflow} exited with status ${result.status ?? "unknown"}`);
+  completeInterview(projectDir, record);
+}
+
 function artifactCollisions(
   targetDir: string,
   config: ProjectConfig,
@@ -620,8 +750,8 @@ function cloneArtifactMap(map: ProjectConfig["agents"]): ProjectConfig["agents"]
   return Object.fromEntries(Object.entries(map).map(([name, paths]) => [name, { ...paths }]));
 }
 
-function parsePlanningSources(raw: string): string[] {
-  return raw
+function parsePlanningSources(raw: string | string[]): string[] {
+  return (Array.isArray(raw) ? raw.join(" ") : raw)
     .split(/\s*(?:,|\+)\s*|\s+/)
     .map((source) => source.trim())
     .filter(Boolean);

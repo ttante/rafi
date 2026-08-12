@@ -13,6 +13,7 @@ import {
   nextPopulateCommand,
   resolveBrief,
   resolvePlanDocsRoot,
+  resolvePlanSources,
   stripFinalStepStatusMarker,
   validatePlanMarkdown,
   writePlanArtifacts,
@@ -91,6 +92,17 @@ test("plan docs root resolves from rafi-config.yaml or defaults to docs", () => 
   }
 });
 
+test("plan sources prefer an explicit flag and otherwise carry create planning sources", () => {
+  const dir = tempDir();
+  try {
+    writeFileSync(join(dir, "rafi-config.yaml"), stringify({ planning: { sources: ["docs/brief.md", "notes/**"] } }), "utf8");
+    assert.deepEqual(resolvePlanSources(dir), ["docs/brief.md", "notes/**"]);
+    assert.deepEqual(resolvePlanSources(dir, ["manual.md"]), ["manual.md"]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
 test("plan success status accepts only plan_complete", () => {
   assert.equal(isSuccessfulPlanStatus("plan_complete"), true);
   assert.equal(isSuccessfulPlanStatus("done"), false);
@@ -156,6 +168,58 @@ Ship account settings.
   assert.ok(missing.includes("Ticket-Maker Guidance: likely files"));
   assert.ok(missing.includes("Ticket-Maker Guidance: branch/batch strategy"));
   assert.match(formatPlanValidationFailures(missing), /missing section: Problem Statement/);
+});
+
+test("plan validation accepts a singular Dependency Graph heading", () => {
+  const plan = `
+## Goal
+Ship account settings.
+
+## Problem Statement
+Settings cannot currently be changed.
+
+## Repo Findings
+The account route exists.
+
+## Locked Decisions
+Save settings immediately.
+
+## Open Questions
+None.
+
+## Scope
+Settings page and save path.
+
+## Out of Scope
+Billing settings.
+
+## Risks
+Validation regressions.
+
+## Rollback Notes
+Revert the settings route.
+
+## Ticket-Maker Guidance
+### Ticket Slices
+- Account settings route, save API, and tests.
+
+### Dependency Graph
+Save API before UI submit wiring.
+
+### Acceptance
+Users can save valid changes and see validation errors.
+
+### Tests
+Unit tests and an integration smoke test.
+
+### Files
+app/account/settings.tsx, server/account.ts.
+
+### Branch / Batch Strategy
+Use one branch per slice and batch repeated component-library form updates.
+`;
+
+  assert.deepEqual(validatePlanMarkdown(plan), []);
 });
 
 test("validated plan writes reject incomplete plans before creating artifacts", () => {

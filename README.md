@@ -40,7 +40,7 @@ Run `rafi` from inside the target repo:
 - Answer the walkthrough questions about your stack (or skip with `--defaults`)
 - Choose runtime targets: both Claude and Codex, Claude only, or Codex only
 - Get target-specific agent files, role bundles, and starter docs written to your repo
-- If the final target set includes Claude Code, the Claude Agent SDK is installed automatically with your selected package manager (`npm`, `pnpm`, Yarn Classic/modern, or Bun)
+- If the final target set includes Claude Code, the Claude Agent SDK is installed with your selected package manager only when the target project cannot already resolve it (`npm`, `pnpm`, Yarn Classic/modern, or Bun)
 - Selected agent runtimes are checked before `create`, `plan`, `start`, and `tickets populate` continue, with retry/switch/cancel recovery prompts if auth is missing
 - Re-run `rafi compile` whenever you update `rafi-config.yaml`
 
@@ -201,10 +201,10 @@ Current package versions:
 
 | Package | Version |
 |---|---|
-| `@rafi-ai/cli` | `0.6.2` |
-| `ai-foreman` | `1.3.1` |
-| `special-agents` | `0.4.0` |
-| `rafi-spec` | `0.4.0` |
+| `@rafi-ai/cli` | `0.8.0` |
+| `ai-foreman` | `1.5.0` |
+| `special-agents` | `0.6.0` |
+| `rafi-spec` | `0.6.0` |
 
 - Release notes live in [CHANGELOG.md](./CHANGELOG.md).
 - Release mechanics and required checks live in [RELEASING.md](./RELEASING.md).

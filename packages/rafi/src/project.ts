@@ -24,7 +24,7 @@ export interface WalkthroughAnswers {
   /** Repo-relative folder where Rafi project docs are written. */
   docsRoot?: string;
   /** Files, folders, or globs with existing tickets or planning material. */
-  planningSources?: string;
+  planningSources?: string | string[];
 }
 
 export const RAFI_CONFIG_FILE = "rafi-config.yaml";
@@ -148,6 +148,9 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
     docs: {
       root: answers.docsRoot ?? DEFAULT_DOCS_ROOT,
     },
+    ...(normalizePlanningSources(answers.planningSources).length > 0
+      ? { planning: { sources: normalizePlanningSources(answers.planningSources) } }
+      : {}),
     agents: defaultAgentsConfig(),
     skills: defaultSkillsConfig(),
   };
@@ -168,11 +171,22 @@ export function normalizeProjectConfig(raw: unknown): ProjectConfig {
     docs: {
       root: cfg.docs?.root ?? DEFAULT_DOCS_ROOT,
     },
+    ...(normalizePlanningSources(cfg.planning?.sources).length > 0
+      ? { planning: { sources: normalizePlanningSources(cfg.planning?.sources) } }
+      : {}),
     agents: normalizeArtifactMap(cfg.agents, defaultAgentsConfig()),
     skills: normalizeArtifactMap(cfg.skills, defaultSkillsConfig()),
   };
   assertProjectConfig(normalized);
   return normalized;
+}
+
+export function normalizePlanningSources(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  return [...new Set(raw
+    .flatMap((entry) => String(entry).split(/\s*(?:,|\+)\s*|\s+/))
+    .map((entry) => entry.trim())
+    .filter(Boolean))];
 }
 
 function normalizeArtifactMap(

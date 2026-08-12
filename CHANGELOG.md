@@ -4,6 +4,26 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.8.0 / ai-foreman 1.5.0 / special-agents 0.6.0 / rafi-spec 0.6.0 - 2026-08-06
+
+### Added
+
+- Added durable local interview records and `rafi resume [project]` for interactive create, plan, and ticket-setup journeys. Records preserve saved answers, checkpoints, redacted failure context, runtime/session metadata, and output fingerprints under ignored `.rafi/interviews/` state.
+- Added `planning.sources` to `rafi-config.yaml`. Create persists planning hints, plan consumes them unless `--sources` is explicit, and ticket setup uses them only as a local-source prefill.
+- Added planner runtime/session metadata to agent-run logs and output-drift detection before resumable plan writes.
+- Added a documented, explicit `test:live-interview` release-candidate acceptance script and React/FastAPI/PostgreSQL fixture.
+
+### Changed
+
+- Refreshed the published CLI README and npm description around the interview-led workflow, AI-application guidance, resume behavior, and the complete manual command reference.
+
+### Packages
+
+- Bumped `@rafi-ai/cli` to `0.8.0`.
+- Bumped `ai-foreman` to `1.5.0`.
+- Bumped `special-agents` to `0.6.0` for its updated `rafi-spec` dependency.
+- Bumped `rafi-spec` to `0.6.0`.
+
 ## @rafi-ai/cli 0.7.0 / ai-foreman 1.4.0 / special-agents 0.5.0 / rafi-spec 0.5.0 - 2026-07-24
 
 ### Added

@@ -36,6 +36,7 @@ test("buildArgs: baseline includes required flags and instruction", () => {
   const a = adapter();
   const args = a.buildArgs("do the thing");
   assert.ok(args.includes("--json"), "missing --json");
+  assert.ok(args.includes("--skip-git-repo-check"), "missing --skip-git-repo-check");
   assert.ok(args.includes("--sandbox"), "missing --sandbox");
   assert.ok(args.includes("workspace-write"), "missing workspace-write");
   assert.ok(args.includes("-C"), "missing -C");

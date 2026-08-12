@@ -1,7 +1,8 @@
 {
   "name": "@rafi-ai/cli",
-  "version": "0.7.0",
-  "description": "Rafi CLI — scaffold and compile AI framework configs for a target repo.",
+  "version": "0.8.0",
+  "description": "Interactive AI app engineering for Claude and Codex: interview, plan, ticket, and build with QA.",
+  "preferGlobal": true,
   "license": "Apache-2.0",
   "type": "module",
   "repository": {
@@ -36,9 +37,9 @@
     "node": ">=20"
   },
   "dependencies": {
-    "ai-foreman": "1.4.0",
-    "special-agents": "0.5.0",
-    "rafi-spec": "0.5.0",
+    "ai-foreman": "1.5.0",
+    "special-agents": "0.6.0",
+    "rafi-spec": "0.6.0",
     "ajv": "^8.20.0",
     "@clack/prompts": "^1.4.0",
     "commander": "^12.1.0",

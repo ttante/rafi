@@ -37,6 +37,7 @@ import {
 import type { TicketsConfig } from "../tickets/config.js";
 import {
   DEFAULT_TICKET_SETUP,
+  configuredPlanningSources,
   defaultAppName,
   detectPackageName,
   ensureRafiConfigForTicketSetup,
@@ -53,6 +54,13 @@ import {
   type TicketSourceConfig,
   type TicketsSetupConfig,
 } from "../tickets/setupConfig.js";
+import {
+  checkpointInterview,
+  completeInterview,
+  createInterviewRecord,
+  failInterview,
+  type InterviewRecord,
+} from "../interviews.js";
 
 function fail(msg: string): never {
   console.error(`foreman tickets: ${msg}`);
@@ -227,76 +235,109 @@ interface PopulateCommandOptions {
 async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
   const dir = cwd(opts);
   if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
+  let interview = beginTicketSetupInterview(dir, "tickets-setup-init", opts);
   if (hasTicketSetupConfig(dir)) {
     console.log("foreman tickets setup: existing setup found; opening setup:update");
     await cmdSetupUpdateCli(opts);
+    if (interview) completeInterview(dir, interview);
     return;
   }
-
-  const answers = await collectTicketSetup(dir, opts, undefined);
-  ensureRafiConfigForTicketSetup(dir, {
-    appName: opts.appName ?? defaultAppName(dir),
-    docsRoot: opts.docsRoot,
-    targets: parseRuntimeTargets(opts.runtime),
-  });
-  saveTicketSetupConfig(dir, answers, {
-    appName: opts.appName ?? defaultAppName(dir),
-    docsRoot: opts.docsRoot,
-    targets: parseRuntimeTargets(opts.runtime),
-  });
-  console.log(`foreman tickets setup: saved ticket setup in ${join(dir, "rafi-config.yaml")}`);
-
-  await validateConfiguredSourcesIfRequested(answers, Boolean(opts.skipAccessCheck));
-
-  if (!isTicketsInitialized(dir)) {
-    cmdInit(dir, {
+  try {
+    const answers = await collectTicketSetup(dir, opts, undefined);
+    if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "save-setup", answers: { setup: answers } });
+    ensureRafiConfigForTicketSetup(dir, {
       appName: opts.appName ?? defaultAppName(dir),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       docsRoot: opts.docsRoot,
+      targets: parseRuntimeTargets(opts.runtime),
     });
-    console.log("foreman tickets setup: initialized .tickets/");
-  }
+    saveTicketSetupConfig(dir, answers, {
+      appName: opts.appName ?? defaultAppName(dir),
+      docsRoot: opts.docsRoot,
+      targets: parseRuntimeTargets(opts.runtime),
+    });
+    console.log(`foreman tickets setup: saved ticket setup in ${join(dir, "rafi-config.yaml")}`);
 
-  if (shouldPrompt(opts)) {
-    const populate = await confirm({
-      message: "Run ticket population now?",
-      initialValue: answers.sources.length > 0,
-    });
-    if (isCancel(populate)) process.exit(0);
-    if (populate) {
-      await cmdPopulateCli({ project: dir, yes: true });
+    await validateConfiguredSourcesIfRequested(answers, Boolean(opts.skipAccessCheck));
+
+    if (!isTicketsInitialized(dir)) {
+      if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "initialize-tracker" });
+      cmdInit(dir, {
+        appName: opts.appName ?? defaultAppName(dir),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        docsRoot: opts.docsRoot,
+      });
+      console.log("foreman tickets setup: initialized .tickets/");
     }
-  } else {
-    console.log(`foreman tickets setup: next — run \`foreman tickets populate --project ${shellQuote(dir)}\``);
+
+    if (shouldPrompt(opts)) {
+      if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "populate-confirmation" });
+      const populate = await confirm({
+        message: "Run ticket population now?",
+        initialValue: answers.sources.length > 0,
+      });
+      if (isCancel(populate)) return;
+      if (populate) {
+        await cmdPopulateCli({ project: dir, yes: true });
+      }
+    } else {
+      console.log(`foreman tickets setup: next — run \`foreman tickets populate --project ${shellQuote(dir)}\``);
+    }
+    if (interview) completeInterview(dir, interview);
+  } catch (error) {
+    if (interview) failInterview(dir, interview, interview.checkpoint, error);
+    throw error;
   }
 }
 
 async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
   const dir = cwd(opts);
   if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
-  const current = loadTicketSetupConfigWithDefaults(dir);
-  const patch = await collectTicketSetupPatch(dir, opts, current);
-  const next = mergeTicketSetup(current, patch);
-  ensureRafiConfigForTicketSetup(dir, {
-    appName: opts.appName ?? defaultAppName(dir),
-    docsRoot: opts.docsRoot,
-    targets: parseRuntimeTargets(opts.runtime),
-  });
-  saveTicketSetupConfig(dir, next, {
-    appName: opts.appName ?? defaultAppName(dir),
-    docsRoot: opts.docsRoot,
-    targets: parseRuntimeTargets(opts.runtime),
-  });
-  console.log(`foreman tickets setup: updated ticket setup in ${join(dir, "rafi-config.yaml")}`);
+  let interview = beginTicketSetupInterview(dir, "tickets-setup-update", opts);
+  try {
+    const current = loadTicketSetupConfigWithDefaults(dir);
+    const patch = await collectTicketSetupPatch(dir, opts, current);
+    const next = mergeTicketSetup(current, patch);
+    if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "save-setup", answers: { setup: next } });
+    ensureRafiConfigForTicketSetup(dir, {
+      appName: opts.appName ?? defaultAppName(dir),
+      docsRoot: opts.docsRoot,
+      targets: parseRuntimeTargets(opts.runtime),
+    });
+    saveTicketSetupConfig(dir, next, {
+      appName: opts.appName ?? defaultAppName(dir),
+      docsRoot: opts.docsRoot,
+      targets: parseRuntimeTargets(opts.runtime),
+    });
+    console.log(`foreman tickets setup: updated ticket setup in ${join(dir, "rafi-config.yaml")}`);
 
-  await validateConfiguredSourcesIfRequested(next, Boolean(opts.skipAccessCheck));
+    await validateConfiguredSourcesIfRequested(next, Boolean(opts.skipAccessCheck));
 
-  if (isTicketsInitialized(dir)) {
-    const rows = cmdQueue(dir, 1);
-    if (rows.length === 0) {
-      console.log(`foreman tickets setup: queue is empty; run \`foreman tickets populate --project ${shellQuote(dir)}\` to import or refresh tickets.`);
+    if (isTicketsInitialized(dir)) {
+      const rows = cmdQueue(dir, 1);
+      if (rows.length === 0) {
+        console.log(`foreman tickets setup: queue is empty; run \`foreman tickets populate --project ${shellQuote(dir)}\` to import or refresh tickets.`);
+      }
     }
+    if (interview) completeInterview(dir, interview);
+  } catch (error) {
+    if (interview) failInterview(dir, interview, interview.checkpoint, error);
+    throw error;
   }
+}
+
+function beginTicketSetupInterview(
+  projectDir: string,
+  workflow: "tickets-setup-init" | "tickets-setup-update",
+  opts: SetupCommandOptions,
+): InterviewRecord | undefined {
+  if (!shouldPrompt(opts)) return undefined;
+  const record = createInterviewRecord({
+    workflow,
+    invocation: { projectDir, ...opts },
+    checkpoint: "setup-section",
+    outputs: ["rafi-config.yaml", ".tickets/config.yaml"],
+  });
+  return checkpointInterview(projectDir, record, { checkpoint: "setup-section" });
 }
 
 async function collectTicketSetup(
@@ -330,8 +371,11 @@ async function collectTicketSetupPatch(
   }
 
   if (!shouldPrompt(opts)) {
+    const prefill = current.sources.length === 0
+      ? configuredPlanningSources(dir).map((path) => ({ type: "local" as const, paths: [path] }))
+      : current.sources;
     return {
-      sources: nonInteractiveSources.length > 0 ? nonInteractiveSources : current.sources,
+      sources: nonInteractiveSources.length > 0 ? nonInteractiveSources : prefill,
       populate: populatePatch,
       build: Object.keys(buildPatch).length > 0 ? buildPatch : {},
     };
@@ -348,7 +392,12 @@ async function collectTicketSetupPatch(
   });
   if (isCancel(section)) process.exit(0);
 
-  let sources = nonInteractiveSources.length > 0 ? nonInteractiveSources : current.sources;
+  // Do not silently persist planning hints over a completed ticket setup. They
+  // are only the initial local-source suggestion for a fresh setup.
+  const planningPrefill = current.sources.length === 0
+    ? configuredPlanningSources(dir).map((path) => ({ type: "local" as const, paths: [path] }))
+    : current.sources;
+  let sources = nonInteractiveSources.length > 0 ? nonInteractiveSources : planningPrefill;
   if (section === "sources" || section === "all") {
     sources = await promptTicketSources(dir, current.sources);
   }

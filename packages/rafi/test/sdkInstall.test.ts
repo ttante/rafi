@@ -1,13 +1,88 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildClaudeAgentSdkInstallCommand } from "../src/sdkInstall.js";
+import {
+  buildClaudeAgentSdkInstallCommand,
+  installClaudeAgentSdk,
+  isClaudeAgentSdkInstalled,
+} from "../src/sdkInstall.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "rafi-sdk-install-test-"));
 }
+
+function writeSdkPackage(projectDir: string): void {
+  const packageDir = join(projectDir, "node_modules", "@anthropic-ai", "claude-agent-sdk");
+  mkdirSync(packageDir, { recursive: true });
+  writeFileSync(
+    join(packageDir, "package.json"),
+    JSON.stringify({ name: "@anthropic-ai/claude-agent-sdk", exports: "./index.js" }),
+    "utf8",
+  );
+  writeFileSync(join(packageDir, "index.js"), "export {};\n", "utf8");
+}
+
+test("Claude SDK detection requires a resolvable package, not only a manifest declaration", () => {
+  const dir = tempDir();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ dependencies: { "@anthropic-ai/claude-agent-sdk": "^0.3.0" } }),
+    "utf8",
+  );
+
+  assert.equal(isClaudeAgentSdkInstalled(dir), false);
+});
+
+test("Claude SDK detection finds a locally installed package", () => {
+  const dir = tempDir();
+  writeSdkPackage(dir);
+
+  assert.equal(isClaudeAgentSdkInstalled(dir), true);
+});
+
+test("Claude SDK detection finds a package hoisted to a workspace root", () => {
+  const workspace = tempDir();
+  const projectDir = join(workspace, "packages", "app");
+  mkdirSync(projectDir, { recursive: true });
+  writeSdkPackage(workspace);
+
+  assert.equal(isClaudeAgentSdkInstalled(projectDir), true);
+});
+
+test("Claude SDK installer skips a resolvable package without invoking the package manager", () => {
+  const dir = tempDir();
+  writeSdkPackage(dir);
+  let calls = 0;
+
+  const result = installClaudeAgentSdk(dir, "npm", {
+    execFile: () => {
+      calls += 1;
+    },
+  });
+
+  assert.equal(result, "already-installed");
+  assert.equal(calls, 0);
+});
+
+test("Claude SDK installer runs the selected package manager when the package is absent", () => {
+  const dir = tempDir();
+  const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
+
+  const result = installClaudeAgentSdk(dir, "npm", {
+    execFile: (command, args, options) => {
+      calls.push({ command, args, cwd: options.cwd });
+    },
+  });
+
+  assert.equal(result, "installed");
+  assert.deepEqual(calls, [{
+    command: "npm",
+    args: ["install", "@anthropic-ai/claude-agent-sdk"],
+    cwd: dir,
+  }]);
+});
 
 test("Claude SDK install uses pnpm workspace-root add in pnpm monorepos", () => {
   const dir = tempDir();

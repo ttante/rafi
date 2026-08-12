@@ -1,171 +1,155 @@
 # @rafi-ai/cli
 
-Scaffold, compile, and drive your AI agent harness — all from one command.
+Rafi is an interview-led AI application engineering CLI. It interviews you about the project, writes project-specific guidance for Claude Code and Codex, turns a brief into a ticket-maker-ready implementation plan, sets up a structured ticket queue, and can drive a builder through that queue with QA after each ticket.
 
-`rafi create` reads your stack, assembles best-practice rule packs, and writes the files Claude Code and Codex read. `rafi plan` turns a brief plus repo inspection into a ticket-maker-ready plan. `rafi start` drives an agent builder through a ticket queue unattended. All `ai-foreman` commands are available under `rafi`.
+It is especially useful for products that use LLMs: Rafi composes stack-aware engineering rules, skills, and role agents (`builder`, `qa`, `planner`, and `ticket-maker`) so AI safety, evaluation, reproducibility, cost, and governance are considered from the first implementation plan.
 
 ## Install
+
+Rafi is a command-line tool; install it globally:
 
 ```sh
 npm install -g @rafi-ai/cli
 ```
 
-## Commands
+Then run `rafi` inside the repository you want to configure. Node.js 20 or later is required.
 
-### Scaffold & compile
+## Guided interviews: the usual workflow
+
+```sh
+mkdir my-app && cd my-app
+rafi create .              # stack and runtime interview
+rafi plan .                # brief and repo-planning interview
+rafi tickets setup:init    # ticket-source and build-preferences interview
+rafi tickets populate      # ticket-maker turns the plan into a queue
+rafi start . --steps 10    # builder works through the queue with QA
+```
+
+Start with `rafi create .`. It asks about the stack and target runtimes, writes `rafi-config.yaml`, emits the selected Claude/Codex artifacts, and installs the Claude Agent SDK only when Claude is selected and the target project cannot already resolve it. `rafi plan .` then interviews for the brief, and ticket setup interviews for sources and build preferences.
+
+Use `rafi resume .` if an interactive interview is interrupted. For scripts or a no-prompt setup, use `rafi create . --defaults`; the complete manual-command and option reference is at [docs/cli.md](https://github.com/ttante/rafi/blob/main/docs/cli.md).
+
+## What Rafi adds for AI applications
+
+When `usesAI` is enabled (it is enabled by the built-in defaults), Rafi adds five AI-focused rule packs in addition to its general engineering guidance:
+
+- **AI safety**: prompt-injection and jailbreak defenses, content-safety checks, scoped tools, abuse monitoring, red-team release criteria, and incident planning.
+- **AI evals**: acceptance thresholds, quality gates, golden examples, adversarial cases, and explicit evaluation before prompt/model changes are promoted.
+- **AI reproducibility**: versioned prompts plus recorded inputs, model/provider settings, tool calls, outputs, validation results, cost, latency, and decisions for meaningful generation work.
+- **AI cost**: planned token/retry/tool/latency cost tracking and a correction loop for failed generations.
+- **AI governance**: approved-model and fallback policies, model-change evaluation requirements, and dataset consent/retention/eligibility decisions.
+
+Set `usesAI: false` in `rafi-config.yaml` and run `rafi compile .` to omit these AI-specific packs.
+
+## Scaffold and compile
 
 ```sh
 cd my-repo
-rafi create .             # interactive walkthrough
-rafi create . --defaults  # skip walkthrough, use built-in defaults
-rafi create . --runtime codex  # Codex-only native artifacts
-rafi create . --docs-root docs-rafi  # choose the Rafi docs root explicitly
-rafi compile .            # re-render after editing rafi-config.yaml
-rafi compile . --root-file-mode append  # one-run override for AGENTS.md/CLAUDE.md handling
+rafi create .
+rafi compile .
 ```
 
-`rafi create` collects your stack (frontend, backend, database, cloud, package manager), three boolean flags (`usesAI`, `hasFrontend`, `runsInCloud`), and runtime targets: both Claude and Codex, Claude only, or Codex only. `--defaults` keeps both targets unless `--runtime` is supplied. The Claude Agent SDK is installed only when the final target set includes Claude. Before `create`, `plan`, `start`, or `tickets populate` continue into agent work, Rafi checks the selected runtime and prompts you to repair missing authentication or switch to the other runtime when it can be verified. Non-interactive runs and `--yes` fail clearly instead of switching automatically. Cancel keeps generated files and installed packages in place; after fixing auth, run `rafi compile .`, `rafi plan .`, `rafi start . --steps ...`, or rerun `rafi create .` for the walkthrough. If you have existing planning material, you can enter files, folders, or globs as source hints for `rafi plan` or `rafi tickets populate`; any reasonable format is OK because an agent interprets it. Stack answers, runtime targets, and the selected docs root are saved to `rafi-config.yaml`.
+`create` saves stack answers, runtime targets, the selected documentation root, and planning-source hints in `rafi-config.yaml`. `compile` refreshes the generated guidance after you edit that config. See the [manual command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md) for non-interactive defaults, runtime selection, custom docs roots, and one-run root-file-mode overrides.
 
-| Command / option | Notes |
-| --- | --- |
-| `rafi create <project>` | Runs the walkthrough, writes `rafi-config.yaml`, then compiles generated files. |
-| `rafi create <project> --defaults` | Uses built-in defaults without prompts. |
-| `rafi compile <project>` | Re-renders generated files after editing `rafi-config.yaml`. |
-| `rafi plan [project]` | Runs an interactive read-only planner and writes a ticket-maker-ready plan. |
-| `--force` | Overwrites generated starter doc files when Rafi would otherwise preserve them. |
-| `--docs-root <dir>` | Uses a safe repo-relative directory for Rafi starter and tracker docs. |
-| `--runtime <both\|claude\|codex>` | Selects which native runtime artifacts are emitted. |
-| `--root-file-mode <mode>` | One-run override for existing root instruction files: `append`, `update`, or `overwrite`. |
+Before `create`, `plan`, `start`, or `tickets populate` enters agent work, Rafi checks the selected runtime. Interactive runs offer repair/retry or a verified switch when authentication is unavailable. Non-interactive and `--yes` runs fail clearly rather than switching automatically. Cancelling keeps project files, configuration, and installed packages in place.
 
-Existing root `AGENTS.md` and `CLAUDE.md` files are handled by `--root-file-mode` or `agent_files.mode`:
+### Existing files and custom artifacts
+
+Rafi does not silently replace existing root instructions, skills, or agents. For pre-existing `AGENTS.md` or `CLAUDE.md`, choose one of these modes during `create`, in `rafi-config.yaml`, or for one invocation with `--root-file-mode`:
 
 | Mode | Behavior |
 | --- | --- |
-| `append` | Preserve existing text and add or refresh a dated Rafi block. If the inline append would exceed the target runtime guard, Rafi writes generated guidance to `AGENTS-rafi.md` or `CLAUDE-rafi.md` and places a compact reference block near the top of the root file. |
-| `update` | Ask an authenticated Claude Code or Codex runtime to merge existing guidance with Rafi guidance. |
-| `overwrite` | Replace the file with Rafi's generated version. |
+| `append` | Preserves existing text and adds or refreshes Rafi guidance. If the root-file guard would be exceeded, Rafi writes target-specific guidance to `AGENTS-rafi.md` or `CLAUDE-rafi.md` and places a compact reference in the root file. |
+| `update` | Uses an authenticated Claude Code or Codex runtime to merge existing guidance with Rafi guidance. |
+| `overwrite` | Replaces the root instruction file with the generated version. |
 
-Append overflow sidecars are target-aware and collision-safe: Codex can create `AGENTS-rafi.md`, Claude can create `CLAUDE-rafi.md`, and Rafi refuses to overwrite a sidecar unless it is clearly Rafi-generated. Claude `@file` imports still load imported content into Claude's context; the sidecar keeps the root file short, but it is not a Claude context-reduction mechanism.
+Rafi refuses to overwrite a non-Rafi sidecar. It also handles skill/subagent collisions independently: keep the existing artifact, write the Rafi default under a `*-rafi` path, or configure an existing artifact with `artifact_source: existing` in `rafi-config.yaml`.
 
-Existing skill and subagent path collisions are handled separately. Rafi can overwrite the colliding file, write its default artifact under a `*-rafi` name, or use the existing project artifact by setting `artifact_source: existing` and editing the artifact paths in `rafi-config.yaml`.
+If `docs/` already exists, Rafi chooses a safe `docs-rafi/` variant by default and stores it as `docs.root`. Legacy configs without `docs.root` still use `docs/`.
 
-If `docs/` already exists, `rafi create` defaults to a separate `docs-rafi/` variant and persists that as `docs.root`. Legacy configs without `docs.root` still render to `docs/`.
+## Resumable interviews
 
-### Planning
+Interactive `create`, `plan`, `tickets setup:init`, and `tickets setup:update` runs save compact local recovery records under `.rafi/interviews/`; Rafi adds that directory to `.gitignore`. Records contain the saved answers, checkpoint, runtime/session metadata, output fingerprints, timestamps, and redacted/truncated failure context. They do not contain raw transcripts or command output. Default-mode and non-interactive commands do not create interview records.
+
+```sh
+rafi resume .
+rafi resume . --id 1234abcd
+rafi resume . --discard 1234abcd
+```
+
+With no ID, `rafi resume` offers an interactive picker. Completed records are retained for 30 days; incompatible records remain until explicitly discarded. When an agent session ID is available, Rafi requests continuation with that runtime; otherwise it explains that exact continuity is unavailable and resumes from the preserved brief, answers, and checkpoint. Before writing a shared artifact, Rafi fingerprints it and stops for review if another interview changed it.
+
+## Plan a feature
 
 ```sh
 rafi plan .
-rafi plan . --sources docs/roadmap.md src/features
-rafi tickets populate --sources docs/rafi-plan.md
 ```
 
-`rafi plan` starts an interactive planning interview, then runs the `planner` role with the `grill-me` skill and non-mutating permissions. The planning agent can read, search, inspect, stress-test assumptions, and ask a focused follow-up question when it is genuinely blocked, but Rafi CLI writes the final plan artifact itself.
+`rafi plan` runs the read-only `planner` role with the `grill-me` skill. It turns a brief and repository inspection into a Markdown plan with scope, decisions, risks, rollback notes, and ticket-maker guidance. The CLI validates the plan before writing:
 
-`plan` options:
-
-| Option | Notes |
-| --- | --- |
-| `--brief <text>` | Optional non-interactive planning brief for scripts or one-line runs. |
-| `--brief-file <path>` | Optional file containing the planning brief. Use either this or `--brief`. |
-| `--sources <paths...>` | Source hint files, folders, or globs to inspect first. |
-| `--agent <agent>` | Selects Claude or Codex. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
-| `--model <model>` / `--effort <level>` | Override the selected runtime's model and reasoning effort. |
-| `--fast` | Lower-latency mode. |
-| `-y, --yes` | Skip the confirmation before the planning agent runs. |
-
-Plan output paths:
-
-| Path | Notes |
+| Path | Purpose |
 | --- | --- |
 | `<docs.root>/rafi-plans/<timestamp>.md` | Versioned plan history. |
-| `<docs.root>/rafi-plan.md` | Latest managed plan copy used by ticket population. |
+| `<docs.root>/rafi-plan.md` | Latest plan used by ticket population. |
 
-### Ticket lifecycle
+`plan` uses the `planning.sources` captured during `rafi create`; this is separate from completed ticket setup sources. For scripted briefs, custom sources, runtime/model selection, effort, or fast mode, use the [plan command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-plan---help).
 
-```sh
-rafi tickets setup:init                 # save sources and build defaults in rafi-config.yaml
-rafi tickets init --app-name "My App"   # initialize .tickets/ in the project
-rafi tickets init --docs-root docs-rafi  # override tracker docs root
-rafi tickets populate                    # agent fills tickets from rafi-plan.md or existing docs
-rafi tickets populate --sources docs/tickets.md docs/plans/**
-rafi tickets review                      # accept/defer/dismiss split/combine/duplicate recommendations
-rafi tickets queue                       # show the display queue
-rafi tickets validate                    # run all 4 validation passes
-rafi tickets render                      # regenerate the configured progress doc
-```
-
-`tickets setup:init` / `setup:update` stores optional local, Linear, and Jira Cloud sources plus populate/build defaults in `rafi-config.yaml`. Linear uses `LINEAR_API_KEY`; Jira Cloud uses `JIRA_EMAIL` and `JIRA_API_TOKEN`.
-
-`tickets populate` options:
-
-| Option | Notes |
-| --- | --- |
-| `--sources <paths...>` | Files, folders, or globs the agent should check first. When omitted, populate uses saved setup sources, then asks about the configured Rafi plan when present. |
-| `--agent <agent>` | Selects Claude or Codex. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
-| `--model <model>` / `--effort <level>` | Override the selected runtime's model and reasoning effort. |
-| `--fast` | Lower-latency mode. |
-| `-y, --yes` | Skip the confirmation before the agent edits ticket files. |
-
-`--tickets` is for `rafi start`, not `rafi tickets populate`. Use `--sources` when populate should read specific planning files. `tickets populate` runs with the `ticket-maker` role bundle.
-
-`rafi tickets init` reads `docs.root` from `rafi-config.yaml` when present and writes `ticket-progress.md` / `ticket-archive.md` under that root. If the selected progress doc already exists, init stops and asks you to choose another root.
-
-Use `--implementation-limit <n>` to set the generated-doc and Foreman selection window, and `--view-limit <n>` to set the default `rafi tickets queue` display size. `--queue-limit <n>` remains as a deprecated alias for `--implementation-limit`.
-
-The selected limits live in `.tickets/config.yaml` as `implementation_limit` and `view_limit`; they are not part of `rafi-config.yaml`.
-
-Native Linear/Jira imports write ignored snapshots under `.tickets/imports/` and add `external_refs` to mirrored tickets. Pending review recommendations render in the progress doc and are managed with `rafi tickets review`.
-
-### Run the builder
+## Ticket lifecycle
 
 ```sh
-rafi start . --steps 10              # drive a Claude builder through 10 steps
-rafi start . --steps 5 --agent codex # use Codex instead
-rafi start . --steps 5 --no-qa       # skip per-ticket QA
-rafi status .                         # summarize the most recent run
-rafi doctor .                         # check env, config, and readiness
+rafi tickets setup:init
+rafi tickets populate
+rafi tickets validate
 ```
 
-| Command / option | Notes |
-| --- | --- |
-| `rafi start <project> --steps <n>` | Runs the builder through up to `n` tickets or steps. |
-| `--agent <agent>` | Selects the Claude or Codex builder runtime. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
-| `--tickets <path>` | Sends a one-off task file to the builder during start preflight. |
-| `--no-qa` | Skips the per-ticket QA review. |
-| `--branch-per-ticket` / `--no-branch-per-ticket` | Enable branch-per-ticket mode or disable the saved default for one run. |
-| `--completion <mode>` | Branch completion override: `pr`, `auto-merge`, `direct-merge`, or `none`. |
-| `--provider <provider>` | PR/MR provider override: `auto`, `github`, or `gitlab`. |
-| `--auto-merge-wait` / `--no-auto-merge-wait` | Override whether dependent auto-merge tickets wait for earlier PRs/MRs to merge. |
-| `--auto-merge-timeout-minutes <n>` | Override the dependency merge wait timeout. |
-| `--no-create-pr` | Disable saved PR/MR creation defaults for one run. |
-| `--continue` / `--resume <id>` | Resume the latest or a specific logged session. |
-| `rafi status <project>` | Summarizes the latest run, including branch/PR failures when present. |
-| `rafi doctor <project>` | Checks environment, config, ticket tracker, and readiness. |
+`tickets setup:init` / `setup:update` saves local, Linear, or Jira Cloud sources and populate/build defaults in `rafi-config.yaml`. Planning hints from `planning.sources` are offered as the initial local-source prefill, but the completed setup remains in `tickets.sources`. Linear uses `LINEAR_API_KEY`; Jira Cloud uses `JIRA_EMAIL` and `JIRA_API_TOKEN`.
+
+`tickets populate` uses explicit sources first, then saved ticket sources, then the latest Rafi plan when available. It runs the `ticket-maker` role, writes canonical tickets to `.tickets/tickets.yaml`, renders tracker docs, and validates the tracker. Source overrides, external-import setup, agent/model controls, review, queue, render, archive, and manual ticket maintenance are in the [ticket command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-tickets---help).
+
+Use `rafi tickets init --app-name "My App"` for standalone tracker initialization. It writes the ticket docs under `docs.root` when configured. `--implementation-limit` controls the selection/generated-doc window; `--view-limit` controls the default queue display; `--queue-limit` remains a deprecated alias for the former.
+
+## Run the builder
+
+```sh
+rafi start . --steps 10
+rafi status .
+rafi doctor .
+```
+
+`rafi start` reads the compiled role bundles and drives a builder through the requested work, with QA after each ticket by default. Branch strategy, completion settings, agent selection, QA overrides, and builder-session continuation are documented in the [start command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-start---help).
 
 ## What gets written
 
-```
+```text
 <project>/
-  AGENTS.md                        Codex flat rules doc, when Codex is targeted
+  AGENTS.md                        Codex root rules, when Codex is targeted
   AGENTS-rafi.md                   Append-mode overflow sidecar, when needed
-  CLAUDE.md                        Claude Code entrypoint or standalone rules, when Claude is targeted
+  CLAUDE.md                        Claude Code root entrypoint/rules, when Claude is targeted
   CLAUDE-rafi.md                   Append-mode overflow sidecar, when needed
-  rafi-config.yaml                 stack config and agent/skill paths (commit this)
-  .claude/agents/<role>.md         Claude subagent files, when Claude is targeted
-  .claude/skills/<name>/SKILL.md   Claude project skill files, when Claude is targeted
-  .codex/agents/<role>.toml        Codex project subagent files, when Codex is targeted
-  .agents/skills/<name>/SKILL.md   Codex project skill files, when Codex is targeted
-  .rafi/compiled/<role>/system.md  role system text — always emitted and read at runtime
-  .rafi/compiled/<role>/meta.json  skills + model config
-  docs/                            starter doc templates, or configured docs.root
-  docs/rafi-plan.md                latest plan from rafi plan, under configured docs.root
-  docs/rafi-plans/<timestamp>.md   plan history from rafi plan, under configured docs.root
+  rafi-config.yaml                 Stack, runtime, planning, and artifact configuration
+  .claude/agents/<role>.md         Claude subagents, when Claude is targeted
+  .claude/skills/<name>/SKILL.md   Claude skills, when Claude is targeted
+  .codex/agents/<role>.toml        Codex subagents, when Codex is targeted
+  .agents/skills/<name>/SKILL.md   Codex skills, when Codex is targeted
+  .rafi/compiled/<role>/           Runtime role bundles
+  .rafi/interviews/                Ignored local interactive recovery records
+  <docs.root>/                     Starter and ticket-tracker docs
+  <docs.root>/rafi-plan.md         Latest Rafi plan
+  <docs.root>/rafi-plans/*.md      Versioned Rafi plans
+  .tickets/                        Structured ticket tracker, after ticket initialization
 ```
 
-`rafi compile` preserves stale files for unselected targets; it only refreshes the artifacts selected by `harness.targets`.
+`harness.targets` controls which native Claude/Codex files are refreshed. Rafi preserves files for unselected targets rather than deleting them.
+
+## Advanced and manual command reference
+
+The guided interviews above are the recommended path. For every flag, non-interactive/scripted invocation, standalone ticket command, integration setting, and `ai-foreman` equivalent, use the generated [complete CLI reference](https://github.com/ttante/rafi/blob/main/docs/cli.md). You can also run `rafi --help`, `rafi help <command>`, or any command with `--help` locally.
 
 ## Part of Rafi
 
-- **`special-agents`** — library (rules + skills + agents + composition)
-- **`ai-foreman`** — standalone runtime (same commands, separate install)
-- **`@rafi-ai/cli`** — this CLI (includes everything)
+- [`@rafi-ai/cli`](https://www.npmjs.com/package/@rafi-ai/cli) — this all-in-one CLI.
+- [`ai-foreman`](https://www.npmjs.com/package/ai-foreman) — standalone ticket-loop runtime.
+- [`special-agents`](https://www.npmjs.com/package/special-agents) — rules, skills, agents, and composition library.
+- [`rafi-spec`](https://www.npmjs.com/package/rafi-spec) — shared schemas and TypeScript types.
+
+Source, issues, release notes, and the Apache-2.0 license are in the [Rafi repository](https://github.com/ttante/rafi).

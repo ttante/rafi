@@ -138,6 +138,13 @@ test("buildProjectConfig preserves a custom docs root", () => {
   assert.deepEqual(config.docs, { root: "docs-rafi" });
 });
 
+test("planning sources are normalized into the backward-compatible planning block", () => {
+  const config = buildProjectConfig({ ...defaultAnswers(), planningSources: "docs/brief.md, notes/** docs/brief.md" });
+  assert.deepEqual(config.planning, { sources: ["docs/brief.md", "notes/**"] });
+  const legacy = normalizeProjectConfig({ ...config, planning: { sources: "docs/brief.md" } });
+  assert.deepEqual(legacy.planning, { sources: ["docs/brief.md"] });
+});
+
 test("normalizeProjectConfig adds artifact_source to legacy artifact entries", () => {
   const legacy = buildProjectConfig(defaultAnswers());
   const { artifact_source, ...legacySkill } = legacy.skills.tdd;
