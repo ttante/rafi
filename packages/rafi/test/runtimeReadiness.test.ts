@@ -33,7 +33,8 @@ test("runtime readiness retries after auth failure and then completes", async ()
       assert.equal(err.runtime, "claude");
       assert.equal(err.authLikely, true);
       assert.match(err.message, /claude -p/);
-      assert.match(err.message, /claude auth login --claudeai/);
+      assert.match(err.message, /approved by your organization/);
+      assert.doesNotMatch(err.message, /--claudeai|setup-token|auth logout/);
       return "retry";
     },
     (_targetDir, runtime) => {

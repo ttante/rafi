@@ -47,6 +47,14 @@ Requires:
 
 - Node.js 20 or newer.
 
+### Claude runtime and enterprise authentication
+
+Foreman first resolves and probes the system `claude` command, then passes that exact absolute executable path to the Claude Agent SDK. It does not use the SDK's bundled Claude executable. SDK sessions inherit the current environment and load Claude's user, project, and local settings; organization-managed policy remains applied by Claude Code. This preserves enterprise SSO such as `/login-okta`, managed settings, and proxy/certificate configuration.
+
+The SDK package is an optional dependency of `ai-foreman`. Do not install `@anthropic-ai/claude-agent-sdk` into the application being built unless that application independently uses it.
+
+Run `ai-foreman doctor .` to see the selected executable, SDK-wrapper status, settings sources, and relevant environment-variable names. Add `--live-claude` for a bounded, no-tools request through the real adapter path. That opt-in check uses account quota.
+
 ## Use
 
 - Check the target project.

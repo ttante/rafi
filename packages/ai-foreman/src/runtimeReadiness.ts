@@ -1,4 +1,6 @@
 import { spawn, type SpawnOptions } from "node:child_process";
+import { accessSync, constants, statSync } from "node:fs";
+import { delimiter, isAbsolute, resolve } from "node:path";
 import type { RuntimeProbeCategory, RuntimeProbePhase, RuntimeProbeResult } from "rafi-spec";
 import type { AgentRuntime } from "./runtimeAuth.js";
 
@@ -13,17 +15,70 @@ export interface ProbeRuntimeOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+/** Resolve the executable Node will launch without involving a shell. */
+export function resolveExecutablePath(
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  const hasPathSeparator = command.includes("/") || command.includes("\\");
+  if (isAbsolute(command) || hasPathSeparator) {
+    const candidate = resolve(command);
+    return isRunnableFile(candidate, platform) ? candidate : undefined;
+  }
+
+  const pathValue = platform === "win32"
+    ? env.Path ?? env.PATH ?? env.path
+    : env.PATH;
+  if (!pathValue) return undefined;
+
+  const extensions = platform === "win32"
+    ? executableExtensions(command, env.PATHEXT)
+    : [""];
+  const pathDelimiter = platform === "win32" ? ";" : delimiter;
+  for (const entry of pathValue.split(pathDelimiter)) {
+    const directory = entry || process.cwd();
+    for (const extension of extensions) {
+      const candidate = resolve(directory, `${command}${extension}`);
+      if (isRunnableFile(candidate, platform)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function executableExtensions(command: string, pathExt: string | undefined): string[] {
+  const extensions = (pathExt ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .filter(Boolean)
+    .map((value) => value.startsWith(".") ? value : `.${value}`);
+  const lower = command.toLowerCase();
+  return extensions.some((extension) => lower.endsWith(extension.toLowerCase()))
+    ? [""]
+    : extensions;
+}
+
+function isRunnableFile(path: string, platform: NodeJS.Platform): boolean {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, platform === "win32" ? constants.F_OK : constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function probeRuntime(
   cwd: string,
   runtime: AgentRuntime,
   opts: ProbeRuntimeOptions = {},
 ): Promise<RuntimeProbeResult> {
-  const executable = runtime === "claude" ? "claude" : "codex";
+  const env = opts.env ?? process.env;
+  const command = runtime === "claude" ? "claude" : "codex";
+  const executable = resolveExecutablePath(command, env) ?? command;
   const args = runtime === "claude"
     ? ["-p", "Return exactly OK"]
     : ["exec", "--skip-git-repo-check", "-C", cwd, "Return exactly OK"];
   const phase = opts.phase ?? "readiness";
-  const env = opts.env ?? process.env;
   const limit = opts.maxDiagnosticsBytes ?? RUNTIME_DIAGNOSTIC_LIMIT;
   const timeoutMs = opts.timeoutMs ?? RUNTIME_PROBE_TIMEOUT_MS;
 
@@ -96,6 +151,29 @@ export function classifyRuntimeFailure(text: string, phase: RuntimeProbePhase = 
   return "unknown";
 }
 
+export function classifyClaudeSdkFailure(
+  error: string | undefined,
+  status: number | null | undefined,
+  diagnostics: string,
+): RuntimeProbeCategory {
+  switch (error) {
+    case "authentication_failed": return "authentication";
+    case "oauth_org_not_allowed": return "authorization";
+    case "rate_limit": return "rate-limit";
+    case "model_not_found":
+    case "invalid_request":
+    case "max_output_tokens": return "configuration";
+    case "billing_error": return "authorization";
+    case "server_error": return "agent-stream";
+  }
+  if (status === 401) return "authentication";
+  if (status === 403) return "authorization";
+  if (status === 407) return "network";
+  if (status === 429) return "rate-limit";
+  if (status !== undefined && status !== null && status >= 500) return "agent-stream";
+  return classifyRuntimeFailure(diagnostics, "builder");
+}
+
 export function sanitizeDiagnostics(text: string, maxBytes = RUNTIME_DIAGNOSTIC_LIMIT): string {
   const clean = text
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
@@ -116,7 +194,7 @@ export function formatRuntimeProbeFailure(result: RuntimeProbeResult): string {
   ];
   if (result.category === "authentication") {
     lines.push(result.runtime === "claude"
-      ? "Authenticate with `claude auth login --claudeai`, then retry."
+      ? "Authenticate with the Claude Code login method approved by your organization, then rerun `claude -p \"Return exactly OK\"`."
       : "Authenticate with `codex login`, then retry.");
   } else {
     lines.push("Review the diagnostic below, then retry, switch to a verified provider, or cancel.");

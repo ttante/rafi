@@ -7,6 +7,7 @@ import { Log } from "../log.js";
 import { PermissionPolicy } from "../permissions/policy.js";
 import { ClaudeAdapter } from "../adapters/claude.js";
 import { CodexAdapter } from "../adapters/codex.js";
+import { RecoveringAdapter } from "../adapters/recovering.js";
 import { Foreman, createPermissionHandler } from "../foreman.js";
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
 import { printEvents } from "./events.js";
@@ -328,10 +329,12 @@ export function buildStartCommand(): Command {
         fail(err instanceof Error ? err.message : String(err));
       }
       let model = (opts.model as string | undefined) ?? explicitDefaultValue(roleDefaults.builder?.model);
+      let agentExecutable: string | undefined;
       const builderEffort = (opts.effort as EffortLevel | undefined) ?? explicitEffort(roleDefaults.builder?.reasoning);
       const builderFast = opts.fast as boolean | undefined ?? roleDefaults.builder?.fast;
       let qaAgent = resolveAgentForProject(cwd, roleDefaults.qa?.make);
       let qaModel = explicitDefaultValue(roleDefaults.qa?.model);
+      let qaExecutable: string | undefined;
       const qaEffort = explicitEffort(roleDefaults.qa?.reasoning);
       const qaFast = roleDefaults.qa?.fast ?? false;
 
@@ -406,11 +409,13 @@ export function buildStartCommand(): Command {
 
       const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
 
-      const createBuilder = async (builderCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
+      const createRawBuilder = async (builderCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
         const builderPolicy = new PermissionPolicy(config.permissions, builderCwd);
         const roleBundle = loadRoleBundle("builder", { projectDir: builderCwd });
         const adapterOpts = {
           cwd: builderCwd,
+          runtimeExecutable: agentExecutable,
+          runtimePhase: "builder" as const,
           model,
           resumeSessionId: sessionId,
           permission: createPermissionHandler(builderPolicy, log),
@@ -424,11 +429,35 @@ export function buildStartCommand(): Command {
           : await ClaudeAdapter.create(adapterOpts);
       };
 
-      const createQa = async (qaCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
+      const createBuilder = async (builderCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
+        const initial = await createRawBuilder(builderCwd, sessionId);
+        return new RecoveringAdapter({
+          initial,
+          runtime: agent,
+          label: "builder turn",
+          enabled: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY),
+          allowSwitch: !(opts.resume || opts.continue),
+          recreate: async (nextRuntime, resumeSessionId) => {
+            const nextReady = await ensureRuntimeReadyForCommand(builderCwd, nextRuntime, {
+              label: "builder recovery",
+              allowSwitch: false,
+              model: nextRuntime === agent ? model : undefined,
+            });
+            agent = nextReady.runtime;
+            model = nextReady.model;
+            agentExecutable = nextReady.executable;
+            return createRawBuilder(builderCwd, resumeSessionId);
+          },
+        });
+      };
+
+      const createRawQa = async (qaCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
         const qaPolicy = new PermissionPolicy(config.permissions, qaCwd);
         const roleBundle = loadRoleBundle("qa", { projectDir: qaCwd });
         const adapterOpts = {
           cwd: qaCwd,
+          runtimeExecutable: qaExecutable,
+          runtimePhase: "qa" as const,
           model: qaModel,
           resumeSessionId: sessionId,
           permission: createPermissionHandler(qaPolicy, log),
@@ -440,6 +469,28 @@ export function buildStartCommand(): Command {
         return qaAgent === "codex"
           ? new CodexAdapter(adapterOpts)
           : await ClaudeAdapter.create(adapterOpts);
+      };
+
+      const createQa = async (qaCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
+        const initial = await createRawQa(qaCwd, sessionId);
+        return new RecoveringAdapter({
+          initial,
+          runtime: qaAgent,
+          label: "QA turn",
+          enabled: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY),
+          allowSwitch: !sessionId,
+          recreate: async (nextRuntime, resumeSessionId) => {
+            const nextReady = await ensureRuntimeReadyForCommand(qaCwd, nextRuntime, {
+              label: "QA recovery",
+              allowSwitch: false,
+              model: nextRuntime === qaAgent ? qaModel : undefined,
+            });
+            qaAgent = nextReady.runtime;
+            qaModel = nextReady.model;
+            qaExecutable = nextReady.executable;
+            return createRawQa(qaCwd, resumeSessionId);
+          },
+        });
       };
 
       if (branchMode) {
@@ -462,6 +513,7 @@ export function buildStartCommand(): Command {
         });
         agent = ready.runtime;
         model = ready.model;
+        agentExecutable = ready.executable;
 
         const ticketPaths = resolveTicketPaths(ticketsConfig, cwd);
         const tickets = loadTickets(ticketPaths.tickets);
@@ -526,6 +578,7 @@ export function buildStartCommand(): Command {
             auditBuilder = await createBuilder(cwd);
             auditViewer = printEvents(auditBuilder.events());
             const audit = await auditBuilder.sendTurn(buildBranchAuditInstruction(plan.nodes.map((node) => node.ticket)));
+            if (audit.isError) throw new Error(audit.text);
             const auditDependencies = parseAuditDependencies(audit.text);
             plan = buildBranchPlan(tickets, states, {
               steps,
@@ -652,10 +705,12 @@ export function buildStartCommand(): Command {
       });
       agent = ready.runtime;
       model = ready.model;
+      agentExecutable = ready.executable;
       if (qaEnabled) {
         const qaReady = await ensureRuntimeReadyForCommand(cwd, qaAgent, { label: "independent QA", yes: Boolean(opts.yes), model: qaModel });
         qaAgent = qaReady.runtime;
         qaModel = qaReady.model;
+        qaExecutable = qaReady.executable;
       }
       const capturedBuilder: ResolvedAgentSettings = {
         role: "builder", source: opts.agent || opts.model || opts.effort || opts.fast ? "cli" : roleDefaults.builder ? "project" : "provider",

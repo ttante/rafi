@@ -4,6 +4,25 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.8.2 / ai-foreman 1.6.1 - 2026-08-20
+
+### Fixed
+
+- Claude runs now use the exact system `claude` executable that passed Rafi's readiness probe instead of the Claude Agent SDK's bundled executable. This preserves enterprise Claude Code authentication, including organization-managed SSO flows such as `/login-okta`.
+- Claude SDK sessions now load user, project, and local settings in addition to always-applied managed policy, so organization proxy, certificate, and policy configuration is not accidentally excluded when Rafi enables skills.
+- `rafi create` no longer installs `@anthropic-ai/claude-agent-sdk` into the target application. The SDK wrapper is owned and resolved by `ai-foreman`, where it is declared as an optional dependency.
+- Claude failures now retain structured authentication, authorization, network, rate-limit, configuration, and agent-stream diagnostics instead of collapsing distinct failures into an unhelpful `API Error` or generic login claim.
+- Interactive structured turn failures offer retry, a verified fresh-session provider switch, or cancellation while preserving project state; resume flows never switch providers because session IDs are provider-specific.
+- Start preflight and preflight-feedback errors now stop with the complete diagnostic rather than displaying an error result as a proposed implementation plan.
+
+### Added
+
+- `rafi doctor --live-claude` / `ai-foreman doctor --live-claude` runs an explicit, bounded, no-tools SDK-path smoke test and reports the exact executable, setting sources, and relevant environment-variable names. The live check uses account quota and remains opt-in.
+
+### Packages
+
+- Bumped `@rafi-ai/cli` to `0.8.2` and `ai-foreman` to `1.6.1`. `special-agents` and `rafi-spec` remain at `0.7.0`.
+
 ## @rafi-ai/cli 0.8.1 / ai-foreman 1.6.0 / special-agents 0.7.0 / rafi-spec 0.7.0 - 2026-08-19
 
 ### Added

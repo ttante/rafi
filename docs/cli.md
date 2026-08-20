@@ -24,7 +24,9 @@ Runtime behavior not fully expressible in Commander help:
 - `rafi compile` emits native artifacts only for configured targets: Codex writes `AGENTS.md`, `.codex/agents/*`, and `.agents/skills/*`; Claude writes `CLAUDE.md`, `.claude/agents/*`, and `.claude/skills/*`. `.rafi/compiled/<role>/*` is always emitted. Files for unselected targets are preserved, not deleted.
 - In `agent_files.mode: append` or `--root-file-mode append`, Rafi appends generated guidance inline unless that would exceed the target runtime's root-file startup guard. Overflow writes generated guidance to a target-specific sidecar (`AGENTS-rafi.md` or `CLAUDE-rafi.md`) and inserts a compact managed reference block near the top of the root file. Claude `@file` imports still load into Claude's context; this keeps root files short, but it is not a Claude context-reduction mechanism.
 - `rafi plan`, `rafi start`, `ai-foreman start`, and `tickets populate` use a single `harness.targets` value from `rafi-config.yaml` when `--agent` is omitted. Missing config or both targets default to Claude.
-- Interactive runtime auth/readiness failures offer retry, verified switch to the other runtime, or cancel. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because session IDs are runtime-specific.
+- Interactive runtime auth/readiness failures, including structured failures after the initial probe, offer retry, verified switch to the other runtime, or cancel. A switch starts a fresh provider session and reports lost conversational continuity. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because session IDs are runtime-specific.
+- Claude runs use the exact absolute system `claude` executable that passed readiness; they never fall back to the SDK-bundled CLI. The SDK loads user, project, and local settings while Claude Code continues to apply managed policy, and it inherits the current process environment. This preserves enterprise login flows such as `/login-okta` and organization proxy/certificate configuration.
+- `@anthropic-ai/claude-agent-sdk` is an optional dependency of `ai-foreman`; `rafi create` does not install it into the target application. `rafi doctor --live-claude` runs an opt-in bounded no-tools request through the real adapter path and uses account quota.
 - `rafi plan` accepts only `STEP_STATUS: plan_complete` as a successful planner result, validates required plan sections before writing, writes versioned history to `<docs.root>/rafi-plans/<timestamp>.md`, and refreshes `<docs.root>/rafi-plan.md`.
 - Interactive `create`, `plan`, and ticket setup runs save compact, local recovery records under `.rafi/interviews/`, which Rafi adds to `.gitignore`. Records hold answers/checkpoints and redacted failure context—not transcripts or agent output. Use `rafi resume [project] --id <id>` to continue or `rafi resume [project] --discard <id>` to remove a record. Completed records are pruned after 30 days; incompatible records remain until discarded.
 - `rafi create` saves planning hints as `planning.sources`. `rafi plan` uses explicit `--sources` first, then those hints. Ticket setup uses those values only as its initial local-source prefill; completed ticket sources remain in `tickets.sources`.
@@ -45,32 +47,24 @@ Options:
   -h, --help                        display help for command
 
 Commands:
-  compile [options] <project>       Re-render .claude/, .codex/, AGENTS.md, and
-                                    role bundles from an existing
-                                    rafi-config.yaml.
-  create [options] <project>        Run the walkthrough, write
-                                    rafi-config.yaml, and compile the target
-                                    repo.
-  resume [options] [project]        Resume or discard a saved interactive
-                                    create, plan, or ticket-setup interview.
-  plan [options] [project]          Create a ticket-maker-ready implementation
-                                    plan from a brief and repo inspection.
-  tickets                           Manage the structured ticket tracker for a
-                                    project.
-  start [options] <project>         Enlist a builder and drive it through a
-                                    batch of N steps.
-  build:resume [options] [project]  Inspect and resume one interrupted
-                                    implementation run without discarding
-                                    partial work.
-  agents [options] [project]        Configure persistent runtime, model,
-                                    reasoning, and fast defaults for Rafi
-                                    roles.
-  uninstall [options] [project]     Preview and safely remove selected
-                                    project-local Rafi material.
-  status [project]                  Summarize the most recent Foreman run for a
-                                    Rafi project.
-  doctor [options] [project]        Check Foreman, agent CLIs, config, and
-                                    optional ticket tracker readiness.
+  compile [options] <project>       Re-render .claude/, .codex/, AGENTS.md, and role bundles from
+                                    an existing rafi-config.yaml.
+  create [options] <project>        Run the walkthrough, write rafi-config.yaml, and compile the
+                                    target repo.
+  resume [options] [project]        Resume or discard a saved interactive create, plan, or
+                                    ticket-setup interview.
+  plan [options] [project]          Create a ticket-maker-ready implementation plan from a brief
+                                    and repo inspection.
+  tickets                           Manage the structured ticket tracker for a project.
+  start [options] <project>         Enlist a builder and drive it through a batch of N steps.
+  build:resume [options] [project]  Inspect and resume one interrupted implementation run without
+                                    discarding partial work.
+  agents [options] [project]        Configure persistent runtime, model, reasoning, and fast
+                                    defaults for Rafi roles.
+  uninstall [options] [project]     Preview and safely remove selected project-local Rafi material.
+  status [project]                  Summarize the most recent Foreman run for a Rafi project.
+  doctor [options] [project]        Check Foreman, agent CLIs, config, and optional ticket tracker
+                                    readiness.
   help [command]                    display help for command
 ```
 
@@ -103,14 +97,10 @@ Arguments:
 Options:
   --defaults               skip walkthrough and use built-in defaults
   --force                  overwrite existing doc files
-  --docs-root <dir>        repo-relative directory for Rafi starter and tracker
-                           docs
-  --runtime <runtime>      agent runtime targets to configure (both | claude |
-                           codex)
-  --root-file-mode <mode>  override root instruction file handling (append |
-                           overwrite | update)
-  --grill-me               use exhaustive initial planning when planning is
-                           accepted
+  --docs-root <dir>        repo-relative directory for Rafi starter and tracker docs
+  --runtime <runtime>      agent runtime targets to configure (both | claude | codex)
+  --root-file-mode <mode>  override root instruction file handling (append | overwrite | update)
+  --grill-me               use exhaustive initial planning when planning is accepted
   --no-grill-me            use standard initial planning (default)
   -h, --help               display help for command
 ```
@@ -120,16 +110,15 @@ Options:
 ```text
 Usage: rafi compile [options] <project>
 
-Re-render .claude/, .codex/, AGENTS.md, and role bundles from an existing
-rafi-config.yaml.
+Re-render .claude/, .codex/, AGENTS.md, and role bundles from an existing rafi-config.yaml.
 
 Arguments:
   project                  path to the target repo
 
 Options:
   --force                  overwrite existing doc files
-  --root-file-mode <mode>  override root instruction file handling for this run
-                           (append | overwrite | update)
+  --root-file-mode <mode>  override root instruction file handling for this run (append | overwrite
+                           | update)
   -h, --help               display help for command
 ```
 
@@ -138,8 +127,7 @@ Options:
 ```text
 Usage: rafi plan [options] [project]
 
-Create a ticket-maker-ready implementation plan from a brief and repo
-inspection.
+Create a ticket-maker-ready implementation plan from a brief and repo inspection.
 
 Arguments:
   project                path to the target repo (default: ".")
@@ -155,8 +143,7 @@ Options:
   --resume-session <id>  resume a saved planner agent session
   --grill-me             use exhaustive one-question-at-a-time planning
   --no-grill-me          use standard focused planning (default)
-  -y, --yes              skip confirmation prompt before running the planning
-                         agent
+  -y, --yes              skip confirmation prompt before running the planning agent
   -h, --help             display help for command
 ```
 
@@ -171,25 +158,36 @@ Options:
   -h, --help                                   display help for command
 
 Commands:
-  setup:init [options]                         Configure ticket sources, populate defaults, and build defaults in rafi-config.yaml.
-  setup:update [options]                       Update selected ticket setup sections in rafi-config.yaml.
-  init [options]                               Initialize .tickets/ structure in a project directory.
-  populate [options]                           Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
+  setup:init [options]                         Configure ticket sources, populate defaults, and
+                                               build defaults in rafi-config.yaml.
+  setup:update [options]                       Update selected ticket setup sections in
+                                               rafi-config.yaml.
+  init [options]                               Initialize .tickets/ structure in a project
+                                               directory.
+  populate [options]                           Ask the ticket-maker role to populate
+                                               .tickets/tickets.yaml from existing project
+                                               ticket/backlog docs.
   update [options] <ticketId>                  Update ticket status or progress fields.
   complete [options] <ticketId>                Mark a ticket done with validation evidence.
   block [options] <ticketId>                   Mark a ticket as blocked.
   unblock [options] <ticketId>                 Remove explicit blockers from a ticket.
   cancel [options] <ticketId>                  Cancel a ticket.
   discover [options]                           Add newly discovered future work to the inbox.
-  accept-future-work [options] <futureWorkId>  Promote a future-work item into tickets.yaml as a new ticket.
-  reorder [options] <ticketId>                 Change the canonical implementation order of a ticket.
-  review [options]                             Review pending split/combine/duplicate ticket recommendations.
-  render [options]                             Regenerate the configured ticket progress doc from current structured sources.
+  accept-future-work [options] <futureWorkId>  Promote a future-work item into tickets.yaml as a
+                                               new ticket.
+  reorder [options] <ticketId>                 Change the canonical implementation order of a
+                                               ticket.
+  review [options]                             Review pending split/combine/duplicate ticket
+                                               recommendations.
+  render [options]                             Regenerate the configured ticket progress doc from
+                                               current structured sources.
   validate [options]                           Run all 4 validation passes. Exits 1 on error.
   queue [options]                              Print the ticket queue to stdout.
-  archive [options]                            Update the configured ticket archive doc and prune old completed rows.
+  archive [options]                            Update the configured ticket archive doc and prune
+                                               old completed rows.
   import [options]                             (stub) Migrate an existing Markdown tracker.
-  plan [options]                               Plan and approve ticket work through a guided, project-aware conversation.
+  plan [options]                               Plan and approve ticket work through a guided,
+                                               project-aware conversation.
   help [command]                               display help for command
 ```
 
@@ -202,17 +200,14 @@ Plan and approve ticket work through a guided, project-aware conversation.
 
 Options:
   -p, --project <dir>    exact project directory (default: discover from cwd)
-  --brief <text>         initial description (primarily for recovery and
-                         non-interactive use)
+  --brief <text>         initial description (primarily for recovery and non-interactive use)
   -a, --agent <agent>    session runtime (claude | codex)
   -m, --model <model>    session-only model override
-  --effort <level>       session-only reasoning override
-                         (low|medium|high|xhigh)
+  --effort <level>       session-only reasoning override (low|medium|high|xhigh)
   --resume-session <id>  resume the planning agent session
   --grill-me             start in exhaustive one-question-at-a-time mode
   --no-grill-me          start in standard focused mode (default)
-  -y, --yes              non-interactive mode; requires --brief and approves a
-                         valid proposal
+  -y, --yes              non-interactive mode; requires --brief and approves a valid proposal
   -h, --help             display help for command
 ```
 
@@ -309,14 +304,12 @@ Initialize .tickets/ structure in a project directory.
 Options:
   -p, --project <dir>         project directory (default: cwd)
   --app-name <name>           application name
-  --timezone <tz>             IANA timezone (e.g. America/Chicago) (default:
-                              "UTC")
+  --timezone <tz>             IANA timezone (e.g. America/Chicago) (default: "UTC")
   --implementation-limit <n>  implementation queue window size (default: "500")
   --view-limit <n>            ticket queue display limit (default: "20000")
   --queue-limit <n>           deprecated alias for --implementation-limit
   --docs-root <dir>           repo-relative directory for generated ticket docs
-  -y, --yes                   skip app-name prompt when no config/package
-                              default exists
+  -y, --yes                   skip app-name prompt when no config/package default exists
   -h, --help                  display help for command
 ```
 
@@ -325,8 +318,8 @@ Options:
 ```text
 Usage: rafi tickets populate [options]
 
-Ask the ticket-maker role to populate .tickets/tickets.yaml from existing
-project ticket/backlog docs.
+Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog
+docs.
 
 Options:
   -p, --project <dir>   project directory (default: cwd)
@@ -335,8 +328,7 @@ Options:
   --effort <level>      reasoning effort level (low|medium|high|xhigh)
   --sources <paths...>  source hint files, folders, or globs to check first
   --fast                fast mode - lower latency
-  -y, --yes             skip confirmation prompt before letting the builder
-                        edit tickets
+  -y, --yes             skip confirmation prompt before letting the builder edit tickets
   -h, --help            display help for command
 ```
 
@@ -568,60 +560,45 @@ Usage: rafi start [options] <project>
 Enlist a builder and drive it through a batch of N steps.
 
 Arguments:
-  project                           path to the project directory the builder
-                                    works in
+  project                           path to the project directory the builder works in
 
 Options:
   -s, --steps <n>                   number of steps to drive
   -a, --agent <agent>               builder agent (claude | codex)
   -m, --model <model>               override the builder's model
   -r, --resume <sessionId>          resume a prior builder session
-  --continue                        resume the most recent logged session for
-                                    this project
-  -t, --tickets <path>              path to ticket file (.md, .txt, .yaml, …) —
-                                    passed to the builder as context
+  --continue                        resume the most recent logged session for this project
+  -t, --tickets <path>              path to ticket file (.md, .txt, .yaml, …) — passed to the
+                                    builder as context
   -y, --yes                         skip pre-flight confirmation prompt
-  --effort <level>                  reasoning effort level
-                                    (low|medium|high|xhigh)
-  --fast                            fast mode — lower latency (maps to
-                                    effort=low for codex)
-  --no-qa                           disable per-ticket QA review (enabled by
-                                    default)
-  --branch-per-ticket               run each selected structured ticket in an
-                                    isolated git worktree and branch
-  --no-branch-per-ticket            disable saved branch-per-ticket defaults
-                                    for this run
-  --create-pr                       push each successful ticket branch and
-                                    create a GitHub PR (implies
-                                    --branch-per-ticket)
-  --no-create-pr                    disable saved PR/MR creation defaults for
-                                    this run
-  --completion <mode>               ticket branch completion behavior (pr |
-                                    auto-merge | direct-merge | none)
-  --merge-method <method>           merge method for local or remote completion
-                                    (squash | merge | rebase)
-  --provider <provider>             PR/MR provider for branch completion (auto
-                                    | github | gitlab)
-  --auto-merge-wait                 wait for dependency PR/MRs to merge before
-                                    starting dependent tickets
-  --no-auto-merge-wait              do not wait for dependency PR/MRs before
-                                    dependent tickets
-  --auto-merge-timeout-minutes <n>  auto-merge dependency wait timeout in
-                                    minutes (blank means no timeout)
-  --base <ref>                      base ref for root ticket branches (default:
-                                    current branch or HEAD)
-  --branch-prefix <prefix>          branch name prefix for ticket branches
-                                    (default: "rafi")
-  --max-branch-depth <n>            maximum selected branch stack depth
-                                    (default: "2")
-  --pr-ready                        create ready-for-review PRs instead of
-                                    draft PRs
-  --keep-worktrees                  keep successful ticket worktrees for
-                                    inspection
-  --ticket <id>                     ticket id to continue in branch mode;
-                                    repeat for multiple tickets (default: [])
-  --skip-delivery-unit <id>         skip one unfinished delivery unit for this
-                                    run (default: [])
+  --effort <level>                  reasoning effort level (low|medium|high|xhigh)
+  --fast                            fast mode — lower latency (maps to effort=low for codex)
+  --no-qa                           disable per-ticket QA review (enabled by default)
+  --branch-per-ticket               run each selected structured ticket in an isolated git worktree
+                                    and branch
+  --no-branch-per-ticket            disable saved branch-per-ticket defaults for this run
+  --create-pr                       push each successful ticket branch and create a GitHub PR
+                                    (implies --branch-per-ticket)
+  --no-create-pr                    disable saved PR/MR creation defaults for this run
+  --completion <mode>               ticket branch completion behavior (pr | auto-merge |
+                                    direct-merge | none)
+  --merge-method <method>           merge method for local or remote completion (squash | merge |
+                                    rebase)
+  --provider <provider>             PR/MR provider for branch completion (auto | github | gitlab)
+  --auto-merge-wait                 wait for dependency PR/MRs to merge before starting dependent
+                                    tickets
+  --no-auto-merge-wait              do not wait for dependency PR/MRs before dependent tickets
+  --auto-merge-timeout-minutes <n>  auto-merge dependency wait timeout in minutes (blank means no
+                                    timeout)
+  --base <ref>                      base ref for root ticket branches (default: current branch or
+                                    HEAD)
+  --branch-prefix <prefix>          branch name prefix for ticket branches (default: "rafi")
+  --max-branch-depth <n>            maximum selected branch stack depth (default: "2")
+  --pr-ready                        create ready-for-review PRs instead of draft PRs
+  --keep-worktrees                  keep successful ticket worktrees for inspection
+  --ticket <id>                     ticket id to continue in branch mode; repeat for multiple
+                                    tickets (default: [])
+  --skip-delivery-unit <id>         skip one unfinished delivery unit for this run (default: [])
   -h, --help                        display help for command
 ```
 
@@ -647,11 +624,12 @@ Usage: rafi doctor [options] [project]
 Check Foreman, agent CLIs, config, and optional ticket tracker readiness.
 
 Arguments:
-  project     path to the project directory (default: ".")
+  project        path to the project directory (default: ".")
 
 Options:
-  --github    run GitHub PR readiness checks
-  -h, --help  display help for command
+  --github       run GitHub PR readiness checks
+  --live-claude  run a bounded no-tools Claude adapter request (uses account quota)
+  -h, --help     display help for command
 ```
 
 ## Standalone `ai-foreman`
@@ -801,8 +779,7 @@ Options:
 ```text
 Usage: rafi build:resume [options] [project]
 
-Inspect and resume one interrupted implementation run without discarding
-partial work.
+Inspect and resume one interrupted implementation run without discarding partial work.
 
 Arguments:
   project            project directory (default: ".")
@@ -822,15 +799,13 @@ Options:
 ```text
 Usage: rafi agents [options] [project]
 
-Configure persistent runtime, model, reasoning, and fast defaults for Rafi
-roles.
+Configure persistent runtime, model, reasoning, and fast defaults for Rafi roles.
 
 Arguments:
   project                 project directory (default: ".")
 
 Options:
-  --agent-type <role>     planner | builder | qa | ticket-maker | uninstaller |
-                          all
+  --agent-type <role>     planner | builder | qa | ticket-maker | uninstaller | all
   --agent-make <runtime>  claude | codex
   --model <model>         provider model ID or default
   --reasoning <level>     provider reasoning level or default
@@ -849,7 +824,6 @@ Arguments:
   project     project directory (default: ".")
 
 Options:
-  --dry-run   show the final preview without writing transaction state or
-              changing files
+  --dry-run   show the final preview without writing transaction state or changing files
   -h, --help  display help for command
 ```

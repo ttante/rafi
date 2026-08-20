@@ -114,3 +114,24 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
     rmSync(dir, { recursive: true });
   }
 });
+
+test("preflight rejects an adapter error instead of treating it as a plan", async () => {
+  const dir = makeTmpDir();
+  try {
+    const builder = new FakeBuilder(["API Error"]);
+    builder.sendTurn = async () => ({
+      text: "Claude failed during builder (authentication).\nExecutable: /opt/company/bin/claude",
+      isError: true,
+      numTurns: 1,
+      costUsd: 0,
+    });
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir);
+
+    await assert.rejects(
+      foreman.runPreflight(3),
+      /Claude failed during builder \(authentication\).*\/opt\/company\/bin\/claude/s,
+    );
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});

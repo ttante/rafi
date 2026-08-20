@@ -24,10 +24,14 @@ const cases: Array<[string, typeof program]> = [
   ["rafi plan --help", commandByPath(["plan"])],
   ["rafi tickets --help", commandByPath(["tickets"])],
   ["rafi tickets plan --help", commandByPath(["tickets", "plan"])],
+  ["rafi tickets init --help", commandByPath(["tickets", "init"])],
+  ["rafi tickets populate --help", commandByPath(["tickets", "populate"])],
+  ["rafi tickets queue --help", commandByPath(["tickets", "queue"])],
   ["rafi build:resume --help", commandByPath(["build:resume"])],
   ["rafi agents --help", commandByPath(["agents"])],
   ["rafi uninstall --help", commandByPath(["uninstall"])],
   ["rafi start --help", commandByPath(["start"])],
+  ["rafi doctor --help", commandByPath(["doctor"])],
 ];
 
 let docs = readFileSync(docsPath, "utf8");

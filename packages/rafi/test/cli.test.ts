@@ -50,17 +50,6 @@ function installReadyClaude(binDir: string): void {
   chmodSync(claudePath, 0o755);
 }
 
-function writeSdkPackage(projectDir: string): void {
-  const packageDir = join(projectDir, "node_modules", "@anthropic-ai", "claude-agent-sdk");
-  mkdirSync(packageDir, { recursive: true });
-  writeFileSync(
-    join(packageDir, "package.json"),
-    JSON.stringify({ name: "@anthropic-ai/claude-agent-sdk", exports: "./index.js" }),
-    "utf8",
-  );
-  writeFileSync(join(packageDir, "index.js"), "export {};\n", "utf8");
-}
-
 test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
   const docs = readFileSync(join(HERE, "..", "..", "..", "docs", "cli.md"), "utf8");
   const cases = [
@@ -70,6 +59,7 @@ test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nod
     { heading: "rafi tickets init --help", command: commandByPath(["tickets", "init"]) },
     { heading: "rafi tickets populate --help", command: commandByPath(["tickets", "populate"]) },
     { heading: "rafi tickets queue --help", command: commandByPath(["tickets", "queue"]) },
+    { heading: "rafi doctor --help", command: commandByPath(["doctor"]) },
   ];
 
   for (const item of cases) {
@@ -141,11 +131,12 @@ test("compile --root-file-mode append overrides update mode for the run", { skip
   assert.match(readFileSync(join(dir, "rafi-config.yaml"), "utf8"), /mode: update/);
 });
 
-test("create skips a resolvable Claude Agent SDK", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+test("create never installs the Claude Agent SDK into the target application", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
   const dir = tempDir();
   const binDir = join(dir, "bin");
   installReadyClaude(binDir);
-  writeSdkPackage(dir);
+  const packageJson = `${JSON.stringify({ name: "sdk-free-app", private: true }, null, 2)}\n`;
+  writeFileSync(join(dir, "package.json"), packageJson, "utf8");
 
   const projectRoot = join(HERE, "..");
   const output = execFileSync(
@@ -158,6 +149,8 @@ test("create skips a resolvable Claude Agent SDK", { skip: nodeMajor < 20 ? "CLI
     },
   );
 
-  assert.match(output, /Claude Agent SDK already installed; skipping\./);
+  assert.match(output, /verified agent runtime auth for claude/);
   assert.doesNotMatch(output, /installing Claude Agent SDK/);
+  assert.equal(readFileSync(join(dir, "package.json"), "utf8"), packageJson);
+  assert.equal(existsSync(join(dir, "node_modules", "@anthropic-ai", "claude-agent-sdk")), false);
 });

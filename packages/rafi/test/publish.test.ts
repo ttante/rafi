@@ -41,6 +41,11 @@ test("@rafi-ai/cli pack excludes TypeScript source files", () => {
   assert.ok(!files.some((f) => f.startsWith("src/")), `src/ TypeScript files found in pack: ${files.filter((f) => f.startsWith("src/")).join(", ")}`);
 });
 
+test("@rafi-ai/cli pack excludes the removed target-project SDK installer", () => {
+  const files = packList();
+  assert.ok(!files.some((f) => /sdkInstall\.(?:js|d\.ts)$/.test(f)), `stale SDK installer found in pack: ${files.filter((f) => f.includes("sdkInstall")).join(", ")}`);
+});
+
 test("@rafi-ai/cli pack includes package.json and README.md", () => {
   const files = packList();
   assert.ok(files.includes("package.json"), "package.json missing from pack");
@@ -59,6 +64,6 @@ test("@rafi-ai/cli depends on published rafi-spec", () => {
 });
 
 test("@rafi-ai/cli depends on the published ai-foreman version", () => {
-  assert.equal(aiForemanPackageJson.version, "1.6.0");
+  assert.equal(aiForemanPackageJson.version, "1.6.1");
   assert.equal(packageJson.dependencies?.["ai-foreman"], aiForemanPackageJson.version);
 });

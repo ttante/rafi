@@ -29,7 +29,7 @@ export class RuntimeAuthError extends Error {
   }
 }
 
-export async function checkRuntimeReady(projectDir: string, runtime: AgentRuntime): Promise<void> {
+export async function checkRuntimeReady(projectDir: string, runtime: AgentRuntime) {
   const result = await probeRuntime(projectDir, runtime);
   if (!result.ok) throw new RuntimeAuthError({
     runtime,
@@ -37,6 +37,7 @@ export async function checkRuntimeReady(projectDir: string, runtime: AgentRuntim
     exitCode: result.exitCode,
     stderr: formatRuntimeProbeFailure(result),
   });
+  return result;
 }
 
 export function normalizeRuntimeErrorText(
@@ -76,12 +77,9 @@ export function runtimeCommandLabel(runtime: AgentRuntime): string {
 export function runtimeRepairCommands(runtime: AgentRuntime): string {
   if (runtime === "claude") {
     return [
-      "claude auth logout",
-      "claude auth login --claudeai",
+      "Authenticate in Claude Code using the login method approved by your organization.",
+      "Enterprise users should keep using their organization-provided flow (for example, /login-okta).",
       'claude -p "Return exactly OK"',
-      "",
-      "Claude subscription users may also need:",
-      "claude setup-token",
     ].join("\n");
   }
   return [
@@ -95,7 +93,7 @@ export function formatRuntimeAuthFailure(opts: RuntimeAuthErrorOptions): string 
   const exit = opts.exitCode === undefined || opts.exitCode === null ? "unknown" : String(opts.exitCode);
   const authLine = isRuntimeAuthFailure(output)
     ? "The runtime output looks like an authentication failure."
-    : "This often means the selected agent runtime is missing or not authenticated.";
+    : "The selected runtime failed; review the actual output below before changing authentication.";
   const details = output ? `\n\nRuntime output:\n${truncateRuntimeOutput(output)}` : "";
   return (
     `${runtimeCommandLabel(opts.runtime)} failed during ${opts.context} (exit code ${exit}).\n\n` +

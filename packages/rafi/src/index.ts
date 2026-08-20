@@ -42,7 +42,6 @@ import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
 import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { runStatus } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
-import { installClaudeAgentSdk } from "./sdkInstall.js";
 import { buildPlanCommand } from "./plan.js";
 import { buildTicketPlanCommand } from "./ticketPlan.js";
 import { buildAgentsCommand } from "./agents.js";
@@ -323,17 +322,6 @@ program
     console.log(`rafi: compiled ${targetDir}`);
     console.log(`rafi: AI rules: ${aiStatus === "off" ? "excluded — re-run \`rafi compile\` after setting usesAI: true to add them" : "included"}`);
     console.log(`rafi: custom skills or agents can replace Rafi defaults by setting artifact_source: existing and editing their paths in ${RAFI_CONFIG_FILE}.`);
-
-    if (config.harness.targets.includes("claude")) {
-      const sdkInstall = installClaudeAgentSdk(targetDir, answers.packageManager);
-      console.log(
-        sdkInstall === "installed"
-          ? "rafi: Claude Agent SDK installed."
-          : "rafi: Claude Agent SDK already installed; skipping.",
-      );
-    } else {
-      console.log("rafi: skipping Claude Agent SDK (Codex only).");
-    }
 
     console.log(`rafi: verified agent runtime auth for ${config.harness.targets.join(" and ")}.`);
 
@@ -847,6 +835,7 @@ program
     runStatus(discovered.root);
   });
 program.addCommand(buildDoctorCommand());
+configureHelpWidth(program, 100);
 
 export async function runRafiCli(argv = process.argv): Promise<void> {
   await program.parseAsync(argv);
@@ -857,6 +846,11 @@ if (isDirectCliEntrypoint()) {
     console.error(`rafi: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   });
+}
+
+function configureHelpWidth(command: Command, width: number): void {
+  command.configureHelp({ helpWidth: width });
+  for (const child of command.commands) configureHelpWidth(child, width);
 }
 
 function isDirectCliEntrypoint(): boolean {

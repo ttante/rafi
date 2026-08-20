@@ -6,6 +6,8 @@ import { loadConfig } from "../config.js";
 import { isTicketsInitialized } from "../tickets/config.js";
 import { cmdValidate } from "../tickets/commands.js";
 import { checkGitHubReadiness, inspectGitHubRemote } from "../branch/github.js";
+import { requireClaudeSDK } from "../adapters/claude.js";
+import { resolveExecutablePath, sanitizeDiagnostics } from "../runtimeReadiness.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -26,7 +28,8 @@ export function buildDoctorCommand(): Command {
     .description("Check Foreman, agent CLIs, config, and optional ticket tracker readiness.")
     .argument("[project]", "path to the project directory", ".")
     .option("--github", "run GitHub PR readiness checks")
-    .action((project: string, opts: { github?: boolean }) => {
+    .option("--live-claude", "run a bounded no-tools Claude adapter request (uses account quota)")
+    .action(async (project: string, opts: { github?: boolean; liveClaude?: boolean }) => {
       const cwd = resolve(project);
       let errors = 0;
 
@@ -50,9 +53,35 @@ export function buildDoctorCommand(): Command {
         report(false, "foreman.yaml", err instanceof Error ? err.message : String(err));
       }
 
-      const claude = commandVersion("claude");
-      if (claude.ok) warn("claude CLI found", claude.detail);
-      else warn("claude CLI not found", "Claude adapter may still work through the SDK if credentials are configured");
+      const claudeExecutable = resolveExecutablePath("claude");
+      const claude = claudeExecutable ? commandVersion(claudeExecutable) : { ok: false };
+      if (claude.ok) warn("claude CLI found", `${claudeExecutable} (${claude.detail})`);
+      else warn("claude CLI not found", "required for Claude runs; Rafi never falls back to the SDK-bundled binary");
+
+      try {
+        await requireClaudeSDK();
+        warn("Rafi Claude SDK wrapper", "available; execution uses the system Claude CLI above");
+      } catch (err) {
+        report(false, "Rafi Claude SDK wrapper", err instanceof Error ? err.message.split("\n")[0] : String(err));
+      }
+      warn("Claude setting sources", "user, project, local, and managed policy");
+      const relevantEnvironment = Object.keys(process.env)
+        .filter((name) => /^(ANTHROPIC|CLAUDE|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|SSL_CERT_FILE|NODE_EXTRA_CA_CERTS)(_|$)/i.test(name))
+        .sort();
+      warn("Claude environment names", relevantEnvironment.length > 0 ? relevantEnvironment.join(", ") : "none set");
+      const projectSdkRemoval = projectClaudeSdkRemoval(cwd);
+      if (projectSdkRemoval) {
+        warn("project-local Claude Agent SDK", `Rafi does not use this dependency; keep it if the application does, otherwise: ${projectSdkRemoval}`);
+      }
+
+      if (opts.liveClaude) {
+        if (!claudeExecutable) {
+          report(false, "live Claude adapter", "system Claude executable is missing");
+        } else {
+          const live = await liveClaudeSmoke(cwd, claudeExecutable);
+          report(live.ok, "live Claude adapter", live.detail);
+        }
+      }
 
       const codex = commandVersion("codex");
       if (codex.ok) warn("codex CLI found", codex.detail);
@@ -87,6 +116,57 @@ export function buildDoctorCommand(): Command {
 
       process.exit(errors === 0 ? 0 : 1);
     });
+}
+
+async function liveClaudeSmoke(cwd: string, executable: string): Promise<{ ok: boolean; detail: string }> {
+  const abortController = new AbortController();
+  const timer = setTimeout(() => abortController.abort(), 45_000);
+  timer.unref();
+  try {
+    const { query } = await requireClaudeSDK();
+    const queryInstance = query({
+      prompt: "Return exactly OK",
+      options: {
+        cwd,
+        pathToClaudeCodeExecutable: executable,
+        settingSources: ["user", "project", "local"],
+        tools: [],
+        permissionMode: "dontAsk",
+        persistSession: false,
+        abortController,
+      },
+    });
+    for await (const message of queryInstance) {
+      if (message.type !== "result") continue;
+      const output = "result" in message ? message.result : message.errors.join("; ");
+      return message.is_error
+        ? { ok: false, detail: sanitizeDiagnostics(output || "Claude returned an error") }
+        : { ok: output.trim().toUpperCase() === "OK", detail: sanitizeDiagnostics(output) };
+    }
+    return { ok: false, detail: "Claude adapter ended without a result" };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, detail: abortController.signal.aborted ? "timed out after 45 seconds" : sanitizeDiagnostics(message) };
+  } finally {
+    clearTimeout(timer);
+    abortController.abort();
+  }
+}
+
+function projectClaudeSdkRemoval(cwd: string): string | undefined {
+  const packagePath = join(cwd, "package.json");
+  if (!existsSync(packagePath)) return undefined;
+  try {
+    const pkg = JSON.parse(readFileSync(packagePath, "utf8")) as Record<string, Record<string, string> | undefined>;
+    const name = "@anthropic-ai/claude-agent-sdk";
+    if (!pkg.dependencies?.[name] && !pkg.devDependencies?.[name] && !pkg.optionalDependencies?.[name]) return undefined;
+    if (existsSync(join(cwd, "pnpm-lock.yaml"))) return `pnpm remove ${name}`;
+    if (existsSync(join(cwd, "yarn.lock"))) return `yarn remove ${name}`;
+    if (existsSync(join(cwd, "bun.lock")) || existsSync(join(cwd, "bun.lockb"))) return `bun remove ${name}`;
+    return `npm uninstall ${name}`;
+  } catch {
+    return undefined;
+  }
 }
 
 function truncateOneLine(value: string): string {

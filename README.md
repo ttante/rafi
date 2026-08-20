@@ -42,6 +42,8 @@ As it proceeds, Rafi:
 - verifies that the selected agent runtime is installed and authenticated;
 - offers to continue into an initial planning interview and ticket setup.
 
+For Claude, Rafi uses the exact system `claude` executable that passes its readiness check. It does not use the Claude Agent SDK's bundled executable, and it does not install the SDK into your application repository. Claude sessions inherit the terminal environment and load user, project, local, and organization-managed settings, so enterprise SSO flows such as `/login-okta` and managed proxy/certificate policy remain available.
+
 The optional planning handoff is part of the `create` journey. Describe what the product should do, point Rafi at any existing requirements, and answer the planner’s follow-up questions. Rafi can then establish the project’s initial plan and structured ticket queue. You do not need to memorize a separate planning pipeline before you can get useful work underway.
 
 This workflow is equally appropriate for an empty repository and an established codebase. In an existing repository, answer according to what the project actually uses. Rafi preserves project-owned material and adds its guidance around it.
@@ -59,6 +61,21 @@ rafi tickets plan
 You can run it from the project root or from a directory inside the project. Rafi finds the nearest configured project, shows its name and absolute path, and asks before using an ancestor project. Ticket planning requires a fully initialized tracker; an uninitialized or partial project is directed to `rafi create` or `rafi resume` before an agent is launched or shared state is changed.
 
 Rafi also protects the less-visible history behind the tracker. If canonical tickets exist but the ignored local status database is missing, planning stops and explains what needs to be restored. It will not pretend every old ticket is new work and build a proposal on corrupted assumptions.
+
+## A few useful supporting commands
+
+The two interviews are the primary interface. These supporting commands are useful once work is underway:
+
+```sh
+rafi compile .       # refresh generated guidance after editing rafi-config.yaml
+rafi status          # show the nearest project's latest builder run
+rafi doctor .        # check project, runtime, and tracker readiness
+rafi tickets queue   # view all tickets in queue
+```
+
+`rafi doctor .` reports the exact Claude executable, SDK-wrapper availability, setting sources, and the names (not values) of relevant proxy/certificate environment variables. If `claude -p "Return exactly OK"` succeeds but a Rafi Claude run still fails, use `rafi doctor . --live-claude` to exercise the same no-tools SDK execution path. The live check is opt-in, bounded, and uses account quota.
+
+The complete scripting and maintenance command reference—including non-interactive modes and advanced overrides—is generated in [docs/cli.md](./docs/cli.md). It is intentionally separate from this guided workflow introduction.
 
 ### One conversation, from rough idea to approved tickets
 
@@ -209,17 +226,6 @@ Rafi is useful for general software projects, and it adds deeper guardrails when
 
 General rule packs cover testing and TDD, security, observability, robustness, scalability, data governance, API documentation, release practices, architecture, accessibility, cloud infrastructure, and the technologies named during the setup interview.
 
-## A few useful supporting commands
-
-The two interviews are the primary interface. These supporting commands are useful once work is underway:
-
-```sh
-rafi compile .       # refresh generated guidance after editing rafi-config.yaml
-rafi status          # show the nearest project's latest builder run
-rafi doctor .        # check project, runtime, and tracker readiness
-```
-
-The complete scripting and maintenance command reference—including non-interactive modes and advanced overrides—is generated in [docs/cli.md](./docs/cli.md). It is intentionally separate from this guided workflow introduction.
 
 ## Packages
 

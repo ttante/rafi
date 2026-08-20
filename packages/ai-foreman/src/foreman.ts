@@ -309,14 +309,17 @@ export class Foreman {
     this.log.write("preflight", {
       ticketsProvided: ticketsContent !== undefined,
       costUsd: result.costUsd,
+      isError: result.isError,
     });
+    if (result.isError) throw new Error(result.text);
     return result.text;
   }
 
   /** Send user feedback on the plan; builder responds with a revised list. Does not count toward steps. */
   async sendPreflightFeedback(feedback: string): Promise<void> {
     const result = await this.builder.sendTurn(feedback);
-    this.log.write("preflight", { feedback: true, costUsd: result.costUsd });
+    this.log.write("preflight", { feedback: true, costUsd: result.costUsd, isError: result.isError });
+    if (result.isError) throw new Error(result.text);
   }
 
   /** Send one custom instruction through the same needs_input loop as a batch turn. */

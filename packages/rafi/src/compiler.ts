@@ -411,12 +411,9 @@ export function runtimeCommandLabel(runtime: AgentRuntime): string {
 export function runtimeRepairCommands(runtime: AgentRuntime): string {
   if (runtime === "claude") {
     return [
-      "claude auth logout",
-      "claude auth login --claudeai",
+      "Authenticate in Claude Code using the login method approved by your organization.",
+      "Enterprise users should keep using their organization-provided flow (for example, /login-okta).",
       'claude -p "Return exactly OK"',
-      "",
-      "Claude subscription users may also need:",
-      "claude setup-token",
     ].join("\n");
   }
   return [
@@ -432,7 +429,7 @@ export function formatRuntimeUpdateFailure(opts: RuntimeUpdateErrorOptions): str
   const authLikely = isRuntimeAuthFailure(output);
   const authLine = authLikely
     ? "The runtime output looks like an authentication failure."
-    : "This often means the selected agent runtime is missing or not authenticated.";
+    : "The selected runtime failed; review the actual output below before changing authentication.";
   const details = output ? `\n\nRuntime output:\n${truncateRuntimeOutput(output)}` : "";
   return (
     `Could not update ${opts.targetFile} with ${command} (exit code ${exit}).\n\n` +

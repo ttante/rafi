@@ -5,6 +5,7 @@ import { Log } from "./log.js";
 import { PermissionPolicy } from "./permissions/policy.js";
 import { ClaudeAdapter } from "./adapters/claude.js";
 import { CodexAdapter } from "./adapters/codex.js";
+import { RecoveringAdapter } from "./adapters/recovering.js";
 import { Foreman, createPermissionHandler, type StepStatus } from "./foreman.js";
 import type { BuilderAdapter, BuilderAdapterOptions, EffortLevel, TurnResult } from "./adapters/types.js";
 import { printEvents } from "./cli/events.js";
@@ -158,27 +159,58 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
     model: initialModel,
   });
   runtime = ready.runtime;
-  const model = ready.model;
+  let model = ready.model;
+  let runtimeExecutable = ready.executable;
 
   const policy = new PermissionPolicy(opts.permissionConfig ?? config.permissions, opts.projectDir);
   const skills = mergeSkills(roleBundle.skills, opts.extraSkills);
-  const adapterOpts: BuilderAdapterOptions = {
-    cwd: opts.projectDir,
-    model,
-    resumeSessionId: opts.resumeSessionId,
-    permission: createPermissionHandler(policy, log),
-    effort,
-    fast: opts.fast ?? saved?.fast,
-    sandboxMode: opts.sandboxMode,
-    systemPromptAppend: roleBundle.system || undefined,
-    skills: skills.length > 0 ? skills : undefined,
-  };
-  const builder: BuilderAdapter =
-    runtime === "codex"
+  const makeAdapter = async (nextRuntime: AgentRuntime, resumeSessionId?: string): Promise<BuilderAdapter> => {
+    const adapterOpts: BuilderAdapterOptions = {
+      cwd: opts.projectDir,
+      runtimeExecutable,
+      runtimePhase: phaseForRole(opts.role),
+      model,
+      resumeSessionId,
+      permission: createPermissionHandler(policy, log),
+      effort,
+      fast: opts.fast ?? saved?.fast,
+      sandboxMode: opts.sandboxMode,
+      systemPromptAppend: roleBundle.system || undefined,
+      skills: skills.length > 0 ? skills : undefined,
+    };
+    return nextRuntime === "codex"
       ? new CodexAdapter(adapterOpts)
       : await ClaudeAdapter.create(adapterOpts);
+  };
+  const initial = await makeAdapter(runtime, opts.resumeSessionId);
+  const builder: BuilderAdapter = new RecoveringAdapter({
+    initial,
+    runtime,
+    label: opts.label,
+    enabled: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    allowSwitch: opts.allowSwitch !== false && !opts.resumeSessionId,
+    recreate: async (nextRuntime, resumeSessionId) => {
+      const nextReady = await ensureRuntimeReadyForCommand(opts.projectDir, nextRuntime, {
+        label: opts.label,
+        allowSwitch: false,
+        model: nextRuntime === runtime ? model : undefined,
+      });
+      runtime = nextReady.runtime;
+      model = nextReady.model;
+      runtimeExecutable = nextReady.executable;
+      return makeAdapter(runtime, resumeSessionId);
+    },
+  });
 
   return { builder, runtime, model, effort, roleBundle, skills, log };
+}
+
+function phaseForRole(role: string): BuilderAdapterOptions["runtimePhase"] {
+  if (role === "planner") return "planning";
+  if (role === "ticket-maker") return "ticket-population";
+  if (role === "qa") return "qa";
+  if (role === "uninstaller") return "uninstaller";
+  return "builder";
 }
 
 function readRoleDefaults(projectDir: string, role: string): AgentRoleDefaultsV1 | undefined {
@@ -197,10 +229,11 @@ function readRoleDefaults(projectDir: string, role: string): AgentRoleDefaultsV1
 export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promise<RoleInstructionRunResult> {
   const logPath = opts.logPath ?? makeLogPath(opts.projectDir, opts.label.replace(/\s+/g, "-"));
   const log = new Log(logPath);
-  const { builder, runtime, model, effort, roleBundle, skills } = await createRoleBuilder({
+  const roleBuilder = await createRoleBuilder({
     ...opts,
     log,
   });
+  const { builder, effort, roleBundle, skills } = roleBuilder;
   const viewer = printEvents(builder.events());
   const config = loadConfig(join(opts.projectDir, "foreman.yaml"));
   const foreman = new Foreman(builder, log, config.notifications.enabled, false, 3, opts.projectDir);
@@ -213,8 +246,8 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
     if (opts.logEvent) {
       log.write(opts.logEvent, {
         role: opts.role,
-        runtime,
-        model,
+        runtime: builder.agent,
+        model: builder.agent === roleBuilder.runtime ? roleBuilder.model : undefined,
         effort,
         sessionId: builder.sessionId(),
         statusKind: turn.status.kind,
@@ -225,7 +258,16 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
       });
     }
 
-    return { turn, runtime, model, effort, sessionId: builder.sessionId(), logPath, roleBundle, skills };
+    return {
+      turn,
+      runtime: builder.agent,
+      model: builder.agent === roleBuilder.runtime ? roleBuilder.model : undefined,
+      effort,
+      sessionId: builder.sessionId(),
+      logPath,
+      roleBundle,
+      skills,
+    };
   } catch (err) {
     await builder.close().catch(() => {});
     await viewer.catch(() => {});

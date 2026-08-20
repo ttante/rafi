@@ -1,5 +1,6 @@
 import type { AgentRuntime } from "./compiler.js";
 import { probeRuntime, formatRuntimeProbeFailure } from "ai-foreman/runtime-readiness.js";
+import { requireClaudeSDK } from "ai-foreman/claude-adapter.js";
 import {
   isRuntimeAuthFailure,
   runtimeCommandLabel,
@@ -41,6 +42,17 @@ export async function checkAgentRuntimeReady(targetDir: string, runtime: AgentRu
     exitCode: result.exitCode,
     stderr: formatRuntimeProbeFailure(result),
   });
+  if (runtime === "claude") {
+    try {
+      await requireClaudeSDK();
+    } catch (err) {
+      throw new RuntimeReadinessError({
+        runtime,
+        stderr: err instanceof Error ? err.message : String(err),
+        cause: err,
+      });
+    }
+  }
 }
 
 export async function ensureAgentRuntimesReady(
@@ -78,7 +90,7 @@ export function formatRuntimeReadinessFailure(opts: RuntimeReadinessErrorOptions
   const exit = opts.exitCode === undefined || opts.exitCode === null ? "unknown" : String(opts.exitCode);
   const authLine = isRuntimeAuthFailure(output)
     ? "The runtime output looks like an authentication failure."
-    : "This often means the selected agent runtime is missing or not authenticated.";
+    : "The selected runtime failed; review the actual output below before changing authentication.";
   const details = output ? `\n\nRuntime output:\n${truncateRuntimeOutput(output)}` : "";
   return (
     `${runtimeCommandLabel(opts.runtime)} failed the create-time readiness check (exit code ${exit}).\n\n` +

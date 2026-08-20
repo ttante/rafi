@@ -1,6 +1,7 @@
 /**
  * Agent-agnostic interface over a coding agent ("builder").
  */
+import type { RuntimeProbeCategory, RuntimeProbePhase } from "rafi-spec";
 
 /** A permission request surfaced by a builder before it runs a tool. */
 export interface PermissionRequest {
@@ -27,6 +28,14 @@ export interface TurnResult {
   isError: boolean;
   numTurns: number;
   costUsd: number;
+  failure?: {
+    runtime: "claude" | "codex";
+    phase: RuntimeProbePhase;
+    category: RuntimeProbeCategory;
+    executable: string;
+    cwd: string;
+    diagnostics: string;
+  };
 }
 
 /** Observability events emitted while a builder works. */
@@ -41,6 +50,10 @@ export type EffortLevel = "low" | "medium" | "high" | "xhigh";
 export interface BuilderAdapterOptions {
   /** Working directory the builder operates in. */
   cwd: string;
+  /** Absolute runtime executable path verified by the readiness probe. */
+  runtimeExecutable?: string;
+  /** User-facing execution phase for diagnostics. */
+  runtimePhase?: RuntimeProbePhase;
   /** Permission decision callback. */
   permission: PermissionHandler;
   /** Resume a prior session instead of starting fresh. */

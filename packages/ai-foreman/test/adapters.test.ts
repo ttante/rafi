@@ -24,10 +24,14 @@ test("buildClaudeQueryOptions maps systemPromptAppend to systemPrompt.append", (
   assert.equal(sp.append, "## My Rules\n");
 });
 
-test("buildClaudeQueryOptions includes skills and settingSources when skills provided", () => {
-  const opts = buildClaudeQueryOptions({ ...BASE_OPTS, skills: ["tdd", "grill-me"] });
+test("buildClaudeQueryOptions includes skills and all CLI setting sources", () => {
+  const opts = buildClaudeQueryOptions({ ...BASE_OPTS, runtimeExecutable: "/opt/company/bin/claude", skills: ["tdd", "grill-me"] });
   assert.deepEqual(opts.skills, ["tdd", "grill-me"]);
-  assert.deepEqual(opts.settingSources, ["project"]);
+  assert.deepEqual(opts.settingSources, ["user", "project", "local"]);
+  assert.equal(opts.pathToClaudeCodeExecutable, "/opt/company/bin/claude");
+  const env = opts.env as NodeJS.ProcessEnv;
+  assert.equal(env.PATH, process.env.PATH);
+  assert.equal(env.HTTPS_PROXY, process.env.HTTPS_PROXY);
 });
 
 test("buildClaudeQueryOptions omits systemPrompt when systemPromptAppend is absent", () => {
@@ -35,10 +39,10 @@ test("buildClaudeQueryOptions omits systemPrompt when systemPromptAppend is abse
   assert.equal(opts.systemPrompt, undefined);
 });
 
-test("buildClaudeQueryOptions omits skills/settingSources when skills is absent", () => {
+test("buildClaudeQueryOptions omits skills but retains CLI-equivalent setting sources", () => {
   const opts = buildClaudeQueryOptions(BASE_OPTS);
   assert.equal(opts.skills, undefined);
-  assert.equal(opts.settingSources, undefined);
+  assert.deepEqual(opts.settingSources, ["user", "project", "local"]);
 });
 
 test("buildClaudeQueryOptions forwards cwd, model, effort, and resumeSessionId unchanged", () => {

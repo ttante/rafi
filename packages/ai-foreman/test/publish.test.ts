@@ -30,6 +30,12 @@ test("ai-foreman pack includes agent-run exported subpath files", () => {
   assert.ok(files.includes("dist/agentRun.d.ts"), "dist/agentRun.d.ts missing from pack");
 });
 
+test("ai-foreman pack includes the exported Claude adapter used by Rafi readiness", () => {
+  const files = packList();
+  assert.ok(files.includes("dist/adapters/claude.js"), "dist/adapters/claude.js missing from pack");
+  assert.ok(files.includes("dist/adapters/claude.d.ts"), "dist/adapters/claude.d.ts missing from pack");
+});
+
 test("ai-foreman pack includes foreman.yaml", () => {
   const files = packList();
   assert.ok(files.includes("foreman.yaml"), "foreman.yaml missing from pack");

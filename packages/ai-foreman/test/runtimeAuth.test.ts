@@ -18,7 +18,7 @@ test("runtime auth detection matches 401 credential output", () => {
   assert.equal(isRuntimeAuthFailure("Error: 401 Invalid authentication credentials"), true);
 });
 
-test("runtime auth formatter includes Claude repair commands", () => {
+test("runtime auth formatter preserves organization-approved Claude login", () => {
   const message = formatRuntimeAuthFailure({
     runtime: "claude",
     context: "builder turn",
@@ -27,9 +27,9 @@ test("runtime auth formatter includes Claude repair commands", () => {
   });
 
   assert.match(message, /claude -p failed during builder turn/);
-  assert.match(message, /claude auth logout/);
-  assert.match(message, /claude auth login --claudeai/);
-  assert.match(message, /claude setup-token/);
+  assert.match(message, /approved by your organization/);
+  assert.match(message, /login-okta/);
+  assert.doesNotMatch(message, /auth logout|--claudeai|setup-token/);
 });
 
 test("runtime auth normalization leaves unrelated errors unchanged", () => {
@@ -85,6 +85,20 @@ test("runtime command fallback verifies the other runtime and drops model overri
       if (runtime === "codex") {
         throw new RuntimeAuthError({ runtime, context: "start", stderr: "not logged in" });
       }
+      return {
+        ok: true,
+        runtime,
+        phase: "readiness" as const,
+        category: "ready" as const,
+        executable: "/opt/company/bin/claude",
+        cwd: "/tmp/project",
+        timedOut: false,
+        exitCode: 0,
+        signal: null,
+        diagnostics: "OK",
+        environmentNames: [],
+        recoveryChoices: [],
+      };
     },
     checkClaudeSdk: async () => {
       sdkChecks += 1;
@@ -93,7 +107,10 @@ test("runtime command fallback verifies the other runtime and drops model overri
 
   assert.deepEqual(checked, ["codex", "claude"]);
   assert.equal(sdkChecks, 1);
-  assert.deepEqual(result, { runtime: "claude", model: undefined, fellBack: true });
+  assert.equal(result.runtime, "claude");
+  assert.equal(result.model, undefined);
+  assert.equal(result.fellBack, true);
+  assert.equal(result.executable, "/opt/company/bin/claude");
 });
 
 test("runtime command fallback is not offered when switching is disabled", async () => {
@@ -115,4 +132,36 @@ test("runtime command fallback is not offered when switching is disabled", async
   );
 
   assert.deepEqual(choices, [false]);
+});
+
+test("runtime command diagnostics preserve an SDK load failure after a successful CLI probe", async () => {
+  await assert.rejects(
+    ensureRuntimeReadyForCommand("/tmp/project", "claude", {
+      label: "planning",
+      yes: true,
+      check: () => ({
+        ok: true,
+        runtime: "claude",
+        phase: "readiness",
+        category: "ready",
+        executable: "/opt/company/bin/claude",
+        cwd: "/tmp/project",
+        timedOut: false,
+        exitCode: 0,
+        signal: null,
+        diagnostics: "OK",
+        environmentNames: [],
+        recoveryChoices: [],
+      }),
+      checkClaudeSdk: async () => {
+        throw new Error("Rafi's Claude Agent SDK dependency is not installed");
+      },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof RuntimeAuthError);
+      assert.match(err.message, /SDK dependency is not installed/);
+      assert.equal(err.authLikely, false);
+      return true;
+    },
+  );
 });

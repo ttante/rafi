@@ -49,7 +49,9 @@ rafi compile .
 
 `create` saves stack answers, runtime targets, the selected documentation root, and planning-source hints in `rafi-config.yaml`. `compile` refreshes the generated guidance after you edit that config. See the [manual command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md) for non-interactive defaults, runtime selection, custom docs roots, and one-run root-file-mode overrides.
 
-Before `create`, `plan`, `start`, or `tickets populate` enters agent work, Rafi checks the selected runtime. Interactive runs offer repair/retry or a verified switch when authentication is unavailable. Non-interactive and `--yes` runs fail clearly rather than switching automatically. Cancelling keeps project files, configuration, and installed packages in place.
+Before `create`, `plan`, `start`, or `tickets populate` enters agent work, Rafi checks the selected runtime. Interactive runs offer repair/retry or a verified switch when authentication is unavailable, including a structured Claude failure that occurs after the initial probe. Provider switches start a fresh session and say that conversational continuity was not transferred. Non-interactive and `--yes` runs fail clearly rather than switching automatically. Cancelling keeps project files, configuration, and installed packages in place. Resume flows never switch providers because session IDs are provider-specific.
+
+Claude execution is pinned to the exact system `claude` executable that passed that check; Rafi never silently falls back to the SDK-bundled CLI. The SDK wrapper belongs to Rafi's `ai-foreman` dependency and is never installed into the target application. Claude runs inherit the current environment and load user, project, local, and organization-managed settings, preserving enterprise login methods such as `/login-okta` and managed proxy/certificate configuration.
 
 ### Existing files and custom artifacts
 
@@ -116,6 +118,8 @@ rafi agents .
 rafi uninstall . --dry-run
 rafi doctor .
 ```
+
+`rafi doctor .` shows the resolved Claude executable, SDK-wrapper availability, setting sources, and relevant environment-variable names without printing their values. `rafi doctor . --live-claude` adds a bounded no-tools request through the same SDK path used by Rafi; it is opt-in and uses account quota. This is the decisive diagnostic when the direct `claude -p "Return exactly OK"` probe works but agent execution does not.
 
 `rafi start` reads the compiled role bundles and drives a builder through the requested work, with QA after each ticket by default. Branch strategy, completion settings, agent selection, QA overrides, and builder-session continuation are documented in the [start command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-start---help).
 

@@ -6,6 +6,8 @@ import {
   runtimeCommandLabel,
   type AgentRuntime,
 } from "../runtimeAuth.js";
+import { resolveExecutablePath } from "../runtimeReadiness.js";
+import type { RuntimeProbeResult } from "rafi-spec";
 import { otherRuntime, runtimeDisplayName } from "./runtimeSelection.js";
 
 export type RuntimeCommandRecoveryChoice = "retry" | "switch" | "cancel";
@@ -20,7 +22,7 @@ export interface RuntimeReadyForCommandOptions {
   yes?: boolean;
   allowSwitch?: boolean;
   model?: string | undefined;
-  check?: (projectDir: string, runtime: AgentRuntime) => void | Promise<void>;
+  check?: (projectDir: string, runtime: AgentRuntime) => void | RuntimeProbeResult | Promise<void | RuntimeProbeResult>;
   checkClaudeSdk?: () => Promise<void>;
   choose?: (
     err: RuntimeAuthError,
@@ -32,6 +34,7 @@ export interface RuntimeReadyForCommandResult {
   runtime: AgentRuntime;
   model?: string;
   fellBack: boolean;
+  executable: string;
 }
 
 export async function ensureRuntimeReadyForCommand(
@@ -49,12 +52,20 @@ export async function ensureRuntimeReadyForCommand(
 
   while (true) {
     try {
-      await check(projectDir, runtime);
-      return { runtime, model: opts.model, fellBack: false };
+      const probe = await check(projectDir, runtime);
+      if (runtime === "claude") await checkClaudeSdk();
+      const executable = probe?.executable ?? resolveExecutablePath(runtime === "claude" ? "claude" : "codex");
+      if (!executable) throw new Error(`${runtime} executable disappeared after readiness`);
+      return { runtime, model: opts.model, fellBack: false, executable };
     } catch (err) {
       const failure = err instanceof RuntimeAuthError
         ? err
-        : new RuntimeAuthError({ runtime, context: opts.label, cause: err });
+        : new RuntimeAuthError({
+            runtime,
+            context: opts.label,
+            stderr: err instanceof Error ? err.message : String(err),
+            cause: err,
+          });
 
       if (nonInteractive) {
         throw failure;
@@ -68,7 +79,7 @@ export async function ensureRuntimeReadyForCommand(
       if (choice === "retry") continue;
       if (choice === "switch" && allowSwitch) {
         try {
-          await check(projectDir, fallbackRuntime);
+          const probe = await check(projectDir, fallbackRuntime);
           if (fallbackRuntime === "claude") {
             await checkClaudeSdk();
           }
@@ -78,11 +89,18 @@ export async function ensureRuntimeReadyForCommand(
             );
           }
           console.log(`foreman: using ${runtimeDisplayName(fallbackRuntime)} for this run.`);
-          return { runtime: fallbackRuntime, model: undefined, fellBack: true };
+          const executable = probe?.executable ?? resolveExecutablePath(fallbackRuntime === "claude" ? "claude" : "codex");
+          if (!executable) throw new Error(`${fallbackRuntime} executable disappeared after readiness`);
+          return { runtime: fallbackRuntime, model: undefined, fellBack: true, executable };
         } catch (switchErr) {
           const switchFailure = switchErr instanceof RuntimeAuthError
             ? switchErr
-            : new RuntimeAuthError({ runtime: fallbackRuntime, context: opts.label, cause: switchErr });
+            : new RuntimeAuthError({
+                runtime: fallbackRuntime,
+                context: opts.label,
+                stderr: switchErr instanceof Error ? switchErr.message : String(switchErr),
+                cause: switchErr,
+              });
           log.error(`Fallback runtime is not ready:\n${switchFailure.message}`);
           continue;
         }
