@@ -2,7 +2,7 @@
 
 Rafi is an interview-led AI application engineering CLI. It interviews you about the project, writes project-specific guidance for Claude Code and Codex, turns a brief into a ticket-maker-ready implementation plan, sets up a structured ticket queue, and can drive a builder through that queue with QA after each ticket.
 
-It is especially useful for products that use LLMs: Rafi composes stack-aware engineering rules, skills, and role agents (`builder`, `qa`, `planner`, and `ticket-maker`) so AI safety, evaluation, reproducibility, cost, and governance are considered from the first implementation plan.
+It is especially useful for products that use LLMs: Rafi composes stack-aware engineering rules, skills, and role agents (`builder`, independent `qa`, `planner`, `ticket-maker`, and read-only `uninstaller`) so AI safety, evaluation, reproducibility, cost, and governance are considered from the first implementation plan.
 
 ## Install
 
@@ -18,14 +18,12 @@ Then run `rafi` inside the repository you want to configure. Node.js 20 or later
 
 ```sh
 mkdir my-app && cd my-app
-rafi create .              # stack and runtime interview
-rafi plan .                # brief and repo-planning interview
-rafi tickets setup:init    # ticket-source and build-preferences interview
-rafi tickets populate      # ticket-maker turns the plan into a queue
+rafi create .              # complete setup, initial planning, and tracker journey
+rafi tickets plan          # guided proposal, review, and exact ticket creation
 rafi start . --steps 10    # builder works through the queue with QA
 ```
 
-Start with `rafi create .`. It asks about the stack and target runtimes, writes `rafi-config.yaml`, emits the selected Claude/Codex artifacts, and installs the Claude Agent SDK only when Claude is selected and the target project cannot already resolve it. `rafi plan .` then interviews for the brief, and ticket setup interviews for sources and build preferences.
+Start with `rafi create .`. It asks about the stack and target runtimes, writes `rafi-config.yaml`, emits the selected Claude/Codex artifacts, verifies runtime readiness, offers standard or exhaustive initial planning, and continues into ticket setup/population in the same process. `rafi plan` is the initialization-only planning stage normally run by create.
 
 Use `rafi resume .` if an interactive interview is interrupted. For scripts or a no-prompt setup, use `rafi create . --defaults`; the complete manual-command and option reference is at [docs/cli.md](https://github.com/ttante/rafi/blob/main/docs/cli.md).
 
@@ -85,7 +83,7 @@ With no ID, `rafi resume` offers an interactive picker. Completed records are re
 rafi plan .
 ```
 
-`rafi plan` runs the read-only `planner` role with the `grill-me` skill. It turns a brief and repository inspection into a Markdown plan with scope, decisions, risks, rollback notes, and ticket-maker guidance. The CLI validates the plan before writing:
+`rafi plan` runs the read-only `planner` role in standard mode by default. `--grill-me` selects an exhaustive, one-question-at-a-time interview; `--no-grill-me` selects standard mode explicitly. It turns a brief and repository inspection into a validated Markdown plan with scope, decisions, risks, rollback notes, assessment, and ticket-maker guidance.
 
 | Path | Purpose |
 | --- | --- |
@@ -98,11 +96,11 @@ rafi plan .
 
 ```sh
 rafi tickets setup:init
-rafi tickets populate
+rafi tickets plan
 rafi tickets validate
 ```
 
-`tickets setup:init` / `setup:update` saves local, Linear, or Jira Cloud sources and populate/build defaults in `rafi-config.yaml`. Planning hints from `planning.sources` are offered as the initial local-source prefill, but the completed setup remains in `tickets.sources`. Linear uses `LINEAR_API_KEY`; Jira Cloud uses `JIRA_EMAIL` and `JIRA_API_TOKEN`.
+`tickets plan` runs a read-only guided planning conversation and applies only the exact validated proposal you approve. `tickets setup:init` / `setup:update` saves local, public URL, Linear, or Jira Cloud sources and populate/build defaults in `rafi-config.yaml`. URL snapshots are stored under ignored `.tickets/imports/`; Linear uses `LINEAR_API_KEY`, and Jira Cloud uses `JIRA_EMAIL` and `JIRA_API_TOKEN`.
 
 `tickets populate` uses explicit sources first, then saved ticket sources, then the latest Rafi plan when available. It runs the `ticket-maker` role, writes canonical tickets to `.tickets/tickets.yaml`, renders tracker docs, and validates the tracker. Source overrides, external-import setup, agent/model controls, review, queue, render, archive, and manual ticket maintenance are in the [ticket command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-tickets---help).
 
@@ -112,11 +110,16 @@ Use `rafi tickets init --app-name "My App"` for standalone tracker initializatio
 
 ```sh
 rafi start . --steps 10
-rafi status .
+rafi status
+rafi build:resume .
+rafi agents .
+rafi uninstall . --dry-run
 rafi doctor .
 ```
 
 `rafi start` reads the compiled role bundles and drives a builder through the requested work, with QA after each ticket by default. Branch strategy, completion settings, agent selection, QA overrides, and builder-session continuation are documented in the [start command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-start---help).
+
+QA is an independent, run-wide session and cannot edit protected project files. Interrupted implementation uses durable `.foreman/runs/*.json` checkpoints and resumes with `rafi build:resume`; setup/planning interviews continue with `rafi resume`. `rafi agents` stores per-role runtime/model/reasoning/fast intent, and `rafi uninstall` provides a category-by-category preview with drift checks and local rollback journaling.
 
 ## What gets written
 

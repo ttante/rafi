@@ -1,548 +1,253 @@
 # Rafi (Refined AI Framework & Implementor)
 
-A lightweight + powerful harness engineering framework. Your best bet for everything from one-shot builds to small feature implementation. Especially helpful for building enterprise level AI features.
+Rafi is an interview-led engineering framework for Claude Code and Codex. It helps you introduce an AI engineering team to a repository, decide what should be built, turn that decision into an ordered ticket queue, and drive the work with QA after every ticket.
 
-## Features
-- Composes best-practice rules into skills into agents (builder, QA, planner, ticket-maker)
-- In-stack rules for AI | frontend | cloud | backend
-- Turns a user brief plus repo inspection into a ticket-maker-ready plan with `rafi plan`
-- `ai-foreman` (robust ticketing/tracking solution):
-- Sets up + populates tickets via specialized-agent
-- Drives agents through tickets with built-in QA cycling per step
+You do not need to learn a long sequence of setup and planning commands. Rafi is designed around two guided conversations:
 
-## How
-- enforces strict test driven development (TDD)
-- enterprise level stability & security features from square one
-- rock solid task tracking
-- future work identified + documented
-- QA-coupled builder ensures code quality + testing + regression protection
+1. Run `rafi create .` when Rafi is new to a project.
+2. Run `rafi tickets plan` when a Rafi project needs more work.
 
-## AI App Superbuilder
-
-Rafi shines brightest in apps that leverage LLMs. Enable `usesAI` and your agents get five additional rule packs that enforce enterprise-grade AI engineering from the first line of code:
-
-- **Adversarial safety** — agents plan prompt injection defense, jailbreak protection, content safety checks, tool scoping, and abuse monitoring before writing any AI feature. Red-teaming is built into release criteria. An incident plan for harmful, wrong, expensive, or policy-violating outputs is required.
-- **Confidence & evals** — every AI generation step gets quality gates, confidence scoring, and acceptance thresholds. Models check their own work three times by default (configurable). Eval suites with golden examples and adversarial cases are required before promoting any prompt change.
-- **Full replayability** — every meaningful AI generation is recorded with prompt version, rendered prompt, input references, model/provider, parameters, tool calls, output, validation results, cost, latency, and decisions. Prompts are versioned, reviewed, tested, and rollback-capable.
-- **Cost tracking & learning loop** — cost per task is tracked across tokens, retries, tool calls, and latency. Failed generations feed a structured correction workflow; approved corrections are preserved in a format suitable for future evals, fine-tuning, or custom model training — all planned from day one.
-- **Model & dataset governance** — approved models, fallbacks, and change rules are documented. Model changes require evals. Dataset consent, labeling quality, retention, and training eligibility are defined before data is collected.
+Those two interviews cover the normal lifecycle. Rafi asks the questions, explains meaningful choices, remembers the project, and shows you what it intends to do before it changes shared planning state.
 
 ## Install
+
+Rafi requires Node.js 20 or later.
 
 ```sh
 npm install -g @rafi-ai/cli
 ```
 
-## Use
+Then open the repository you want to work on and start the appropriate interview.
 
-Run `rafi` from inside the target repo:
+## Workflow 1: bring Rafi into a project
 
-- Answer the walkthrough questions about your stack (or skip with `--defaults`)
-- Choose runtime targets: both Claude and Codex, Claude only, or Codex only
-- Get target-specific agent files, role bundles, and starter docs written to your repo
-- If the final target set includes Claude Code, the Claude Agent SDK is installed with your selected package manager only when the target project cannot already resolve it (`npm`, `pnpm`, Yarn Classic/modern, or Bun)
-- Selected agent runtimes are checked before `create`, `plan`, `start`, and `tickets populate` continue, with retry/switch/cancel recovery prompts if auth is missing
-- Re-run `rafi compile` whenever you update `rafi-config.yaml`
+Use `rafi create` once when adopting a new or existing repository:
 
 ```sh
-cd my-repo
-rafi create .             # interactive walkthrough
-rafi create . --defaults  # skip walkthrough, use built-in defaults
-rafi create . --runtime codex  # Codex-only native artifacts
-rafi create . --docs-root docs-rafi  # choose where Rafi writes starter/tracker docs
-rafi compile .            # re-render after editing rafi-config.yaml
-rafi plan .                 # start an interactive planning interview
+cd my-project
+rafi create .
 ```
 
-## What gets written
+This is an interactive setup interview, not a blind scaffolding command. Every question has a useful default, and Rafi handles the mechanical follow-up work for you.
 
-```
-my-repo/
-  AGENTS.md                        Codex rules doc, when Codex is targeted
-  AGENTS-rafi.md                   Append-mode overflow sidecar, when needed
-  CLAUDE.md                        Claude Code entrypoint or standalone rules, when Claude is targeted
-  CLAUDE-rafi.md                   Append-mode overflow sidecar, when needed
-  rafi-config.yaml                 your stack config - commit this, edit to update
-  .claude/agents/<role>.md         Claude subagents, when Claude is targeted
-  .claude/skills/<name>/SKILL.md   Claude project skills, when Claude is targeted
-  .codex/agents/<role>.toml        Codex project subagents, when Codex is targeted
-  .agents/skills/<name>/SKILL.md   Codex project skills, when Codex is targeted
-  .rafi/compiled/<role>/           role bundles always emitted for ai-foreman
-  docs/                            starter docs (or docs-rafi/ when docs/ already exists)
-  docs/rafi-plan.md                latest managed plan from rafi plan
-  docs/rafi-plans/<timestamp>.md   preserved plan history
-```
+The interview asks about the application and its real engineering environment: its frontend and backend, database, package manager, cloud posture, whether it uses AI, and whether Claude Code, Codex, or both should work on it. It also asks where Rafi-owned documentation should live and whether existing plans or ticket sources should be brought into the initial project setup.
 
-`harness.targets` in `rafi-config.yaml` controls which native files are refreshed. Files for unselected targets are preserved, not deleted.
+As it proceeds, Rafi:
 
-## Defaults
+- writes the project’s choices to `rafi-config.yaml`;
+- composes stack-aware rules, skills, and role agents for the selected runtimes;
+- creates native Claude Code and/or Codex project files;
+- creates role bundles used by the ticket builder and QA loop;
+- protects existing `AGENTS.md`, `CLAUDE.md`, skills, agents, and documentation instead of silently replacing them;
+- verifies that the selected agent runtime is installed and authenticated;
+- offers to continue into an initial planning interview and ticket setup.
 
-`--defaults` (and the starting point for the walkthrough) uses these values:
+The optional planning handoff is part of the `create` journey. Describe what the product should do, point Rafi at any existing requirements, and answer the planner’s follow-up questions. Rafi can then establish the project’s initial plan and structured ticket queue. You do not need to memorize a separate planning pipeline before you can get useful work underway.
 
-| Setting | Default |
-|---|---|
-| Frontend | React with TypeScript |
-| Backend | Node.js, Python, or both |
-| Database | PostgreSQL |
-| Cloud | AWS |
-| Package manager | pnpm |
-| Has frontend | ✓ |
-| Uses AI | ✓ (opt-out — disable to exclude AI rule packs) |
-| Runs in cloud | ✓ |
+This workflow is equally appropriate for an empty repository and an established codebase. In an existing repository, answer according to what the project actually uses. Rafi preserves project-owned material and adds its guidance around it.
 
-Edit `rafi-config.yaml` and run `rafi compile` to change anything. Older legacy config files are migrated automatically.
+Once a project has `rafi-config.yaml`, do not rerun `create` merely because you have another feature or milestone. That is the second workflow.
 
-## Existing Files And Custom Artifacts
+## Workflow 2: plan more work in an existing Rafi project
 
-Rafi includes protections against overwriting existing `AGENTS.md`, `CLAUDE.md`, skills, and subagents. During `rafi create`, if Rafi finds an existing root instruction file, it asks how to handle it.
-
-| Choice | Existing `AGENTS.md` / `CLAUDE.md` behavior | Use when |
-|---|---|---|
-| `append` | Preserves existing text and writes or refreshes a dated Rafi block. If inline append would exceed the runtime startup guard, Rafi writes generated guidance to `AGENTS-rafi.md` or `CLAUDE-rafi.md` and inserts a compact reference block near the top of the root file. | You want the safest non-destructive default. |
-| `update` | Asks an installed agent runtime to merge existing guidance with Rafi guidance. | You want one coherent file and have authenticated Claude Code or Codex. |
-| `overwrite` | Replaces the file with Rafi's generated version. | The existing file is disposable or already generated. |
-
-For non-interactive runs, the same root-file behavior can be set with `--root-file-mode append|update|overwrite` on `rafi create` or `rafi compile`, or with `agent_files.mode` in `rafi-config.yaml`.
-
-Append overflow sidecars are target-aware: Codex writes `AGENTS-rafi.md` only when `AGENTS.md` would exceed Codex's root file guard, and Claude writes `CLAUDE-rafi.md` only when `CLAUDE.md` would exceed Claude's guard. Rafi refuses to overwrite a pre-existing sidecar unless it is clearly Rafi-generated. Claude `@file` imports still load imported content into Claude's context according to Claude Code behavior; this sidecar keeps the root file short and visible to startup readers, but it is not a Claude context-reduction mechanism.
-
-Existing project skills and subagents can either stay project-owned or be replaced by Rafi. If a generated skill or subagent path collides, `rafi create` asks whether Rafi should overwrite it. If not, Rafi writes its defaults under `*-rafi` paths, and you can reference your existing artifact by setting `artifact_source: existing` in `rafi-config.yaml`.
-
-If a target repo already has a `docs/` path, `rafi create` keeps those app docs untouched by default and writes Rafi starter docs under the first safe `docs-rafi/` variant. The selected root is saved as `docs.root` in `rafi-config.yaml`; legacy configs without it continue to use `docs/`.
-
-## Suggested Use
-
-### New Projects
-
-- Create an empty repo and run rafi from inside it
-  ```sh
-  mkdir my-repo && cd my-repo
-  rafi create .
-  ```
-- Ask Rafi to run the `planner` role with `grill-me`, interview you for the brief, and write a ticket-maker-ready plan
-  ```sh
-  rafi plan .
-  ```
-- Use the ticket-maker agent to convert the plan into a structured, ordered ticket queue
-  ```sh
-  rafi tickets setup:init
-  rafi tickets populate
-  ```
-- `rafi tickets init` reads `docs.root` from `rafi-config.yaml`; pass `--docs-root <dir>` to override it for standalone ticket setup.
-- `rafi tickets setup:init` saves ticket sources and populate/build defaults in `rafi-config.yaml`. Sources can be local docs/globs, Linear (`LINEAR_API_KEY`), or Jira Cloud (`JIRA_EMAIL` / `JIRA_API_TOKEN`).
-- `rafi tickets populate` uses explicit `--sources` first, then saved setup sources, then asks about `<docs.root>/rafi-plan.md` when present. Native Linear/Jira imports are mirrored into `.tickets/tickets.yaml` with provider refs and ignored snapshots under `.tickets/imports/`.
-- Run the builder to implement tickets one by one, with QA after each step
-  ```sh
-  rafi start . --steps 10
-  ```
-
-### Existing Projects
-
-- Navigate into the repo and run rafi — answer questions about your current stack, or use `--defaults` and edit `rafi-config.yaml` to match reality
-  ```sh
-  cd my-repo
-  rafi create .
-  ```
-- Enable the flags that match your stack (`usesAI`, `hasFrontend`, `runsInCloud`) and re-compile to get the right rule packs
-  ```sh
-  # edit rafi-config.yaml, then:
-  rafi compile .
-  ```
-- Turn your current repo into a managed plan through Rafi's interactive planning interview, or import your existing backlog from planning docs, ticket files, folders of notes, or markdown roadmaps. Any reasonable format is OK because an agent interprets the sources.
-  ```sh
-  rafi tickets setup:init
-  rafi plan . --sources docs/roadmap.md
-  rafi tickets populate
-  # or: rafi tickets populate --sources docs/tickets.md docs/plans/**
-  ```
-- Run the builder against your backlog; QA cycles and future-work tracking keep the queue clean as work completes
-  ```sh
-  rafi start . --steps 10
-  ```
-
-## Rule packs
-
-All 30 packs are assembled from your stack config. Most are always included; three groups are conditional:
-
-- **Always** — code quality, git safety, testing, TDD, CI, security, observability, robustness, scalability, data governance, API docs, release, architecture, and templated stack rules (frontend framework, backend, database, package manager substituted from your answers)
-- **`usesAI`** — AI safety, evals, cost tracking, reproducibility, and AI governance rules
-- **`hasFrontend`** — accessibility and UX rules
-- **`runsInCloud`** — cloud infra and IaC rules
-
-Choices are saved in `rafi-config.yaml`. The top of `AGENTS.md` shows a `# rafi: ai=off frontend=on cloud=on docs=docs` header so the active set and docs root are always visible.
-
-## Unattended ticket loop
-
-`rafi` drives your agents through a ticket queue — no human needed between steps:
+When a Rafi-managed project needs a feature, milestone, fix, audit, backlog import, or revised direction, run:
 
 ```sh
-rafi tickets init --project ./my-repo --app-name "My App"
-rafi start ./my-repo --steps 5
+rafi tickets plan
 ```
 
-- Reads compiled role bundles from `.rafi/compiled/` so each turn gets the right guidance.
-- Builder, QA, planner, and ticket-maker roles are each composed from the relevant rule packs.
-- Falls back to library defaults if no compiled bundle is present.
+You can run it from the project root or from a directory inside the project. Rafi finds the nearest configured project, shows its name and absolute path, and asks before using an ancestor project. Ticket planning requires a fully initialized tracker; an uninitialized or partial project is directed to `rafi create` or `rafi resume` before an agent is launched or shared state is changed.
+
+Rafi also protects the less-visible history behind the tracker. If canonical tickets exist but the ignored local status database is missing, planning stops and explains what needs to be restored. It will not pretend every old ticket is new work and build a proposal on corrupted assumptions.
+
+### One conversation, from rough idea to approved tickets
+
+The interview begins with one open question. You can answer however is natural:
+
+- describe a feature, problem, milestone, or desired outcome;
+- ask Rafi to audit the repository and propose work;
+- paste requirements or existing tickets;
+- name local files, directories, or globs;
+- reference saved Linear or Jira sources;
+- provide a public web page, Markdown or text document, or PDF.
+
+Rafi combines that answer with what it already knows about the project. It summarizes remembered sources and lets you say which ones matter for this session in plain language. It also surfaces saved future-work ideas and existing “next” tickets so you can include them, leave them for later, dismiss them, retain the current queue, or replace it intentionally.
+
+Public sources are fetched and snapshotted for the session. Local material outside the repository is also copied into an ignored import snapshot rather than recording a machine-specific absolute path. Source provenance stays attached to the resulting tickets, so imported requirements do not disappear into an unexplained backlog.
+
+### An interview at the depth you want
+
+After hearing the initial request, Rafi explains two interview styles:
+
+- **Standard** asks focused questions where an answer is needed to produce a sound proposal.
+- **Exhaustive `grill-me`** probes assumptions, edge cases, failure modes, and unresolved product or delivery decisions more aggressively.
+
+You can begin with the standard interview and upgrade to `grill-me` later without losing the proposal already under discussion.
+
+Questions are conversational. Rafi gives a recommended answer and alternatives, but you can always respond in your own words. Depending on the work, the conversation may cover scope, source interpretation, ticket size, dependencies, estimates, validation expectations, branching, pull requests, merge behavior, and whether several tickets should travel together as one delivery unit. These are decisions made with you, not a wall of command-line switches you need to understand in advance.
+
+If only one configured runtime is available, Rafi uses it. If both Claude and Codex are configured, it asks which one should plan the session. It shows the effective model and reasoning defaults and lets you make session-only changes conversationally.
+
+### Nothing changes until you approve the exact result
+
+The planning agent runs read-only. It may inspect the repository and reason about the work, but it cannot edit the tracker or project while interviewing you.
+
+When it believes the plan is ready, Rafi presents the complete human-readable plan and the exact proposed ticket changes. That proposal can include:
+
+- new tickets and edits to existing tickets;
+- dependency and ordering changes;
+- explicit handling of every imported source item;
+- future-work decisions;
+- delivery groups, branch strategy, and pull-request behavior;
+- the tickets that should be considered “next.”
+
+You can approve the exact set, continue discussing it in natural language, or cancel. Continuing the discussion can be as simple as “split the API work,” “keep the existing next tickets,” “make this one pull request,” or “upgrade to grill-me.” Rafi produces a revised complete proposal and asks for approval again.
+
+After approval, Rafi validates and applies that exact proposal—no second agent gets to reinterpret it. Existing ticket IDs and completion evidence are preserved. Replaced work is linked through supersession history rather than erased. Rafi writes the current ticket plan and a timestamped historical copy, updates the structured tracker and delivery plan, and runs the tracker validations. If configuration or ticket state changed while you were reviewing, Rafi refreshes the proposal and asks for approval again instead of applying stale decisions.
+
+Finally, Rafi summarizes what was created or changed and offers to start the agreed next ticket or delivery group.
+
+## Build the approved work
+
+Once tickets are ready, Rafi can drive the implementation queue:
+
+```sh
+rafi start . --steps 3
+```
+
+Each step is one ticket. The builder receives the project-specific role guidance, and QA reviews each completed ticket by default. The delivery choices approved during `rafi tickets plan` carry into execution: work can stay on the current branch, use a branch per ticket, or share an isolated branch and pull request across a related group.
+
+If a grouped delivery contains more tickets than the current run allows, Rafi completes the requested number of tickets, preserves the group’s branch and session, and waits to open its pull request until the group is complete. Unfinished or blocked groups remain available to resume, while dependency-safe unrelated work can continue.
+
+To see the most recent run, use:
+
+```sh
+rafi status
+```
+
+Like ticket planning, status finds the nearest Rafi project when run from a nested directory and identifies the project before showing its latest run.
+
+If implementation is interrupted, use `rafi build:resume .`. It lists every recoverable run, shows the preserved worktree/branch, checkpoint, completed side effects, and exact-session availability, then resumes only the selected ticket. `rafi resume` is exclusively for setup and planning interviews; a new `rafi start` begins new implementation work.
+
+## Agent defaults and safe removal
+
+Run `rafi agents .` to configure committed defaults independently for planner, Builder, QA, ticket maker, and the read-only uninstaller interpreter. `rafi start --agent` overrides only Builder for that run; QA remains a separate provider session with its own settings.
+
+Run `rafi uninstall .` for an ordered, preview-first project uninstall. Tickets, plans, modified or pre-existing material, and application code are preserved by default. Rafi never changes remote branches or pull requests, rechecks targets after preview, and quarantines selected local files in a recoverable transaction before final removal. `--dry-run` changes no bytes.
+
+## Resume an interrupted interview
+
+Rafi saves compact, local recovery records for its interactive workflows. If a setup or planning conversation is interrupted, return to it with:
+
+```sh
+rafi resume .
+```
+
+If more than one unfinished interview exists, Rafi lets you choose one. Ticket planning also notices its own unfinished interviews when you next run `rafi tickets plan` and offers to resume, discard, or start a new conversation.
+
+Recovery records keep answers, checkpoints, source references, file fingerprints, and an agent session ID when one is available. They deliberately do not keep a full interview transcript or agent output. This preserves enough context to continue safely without turning a private product conversation into a permanent project artifact.
+
+If the original agent session can be continued, Rafi requests it. Otherwise, it resumes from the saved brief, answers, and checkpoint and explains the limitation. Shared files are fingerprinted so an interrupted interview cannot unknowingly overwrite planning changes made in the meantime.
+
+Completed recovery records are cleaned up after 30 days. You can also discard a saved interview from the interactive picker or with the focused commands documented in the [CLI reference](./docs/cli.md).
+
+## Where `rafi plan` fits
+
+`rafi plan` is the lower-level Markdown planning step used by the initial `rafi create` journey. It can be useful for automation or for producing a standalone planning document, but it is not the normal command for adding work to an active Rafi project.
+
+The distinction is simple:
+
+- `rafi plan` produces a planning document.
+- `rafi tickets plan` understands the live ticket system, reconciles existing and imported work, agrees on delivery behavior, reviews an exact proposal with you, and safely applies the approved result.
+
+For ongoing project work, prefer `rafi tickets plan`.
+
+## What Rafi adds to a project
+
+The exact files depend on whether Claude Code, Codex, or both are selected:
+
+```text
+my-project/
+  rafi-config.yaml                   Project stack, runtime, and Rafi settings
+  AGENTS.md                          Codex project guidance, when selected
+  CLAUDE.md                          Claude Code project guidance, when selected
+  .codex/agents/<role>.toml          Codex role agents
+  .agents/skills/<name>/SKILL.md     Codex project skills
+  .claude/agents/<role>.md           Claude Code role agents
+  .claude/skills/<name>/SKILL.md     Claude Code project skills
+  .rafi/compiled/<role>/             Runtime-neutral role bundles
+  .rafi/interviews/                  Ignored interview recovery records
+  .tickets/tickets.yaml              Canonical ticket definitions
+  .tickets/delivery.yaml             Approved delivery groups and behavior
+  .tickets/ticket-state.sqlite       Ignored local status and evidence history
+  .tickets/imports/                  Ignored source snapshots
+  docs/rafi-plan.md                  Initial setup plan, when requested
+  docs/rafi-ticket-plan.md           Latest approved ticket-planning result
+  docs/rafi-ticket-plans/            Timestamped ticket-plan history
+  docs/ticket-progress.md            Rendered view of the live tracker
+```
+
+The documentation root is configurable. If an existing project already owns `docs/`, the `create` interview recommends a separate `docs-rafi/` directory so it does not crowd or overwrite the application’s documentation.
+
+After intentionally editing `rafi-config.yaml`, run `rafi compile .` to refresh generated project guidance.
+
+## Existing files stay under your control
+
+When a project already has root instructions such as `AGENTS.md` or `CLAUDE.md`, `rafi create` asks how they should be handled. The recommended choice preserves the existing file and adds a managed Rafi section. You may instead ask an authenticated runtime to merge the guidance or explicitly replace a disposable file.
+
+The same principle applies to existing skills and agents. You can keep the project-owned artifact, let Rafi write its default under a distinct name, or configure Rafi to use the existing artifact. Rafi also refuses to overwrite a sidecar it cannot identify as Rafi-generated.
+
+## Built for serious AI application work
+
+Rafi is useful for general software projects, and it adds deeper guardrails when the application itself uses LLMs. Enabling AI support composes five additional rule packs into planning, building, and QA:
+
+- **Adversarial safety** covers prompt injection, jailbreak defenses, content safety, tool scoping, abuse monitoring, red-team release criteria, and incident response.
+- **Confidence and evals** require meaningful quality gates, golden examples, adversarial cases, and acceptance thresholds for model behavior.
+- **Replayability** treats prompts as versioned engineering artifacts and records the inputs, model settings, tool calls, outputs, validation, cost, latency, and decisions needed to reproduce important generations.
+- **Cost and learning loops** account for tokens, retries, tools, and latency while turning approved corrections into future evaluation or training material.
+- **Model and dataset governance** makes model changes, fallbacks, dataset consent, retention, labeling quality, and training eligibility explicit engineering decisions.
+
+General rule packs cover testing and TDD, security, observability, robustness, scalability, data governance, API documentation, release practices, architecture, accessibility, cloud infrastructure, and the technologies named during the setup interview.
+
+## A few useful supporting commands
+
+The two interviews are the primary interface. These supporting commands are useful once work is underway:
+
+```sh
+rafi compile .       # refresh generated guidance after editing rafi-config.yaml
+rafi status          # show the nearest project's latest builder run
+rafi doctor .        # check project, runtime, and tracker readiness
+```
+
+The complete scripting and maintenance command reference—including non-interactive modes and advanced overrides—is generated in [docs/cli.md](./docs/cli.md). It is intentionally separate from this guided workflow introduction.
 
 ## Packages
 
-| Package | Install | Description |
-|---|---|---|
-| `@rafi-ai/cli` | `npm install -g @rafi-ai/cli` | All commands — scaffold, compile, plan, tickets, start, status, doctor |
-| `special-agents` | `npm install special-agents` | Rules, skills, and agent library |
-| `ai-foreman` | `npm install -g ai-foreman` | Ticket-loop runtime (standalone alternative) |
-| `rafi-spec` | dependency package | Shared schemas and TypeScript types used by the public packages |
+| Package | Purpose |
+| --- | --- |
+| `@rafi-ai/cli` | The complete `rafi` experience: setup, interviews, tickets, builder, status, and diagnostics. |
+| `special-agents` | Rafi’s rules, skills, role definitions, and composition library. |
+| `ai-foreman` | The ticket-loop runtime for users who need it as a standalone package. |
+| `rafi-spec` | Shared schemas and TypeScript types used by the public packages. |
 
-Published artifacts are on npm, not GitHub Packages. That means the GitHub repository homepage can show an empty "Packages" panel even when the npm packages above are available.
+Published packages are available from npm.
 
-## Releases and changelog
+## Releases and development
 
-Current package versions:
+Release notes live in [CHANGELOG.md](./CHANGELOG.md), and release mechanics live in [RELEASING.md](./RELEASING.md).
 
-| Package | Version |
-|---|---|
-| `@rafi-ai/cli` | `0.8.0` |
-| `ai-foreman` | `1.5.0` |
-| `special-agents` | `0.6.0` |
-| `rafi-spec` | `0.6.0` |
+This repository is a pnpm monorepo:
 
-- Release notes live in [CHANGELOG.md](./CHANGELOG.md).
-- Release mechanics and required checks live in [RELEASING.md](./RELEASING.md).
-- GitHub Releases should be created from version tags for user-visible releases. If the GitHub "Releases" panel is empty, no release tags have been published for this repository yet.
-
-## Monorepo
-
-```
+```text
 packages/
-  special-agents/   library (content + composition logic)
   rafi/             @rafi-ai/cli
-  ai-foreman/       runtime
-  spec/             rafi-spec schema/types package
+  ai-foreman/       Ticket runtime
+  special-agents/   Rules, skills, and role composition
+  spec/             Shared schemas and types
 examples/
-  dummy-project/    smoke-test target
+  dummy-project/    Smoke-test target
 ```
 
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE).
-
-## All Commands
-
-`rafi` includes the ticket-loop runtime commands from `ai-foreman`. Standalone `ai-foreman` exposes the same runtime commands: `tickets`, `start`, `status`, and `doctor`. Built-in help is available with `rafi --help`, `rafi help <command>`, and each command's `--help`.
-
-A generated help snapshot is available in [docs/cli.md](./docs/cli.md).
-
-### Global Help
-
-| Command | Description |
-|---|---|
-| `rafi --help` | Show top-level `rafi` help. |
-| `rafi --version` | Print the `rafi` package version. |
-| `rafi help [command]` | Show help for a command or nested command. |
-| `rafi <command> -h, --help` | Show help for a specific command. |
-| `ai-foreman --help` | Show top-level standalone runtime help. |
-| `ai-foreman --version` | Print the standalone `ai-foreman` package version. |
-| `ai-foreman help [command]` | Show help for a standalone runtime command or nested command. |
-
-### Scaffold Commands
-
-#### `rafi create <project>`
-
-Runs the walkthrough, writes `rafi-config.yaml`, and compiles the target repo.
-
-| Option | Description |
-|---|---|
-| `--defaults` | Skip the walkthrough and use built-in defaults. |
-| `--force` | Overwrite existing doc files. |
-| `--docs-root <dir>` | Use a safe repo-relative directory for Rafi starter and tracker docs. |
-| `--runtime <both\|claude\|codex>` | Select which native runtime artifacts to emit. `--defaults` keeps both unless this is supplied. |
-| `--root-file-mode <mode>` | Override root instruction file handling. Valid modes: `append`, `update`, `overwrite`. |
-
-#### `rafi compile <project>`
-
-Re-renders the native artifacts selected by `harness.targets` and always refreshes `.rafi/compiled/<role>/*` role bundles from an existing `rafi-config.yaml`.
-
-| Option | Description |
-|---|---|
-| `--force` | Overwrite existing doc files. |
-| `--root-file-mode <mode>` | Override root instruction file handling for this run. Valid modes: `append`, `update`, `overwrite`. |
-
-### Planning Commands
-
-#### `rafi plan [project]`
-
-Runs a read-only planning agent, loads the `planner` role plus `grill-me`, and writes a ticket-maker-ready Markdown plan. Run `rafi plan .` to start the interactive planning interview; Rafi prompts for the initial brief, then the planner inspects the repo, stress-tests the plan with `grill-me`, and asks a focused follow-up question only when it is genuinely blocked.
-
-| Option | Description |
-|---|---|
-| `--brief <text>` | Optional non-interactive planning brief for scripts or one-line runs. |
-| `--brief-file <path>` | Optional file containing the planning brief. Use either this or `--brief`. |
-| `--sources <paths...>` | Source hint files, folders, or globs to check first. |
-| `-a, --agent <agent>` | Planning agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
-| `-m, --model <model>` | Override the planning agent's model. |
-| `--effort <level>` | Reasoning effort level. Valid values: `low`, `medium`, `high`, `xhigh`. |
-| `--fast` | Fast mode with lower latency. |
-| `-y, --yes` | Skip the confirmation prompt before running the planning agent. |
-
-`rafi plan` writes every run to `<docs.root>/rafi-plans/<timestamp>.md` and refreshes `<docs.root>/rafi-plan.md`. The next step is usually:
-
-```sh
-rafi tickets populate --sources docs/rafi-plan.md
-```
-
-### Ticket Commands
-
-Use `rafi tickets --help` for the ticket command list. The same ticket commands are available in standalone runtime form as `ai-foreman tickets ...`.
-
-#### `rafi tickets init`
-
-Initializes the `.tickets/` structure in a project directory.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--app-name <name>` | Application name. |
-| `--timezone <tz>` | IANA timezone. Default: `UTC`. |
-| `--implementation-limit <n>` | Implementation queue window size for generated docs and Foreman selection. Default: `500`. |
-| `--view-limit <n>` | Default row limit for `rafi tickets queue`. Default: `20000`. |
-| `--queue-limit <n>` | Deprecated alias for `--implementation-limit`. |
-| `--docs-root <dir>` | Override the generated ticket docs root. |
-| `-y, --yes` | Skip the app-name prompt when no config/package default exists. |
-
-`tickets init` writes `implementation_limit` and `view_limit` to `.tickets/config.yaml`. Existing configs with `queue_limit` still load as an implementation limit, with the old default value `50` upgraded to `500`.
-
-#### `rafi tickets setup:init` / `setup:update`
-
-Saves optional `tickets:` preferences in `rafi-config.yaml`: ordered sources, populate defaults, and branch/build completion defaults. If setup runs before `rafi-config.yaml` exists, it writes a minimal valid config without running `rafi compile`.
-
-Useful scripted examples:
-
-```sh
-rafi tickets setup:init --local-source docs/rafi-plan.md --completion auto-merge --provider github
-rafi tickets setup:update --linear --linear-team-key ENG
-rafi tickets setup:update --jira-site https://example.atlassian.net --jira-jql "project = ENG"
-```
-
-For auto-merge runs, setup can also save whether dependent tickets should wait for earlier PRs/MRs to merge, plus an optional wait timeout.
-
-#### `rafi tickets populate`
-
-Asks the `ticket-maker` role to populate `.tickets/tickets.yaml` from existing project ticket or backlog docs.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `-a, --agent <agent>` | Builder agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
-| `-m, --model <model>` | Override the builder's model. |
-| `--effort <level>` | Reasoning effort level. Valid values: `low`, `medium`, `high`, `xhigh`. |
-| `--sources <paths...>` | Source hint files, folders, or globs to check first. When omitted, populate uses saved setup sources before prompting for the configured Rafi plan. |
-| `--fast` | Fast mode with lower latency. |
-| `-y, --yes` | Skip the confirmation prompt before letting the builder edit tickets. |
-
-Configured Linear and Jira sources are imported natively before any local-doc populate agent runs. Rafi stores only env var names and non-secret filters in config, writes snapshots under ignored `.tickets/imports/`, and adds `external_refs` to imported tickets.
-
-#### `rafi tickets review`
-
-Reviews pending split/combine/duplicate recommendations stored in SQLite and rendered into the progress doc. Use `--accept-all`, `--dismiss-all`, `--defer-all`, or `--id <n> --accept|--dismiss|--defer`; accepted recommendations apply deterministic ticket patches, rerender, and validate.
-
-#### `rafi tickets update <ticketId>`
-
-Updates ticket status or progress fields.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--status <status>` | New status. Valid values: `planned`, `next`, `in_progress`, `blocked`, `done`, `canceled`. |
-| `--actor <actor>` | Actor making the update. |
-| `--summary <text>` | Short description of the update. |
-| `--next-action <text>` | What comes next for this ticket. |
-| `--current-step <text>` | Current implementation step. |
-| `--owner <name>` | Ticket owner. |
-| `--validation-result <result>` | Validation result. Valid values: `passed`, `failed`, `not_run`, `not_applicable`. |
-| `--validation-commands <cmds>` | Commands used to validate. |
-| `--evidence <text>` | Evidence of correctness. |
-| `--last-error <text>` | Last error message if tests failed. |
-
-#### `rafi tickets complete <ticketId>`
-
-Marks a ticket done with validation evidence.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--actor <actor>` | Actor who completed this ticket. |
-| `--summary <text>` | Completion summary. |
-| `--validation-result <result>` | Validation result. Valid values: `passed`, `failed`, `not_run`, `not_applicable`. Default: `passed`. |
-| `--validation-commands <cmds>` | Commands used to validate. |
-| `--evidence <text>` | Evidence of correctness. Required unless validation is `not_applicable`. |
-| `--validation-notes <text>` | Extra notes about validation. |
-
-#### `rafi tickets block <ticketId>`
-
-Marks a ticket as blocked.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--blocked-by <ids...>` | Ticket IDs or labels that are blocking. |
-| `--type <type>` | Blocker type, such as `dependency`, `external`, or `decision`. |
-| `--summary <text>` | Description of the blocker. |
-| `--unblock-criteria <text>` | What needs to happen to unblock. |
-| `--actor <actor>` | Actor recording this blocker. |
-
-#### `rafi tickets unblock <ticketId>`
-
-Removes explicit blockers from a ticket.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--summary <text>` | Description of how it was unblocked. |
-| `--actor <actor>` | Actor who resolved the blocker. |
-
-#### `rafi tickets cancel <ticketId>`
-
-Cancels a ticket.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--summary <text>` | Required. Reason for cancellation. |
-| `--actor <actor>` | Actor who canceled this ticket. |
-
-#### `rafi tickets discover`
-
-Adds newly discovered future work to the inbox.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--summary <text>` | Required. Short description of the discovered work. |
-| `--source-ticket <id>` | Ticket that led to this discovery. |
-| `--proposed-ticket <id>` | Proposed ticket ID. |
-| `--priority-guess <p>` | Priority guess, such as `P0`, `P1`, `P2`, or `P3`. |
-| `--area <area>` | Product or code area. |
-| `--rationale <text>` | Why this work is needed. |
-| `--needs-decision-from <who>` | Who needs to decide. |
-| `--actor <actor>` | Actor who discovered this. |
-
-#### `rafi tickets accept-future-work <futureWorkId>`
-
-Promotes a future-work item into `tickets.yaml` as a new ticket.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--ticket-id <id>` | Required. New ticket ID. |
-| `--order <n>` | Required. Canonical implementation order. |
-| `--actor <actor>` | Actor who accepted this item. |
-
-#### `rafi tickets reorder <ticketId>`
-
-Changes the canonical implementation order of a ticket.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--after <ticketId>` | Place this ticket immediately after another. |
-| `--order <n>` | Set an explicit order value. |
-| `--actor <actor>` | Actor who reordered this. |
-
-#### `rafi tickets render`
-
-Regenerates the configured ticket progress doc from current structured sources.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-
-#### `rafi tickets validate`
-
-Runs all four validation passes and exits with status `1` on error.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-
-#### `rafi tickets queue`
-
-Prints the ticket queue to stdout. By default it uses the tracker `view_limit`.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--limit <n>` | Override the view limit. |
-
-#### `rafi tickets archive`
-
-Updates the configured ticket archive doc and prunes old completed rows.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--older-than-days <n>` | Only archive tickets completed more than N days ago. |
-
-#### `rafi tickets import`
-
-Currently a stub for migrating an existing Markdown tracker.
-
-| Option | Description |
-|---|---|
-| `-p, --project <dir>` | Project directory. Defaults to the current working directory. |
-| `--progress <path>` | Path to an existing ticket progress Markdown file. |
-
-### Builder And Runtime Commands
-
-#### `rafi start <project>`
-
-Enlists a builder and drives it through a batch of N steps.
-
-| Option | Description |
-|---|---|
-| `-s, --steps <n>` | Required. Number of steps to drive. |
-| `-a, --agent <agent>` | Builder agent. Valid values: `claude`, `codex`. If omitted, a single `harness.targets` value in `rafi-config.yaml` is used; missing config or both targets default to Claude. |
-| `-m, --model <model>` | Override the builder's model. |
-| `-r, --resume <sessionId>` | Resume a prior builder session. |
-| `--continue` | Resume the most recent logged session for this project. |
-| `-t, --tickets <path>` | Path to ticket file passed to the builder as context. |
-| `-y, --yes` | Skip the pre-flight confirmation prompt. |
-| `--effort <level>` | Reasoning effort level. Valid values: `low`, `medium`, `high`, `xhigh`. |
-| `--fast` | Fast mode with lower latency. For Codex, maps to low effort. |
-| `--no-qa` | Disable per-ticket QA review. QA is enabled by default. |
-| `--branch-per-ticket` | Run each selected structured ticket in an isolated git worktree and branch. |
-| `--no-branch-per-ticket` | Disable saved branch-per-ticket defaults for this run. |
-| `--create-pr` | Push each successful ticket branch and create a GitHub PR. Implies `--branch-per-ticket`. |
-| `--no-create-pr` | Disable saved PR/MR creation defaults for this run. |
-| `--completion <mode>` | Branch completion override: `pr`, `auto-merge`, `direct-merge`, or `none`. |
-| `--provider <provider>` | PR/MR provider override: `auto`, `github`, or `gitlab`. |
-| `--auto-merge-wait` / `--no-auto-merge-wait` | Override whether dependent auto-merge tickets wait for earlier PRs/MRs to merge. |
-| `--auto-merge-timeout-minutes <n>` | Override the dependency merge wait timeout; blank setup value means no timeout. |
-| `--base <ref>` | Base ref for root ticket branches. Default: current branch or `HEAD`. |
-| `--branch-prefix <prefix>` | Branch name prefix for ticket branches. Default: `rafi`. |
-| `--max-branch-depth <n>` | Maximum selected branch stack depth. Default: `2`. |
-| `--pr-ready` | Create ready-for-review PRs instead of draft PRs. |
-| `--keep-worktrees` | Keep successful ticket worktrees for inspection. |
-| `--ticket <id>` | Ticket ID to continue in branch mode. Repeat for multiple tickets. |
-
-#### `rafi status <project>`
-
-Summarizes the most recent foreman run for a project. It has no command-specific options beyond `-h, --help`.
-
-#### `rafi doctor [project]`
-
-Checks Foreman, agent CLIs, config, and optional ticket tracker readiness. The project argument defaults to the current directory.
-
-| Option | Description |
-|---|---|
-| `--github` | Run GitHub PR readiness checks. |
-
-### Standalone `ai-foreman` Runtime
-
-Replace `rafi` with `ai-foreman` for runtime commands only:
-
-- `ai-foreman tickets ...`
-- `ai-foreman start ...`
-- `ai-foreman status ...`
-- `ai-foreman doctor ...`
-
-`ai-foreman create` and `ai-foreman compile` do not exist; those scaffold commands are only provided by `rafi`.

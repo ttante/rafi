@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { formatRuntimeProbeFailure, probeRuntime } from "./runtimeReadiness.js";
 
 export type AgentRuntime = "claude" | "codex";
 
@@ -29,36 +29,14 @@ export class RuntimeAuthError extends Error {
   }
 }
 
-export function checkRuntimeReady(projectDir: string, runtime: AgentRuntime): void {
-  try {
-    if (runtime === "claude") {
-      execFileSync("claude", ["-p", "Return exactly OK"], {
-        cwd: projectDir,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } else {
-      execFileSync("codex", ["exec", "--skip-git-repo-check", "-C", projectDir, "Return exactly OK"], {
-        cwd: projectDir,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    }
-  } catch (err) {
-    const failure = err as {
-      status?: number | null;
-      stdout?: string | Buffer;
-      stderr?: string | Buffer;
-    };
-    throw new RuntimeAuthError({
-      runtime,
-      context: "readiness check",
-      exitCode: failure.status,
-      stdout: outputToString(failure.stdout),
-      stderr: outputToString(failure.stderr),
-      cause: err,
-    });
-  }
+export async function checkRuntimeReady(projectDir: string, runtime: AgentRuntime): Promise<void> {
+  const result = await probeRuntime(projectDir, runtime);
+  if (!result.ok) throw new RuntimeAuthError({
+    runtime,
+    context: "readiness check",
+    exitCode: result.exitCode,
+    stderr: formatRuntimeProbeFailure(result),
+  });
 }
 
 export function normalizeRuntimeErrorText(

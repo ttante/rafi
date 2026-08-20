@@ -3,6 +3,7 @@ import { resolve, join } from "node:path";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { findResumableBranchSessions, formatBranchContinueCommand } from "../branch/resume.js";
 import type { GitHubFailureCode } from "../branch/types.js";
+import { recoverableBuildRuns } from "../buildRuns.js";
 
 type StatusGitHubFailureCode = GitHubFailureCode | "pr_failed";
 
@@ -25,14 +26,23 @@ export function buildStatusCommand(): Command {
   return new Command("status")
     .description("Summarize the most recent foreman run for a project.")
     .argument("<project>", "path to the project directory")
-    .action((project: string) => {
+    .action((project: string) => runStatus(project));
+}
+
+/** Print the existing Foreman status report for a resolved project. */
+export function runStatus(project: string): void {
       const projectDir = resolve(project);
       const dir = join(projectDir, ".foreman");
+      const recoverable = recoverableBuildRuns(projectDir);
       if (!existsSync(dir)) fail(`no foreman runs found under ${dir}`);
       const logs = readdirSync(dir)
         .filter((f) => f.endsWith(".jsonl"))
         .sort();
-      if (logs.length === 0) fail(`no foreman runs found under ${dir}`);
+      if (logs.length === 0) {
+        if (recoverable.length === 0) fail(`no foreman runs found under ${dir}`);
+        printRecoverable(projectDir, recoverable);
+        return;
+      }
 
       const latest = join(dir, logs[logs.length - 1]);
       const records = readFileSync(latest, "utf8")
@@ -82,7 +92,13 @@ export function buildStatusCommand(): Command {
       for (const esc of escalations) {
         console.log(`  escalated: ${esc.tool} — ${esc.reason}`);
       }
-    });
+      if (recoverable.length > 0) printRecoverable(projectDir, recoverable);
+}
+
+function printRecoverable(projectDir: string, runs: ReturnType<typeof recoverableBuildRuns>): void {
+  console.log(`foreman: ${runs.length} unfinished/recoverable build run(s):`);
+  for (const run of runs) console.log(`  ${run.runId}  ${run.currentTicket ?? run.tickets[0] ?? "unknown"}  ${run.active ? "active" : run.status}  checkpoint=${run.checkpoint}`);
+  console.log(`foreman: recover with \`rafi build:resume ${projectDir}\``);
 }
 
 function findLatestGitHubFailure(records: Record<string, unknown>[]): LatestGitHubFailure | undefined {

@@ -43,7 +43,7 @@ export const agentManifestSchema = {
   properties: {
     name: { type: "string", pattern: KEBAB },
     description: { type: "string", minLength: 1 },
-    role: { enum: ["builder", "qa", "planner", "ticket-maker"] },
+    role: { enum: ["builder", "qa", "planner", "ticket-maker", "uninstaller"] },
     packs: { type: "array", items: { type: "string" } },
     skills: { type: "array", items: { type: "string" } },
     conditionalPacks: {
@@ -125,6 +125,15 @@ const ticketSetupSource = {
         jql: { type: "string", minLength: 1 },
       },
     },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "url"],
+      properties: {
+        type: { const: "url" },
+        url: { type: "string", pattern: "^https?://" },
+      },
+    },
   ],
 } as const;
 
@@ -163,6 +172,35 @@ const ticketsSetupConfig = {
       },
     },
   },
+} as const;
+
+const agentDefaultsShape = {
+  type: "object",
+  additionalProperties: false,
+  required: ["version", "roles"],
+  properties: {
+    version: { const: 1 },
+    roles: {
+      type: "object",
+      additionalProperties: false,
+      properties: Object.fromEntries(["planner", "builder", "qa", "ticket-maker", "uninstaller"].map((role) => [role, {
+        type: "object",
+        additionalProperties: false,
+        required: ["make", "model", "reasoning", "fast"],
+        properties: {
+          make: { enum: ["claude", "codex"] },
+          model: { type: "string", minLength: 1 },
+          reasoning: { type: "string", minLength: 1 },
+          fast: { type: "boolean" },
+        },
+      }])),
+    },
+  },
+} as const;
+
+export const agentDefaultsSchema = {
+  $id: "rafi/agentDefaultsV1",
+  ...agentDefaultsShape,
 } as const;
 
 export const projectConfigSchema = {
@@ -214,6 +252,7 @@ export const projectConfigSchema = {
       },
     },
     tickets: ticketsSetupConfig,
+    agent_defaults: agentDefaultsShape,
     agents: artifactPathMap,
     skills: artifactPathMap,
   },

@@ -170,6 +170,22 @@ export function cmdInit(projectDir: string, opts: InitOptions): void {
           },
         },
       },
+      source_refs: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["source", "item"],
+          properties: {
+            source: { type: "string", minLength: 1 },
+            item: { type: "string", minLength: 1 },
+            url: { type: ["string", "null"] },
+            fingerprint: { type: ["string", "null"] },
+            note: { type: ["string", "null"] },
+          },
+        },
+      },
+      superseded_by: { type: "array", items: { type: "string" }, uniqueItems: true },
+      supersedes: { type: "array", items: { type: "string" }, uniqueItems: true },
     },
   };
   writeFileSync(join(ticketsDir, "schema", "tickets.schema.json"), JSON.stringify(ticketSchema, null, 2), "utf8");

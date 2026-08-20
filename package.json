@@ -13,7 +13,11 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
-    "test:live-interview": "node scripts/live-interview.mjs"
+    "test:live-create": "node scripts/live-create.mjs",
+    "test:live-ticket-plan": "node scripts/live-ticket-plan.mjs",
+    "test:live-interview": "node scripts/live-interview.mjs",
+    "docs:generate": "tsx packages/rafi/scripts/generate-cli-docs.ts",
+    "docs:check": "tsx packages/rafi/scripts/generate-cli-docs.ts --check"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["better-sqlite3"]

@@ -14,6 +14,7 @@ import {
 import type { AgentRole, HarnessTarget, ProjectConfig, ProjectFlags } from "rafi-spec";
 import { copyDocs, validateDocsRoot, type CopyDocsOptions } from "./docs.js";
 import { DEFAULT_DOCS_ROOT, RAFI_CONFIG_FILE } from "./project.js";
+import { capturePreimage, finalizeOwnedWrite, registerOwnedFile } from "./ownership.js";
 
 const RAFI_APPEND_START = "<!-- rafi:start -->";
 const RAFI_APPEND_END = "<!-- rafi:end -->";
@@ -139,6 +140,16 @@ export function compile(targetDir: string, config: ProjectConfig, opts: CompileP
   // Compiled role bundles for foreman (role-filtered)
   emitCompiledBundles(targetDir, { defaults, conditions, skillNames });
 
+  for (const [name, paths] of Object.entries(config.agents)) {
+    if (paths.artifact_source !== "rafi") continue;
+    for (const target of targets) registerOwnedFile(targetDir, paths[target], { mode: "generated", origin: `compile:agent:${name}` });
+    registerCompiledRole(targetDir, name);
+  }
+  for (const [name, paths] of Object.entries(config.skills)) {
+    if (paths.artifact_source !== "rafi") continue;
+    for (const target of targets) registerOwnedFile(targetDir, paths[target], { mode: "generated", origin: `compile:skill:${name}` });
+  }
+
   // Starter docs (flag-gated)
   if (!opts.skipDocs) {
     copyDocs(targetDir, config.flags, { force: opts.force, docsRoot });
@@ -151,7 +162,9 @@ export function compile(targetDir: string, config: ProjectConfig, opts: CompileP
  */
 export function writeRafiConfigYaml(targetDir: string, config: ProjectConfig): void {
   mkdirSync(targetDir, { recursive: true });
+  const ownership = capturePreimage(targetDir, RAFI_CONFIG_FILE, "configuration");
   writeFileSync(join(targetDir, RAFI_CONFIG_FILE), stringify(config), "utf8");
+  finalizeOwnedWrite(targetDir, ownership);
 }
 
 export const writeProjectYaml = writeRafiConfigYaml;
@@ -174,15 +187,26 @@ function writeInstructionFile(
 ): void {
   const path = join(targetDir, relPath);
   mkdirSync(dirname(path), { recursive: true });
+  const ownership = capturePreimage(targetDir, relPath, `compile:root:${runtime}`);
   if (!existsSync(path) || mode === "overwrite") {
     writeFileSync(path, generated, "utf8");
+    finalizeOwnedWrite(targetDir, ownership);
     return;
   }
   if (mode === "append") {
     writeAppendInstructionFile(targetDir, relPath, generated, runtime);
+    finalizeOwnedWrite(targetDir, { ...ownership, mode: "managed-block", marker: `${RAFI_APPEND_START}..${RAFI_APPEND_END}` });
     return;
   }
   updateInstructionFileWithAgent(targetDir, relPath, generated, runtime);
+  finalizeOwnedWrite(targetDir, ownership);
+}
+
+function registerCompiledRole(targetDir: string, role: string): void {
+  for (const file of ["system.md", "meta.json"]) {
+    const path = `.rafi/compiled/${role}/${file}`;
+    if (existsSync(join(targetDir, path))) registerOwnedFile(targetDir, path, { mode: "generated", origin: `compile:bundle:${role}` });
+  }
 }
 
 function writeAppendInstructionFile(
@@ -208,6 +232,7 @@ function writeAppendInstructionFile(
   validateRafiSidecar(sidecarPath, sidecarRelPath);
   mkdirSync(dirname(sidecarPath), { recursive: true });
   writeFileSync(sidecarPath, generated, "utf8");
+  registerOwnedFile(targetDir, sidecarRelPath, { mode: "generated", origin: `compile:sidecar:${runtime}` });
   const referenceBlock = rafiAppendReferenceBlock(runtime, sidecarFileName);
   const referenceContent = replaceOrInsertManagedBlock(existing, referenceBlock, "top");
   writeFileSync(rootPath, referenceContent, "utf8");

@@ -20,7 +20,7 @@ export interface RuntimeReadyForCommandOptions {
   yes?: boolean;
   allowSwitch?: boolean;
   model?: string | undefined;
-  check?: (projectDir: string, runtime: AgentRuntime) => void;
+  check?: (projectDir: string, runtime: AgentRuntime) => void | Promise<void>;
   checkClaudeSdk?: () => Promise<void>;
   choose?: (
     err: RuntimeAuthError,
@@ -49,7 +49,7 @@ export async function ensureRuntimeReadyForCommand(
 
   while (true) {
     try {
-      check(projectDir, runtime);
+      await check(projectDir, runtime);
       return { runtime, model: opts.model, fellBack: false };
     } catch (err) {
       const failure = err instanceof RuntimeAuthError
@@ -68,7 +68,7 @@ export async function ensureRuntimeReadyForCommand(
       if (choice === "retry") continue;
       if (choice === "switch" && allowSwitch) {
         try {
-          check(projectDir, fallbackRuntime);
+          await check(projectDir, fallbackRuntime);
           if (fallbackRuntime === "claude") {
             await checkClaudeSdk();
           }

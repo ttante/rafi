@@ -58,6 +58,18 @@ export function validateTicketDefs(tickets: TicketDef[]): ValidationError[] {
         errors.push({ path: `tickets[${t.id}].depends_on`, message: `references unknown ticket: ${dep}` });
       }
     }
+    for (const replacement of t.superseded_by ?? []) {
+      if (!ids.has(replacement)) errors.push({ path: `tickets[${t.id}].superseded_by`, message: `references unknown ticket: ${replacement}` });
+      if (replacement === t.id) errors.push({ path: `tickets[${t.id}].superseded_by`, message: "ticket cannot supersede itself" });
+      const reciprocal = tickets.find((candidate) => candidate.id === replacement)?.supersedes ?? [];
+      if (ids.has(replacement) && !reciprocal.includes(t.id)) errors.push({ path: `tickets[${t.id}].superseded_by`, message: `${replacement} is missing reciprocal supersedes link to ${t.id}` });
+    }
+    for (const replaced of t.supersedes ?? []) {
+      if (!ids.has(replaced)) errors.push({ path: `tickets[${t.id}].supersedes`, message: `references unknown ticket: ${replaced}` });
+      if (replaced === t.id) errors.push({ path: `tickets[${t.id}].supersedes`, message: "ticket cannot supersede itself" });
+      const reciprocal = tickets.find((candidate) => candidate.id === replaced)?.superseded_by ?? [];
+      if (!reciprocal.includes(t.id)) errors.push({ path: `tickets[${t.id}].supersedes`, message: `${replaced} is missing reciprocal superseded_by link to ${t.id}` });
+    }
   }
 
   for (const t of tickets) {

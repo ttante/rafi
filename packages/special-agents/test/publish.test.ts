@@ -56,7 +56,7 @@ test("special-agents pack includes LICENSE", () => {
 });
 
 test("special-agents depends on published rafi-spec", () => {
-  assert.equal(packageJson.dependencies?.["rafi-spec"], "0.6.0");
+  assert.equal(packageJson.dependencies?.["rafi-spec"], "0.7.0");
   assert.ok(!packageJson.bundledDependencies?.includes("rafi-spec"), "rafi-spec should not be bundled");
   assert.ok(packageJson.dependencies?.ajv, "ajv must be a direct dependency for rafi-spec runtime imports");
 });

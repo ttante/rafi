@@ -5,6 +5,7 @@ import type { TicketDef } from "./ticketSchema.js";
 import type { TicketState, StateDb } from "./stateDb.js";
 import { validateTicketDefs, detectCycles } from "./ticketLoader.js";
 import { buildNextQueue } from "./queue.js";
+import { loadDeliveryConfig, validateDeliveryConfig } from "./delivery.js";
 
 export interface ValidationIssue {
   pass: 1 | 2 | 3 | 4;
@@ -27,6 +28,16 @@ export function runAllValidation(
   }
   for (const cycle of detectCycles(ticketDefs)) {
     issues.push({ pass: 1, severity: "error", message: `[cycle] dependency cycle: ${cycle}` });
+  }
+  try {
+    const delivery = loadDeliveryConfig(projectDir);
+    if (delivery) {
+      for (const issue of validateDeliveryConfig(delivery, ticketDefs)) {
+        issues.push({ pass: 1, severity: "error", message: `[delivery] ${issue.path}: ${issue.message}` });
+      }
+    }
+  } catch (err) {
+    issues.push({ pass: 1, severity: "error", message: `[delivery] ${err instanceof Error ? err.message : String(err)}` });
   }
 
   // Pass 2: state validation

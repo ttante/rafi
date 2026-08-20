@@ -17,18 +17,23 @@ import { resolveAgentForProject } from "./runtimeSelection.js";
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "../tickets/config.js";
 import { loadTickets } from "../tickets/ticketLoader.js";
 import { StateDb } from "../tickets/stateDb.js";
-import { buildBranchAuditInstruction, buildBranchPlan, parseAuditDependencies } from "../branch/planner.js";
+import { applySharedDeliveryBranch, buildBranchAuditInstruction, buildBranchPlan, parseAuditDependencies } from "../branch/planner.js";
 import { currentGitRef, ensureCleanBaseWorktree, generatedTrackerDirtyPaths } from "../branch/git.js";
 import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
-import { runBranchPlan } from "../branch/runner.js";
+import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
+import { checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, releaseBuildLease } from "../buildRuns.js";
+import type { BuildRunRecordV1, ResolvedAgentSettings } from "rafi-spec";
+import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
+import { parse as parseYaml } from "yaml";
 import {
   findResumableBranchSessions,
   formatBranchContinueCommand,
   formatBranchSummaryFollowupCommands,
 } from "../branch/resume.js";
-import type { BranchPlan, BranchPlanNode, CompletionMode, ReviewProvider } from "../branch/types.js";
+import type { BranchPlan, BranchPlanNode, CompletionMode, MergeMethod, ReviewProvider } from "../branch/types.js";
 import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig.js";
+import { loadDeliveryConfig, selectDeliveryUnitForRun, type DeliveryUnitProgress } from "../tickets/delivery.js";
 
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
@@ -74,12 +79,14 @@ interface ResolvedStartBranchDefaults {
   rootBaseBranches: boolean;
   autoMergeWait: boolean;
   autoMergeTimeoutMinutes: number | null;
+  mergeMethod: MergeMethod;
 }
 
 function resolveStartBranchDefaults(
   cwd: string,
   opts: Record<string, unknown>,
   command: Command,
+  delivery?: DeliveryUnitProgress,
 ): ResolvedStartBranchDefaults {
   const setup = loadTicketSetupConfig(cwd);
   const savedBuild = setup?.build;
@@ -90,9 +97,11 @@ function resolveStartBranchDefaults(
   const completionFromFlag = typeof opts.completion === "string"
     ? parseCompletionMode(opts.completion)
     : undefined;
+  const deliveryCompletion = delivery?.unit.completion;
   let completionMode: CompletionMode =
     completionFromFlag
     ?? (createPrFlagOn ? "pr" : undefined)
+    ?? deliveryCompletion
     ?? savedBuild?.completion
     ?? "none";
 
@@ -102,6 +111,9 @@ function resolveStartBranchDefaults(
 
   const savedBranchMode = savedBuild?.branch_strategy === "branch-per-ticket";
   let branchMode = Boolean(savedBranchMode || branchFlagOn || createPrFlagOn || completionMode !== "none");
+  if (!branchFlagProvided && !createPrFlagProvided && !optionWasProvided(command, "completion") && delivery) {
+    branchMode = delivery.unit.branch_mode !== "current";
+  }
   if (branchFlagProvided && opts.branchPerTicket === false) {
     branchMode = false;
     completionMode = "none";
@@ -109,7 +121,7 @@ function resolveStartBranchDefaults(
   if (completionMode !== "none") branchMode = true;
 
   const providerFromFlag = typeof opts.provider === "string" ? parseReviewProviderOption(opts.provider, cwd) : undefined;
-  const provider = providerFromFlag ?? (createPrFlagOn ? "github" : providerFromSaved(savedBuild?.provider, cwd));
+  const provider = providerFromFlag ?? (createPrFlagOn ? "github" : providerFromSaved(delivery?.unit.provider ?? savedBuild?.provider, cwd));
   const autoMergeWaitProvided = optionWasProvided(command, "autoMergeWait");
   const autoMergeTimeoutMinutes = typeof opts.autoMergeTimeoutMinutes === "string"
     ? parseOptionalPositiveInteger(opts.autoMergeTimeoutMinutes, "--auto-merge-timeout-minutes")
@@ -119,12 +131,18 @@ function resolveStartBranchDefaults(
     completionMode,
     reviewProvider: provider,
     createReview: completionMode === "pr" || completionMode === "auto-merge",
-    prReady: Boolean(opts.prReady || savedBuild?.pr_ready || completionMode === "auto-merge"),
-    cleanupBranches: opts.keepWorktrees ? false : savedBuild?.cleanup ?? true,
+    prReady: Boolean(opts.prReady || delivery?.unit.pr_ready || savedBuild?.pr_ready || completionMode === "auto-merge"),
+    cleanupBranches: opts.keepWorktrees ? false : delivery?.unit.cleanup ?? savedBuild?.cleanup ?? true,
     rootBaseBranches: completionMode === "auto-merge" || completionMode === "direct-merge",
     autoMergeWait: autoMergeWaitProvided ? opts.autoMergeWait !== false : savedBuild?.auto_merge_wait ?? false,
     autoMergeTimeoutMinutes,
+    mergeMethod: typeof opts.mergeMethod === "string" ? parseMergeMethod(opts.mergeMethod) : delivery?.unit.merge_method ?? savedBuild?.merge_method ?? "squash",
   };
+}
+
+function parseMergeMethod(value: string): MergeMethod {
+  if (["squash", "merge", "rebase"].includes(value)) return value as MergeMethod;
+  fail("--merge-method must be one of: squash, merge, rebase");
 }
 
 function parseCompletionMode(value: string): CompletionMode {
@@ -258,6 +276,7 @@ export function buildStartCommand(): Command {
     .option("--create-pr", "push each successful ticket branch and create a GitHub PR (implies --branch-per-ticket)")
     .option("--no-create-pr", "disable saved PR/MR creation defaults for this run")
     .option("--completion <mode>", "ticket branch completion behavior (pr | auto-merge | direct-merge | none)")
+    .option("--merge-method <method>", "merge method for local or remote completion (squash | merge | rebase)")
     .option("--provider <provider>", "PR/MR provider for branch completion (auto | github | gitlab)")
     .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
     .option("--no-auto-merge-wait", "do not wait for dependency PR/MRs before dependent tickets")
@@ -268,6 +287,7 @@ export function buildStartCommand(): Command {
     .option("--pr-ready", "create ready-for-review PRs instead of draft PRs")
     .option("--keep-worktrees", "keep successful ticket worktrees for inspection")
     .option("--ticket <id>", "ticket id to continue in branch mode; repeat for multiple tickets", collectTicket, [])
+    .option("--skip-delivery-unit <id>", "skip one unfinished delivery unit for this run", collectTicket, [])
     .action(async (project: string, opts, command: Command) => {
       const steps = Number.parseInt(opts.steps, 10);
       if (!Number.isInteger(steps) || steps < 1) {
@@ -280,14 +300,40 @@ export function buildStartCommand(): Command {
 
       const cwd = resolve(project);
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
-      const branchDefaults = resolveStartBranchDefaults(cwd, opts as Record<string, unknown>, command);
+      const roleDefaults = readAgentDefaults(cwd);
+      let deliveryRun: DeliveryUnitProgress | undefined;
+      if (isTicketsInitialized(cwd)) {
+        const delivery = loadDeliveryConfig(cwd);
+        if (delivery) {
+          const earlyConfig = loadTicketsConfig(cwd);
+          const earlyPaths = resolveTicketPaths(earlyConfig, cwd);
+          const earlyDb = new StateDb(earlyPaths.stateDb);
+          const earlyStates = earlyDb.getAllStates();
+          earlyDb.close();
+          deliveryRun = selectDeliveryUnitForRun(delivery, earlyStates, (opts.skipDeliveryUnit as string[] | undefined) ?? []);
+          if (deliveryRun?.state === "resume" && !opts.yes && process.stdin.isTTY && process.stdout.isTTY) {
+            const answer = await select({ message: `Resume unfinished delivery unit ${deliveryRun.unit.id} (${deliveryRun.remaining.length} remaining)?`, options: [
+              { value: "resume", label: "Resume (Recommended)" }, { value: "skip", label: "Skip for this run" },
+            ] });
+            if (isCancel(answer)) process.exit(0);
+            if (answer === "skip") deliveryRun = selectDeliveryUnitForRun(delivery, earlyStates, [deliveryRun.unit.id, ...((opts.skipDeliveryUnit as string[] | undefined) ?? [])]);
+          }
+        }
+      }
+      const branchDefaults = resolveStartBranchDefaults(cwd, opts as Record<string, unknown>, command, deliveryRun);
       let agent: AgentRuntime;
       try {
-        agent = resolveAgentForProject(cwd, opts.agent as string | undefined);
+        agent = resolveAgentForProject(cwd, (opts.agent as string | undefined) ?? roleDefaults.builder?.make);
       } catch (err) {
         fail(err instanceof Error ? err.message : String(err));
       }
-      let model = opts.model as string | undefined;
+      let model = (opts.model as string | undefined) ?? explicitDefaultValue(roleDefaults.builder?.model);
+      const builderEffort = (opts.effort as EffortLevel | undefined) ?? explicitEffort(roleDefaults.builder?.reasoning);
+      const builderFast = opts.fast as boolean | undefined ?? roleDefaults.builder?.fast;
+      let qaAgent = resolveAgentForProject(cwd, roleDefaults.qa?.make);
+      let qaModel = explicitDefaultValue(roleDefaults.qa?.model);
+      const qaEffort = explicitEffort(roleDefaults.qa?.reasoning);
+      const qaFast = roleDefaults.qa?.fast ?? false;
 
       const configuredTrackerPath = isTicketsInitialized(cwd)
         ? loadTicketsConfig(cwd).paths.progressDoc
@@ -368,12 +414,30 @@ export function buildStartCommand(): Command {
           model,
           resumeSessionId: sessionId,
           permission: createPermissionHandler(builderPolicy, log),
-          effort: opts.effort as EffortLevel | undefined,
-          fast: opts.fast as boolean | undefined,
+          effort: builderEffort,
+          fast: builderFast,
           systemPromptAppend: roleBundle.system || undefined,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
         };
         return agent === "codex"
+          ? new CodexAdapter(adapterOpts)
+          : await ClaudeAdapter.create(adapterOpts);
+      };
+
+      const createQa = async (qaCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
+        const qaPolicy = new PermissionPolicy(config.permissions, qaCwd);
+        const roleBundle = loadRoleBundle("qa", { projectDir: qaCwd });
+        const adapterOpts = {
+          cwd: qaCwd,
+          model: qaModel,
+          resumeSessionId: sessionId,
+          permission: createPermissionHandler(qaPolicy, log),
+          effort: qaEffort,
+          fast: qaFast,
+          systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
+          skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+        };
+        return qaAgent === "codex"
           ? new CodexAdapter(adapterOpts)
           : await ClaudeAdapter.create(adapterOpts);
       };
@@ -453,6 +517,7 @@ export function buildStartCommand(): Command {
             branchPrefix: opts.branchPrefix as string,
             maxBranchDepth,
             rootBaseBranches: branchDefaults.rootBaseBranches,
+            ticketIds: deliveryRun?.remaining.slice(0, steps),
           });
 
           let auditBuilder: BuilderAdapter | undefined;
@@ -469,6 +534,7 @@ export function buildStartCommand(): Command {
               maxBranchDepth,
               auditDependencies,
               rootBaseBranches: branchDefaults.rootBaseBranches,
+              ticketIds: deliveryRun?.remaining.slice(0, steps),
             });
             log.write("branch-plan", {
               baseRef: plan.baseRef,
@@ -481,12 +547,25 @@ export function buildStartCommand(): Command {
             await auditBuilder?.close().catch(() => {});
             await auditViewer?.catch(() => {});
           }
+          if (deliveryRun?.unit.branch_mode === "shared") {
+            plan = applySharedDeliveryBranch(plan, deliveryRun.unit.id, deliveryRun.remaining, opts.branchPrefix as string);
+            const saved = readDeliveryUnitSession(cwd, deliveryRun.unit.id);
+            const first = plan.nodes[0];
+            if (saved && first && saved.branch === first.branch && existsSync(saved.worktreePath)) {
+              resumeSessionByTicket.set(first.ticket.id, { worktreePath: saved.worktreePath, sessionId: saved.sessionId });
+            }
+          }
         }
 
         console.log(`foreman: ${continueTickets.length > 0 ? "resuming branch-per-ticket mode" : "branch-per-ticket mode"} for ${plan.nodes.length} ticket(s)`);
         console.log(`foreman: project ${cwd}`);
         console.log(`foreman: base ${plan.baseRef}`);
         console.log(`foreman: log ${logPath}\n`);
+        if (deliveryRun) {
+          console.log(`foreman: delivery unit ${deliveryRun.unit.id} — ${deliveryRun.completed}/${deliveryRun.unit.tickets.length} complete, ${deliveryRun.remaining.length} remaining`);
+          if (deliveryRun.unit.branch_mode === "shared" && steps < deliveryRun.remaining.length) console.log(`foreman: --steps ${steps} completes ${steps} ticket(s) in this ${deliveryRun.remaining.length}-ticket remainder; branch/session is preserved and PR completion is deferred`);
+          if (deliveryRun.unit.dependency_mode === "stack") console.log("foreman: stacked delivery — dependent branches must be rebased or retargeted after prerequisite merges");
+        }
         for (const node of plan.nodes) {
           console.log(`  ${node.ticket.id}  ${node.branch}  base=${node.baseBranch}`);
         }
@@ -516,8 +595,8 @@ export function buildStartCommand(): Command {
           log,
           agent,
           model,
-          effort: opts.effort as EffortLevel | undefined,
-          fast: opts.fast as boolean | undefined,
+          effort: builderEffort,
+          fast: builderFast,
           notificationsEnabled: config.notifications.enabled,
           qaEnabled,
           createPr: branchDefaults.createReview,
@@ -528,6 +607,7 @@ export function buildStartCommand(): Command {
           cleanupBranches: branchDefaults.cleanupBranches,
           autoMergeWait: branchDefaults.autoMergeWait,
           autoMergeTimeoutMinutes: branchDefaults.autoMergeTimeoutMinutes,
+          mergeMethod: branchDefaults.mergeMethod,
           allowedBaseDirtyPaths,
           trackerPaths: {
             progressDoc: ticketsConfig.paths.progressDoc,
@@ -572,13 +652,34 @@ export function buildStartCommand(): Command {
       });
       agent = ready.runtime;
       model = ready.model;
+      if (qaEnabled) {
+        const qaReady = await ensureRuntimeReadyForCommand(cwd, qaAgent, { label: "independent QA", yes: Boolean(opts.yes), model: qaModel });
+        qaAgent = qaReady.runtime;
+        qaModel = qaReady.model;
+      }
+      const capturedBuilder: ResolvedAgentSettings = {
+        role: "builder", source: opts.agent || opts.model || opts.effort || opts.fast ? "cli" : roleDefaults.builder ? "project" : "provider",
+        make: agent, model: model ?? "default", reasoning: builderEffort ?? "default", fast: Boolean(builderFast),
+      };
+      const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast };
+      let buildRun: BuildRunRecordV1 = createBuildRun({
+        tickets: [], repositoryRoot: cwd, branchMode: "current", builder: capturedBuilder, qa: capturedQa,
+      });
+      const heartbeat = setInterval(() => { buildRun = heartbeatBuildRun(cwd, buildRun); }, 10_000);
+      heartbeat.unref();
+      const checkpointSignal = (): void => {
+        try { buildRun = releaseBuildLease(cwd, buildRun, "interrupted"); } catch { /* best effort */ }
+      };
+      process.once("SIGINT", checkpointSignal);
+      process.once("SIGTERM", checkpointSignal);
       const builder = await createBuilder(cwd, resumeSessionId);
-      const foreman = new Foreman(builder, log, config.notifications.enabled, qaEnabled, 3, cwd);
+      const qaReviewer = qaEnabled ? await createQa(cwd) : undefined;
+      const foreman = new Foreman(builder, log, config.notifications.enabled, qaEnabled, 3, cwd, qaReviewer);
 
       const modifiers = [
         model ? `model=${model}` : null,
-        opts.effort ? `effort=${opts.effort}` : null,
-        opts.fast ? "fast" : null,
+        builderEffort ? `effort=${builderEffort}` : null,
+        builderFast ? "fast" : null,
         qaEnabled ? null : "qa=off",
       ].filter(Boolean).join(" ");
       console.log(`foreman: driving a ${agent} builder through ${steps} step(s)${modifiers ? ` [${modifiers}]` : ""}`);
@@ -590,7 +691,11 @@ export function buildStartCommand(): Command {
 
       try {
         console.log("ai-foreman: asking builder to plan the next tickets or steps...\n");
+        buildRun = checkpointBuildRun(cwd, buildRun, "before-preflight");
         await foreman.runPreflight(steps, ticketsContent);
+        if (builder.sessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", builder.sessionId()!);
+        if (qaReviewer?.sessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", qaReviewer.sessionId()!);
+        buildRun = checkpointBuildRun(cwd, buildRun, "preflight-complete");
 
         if (!opts.yes) {
           while (true) {
@@ -631,6 +736,11 @@ export function buildStartCommand(): Command {
         }
 
         const result = await foreman.runBatch(steps, trackerRelPath);
+        buildRun = result.outcome === "all-done" || result.outcome === "plan-complete"
+          ? completeBuildRun(cwd, buildRun)
+          : releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "builder-or-qa-interrupted", { status: "recoverable" }), "recoverable");
+        clearInterval(heartbeat);
+        await qaReviewer?.close().catch(() => {});
         await builder.close();
         await viewer;
 
@@ -641,9 +751,32 @@ export function buildStartCommand(): Command {
         if (sid) console.log(`foreman: resume this builder with  --resume ${sid}`);
         process.exit(result.outcome === "needs-human" ? 2 : 0);
       } catch (err) {
+        clearInterval(heartbeat);
+        buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "failed", { status: "failed", failure: { category: "unknown", summary: err instanceof Error ? err.message.slice(0, 1000) : String(err).slice(0, 1000), at: new Date().toISOString() } }), "failed");
+        await qaReviewer?.close().catch(() => {});
         await builder.close().catch(() => {});
         log.write("error", { message: String(err) });
         fail(`run failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
+}
+
+function readAgentDefaults(projectDir: string): { builder?: AgentRoleDefaultsV1; qa?: AgentRoleDefaultsV1 } {
+  const path = join(projectDir, "rafi-config.yaml");
+  if (!existsSync(path)) return {};
+  try {
+    const parsed = parseYaml(readFileSync(path, "utf8")) as { agent_defaults?: AgentDefaultsV1 } | undefined;
+    if (parsed?.agent_defaults?.version !== 1) return {};
+    return { builder: parsed.agent_defaults.roles.builder, qa: parsed.agent_defaults.roles.qa };
+  } catch {
+    return {};
+  }
+}
+
+function explicitDefaultValue(value: string | undefined): string | undefined {
+  return value && value !== "default" ? value : undefined;
+}
+
+function explicitEffort(value: string | undefined): EffortLevel | undefined {
+  return value && ["low", "medium", "high", "xhigh"].includes(value) ? value as EffortLevel : undefined;
 }

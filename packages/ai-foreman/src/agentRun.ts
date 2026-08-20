@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, DEFAULT_CONFIG, type PermissionConfig } from "./config.js";
 import { Log } from "./log.js";
@@ -12,6 +12,8 @@ import { loadRoleBundle, type RoleBundle } from "./roles.js";
 import { ensureRuntimeReadyForCommand } from "./cli/runtimeAuthPrompt.js";
 import { resolveAgentForProject } from "./cli/runtimeSelection.js";
 import type { AgentRuntime } from "./runtimeAuth.js";
+import { parse as parseYaml } from "yaml";
+import type { AgentDefaultsV1, AgentRoleDefaultsV1, ConfigurableAgentRole } from "rafi-spec";
 
 export type { EffortLevel } from "./adapters/types.js";
 
@@ -27,7 +29,7 @@ export interface RoleBuilderOptions {
   yes?: boolean;
   allowSwitch?: boolean;
   label: string;
-  log: Log;
+  log?: Log;
   permissionConfig?: PermissionConfig;
   extraSkills?: string[];
   sandboxMode?: BuilderAdapterOptions["sandboxMode"];
@@ -41,12 +43,13 @@ export interface RoleBuilder {
   effort?: EffortLevel;
   roleBundle: RoleBundle;
   skills: string[];
+  log: Log;
 }
 
 export interface RoleInstructionRunOptions extends Omit<RoleBuilderOptions, "log"> {
   instruction: string;
   logPath?: string;
-  logEvent?: "rafi-plan" | "ticket-populate" | "preflight";
+  logEvent?: "rafi-plan" | "ticket-populate" | "preflight" | "uninstall-proposal";
 }
 
 export interface RoleInstructionRunResult {
@@ -137,13 +140,17 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
   if (!existsSync(opts.projectDir)) {
     throw new Error(`project directory not found: ${opts.projectDir}`);
   }
-  assertEffortLevel(opts.effort);
+  const saved = readRoleDefaults(opts.projectDir, opts.role);
+  const configuredEffort = saved?.reasoning && saved.reasoning !== "default" ? saved.reasoning : undefined;
+  const effectiveEffort = opts.effort ?? (VALID_EFFORT.includes(configuredEffort as EffortLevel) ? configuredEffort as EffortLevel : undefined);
+  assertEffortLevel(effectiveEffort);
 
-  let runtime = resolveAgentForProject(opts.projectDir, opts.agent);
+  let runtime = resolveAgentForProject(opts.projectDir, opts.agent ?? saved?.make);
   const config = loadConfig(join(opts.projectDir, "foreman.yaml"));
+  const log = opts.log ?? new Log(makeLogPath(opts.projectDir, opts.label.replace(/\s+/g, "-")));
   const roleBundle = loadRoleBundle(opts.role, { projectDir: opts.projectDir });
-  const initialModel = opts.model ?? roleBundle.model ?? undefined;
-  const effort = opts.effort ?? (roleBundle.effort as EffortLevel | null) ?? undefined;
+  const initialModel = opts.model ?? (saved?.model !== "default" ? saved?.model : undefined) ?? roleBundle.model ?? undefined;
+  const effort = effectiveEffort ?? (roleBundle.effort as EffortLevel | null) ?? undefined;
   const ready = await ensureRuntimeReadyForCommand(opts.projectDir, runtime, {
     label: opts.label,
     yes: Boolean(opts.yes),
@@ -159,9 +166,9 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
     cwd: opts.projectDir,
     model,
     resumeSessionId: opts.resumeSessionId,
-    permission: createPermissionHandler(policy, opts.log),
+    permission: createPermissionHandler(policy, log),
     effort,
-    fast: opts.fast,
+    fast: opts.fast ?? saved?.fast,
     sandboxMode: opts.sandboxMode,
     systemPromptAppend: roleBundle.system || undefined,
     skills: skills.length > 0 ? skills : undefined,
@@ -171,7 +178,20 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
       ? new CodexAdapter(adapterOpts)
       : await ClaudeAdapter.create(adapterOpts);
 
-  return { builder, runtime, model, effort, roleBundle, skills };
+  return { builder, runtime, model, effort, roleBundle, skills, log };
+}
+
+function readRoleDefaults(projectDir: string, role: string): AgentRoleDefaultsV1 | undefined {
+  const path = join(projectDir, "rafi-config.yaml");
+  if (!existsSync(path)) return undefined;
+  try {
+    const config = parseYaml(readFileSync(path, "utf8")) as { agent_defaults?: AgentDefaultsV1 } | undefined;
+    return config?.agent_defaults?.version === 1
+      ? config.agent_defaults.roles[role as ConfigurableAgentRole]
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promise<RoleInstructionRunResult> {

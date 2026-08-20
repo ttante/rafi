@@ -94,6 +94,15 @@ export interface ReviewRecommendation {
   updated_at: string | null;
 }
 
+export interface OperationReceipt {
+  operation_id: string;
+  operation_type: string;
+  ticket_id: string | null;
+  run_id: string;
+  completed_at: string;
+  payload_json: string;
+}
+
 const INIT_SQL = `
 PRAGMA foreign_keys = ON;
 
@@ -189,12 +198,22 @@ CREATE TABLE IF NOT EXISTS review_recommendations (
   CHECK (status IN ('pending','accepted','deferred','dismissed'))
 );
 
+CREATE TABLE IF NOT EXISTS operation_receipts (
+  operation_id TEXT PRIMARY KEY,
+  operation_type TEXT NOT NULL,
+  ticket_id TEXT,
+  run_id TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE INDEX IF NOT EXISTS idx_ticket_state_status ON ticket_state(status);
 CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket_id ON ticket_events(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ticket_events_timestamp ON ticket_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_validation_snapshots_timestamp ON validation_snapshots(timestamp);
 CREATE INDEX IF NOT EXISTS idx_future_work_disposition ON future_work(disposition);
 CREATE INDEX IF NOT EXISTS idx_review_recommendations_status ON review_recommendations(status);
+CREATE INDEX IF NOT EXISTS idx_operation_receipts_run ON operation_receipts(run_id);
 `;
 
 export class StateDb {
@@ -414,6 +433,23 @@ export class StateDb {
     this.db
       .prepare("UPDATE review_recommendations SET status = ?, updated_at = ? WHERE id = ?")
       .run(status, updatedAt, id);
+  }
+
+  // ── operation_receipts ───────────────────────────────────────────────────
+
+  getOperationReceipt(operationId: string): OperationReceipt | undefined {
+    return this.db.prepare("SELECT * FROM operation_receipts WHERE operation_id = ?").get(operationId) as OperationReceipt | undefined;
+  }
+
+  recordOperationReceipt(receipt: OperationReceipt): boolean {
+    const result = this.db.prepare(`
+      INSERT OR IGNORE INTO operation_receipts (
+        operation_id,operation_type,ticket_id,run_id,completed_at,payload_json
+      ) VALUES (
+        @operation_id,@operation_type,@ticket_id,@run_id,@completed_at,@payload_json
+      )
+    `).run(receipt);
+    return result.changes === 1;
   }
 
   // ── transactions ──────────────────────────────────────────────────────────

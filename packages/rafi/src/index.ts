@@ -28,20 +28,27 @@ import {
   buildProjectConfig,
   DEFAULT_DOCS_ROOT,
   defaultAnswers,
+  findNearestRafiProject,
   LEGACY_PROJECT_CONFIG_FILE,
   normalizeProjectConfig,
   parseRuntimeSelection,
   RAFI_CONFIG_FILE,
+  resolveExplicitRafiProject,
   runtimeSelectionToTargets,
   type WalkthroughAnswers,
 } from "./project.js";
 import { docsRootPathExists, firstAvailableDocsRoot, validateDocsRoot } from "./docs.js";
 import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
 import { buildStartCommand } from "ai-foreman/cli/start.js";
-import { buildStatusCommand } from "ai-foreman/cli/status.js";
+import { runStatus } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
 import { installClaudeAgentSdk } from "./sdkInstall.js";
 import { buildPlanCommand } from "./plan.js";
+import { buildTicketPlanCommand } from "./ticketPlan.js";
+import { buildAgentsCommand } from "./agents.js";
+import { buildBuildResumeCommand } from "./buildResume.js";
+import { buildUninstallCommand, interpretUninstallInstruction } from "./uninstall.js";
+import { assertLifecycleForCommand } from "./lifecycle.js";
 import {
   checkpointInterview,
   completeInterview,
@@ -98,8 +105,15 @@ program
   .option("--docs-root <dir>", "repo-relative directory for Rafi starter and tracker docs")
   .option("--runtime <runtime>", "agent runtime targets to configure (both | claude | codex)")
   .option("--root-file-mode <mode>", "override root instruction file handling (append | overwrite | update)")
-  .action(async (project: string, opts) => {
+  .option("--grill-me", "use exhaustive initial planning when planning is accepted")
+  .option("--no-grill-me", "use standard initial planning (default)")
+  .action(async (project: string, opts, command: Command) => {
     const targetDir = resolve(project);
+    assertLifecycleForCommand(targetDir, "create");
+    const createArgv = rawCommandArgs(command);
+    if (createArgv.includes("--grill-me") && createArgv.includes("--no-grill-me")) {
+      throw new Error("choose either --grill-me or --no-grill-me, not both");
+    }
     const rootFileMode = parseRootFileMode(opts.rootFileMode);
     const runtimeOption = parseRuntimeSelection(opts.runtime);
     const docsRootOption = opts.docsRoot as string | undefined;
@@ -323,8 +337,13 @@ program
 
     console.log(`rafi: verified agent runtime auth for ${config.harness.targets.join(" and ")}.`);
 
-    await runCreateTicketHandoff(targetDir, config, answers, Boolean(opts.defaults));
-    if (interview) completeInterview(targetDir, interview);
+    const journeyComplete = await runCreateTicketHandoff(targetDir, config, answers, Boolean(opts.defaults), {
+      planningMode: createArgv.includes("--grill-me") ? "exhaustive" : createArgv.includes("--no-grill-me") ? "standard" : undefined,
+    });
+    if (interview) {
+      if (journeyComplete) completeInterview(targetDir, interview);
+      else checkpointInterview(targetDir, interview, { status: "paused", checkpoint: "create-paused" });
+    }
   });
 
 program
@@ -607,7 +626,8 @@ async function runCreateTicketHandoff(
   config: ProjectConfig,
   answers: WalkthroughAnswers,
   defaultsMode: boolean,
-): Promise<void> {
+  opts: { planningMode?: "standard" | "exhaustive" } = {},
+): Promise<boolean> {
   const docsRoot = config.docs?.root ?? DEFAULT_DOCS_ROOT;
   const setupCommand = setupInitCommand(targetDir, answers, docsRoot);
   const planCommand = `rafi plan ${shellQuote(targetDir)}`;
@@ -619,29 +639,43 @@ async function runCreateTicketHandoff(
     console.log(`  ${planCommand}`);
     console.log(`  ${setupCommand}`);
     console.log(`  ${populateCommand}`);
-    return;
+    return true;
   }
 
-  const { confirm, isCancel } = await import("@clack/prompts");
+  const { confirm, select, isCancel } = await import("@clack/prompts");
   const runPlan = await confirm({
     message: "Run `rafi plan .` now?",
     initialValue: false,
   });
-  if (isCancel(runPlan)) process.exit(0);
-  if (runPlan) runSelfCommand(["plan", targetDir]);
+  if (isCancel(runPlan)) return false;
+  if (runPlan) {
+    let mode = opts.planningMode;
+    if (!mode) {
+      const answer = await select({ message: "Initial planning depth (exhaustive may take substantially longer):", options: [
+        { value: "standard", label: "Standard (Recommended)" },
+        { value: "exhaustive", label: "Exhaustive grill-me" },
+      ] });
+      if (isCancel(answer)) return false;
+      mode = answer as "standard" | "exhaustive";
+    }
+    await buildPlanCommand().parseAsync(["node", "rafi-plan", targetDir, "--yes", mode === "exhaustive" ? "--grill-me" : "--no-grill-me"]);
+  }
 
   const runSetup = await confirm({
     message: "Run `rafi tickets setup:init` now?",
     initialValue: true,
   });
-  if (isCancel(runSetup)) process.exit(0);
+  if (isCancel(runSetup)) return false;
   if (runSetup) {
-    runSelfCommand(["tickets", "setup:init", "--project", targetDir]);
+    await buildTicketsCommand().parseAsync(["node", "rafi-tickets", "setup:init", "--project", targetDir]);
   } else {
     console.log("\nrafi: ticket setup commands:");
     console.log(`  ${setupCommand}`);
     console.log(`  ${populateCommand}`);
+    console.log(`  rafi resume ${shellQuote(targetDir)}`);
+    return false;
   }
+  return true;
 }
 
 function setupInitCommand(targetDir: string, answers: WalkthroughAnswers, docsRoot: string): string {
@@ -660,12 +694,16 @@ function setupInitCommand(targetDir: string, answers: WalkthroughAnswers, docsRo
 }
 
 function runSelfCommand(args: string[]): void {
-  const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...args], {
+  const status = runSelfCommandStatus(args);
+  if (status !== 0) throw new Error(`rafi ${args[0] ?? "command"} exited with status ${status}`);
+}
+
+function runSelfCommandStatus(args: string[]): number {
+  const result = spawnSync(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), ...args], {
     stdio: "inherit",
   });
-  if (result.status && result.status !== 0) {
-    process.exit(result.status);
-  }
+  if (result.error) throw result.error;
+  return result.status ?? 1;
 }
 
 async function resumeInterview(projectDir: string, record: InterviewRecord): Promise<void> {
@@ -692,10 +730,14 @@ async function resumeInterview(projectDir: string, record: InterviewRecord): Pro
     if (typeof invocation.docsRoot === "string") args.push("--docs-root", invocation.docsRoot);
     if (typeof invocation.runtime === "string") args.push("--runtime", invocation.runtime);
     if (typeof invocation.rootFileMode === "string") args.push("--root-file-mode", invocation.rootFileMode);
+  } else if (record.workflow === "tickets-plan") {
+    args = ["tickets", "plan", "--project", projectDir];
+    if (typeof record.answers.brief === "string") args.push("--brief", record.answers.brief);
+    if (record.runtime.sessionId) args.push("--resume-session", record.runtime.sessionId);
   } else {
     args = ["tickets", record.workflow === "tickets-setup-init" ? "setup:init" : "setup:update", "--project", projectDir];
   }
-  const result = spawnSync(process.execPath, [entry, ...args], { stdio: "inherit" });
+  const result = spawnSync(process.execPath, [...process.execArgv, entry, ...args], { stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`resumed ${record.workflow} exited with status ${result.status ?? "unknown"}`);
   completeInterview(projectDir, record);
@@ -774,9 +816,36 @@ function sameTargets(a: readonly string[], b: readonly string[]): boolean {
 }
 
 program.addCommand(buildPlanCommand());
-program.addCommand(buildTicketsCommand());
+const ticketsCommand = buildTicketsCommand();
+ticketsCommand.addCommand(buildTicketPlanCommand());
+program.addCommand(ticketsCommand);
 program.addCommand(buildStartCommand());
-program.addCommand(buildStatusCommand());
+program.addCommand(buildBuildResumeCommand({ executeStart: (args) => runSelfCommandStatus(args) }));
+program.addCommand(buildAgentsCommand());
+program.addCommand(buildUninstallCommand({ interpret: interpretUninstallInstruction }));
+program
+  .command("status")
+  .description("Summarize the most recent Foreman run for a Rafi project.")
+  .argument("[project]", "exact project directory; when omitted, search from cwd")
+  .action((project?: string) => {
+    const discovered = project
+      ? resolveExplicitRafiProject(project)
+      : findNearestRafiProject(process.cwd());
+    if (!discovered) {
+      const where = project ? resolve(project) : process.cwd();
+      throw new Error(project
+        ? `no ${RAFI_CONFIG_FILE} found in explicit project directory ${where}`
+        : `no Rafi project found from ${where}; expected ${RAFI_CONFIG_FILE} in this directory or an ancestor`);
+    }
+    const loaded = loadRafiConfig(discovered.root);
+    if (!loaded) throw new Error(`unable to load ${discovered.configFile} from ${discovered.root}`);
+    if (discovered.legacy) {
+      console.log(`rafi: legacy ${LEGACY_PROJECT_CONFIG_FILE} found; run \`rafi compile ${shellQuote(discovered.root)}\` to migrate to ${RAFI_CONFIG_FILE}.`);
+    }
+    console.log(`rafi: project ${loaded.config.appName}`);
+    console.log(`rafi: root ${discovered.root}`);
+    runStatus(discovered.root);
+  });
 program.addCommand(buildDoctorCommand());
 
 export async function runRafiCli(argv = process.argv): Promise<void> {
@@ -799,4 +868,9 @@ function isDirectCliEntrypoint(): boolean {
   } catch {
     return resolve(entry) === modulePath;
   }
+}
+
+function rawCommandArgs(command: Command): string[] {
+  const parent = command.parent as (Command & { rawArgs?: string[] }) | null;
+  return parent?.rawArgs ?? (command as Command & { rawArgs?: string[] }).rawArgs ?? process.argv.slice(2);
 }

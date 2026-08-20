@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { registerDependency } from "./ownership.js";
 
 const CLAUDE_AGENT_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
 
@@ -76,6 +77,7 @@ export function installClaudeAgentSdk(
   if (isInstalled(targetDir)) return "already-installed";
 
   const install = buildClaudeAgentSdkInstallCommand(targetDir, packageManager);
+  const previous = readDependencySpec(targetDir, CLAUDE_AGENT_SDK_PACKAGE);
   const fallback = install.fallbackFrom
     ? ` (unknown package manager \`${install.fallbackFrom}\`; falling back to npm)`
     : "";
@@ -83,12 +85,30 @@ export function installClaudeAgentSdk(
   try {
     const execFile = options.execFile ?? execFileSync;
     execFile(install.command, install.args, { cwd: targetDir, stdio: "inherit" });
+    registerDependency(targetDir, {
+      manager: install.command as "npm" | "pnpm" | "yarn" | "bun",
+      package: CLAUDE_AGENT_SDK_PACKAGE,
+      previous,
+      installed: readDependencySpec(targetDir, CLAUDE_AGENT_SDK_PACKAGE) ?? "added-by-rafi",
+      manifests: ["package.json", ...["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"].filter((path) => existsSync(join(targetDir, path)))],
+    });
     return "installed";
   } catch (err) {
     throw new Error(
       `Claude Agent SDK install failed. Run manually from ${targetDir}: ${install.display}`,
       { cause: err },
     );
+  }
+}
+
+function readDependencySpec(targetDir: string, name: string): string | null {
+  const path = join(targetDir, "package.json");
+  if (!existsSync(path)) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(path, "utf8")) as Record<string, Record<string, string> | undefined>;
+    return pkg.dependencies?.[name] ?? pkg.devDependencies?.[name] ?? pkg.optionalDependencies?.[name] ?? null;
+  } catch {
+    return null;
   }
 }
 

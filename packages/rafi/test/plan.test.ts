@@ -24,7 +24,7 @@ function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "rafi-plan-test-"));
 }
 
-test("plan instruction pins grill-me, prd-to-issues guidance, and output contract", () => {
+test("standard plan instruction excludes grill-me and keeps the output contract", () => {
   const instruction = buildPlanInstruction({
     brief: "Add account settings.",
     sources: ["docs/product.md"],
@@ -34,7 +34,8 @@ test("plan instruction pins grill-me, prd-to-issues guidance, and output contrac
   });
 
   assert.match(instruction, /Use the planner role guidance/);
-  assert.match(instruction, /Use the grill-me skill explicitly/);
+  assert.match(instruction, /standard focused planning conversation/);
+  assert.doesNotMatch(instruction, /complete grill-me skill instructions/);
   assert.match(instruction, /Use prd-to-issues only as vertical-slice planning guidance/);
   assert.match(instruction, /Do not create issues\/\*\.md/);
   assert.match(instruction, /Do not edit source files, docs, \.tickets/);
@@ -56,7 +57,7 @@ test("plan instruction pins grill-me, prd-to-issues guidance, and output contrac
   assert.match(instruction, /STEP_STATUS: plan_complete/);
 });
 
-test("plan agent run options use planner plus grill-me with non-mutating permissions", () => {
+test("standard plan run uses planner without grill-me and non-mutating permissions", () => {
   const opts = buildPlanAgentRunOptions({
     projectDir: "/tmp/project",
     agent: "codex",
@@ -64,10 +65,10 @@ test("plan agent run options use planner plus grill-me with non-mutating permiss
   });
 
   assert.equal(opts.role, "planner");
-  assert.deepEqual(opts.extraSkills, ["grill-me"]);
+  assert.deepEqual(opts.extraSkills, []);
   assert.deepEqual(
     mergeSkills(["write-a-prd", "prd-to-issues"], opts.extraSkills),
-    ["write-a-prd", "prd-to-issues", "grill-me"],
+    ["write-a-prd", "prd-to-issues"],
   );
   assert.equal(opts.sandboxMode, "read-only");
   assert.ok(opts.permissionConfig?.allowTools.includes("Read"));

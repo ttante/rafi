@@ -12,6 +12,9 @@ import type { Log } from "./log.js";
 import { fireNotification } from "./notify.js";
 import { isTicketsInitialized, loadTicketsConfig } from "./tickets/config.js";
 import { cmdUpdate, cmdComplete, cmdBlock, cmdImplementationQueue } from "./tickets/commands.js";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 
 /** Parsed STEP_STATUS marker from a builder's turn. */
 export interface StepStatus {
@@ -245,6 +248,7 @@ export class Foreman {
     private readonly qaEnabled = true,
     private readonly qaMaxCycles = 3,
     private readonly projectDir?: string,
+    private readonly qaReviewer?: BuilderAdapter,
   ) {
     this.ticketsEnabled = !!(projectDir && isTicketsInitialized(projectDir));
   }
@@ -256,7 +260,14 @@ export class Foreman {
   private async doTurn(
     instruction: string,
   ): Promise<{ result: TurnResult; status: StepStatus }> {
-    let result = await this.builder.sendTurn(instruction);
+    return this.doTurnWith(this.builder, instruction);
+  }
+
+  private async doTurnWith(
+    adapter: BuilderAdapter,
+    instruction: string,
+  ): Promise<{ result: TurnResult; status: StepStatus }> {
+    let result = await adapter.sendTurn(instruction);
     let status = parseStepStatus(result.text);
 
     while (status.kind === "needs_input") {
@@ -284,7 +295,7 @@ export class Foreman {
         break;
       }
 
-      result = await this.builder.sendTurn(String(answer));
+      result = await adapter.sendTurn(String(answer));
       status = parseStepStatus(result.text);
     }
 
@@ -326,7 +337,15 @@ export class Foreman {
     summary?: string;
   }> {
     for (let cycle = 1; cycle <= this.qaMaxCycles; cycle++) {
-      const qa = await this.doTurn(buildQaInstruction());
+      const before = this.qaReviewer && this.projectDir ? fingerprintProtectedTree(this.projectDir) : undefined;
+      const qa = await this.doTurnWith(this.qaReviewer ?? this.builder, buildQaInstruction());
+      if (before && this.projectDir) {
+        const changes = changedProtectedFiles(before, fingerprintProtectedTree(this.projectDir));
+        if (changes.length > 0) {
+          this.log.write("qa-protected-files-changed", { stepIndex, cycle, paths: changes });
+          return { outcome: "needs-human", detail: `independent QA changed protected files: ${changes.join(", ")}` };
+        }
+      }
       this.log.write("qa", {
         stepIndex,
         cycle,
@@ -531,4 +550,29 @@ export class Foreman {
 function lastLine(text: string): string {
   const lines = text.trim().split("\n");
   return (lines[lines.length - 1] ?? "").slice(0, 200);
+}
+
+function fingerprintProtectedTree(root: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const ignored = new Set([".git", "node_modules", "dist", "coverage"]);
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const rel = relative(root, path).replace(/\\/g, "/");
+      if (entry.isDirectory()) {
+        if (ignored.has(entry.name) || rel.startsWith(".foreman/") || rel.startsWith(".rafi/cache/")) continue;
+        visit(path);
+      } else if (entry.isFile() && statSync(path).size <= 10 * 1024 * 1024) {
+        out.set(rel, createHash("sha256").update(readFileSync(path)).digest("hex"));
+      }
+    }
+  };
+  if (existsSync(root)) visit(root);
+  return out;
+}
+
+function changedProtectedFiles(before: Map<string, string>, after: Map<string, string>): string[] {
+  return [...new Set([...before.keys(), ...after.keys()])]
+    .filter((path) => before.get(path) !== after.get(path))
+    .sort();
 }

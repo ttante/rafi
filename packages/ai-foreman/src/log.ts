@@ -35,8 +35,10 @@ export interface LogRecord {
     | "preflight"
     | "rafi-plan"
     | "ticket-populate"
+    | "uninstall-proposal"
     | "qa"
     | "qa-fix"
+    | "qa-protected-files-changed"
     | "error";
   [key: string]: unknown;
 }

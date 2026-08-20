@@ -60,7 +60,7 @@ export interface SkillManifest {
 // ───────────────────────────── Agents (roles) ─────────────────────────────
 
 /** The role an agent fills, mapped to an ai-foreman turn-type or command. */
-export type AgentRole = "builder" | "qa" | "planner" | "ticket-maker";
+export type AgentRole = "builder" | "qa" | "planner" | "ticket-maker" | "uninstaller";
 
 /** Reasoning effort levels accepted by the builders. */
 export type EffortLevel = "low" | "medium" | "high" | "xhigh";
@@ -141,6 +141,202 @@ export interface PlanningConfig {
   sources?: string[];
 }
 
+// ───────────────────────────── Workflow state ─────────────────────────────
+
+export type PlanningMode = "standard" | "exhaustive";
+export type WorkflowOutcomeKind = "completed" | "paused" | "cancelled" | "blocked" | "failed";
+
+/** Returned by nested workflows. Only a top-level CLI maps this to an exit code. */
+export interface WorkflowOutcome<T = undefined> {
+  outcome: WorkflowOutcomeKind;
+  stage: string;
+  diagnostic?: string;
+  retryCommand?: string;
+  manualCommand?: string;
+  value?: T;
+}
+
+export type InterviewStageStatus =
+  | "not_offered" | "offered" | "accepted" | "running" | "completed"
+  | "skipped" | "paused" | "failed" | "cancelled";
+export type InterviewWorkflowStatus =
+  | "in_progress" | "paused" | "needs_review" | "completed" | "incompatible";
+
+export interface InterviewStageState {
+  status: InterviewStageStatus;
+  updatedAt: string;
+}
+
+export interface InterviewRuntimeAttempt {
+  runtime: "claude" | "codex";
+  at: string;
+  outcome: "ready" | "failed" | "cancelled";
+  category?: RuntimeProbeCategory;
+}
+
+export interface InterviewRecordV2 {
+  version: 2;
+  id: string;
+  journeyId: string;
+  parentId?: string;
+  childIds: string[];
+  workflow: "create" | "plan" | "tickets-plan" | "tickets-setup-init" | "tickets-setup-update";
+  status: InterviewWorkflowStatus;
+  checkpoint: string;
+  stages: Record<string, InterviewStageState>;
+  planningMode?: PlanningMode;
+  invocation: Record<string, unknown>;
+  decisions: Record<string, unknown>;
+  runtimeAttempts: InterviewRuntimeAttempt[];
+  effectiveSettings?: ResolvedAgentSettings;
+  sessionIds: Record<string, string>;
+  continuityLost: boolean;
+  outputs: Array<{ path: string; sha256: string | null }>;
+  configFingerprint?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  failure?: { checkpoint: string; summary: string; at: string };
+}
+
+export type ProjectLifecycleKind = "uninitialized" | "initializing" | "initialized" | "partial" | "corrupt";
+export interface ProjectLifecycleState {
+  state: ProjectLifecycleKind;
+  reasons: string[];
+  repairCommand?: string;
+  canCreate: boolean;
+}
+
+export type RuntimeProbePhase =
+  | "sdk-load" | "authentication" | "compiler-update" | "capability-discovery"
+  | "planning" | "ticket-planning" | "ticket-population" | "builder" | "qa"
+  | "recovery" | "uninstaller" | "readiness";
+export type RuntimeProbeCategory =
+  | "ready" | "missing-executable" | "sdk-load" | "authentication" | "authorization"
+  | "configuration" | "rate-limit" | "network" | "timeout" | "malformed-protocol"
+  | "agent-stream" | "compiler-update" | "capability-discovery" | "unknown";
+export interface RuntimeProbeResult {
+  ok: boolean;
+  runtime: "claude" | "codex";
+  phase: RuntimeProbePhase;
+  category: RuntimeProbeCategory;
+  executable: string;
+  cwd: string;
+  timedOut: boolean;
+  exitCode: number | null;
+  signal: string | null;
+  diagnostics: string;
+  environmentNames: string[];
+  recoveryChoices: Array<"retry" | "switch" | "cancel">;
+}
+
+export type ConfigurableAgentRole = AgentRole;
+export interface AgentRoleDefaultsV1 {
+  make: "claude" | "codex";
+  model: string;
+  reasoning: string;
+  fast: boolean;
+}
+export interface AgentDefaultsV1 {
+  version: 1;
+  roles: Partial<Record<ConfigurableAgentRole, AgentRoleDefaultsV1>>;
+}
+export interface ResolvedAgentSettings extends AgentRoleDefaultsV1 {
+  role: ConfigurableAgentRole;
+  source: "cli" | "resume" | "project" | "manifest" | "provider";
+}
+
+export type BuildRunStatus = "running" | "interrupted" | "recoverable" | "blocked" | "completed" | "failed";
+export interface BuildRunRecordV1 {
+  version: 1;
+  runId: string;
+  status: BuildRunStatus;
+  tickets: string[];
+  deliveryUnit?: string;
+  branchMode: "current" | "per-ticket" | "shared";
+  checkpoint: string;
+  currentTicket?: string;
+  builder?: { settings: ResolvedAgentSettings; sessionId?: string };
+  qa?: { settings: ResolvedAgentSettings; sessionId?: string };
+  repository: {
+    root: string;
+    branch?: string;
+    worktree: string;
+    baseHead?: string;
+    startHead?: string;
+    partialFingerprint?: string;
+  };
+  receipts: Record<string, { completedAt: string; externalId?: string; detail?: string }>;
+  lease?: { hostname: string; pid: number; processStart: string; heartbeatAt: string };
+  failure?: { category: string; summary: string; at: string };
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  legacy?: boolean;
+}
+
+export type InstallOwnershipMode = "created" | "managed-block" | "modified" | "generated" | "runtime-produced";
+export interface InstallManifestEntryV1 {
+  path: string;
+  sha256: string | null;
+  mode: InstallOwnershipMode;
+  origin: string;
+  marker?: string;
+  backup?: string;
+}
+export interface InstallDependencyV1 {
+  manager: "npm" | "pnpm" | "yarn" | "bun";
+  package: string;
+  previous?: string | null;
+  installed: string;
+  manifests: string[];
+}
+export interface InstallManifestV1 {
+  version: 1;
+  createdAt: string;
+  updatedAt: string;
+  files: InstallManifestEntryV1[];
+  dependencies: InstallDependencyV1[];
+}
+
+export interface PlanningAssessmentArea {
+  finding: string;
+  basis: string;
+  resolution: string;
+  userJudgmentRequired: boolean;
+}
+export interface PlanningAssessment {
+  scope: PlanningAssessmentArea;
+  dependencies: PlanningAssessmentArea;
+  failureAndEdgeCases: PlanningAssessmentArea;
+  compatibilityAndRollout: PlanningAssessmentArea;
+  verification: PlanningAssessmentArea;
+}
+
+export interface BuilderQaHandoff {
+  ticket: string;
+  requirements: string[];
+  builderResult: string;
+  worktree: string;
+  diffSummary: string;
+  tests: string[];
+  evidence: string[];
+}
+export interface QaResult {
+  outcome: "approve" | "reject" | "needs_input";
+  findings: Array<{ severity: "blocking" | "warning" | "note"; message: string; evidence?: string }>;
+}
+
+export interface UninstallProposal {
+  operations: Array<{
+    kind: "keep" | "delete" | "edit" | "remove-dependency";
+    target: string;
+    reason: string;
+    confidence: "high" | "medium" | "low";
+  }>;
+  followUpQuestion?: string;
+}
+
 /** Ticket source configured in the top-level rafi-config.yaml. */
 export type TicketSetupSource =
   | {
@@ -159,6 +355,10 @@ export type TicketSetupSource =
       email_env?: string;
       token_env?: string;
       jql: string;
+    }
+  | {
+      type: "url";
+      url: string;
     };
 
 export type TicketPopulateAgentPreference = "configured" | "claude" | "codex";
@@ -217,6 +417,7 @@ export interface ProjectConfig {
   docs?: DocsConfig;
   planning?: PlanningConfig;
   tickets?: TicketsSetupConfig;
+  agent_defaults?: AgentDefaultsV1;
   agents: Record<string, RuntimeArtifactConfig>;
   skills: Record<string, RuntimeArtifactConfig>;
 }

@@ -1,6 +1,8 @@
 import { loadDefaults } from "special-agents";
 import { assertProjectConfig } from "rafi-spec";
 import type { ProjectConfig, HarnessTarget, RuntimeArtifactConfig } from "rafi-spec";
+import { existsSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 export const NO_UI = "No UI";
 export const LOCAL_ONLY = "Local only";
@@ -30,7 +32,43 @@ export interface WalkthroughAnswers {
 export const RAFI_CONFIG_FILE = "rafi-config.yaml";
 export const LEGACY_PROJECT_CONFIG_FILE = "project.yaml";
 
-export const RAFI_AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker"] as const;
+export interface DiscoveredRafiProject {
+  root: string;
+  configFile: typeof RAFI_CONFIG_FILE | typeof LEGACY_PROJECT_CONFIG_FILE;
+  legacy: boolean;
+}
+
+/** Walk upward and return the nearest active or legacy Rafi project. */
+export function findNearestRafiProject(startDir = process.cwd()): DiscoveredRafiProject | undefined {
+  let current = resolve(startDir);
+  if (existsSync(current) && !statSync(current).isDirectory()) current = dirname(current);
+  while (true) {
+    if (existsSync(join(current, RAFI_CONFIG_FILE))) {
+      return { root: current, configFile: RAFI_CONFIG_FILE, legacy: false };
+    }
+    if (existsSync(join(current, LEGACY_PROJECT_CONFIG_FILE))) {
+      return { root: current, configFile: LEGACY_PROJECT_CONFIG_FILE, legacy: true };
+    }
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+/** Resolve an explicit project directory without searching its ancestors. */
+export function resolveExplicitRafiProject(project: string): DiscoveredRafiProject | undefined {
+  const root = resolve(project);
+  if (!existsSync(root) || !statSync(root).isDirectory()) return undefined;
+  if (existsSync(join(root, RAFI_CONFIG_FILE))) {
+    return { root, configFile: RAFI_CONFIG_FILE, legacy: false };
+  }
+  if (existsSync(join(root, LEGACY_PROJECT_CONFIG_FILE))) {
+    return { root, configFile: LEGACY_PROJECT_CONFIG_FILE, legacy: true };
+  }
+  return undefined;
+}
+
+export const RAFI_AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker", "uninstaller"] as const;
 export const RAFI_SKILL_NAMES = [
   "better-sqlite3-rebuild",
   "grill-me",

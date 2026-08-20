@@ -4,6 +4,26 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.8.1 / ai-foreman 1.6.0 / special-agents 0.7.0 / rafi-spec 0.7.0 - 2026-08-19
+
+### Added
+
+- Added a checkpointed, in-process create journey with explicit standard/exhaustive planning, lifecycle gates, V2 interview state, drift-aware recovery, and clear paused outcomes.
+- Added shared bounded runtime probing and sanitized failure classification, persistent per-role agent defaults, an authoritative five-role registry, and independent run-wide QA sessions.
+- Added durable build-run records, leases, session checkpoints, idempotent operation receipts, `rafi build:resume`, and recoverable-run status reporting.
+- Added ownership provenance and the preview-first, transaction-journaled `rafi uninstall` interview, including a constrained read-only uninstaller role for nonblank special instructions.
+- Added deterministic Commander-to-`docs/cli.md` generation and drift checking.
+
+### Changed
+
+- `rafi plan` is initialization-only and defaults to standard planning; `rafi tickets plan` is the fully initialized later-work workflow.
+- Runtime/provider switches during recovery are explicit fresh sessions and report lost conversational continuity.
+- Builder and QA settings/session IDs are resolved and persisted independently.
+
+### Packages
+
+- Bumped `@rafi-ai/cli` to `0.8.1`, `ai-foreman` to `1.6.0`, `special-agents` to `0.7.0`, and `rafi-spec` to `0.7.0`.
+
 ## @rafi-ai/cli 0.8.0 / ai-foreman 1.5.0 / special-agents 0.6.0 / rafi-spec 0.6.0 - 2026-08-06
 
 ### Added

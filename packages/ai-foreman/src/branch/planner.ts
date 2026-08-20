@@ -15,6 +15,7 @@ export interface BuildBranchPlanOptions {
   maxBranchDepth: number;
   auditDependencies?: AuditDependency[];
   rootBaseBranches?: boolean;
+  ticketIds?: string[];
 }
 
 export function buildBranchPlan(
@@ -22,7 +23,7 @@ export function buildBranchPlan(
   states: Map<string, TicketState>,
   opts: BuildBranchPlanOptions,
 ): BranchPlan {
-  const selected = selectTicketsForBranchRun(tickets, states, opts.steps);
+  const selected = selectTicketsForBranchRun(tickets, states, opts.steps, opts.ticketIds);
   const selectedIds = new Set(selected.map((ticket) => ticket.id));
   const issues: BranchIssue[] = [];
   const dependencyMap = new Map<string, string[]>();
@@ -108,9 +109,12 @@ export function selectTicketsForBranchRun(
   tickets: TicketDef[],
   states: Map<string, TicketState>,
   steps: number,
+  ticketIds?: string[],
 ): TicketDef[] {
+  const allowed = ticketIds ? new Set(ticketIds) : undefined;
   const remaining = tickets
     .filter((ticket) => {
+      if (allowed && !allowed.has(ticket.id)) return false;
       const status = states.get(ticket.id)?.status ?? "planned";
       return status !== "done" && status !== "canceled";
     })
@@ -132,6 +136,30 @@ export function selectTicketsForBranchRun(
   }
 
   return selected;
+}
+
+export function applySharedDeliveryBranch(
+  plan: BranchPlan,
+  unitId: string,
+  allRemainingTicketIds: string[],
+  branchPrefix = "rafi",
+): BranchPlan {
+  if (plan.nodes.length === 0) return plan;
+  const slug = unitId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "group";
+  const branch = `${branchPrefix.replace(/^\/+|\/+$/g, "") || "rafi"}/${slug}`;
+  const finalSelected = plan.nodes.at(-1)?.ticket.id;
+  const completesUnit = plan.nodes.length === allRemainingTicketIds.length
+    && allRemainingTicketIds.every((id) => plan.nodes.some((node) => node.ticket.id === id));
+  return {
+    ...plan,
+    nodes: plan.nodes.map((node) => ({
+      ...node,
+      branch,
+      baseBranch: plan.baseRef,
+      deliveryUnitId: unitId,
+      deliveryUnitFinal: completesUnit && node.ticket.id === finalSelected,
+    })),
+  };
 }
 
 export function parseAuditDependencies(text: string): AuditDependency[] {

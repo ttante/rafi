@@ -69,6 +69,17 @@ export function createTicketWorktree(
   return worktreePath;
 }
 
+export function findWorktreeForBranch(projectDir: string, branch: string): string | undefined {
+  const output = runGit(projectDir, ["worktree", "list", "--porcelain"]).stdout;
+  let worktree: string | undefined;
+  for (const line of output.split(/\r?\n/)) {
+    if (line.startsWith("worktree ")) worktree = line.slice("worktree ".length);
+    if (line === `branch refs/heads/${branch}` && worktree) return worktree;
+    if (!line.trim()) worktree = undefined;
+  }
+  return undefined;
+}
+
 export function removeTicketWorktree(projectDir: string, worktreePath: string): void {
   try {
     runGit(projectDir, ["worktree", "remove", "--force", worktreePath]);
@@ -125,19 +136,31 @@ export function pushBranch(worktreePath: string, branch: string): void {
   runGit(worktreePath, ["push", "-u", "origin", branch]);
 }
 
-export function squashMergeBranchToLocalBase(
+export function mergeBranchToLocalBase(
   projectDir: string,
   branch: string,
   baseBranch: string,
   message: string,
+  method: "squash" | "merge" | "rebase" = "squash",
 ): string {
-  const current = currentGitRef(projectDir);
-  if (current !== baseBranch) {
+  if (method === "rebase") runGit(projectDir, ["rebase", baseBranch, branch]);
+  if (currentGitRef(projectDir) !== baseBranch) {
     runGit(projectDir, ["checkout", baseBranch]);
   }
-  runGit(projectDir, ["merge", "--squash", branch]);
-  runGit(projectDir, ["commit", "-m", message]);
+  if (method === "squash") {
+    runGit(projectDir, ["merge", "--squash", branch]);
+    runGit(projectDir, ["commit", "-m", message]);
+  } else if (method === "merge") {
+    runGit(projectDir, ["merge", "--no-ff", branch, "-m", message]);
+  } else {
+    runGit(projectDir, ["merge", "--ff-only", branch]);
+  }
   return runGit(projectDir, ["rev-parse", "--short", "HEAD"]).stdout;
+}
+
+/** Compatibility export for callers compiled against the older helper. */
+export function squashMergeBranchToLocalBase(projectDir: string, branch: string, baseBranch: string, message: string): string {
+  return mergeBranchToLocalBase(projectDir, branch, baseBranch, message, "squash");
 }
 
 export function deleteLocalBranch(projectDir: string, branch: string): void {

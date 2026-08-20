@@ -9,6 +9,15 @@ export interface TicketExternalRef {
   url?: string | null;
 }
 
+/** General provenance reference. `external_refs` remains accepted for compatibility. */
+export interface TicketSourceRef {
+  source: string;
+  item: string;
+  url?: string | null;
+  fingerprint?: string | null;
+  note?: string | null;
+}
+
 export interface TicketDef {
   id: string;
   order: number;
@@ -25,6 +34,9 @@ export interface TicketDef {
   rollback?: string | null;
   notes?: string | null;
   external_refs?: TicketExternalRef[];
+  source_refs?: TicketSourceRef[];
+  superseded_by?: string[];
+  supersedes?: string[];
 }
 
 export const TICKET_JSON_SCHEMA = {
@@ -63,6 +75,23 @@ export const TICKET_JSON_SCHEMA = {
         },
       },
     },
+    source_refs: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["source", "item"],
+        additionalProperties: true,
+        properties: {
+          source: { type: "string", minLength: 1 },
+          item: { type: "string", minLength: 1 },
+          url: { type: ["string", "null"] },
+          fingerprint: { type: ["string", "null"] },
+          note: { type: ["string", "null"] },
+        },
+      },
+    },
+    superseded_by: { type: "array", items: { type: "string" }, uniqueItems: true },
+    supersedes: { type: "array", items: { type: "string" }, uniqueItems: true },
   },
 } as const;
 

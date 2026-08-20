@@ -8,6 +8,9 @@ export interface BranchPlanNode {
   dependencies: string[];
   depth: number;
   worktreePath?: string;
+  /** Shared delivery units intentionally reuse one isolated branch/worktree. */
+  deliveryUnitId?: string;
+  deliveryUnitFinal?: boolean;
 }
 
 export interface BranchIssue {
@@ -78,6 +81,7 @@ export interface BranchPlan {
 
 export type CompletionMode = "none" | "pr" | "auto-merge" | "direct-merge";
 export type ReviewProvider = "github" | "gitlab";
+export type MergeMethod = "squash" | "merge" | "rebase";
 
 export interface PrResult {
   status: "created" | "existing" | "failed" | "skipped" | "auto_merge_enabled" | "merged";

@@ -6,6 +6,7 @@ import type { TicketDef } from "./ticketSchema.js";
 import type { StateDb, TicketState } from "./stateDb.js";
 import { buildNextQueue, buildActiveStatusRows } from "./queue.js";
 import { resolveBlockers } from "./blockers.js";
+import { formatDeliverySummary, loadDeliveryConfig } from "./delivery.js";
 
 // ── Table helpers ─────────────────────────────────────────────────────────────
 
@@ -122,6 +123,15 @@ export function renderProgressDoc(input: RenderInput): string {
     ],
   )));
   lines.push("");
+
+  // Delivery units are optional; repositories without delivery.yaml retain legacy defaults.
+  const delivery = loadDeliveryConfig(projectDir);
+  if (delivery) {
+    lines.push("## Delivery Units");
+    const deliveryRows = formatDeliverySummary(delivery, states);
+    lines.push(section("DELIVERY_UNITS", deliveryRows.length > 0 ? deliveryRows.map((row) => `- ${row}`).join("\n") : "_No delivery units configured._"));
+    lines.push("");
+  }
 
   // Rules
   if (config.rendering.includeRulesInProgressDoc) {

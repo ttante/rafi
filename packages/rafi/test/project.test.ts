@@ -11,9 +11,14 @@ import {
   NO_UI,
   LOCAL_ONLY,
   runtimeSelectionToTargets,
+  findNearestRafiProject,
+  resolveExplicitRafiProject,
 } from "../src/project.js";
 import { validateProjectConfig } from "rafi-spec";
 import { loadDefaults } from "special-agents";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 test("--defaults produces a config that validates against ProjectConfig schema", () => {
   const config = buildProjectConfig(defaultAnswers());
@@ -186,4 +191,21 @@ test("normalizeProjectConfig preserves custom existing artifact paths", () => {
     claude: "./.claude/skills/custom-tdd/SKILL.md",
     codex: "./.agents/skills/custom-tdd/SKILL.md",
   });
+});
+
+test("project discovery finds nearest active config from nested directories", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-discovery-"));
+  const nested = join(root, "packages", "web", "src");
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(root, "rafi-config.yaml"), "appName: Discovery\n", "utf8");
+  assert.deepEqual(findNearestRafiProject(nested), { root, configFile: "rafi-config.yaml", legacy: false });
+});
+
+test("explicit project resolution never searches ancestors and recognizes legacy config", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-explicit-"));
+  const child = join(root, "child");
+  mkdirSync(child);
+  writeFileSync(join(root, "project.yaml"), "appName: Legacy\n", "utf8");
+  assert.equal(resolveExplicitRafiProject(child), undefined);
+  assert.deepEqual(resolveExplicitRafiProject(root), { root, configFile: "project.yaml", legacy: true });
 });

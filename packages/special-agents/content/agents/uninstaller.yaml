@@ -1,0 +1,9 @@
+name: uninstaller
+description: Read-only interpreter for explicit uninstall instructions; it proposes operations but never mutates files.
+role: uninstaller
+packs:
+  - base/core
+  - domain/security
+skills: []
+model: null
+effort: null

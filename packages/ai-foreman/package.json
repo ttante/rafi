@@ -1,6 +1,6 @@
 {
   "name": "ai-foreman",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
   "license": "Apache-2.0",
   "type": "module",
@@ -24,6 +24,30 @@
     "./interviews.js": {
       "types": "./dist/interviews.d.ts",
       "default": "./dist/interviews.js"
+    },
+    "./runtime-readiness.js": {
+      "types": "./dist/runtimeReadiness.d.ts",
+      "default": "./dist/runtimeReadiness.js"
+    },
+    "./roles.js": {
+      "types": "./dist/roles.d.ts",
+      "default": "./dist/roles.js"
+    },
+    "./build-runs.js": {
+      "types": "./dist/buildRuns.d.ts",
+      "default": "./dist/buildRuns.js"
+    },
+    "./ticket-planning.js": {
+      "types": "./dist/ticketPlanning.d.ts",
+      "default": "./dist/ticketPlanning.js"
+    },
+    "./tickets/source-fetch.js": {
+      "types": "./dist/tickets/sourceFetch.d.ts",
+      "default": "./dist/tickets/sourceFetch.js"
+    },
+    "./tickets/setup-config.js": {
+      "types": "./dist/tickets/setupConfig.d.ts",
+      "default": "./dist/tickets/setupConfig.js"
     },
     "./cli/tickets.js": {
       "types": "./dist/cli/tickets.d.ts",
@@ -73,13 +97,16 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.148"
   },
   "dependencies": {
-    "special-agents": "0.6.0",
+    "special-agents": "0.7.0",
+    "rafi-spec": "0.7.0",
     "@clack/prompts": "^1.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "better-sqlite3": "^12.10.0",
     "commander": "^12.1.0",
     "luxon": "^3.7.2",
+    "parse5": "7.2.1",
+    "pdfjs-dist": "4.10.38",
     "yaml": "^2.5.1"
   },
   "devDependencies": {

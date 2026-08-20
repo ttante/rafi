@@ -21,6 +21,8 @@ import {
 import { validateDocsRoot } from "./docs.js";
 import { DEFAULT_DOCS_ROOT, LEGACY_PROJECT_CONFIG_FILE, RAFI_CONFIG_FILE } from "./project.js";
 import { normalizePlanningSources } from "./project.js";
+import { assertLifecycleForCommand } from "./lifecycle.js";
+import type { PlanningMode } from "rafi-spec";
 import {
   checkpointInterview,
   completeInterview,
@@ -60,6 +62,7 @@ export interface PlanInstructionOptions {
   latestPlanPath: string;
   historyDirPath: string;
   ticketSetupSummary?: string;
+  planningMode?: PlanningMode;
 }
 
 export interface PlanArtifactPaths {
@@ -74,6 +77,11 @@ export function buildPlanInstruction(opts: PlanInstructionOptions): string {
   const sources = opts.sources?.length
     ? opts.sources.map((source) => `- ${source}`).join("\n")
     : "- No explicit sources were provided. Inspect the repository for relevant docs, tickets, code, configs, tests, and recent plans.";
+
+  const mode = opts.planningMode ?? "standard";
+  const conversation = mode === "exhaustive"
+    ? `- Use the complete grill-me skill instructions in this same session. Explore material decision branches one question at a time. Each question must present a recommended choice, meaningful alternatives, a free-text path, and "Stop questions and make the plan now".\n- Zero questions are valid only if the final assessment supplies evidence that every material branch is resolved or inapplicable.`
+    : "- Use a standard focused planning conversation. Do not invoke, advertise, or claim use of grill-me.";
 
   return `You are being run by Rafi to create a ticket-maker-ready implementation plan.
 
@@ -91,7 +99,8 @@ ${opts.ticketSetupSummary ?? "- No saved ticket setup preferences found."}
 
 Role and skill requirements:
 - Use the planner role guidance for baseline planning.
-- Use the grill-me skill explicitly while stress-testing the plan. If a question can be answered by inspecting the repository, inspect the repository instead of asking the user.
+${conversation}
+- If a question can be answered by inspecting the repository, inspect the repository instead of asking the user.
 - Use prd-to-issues only as vertical-slice planning guidance. Do not create issues/*.md or any other issue files.
 
 Permissions and file rules:
@@ -106,6 +115,7 @@ Output contract:
 - Return one Markdown plan.
 - Include these sections: Goal, Problem Statement, Repo Findings, Locked Decisions, Open Questions, Scope, Out Of Scope, Risks, Rollback Notes, Ticket-Maker Guidance.
 - Ticket-Maker Guidance must include proposed ticket slices, dependencies, acceptance criteria, required tests, likely files, and branch/batch strategy for repeated component-library work.
+- Include a Planning Assessment covering scope, dependencies, failure/edge cases, compatibility/rollout, and verification. For every area state the finding, basis, resolution, and whether user judgment remains.
 - Make each ticket slice small enough for \`rafi start --steps ...\` or branch-per-ticket execution.
 - Do not include implementation patches.
 
@@ -123,11 +133,12 @@ export function buildPlanAgentRunOptions(opts: {
   resumeSessionId?: string;
   instruction: string;
   logPath?: string;
+  planningMode?: PlanningMode;
 }): RoleInstructionRunOptions {
   return {
     projectDir: opts.projectDir,
     role: "planner",
-    extraSkills: ["grill-me"],
+    extraSkills: opts.planningMode === "exhaustive" ? ["grill-me"] : [],
     agent: opts.agent,
     model: opts.model,
     effort: opts.effort,
@@ -198,8 +209,9 @@ export function writeValidatedPlanArtifacts(
   docsRoot: string,
   planMarkdown: string,
   now = new Date(),
+  planningMode: PlanningMode = "standard",
 ): PlanArtifactPaths {
-  const missing = validatePlanMarkdown(planMarkdown);
+  const missing = validatePlanMarkdown(planMarkdown, planningMode);
   if (missing.length > 0) {
     throw new Error(formatPlanValidationFailures(missing));
   }
@@ -210,7 +222,7 @@ export function isSuccessfulPlanStatus(kind: string): boolean {
   return kind === "plan_complete";
 }
 
-export function validatePlanMarkdown(planMarkdown: string): string[] {
+export function validatePlanMarkdown(planMarkdown: string, planningMode: PlanningMode = "standard"): string[] {
   const missing: string[] = [];
   const markdown = stripFinalStepStatusMarker(planMarkdown);
 
@@ -223,6 +235,19 @@ export function validatePlanMarkdown(planMarkdown: string): string[] {
     for (const requirement of TICKET_GUIDANCE_REQUIREMENTS) {
       if (!requirement.pattern.test(guidance.content)) {
         missing.push(`Ticket-Maker Guidance: ${requirement.label}`);
+      }
+    }
+  }
+
+  if (planningMode === "exhaustive") {
+    const assessment = findSection(markdown, "Planning Assessment");
+    if (!assessment) missing.push("section: Planning Assessment");
+    else {
+      for (const area of ["scope", "dependencies", "failure/edge cases", "compatibility/rollout", "verification"]) {
+        if (!assessment.content.toLowerCase().includes(area)) missing.push(`Planning Assessment: ${area}`);
+      }
+      for (const field of ["finding", "basis", "resolution", "user judgment"]) {
+        if (!assessment.content.toLowerCase().includes(field)) missing.push(`Planning Assessment field: ${field}`);
       }
     }
   }
@@ -261,16 +286,33 @@ export function buildPlanCommand(): Command {
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--fast", "fast mode - lower latency")
     .option("--resume-session <id>", "resume a saved planner agent session")
+    .option("--grill-me", "use exhaustive one-question-at-a-time planning")
+    .option("--no-grill-me", "use standard focused planning (default)")
     .option("-y, --yes", "skip confirmation prompt before running the planning agent")
-    .action(async (project: string, opts) => {
+    .action(async (project: string, opts, command: Command) => {
       const projectDir = resolve(project);
+      assertLifecycleForCommand(projectDir, "plan");
+      const parent = command.parent as (Command & { rawArgs?: string[] }) | null;
+      const argv = parent?.rawArgs ?? (command as Command & { rawArgs?: string[] }).rawArgs ?? process.argv.slice(2);
+      if (argv.includes("--grill-me") && argv.includes("--no-grill-me")) throw new Error("choose either --grill-me or --no-grill-me, not both");
       const interactiveInterview = !opts.yes && process.stdin.isTTY && process.stdout.isTTY;
+      let planningMode: PlanningMode = opts.grillMe === true ? "exhaustive" : "standard";
+      if (interactiveInterview && !argv.includes("--grill-me") && !argv.includes("--no-grill-me")) {
+        const { select, isCancel } = await import("@clack/prompts");
+        const selected = await select({ message: "Planning depth (exhaustive may take substantially longer):", options: [
+          { value: "standard", label: "Standard (Recommended)" },
+          { value: "exhaustive", label: "Exhaustive grill-me" },
+        ] });
+        if (isCancel(selected)) return;
+        planningMode = selected as PlanningMode;
+      }
       let interview: InterviewRecord | undefined = interactiveInterview
         ? createInterviewRecord({
           workflow: "plan",
           invocation: { projectDir, agent: opts.agent, model: opts.model, effort: opts.effort, fast: Boolean(opts.fast) },
           checkpoint: "planning-brief",
           outputs: ["docs/rafi-plan.md"],
+          planningMode,
         })
         : undefined;
       try {
@@ -296,6 +338,7 @@ export function buildPlanCommand(): Command {
           latestPlanPath: previewPaths.latestRel,
           historyDirPath: `${docsRoot}/rafi-plans`,
           ticketSetupSummary: readTicketSetupSummary(projectDir),
+          planningMode,
         });
 
         if (!opts.yes) {
@@ -317,7 +360,7 @@ export function buildPlanCommand(): Command {
         if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "agent-run" });
         console.log("rafi plan: running read-only planner");
         console.log(`rafi plan: project ${projectDir}`);
-        console.log("rafi plan: role planner + skill grill-me");
+        console.log(`rafi plan: role planner; mode ${planningMode}`);
         console.log(`rafi plan: log ${logPath}\n`);
 
         const run = await runRoleInstruction(buildPlanAgentRunOptions({
@@ -330,6 +373,7 @@ export function buildPlanCommand(): Command {
           resumeSessionId: opts.resumeSession as string | undefined,
           instruction,
           logPath,
+          planningMode,
         }));
 
         const turn = run.turn;
@@ -354,7 +398,7 @@ export function buildPlanCommand(): Command {
             throw new Error(`planned output changed during this interview: ${drifted.join(", ")}; review it and retry instead of overwriting`);
           }
         }
-        const written = writeValidatedPlanArtifacts(projectDir, docsRoot, planMarkdown);
+        const written = writeValidatedPlanArtifacts(projectDir, docsRoot, planMarkdown, new Date(), planningMode);
         if (interview) {
           interview = checkpointInterview(projectDir, interview, {
             checkpoint: "write-plan-artifacts",

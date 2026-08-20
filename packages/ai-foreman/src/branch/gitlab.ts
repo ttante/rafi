@@ -8,6 +8,7 @@ import type {
   GitHubOperationResult,
   PrResult,
   ReviewMergeStatus,
+  MergeMethod,
 } from "./types.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
@@ -77,6 +78,7 @@ export interface CreateMrOptions {
   commit?: string;
   autoMerge?: boolean;
   cleanup?: boolean;
+  mergeMethod?: MergeMethod;
 }
 
 export function createOrReuseMr(cwd: string, opts: CreateMrOptions): PrResult {
@@ -108,7 +110,8 @@ export function createOrReuseMr(cwd: string, opts: CreateMrOptions): PrResult {
     "--yes",
   ];
   if (!opts.ready) args.push("--draft");
-  if (opts.autoMerge) args.push("--auto-merge", "--squash-before-merge");
+  if (opts.autoMerge) args.push("--auto-merge");
+  if (opts.mergeMethod === "squash") args.push("--squash-before-merge");
   if (opts.cleanup) args.push("--remove-source-branch");
 
   const created = runCommand(cwd, "glab", args);
@@ -119,13 +122,15 @@ export function createOrReuseMr(cwd: string, opts: CreateMrOptions): PrResult {
   ]));
 }
 
-export function enableGitLabAutoMerge(cwd: string, branch: string, cleanup: boolean): PrResult {
-  const args = ["mr", "merge", branch, "--auto-merge", "--squash", "--yes"];
+export function enableGitLabAutoMerge(cwd: string, branch: string, cleanup: boolean, method: MergeMethod = "squash"): PrResult {
+  const args = ["mr", "merge", branch, "--auto-merge", "--yes"];
+  if (method === "squash") args.push("--squash");
+  if (method === "rebase") args.push("--rebase");
   if (cleanup) args.push("--remove-source-branch");
   const result = runCommand(cwd, "glab", args, 30_000);
   if (result.ok) return { status: "auto_merge_enabled", url: result.stdout };
   return prFailure(classifyCommandFailure(result, "mr_create_failed", `Failed to enable GitLab MR auto-merge. Branch: ${branch}`, [
-    `glab mr merge ${branch} --auto-merge --squash --yes`,
+    `glab mr merge ${branch} --auto-merge${method === "squash" ? " --squash" : method === "rebase" ? " --rebase" : ""} --yes`,
     "glab auth status",
   ]));
 }

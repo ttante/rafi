@@ -3,10 +3,11 @@ import { Foreman, MARKER_SPEC } from "../foreman.js";
 import type { Log } from "../log.js";
 import { fireNotification } from "../notify.js";
 import { cmdBlock, cmdComplete, cmdUpdate } from "../tickets/commands.js";
-import type { BranchPlan, BranchPlanNode, BranchRunSummary, CompletionMode, GitHubFailureCode, PrResult, ReviewProvider } from "./types.js";
+import type { BranchPlan, BranchPlanNode, BranchRunSummary, CompletionMode, GitHubFailureCode, MergeMethod, PrResult, ReviewProvider } from "./types.js";
 import {
   commitAll,
   createTicketWorktree,
+  findWorktreeForBranch,
   currentWorktreeBranch,
   deleteLocalBranch,
   ensureCleanBaseWorktree,
@@ -15,10 +16,24 @@ import {
   hasWorktreeChanges,
   headCommitIfAhead,
   removeTicketWorktree,
-  squashMergeBranchToLocalBase,
+  mergeBranchToLocalBase,
 } from "./git.js";
 import { checkGitHubPrMerged, createOrReusePr, enableGitHubAutoMerge, pushBranchForPr } from "./github.js";
 import { checkGitLabMrMerged, createOrReuseMr, enableGitLabAutoMerge, pushBranchForMr } from "./gitlab.js";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+export interface DeliveryUnitSession { unitId: string; branch: string; worktreePath: string; sessionId: string; ticket: string; }
+
+export function readDeliveryUnitSession(projectDir: string, unitId: string): DeliveryUnitSession | undefined {
+  const path = deliverySessionPath(projectDir, unitId);
+  if (!existsSync(path)) return undefined;
+  try { return JSON.parse(readFileSync(path, "utf8")) as DeliveryUnitSession; } catch { return undefined; }
+}
+
+function deliverySessionPath(projectDir: string, unitId: string): string {
+  return join(projectDir, ".foreman", "delivery-sessions", `${unitId}.json`);
+}
 
 export interface BranchRunnerOptions {
   projectDir: string;
@@ -39,6 +54,7 @@ export interface BranchRunnerOptions {
   cleanupBranches?: boolean;
   autoMergeWait?: boolean;
   autoMergeTimeoutMinutes?: number | null;
+  mergeMethod?: MergeMethod;
   allowedBaseDirtyPaths?: string[];
   trackerPaths?: { progressDoc: string; archiveDoc: string };
   resumeSessions?: Map<string, { worktreePath: string; sessionId: string }>;
@@ -73,6 +89,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
   if (opts.plan.issues.some((issue) => issue.blocking)) return summaries;
 
   for (const node of orderNodes(opts.plan.nodes)) {
+    const sharedUnit = Boolean(node.deliveryUnitId);
+    const completesSharedUnit = !sharedUnit || Boolean(node.deliveryUnitFinal);
+    const createsReviewForNode = createsReview && completesSharedUnit;
     const missingDependency = node.dependencies.find((dep) => !successfulBranches.has(dep));
     if (missingDependency) {
       const detail = `dependency ${missingDependency} did not complete`;
@@ -87,7 +106,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       continue;
     }
 
-    if (createsReview) {
+    if (createsReview && !sharedUnit) {
       const missingPush = node.dependencies.find((dep) => {
         const depNode = opts.plan.nodes.find((candidate) => candidate.ticket.id === dep);
         return depNode && !pushedBranches.has(depNode.branch);
@@ -106,7 +125,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       }
     }
 
-    if (completionMode === "auto-merge" && node.dependencies.length > 0) {
+    if (completionMode === "auto-merge" && node.dependencies.length > 0 && !sharedUnit) {
       const mergeReadiness = await waitForAutoMergeDependencies(opts, node, reviewProvider);
       if (!mergeReadiness.ok) {
         summaries.push(summaryFor(node, "skipped", mergeReadiness.message, "skipped"));
@@ -133,6 +152,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
 
     const resumeSession = opts.resumeSessions?.get(node.ticket.id);
     const worktreePath = resumeSession?.worktreePath
+      ?? (sharedUnit ? findWorktreeForBranch(opts.projectDir, node.branch) : undefined)
       ?? createTicketWorktree(opts.projectDir, opts.runId, node.branch, node.baseBranch);
     node.worktreePath = worktreePath;
     let builder: BuilderAdapter | undefined;
@@ -188,6 +208,11 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           prReady: opts.prReady,
           keepWorktrees: opts.keepWorktrees,
         });
+        if (node.deliveryUnitId) {
+          const path = deliverySessionPath(opts.projectDir, node.deliveryUnitId);
+          mkdirSync(join(opts.projectDir, ".foreman", "delivery-sessions"), { recursive: true });
+          writeFileSync(path, `${JSON.stringify({ unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, ticket: node.ticket.id }, null, 2)}\n`, "utf8");
+        }
       }
       opts.log.write("step", {
         index: summaries.length + 1,
@@ -243,14 +268,14 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       if (hasWorktreeChanges(worktreePath)) {
         commit = commitAll(worktreePath, `${node.ticket.id}: ${node.ticket.title}`);
       }
-      if (!commit && (createsReview || completionMode === "direct-merge")) {
+      if (!commit && (createsReviewForNode || (completionMode === "direct-merge" && completesSharedUnit))) {
         commit = headCommitIfAhead(worktreePath, node.baseBranch);
       }
 
       const summary = summaryFor(node, "done", commit ? undefined : "no_changes");
       summary.commit = commit;
 
-      if (commit && createsReview) {
+      if (commit && createsReviewForNode) {
         const push = reviewProvider === "gitlab"
           ? pushBranchForMr(worktreePath, node.branch)
           : pushBranchForPr(worktreePath, node.branch);
@@ -291,8 +316,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
             runId: opts.runId,
             qaEvidence: qaSummary,
             commit,
-            autoMerge: completionMode === "auto-merge",
+            autoMerge: false,
             cleanup: opts.cleanupBranches ?? true,
+            mergeMethod: opts.mergeMethod ?? "squash",
           })
           : createOrReusePr(opts.projectDir, {
             node,
@@ -318,7 +344,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           continue;
         }
         if (completionMode === "auto-merge" && reviewProvider === "github") {
-          const autoMerge = enableGitHubAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true);
+          const autoMerge = enableGitHubAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true, opts.mergeMethod ?? "squash");
           summary.pr = autoMerge.status === "failed" ? autoMerge : { ...pr, status: "auto_merge_enabled", url: autoMerge.url ?? pr.url };
           if (autoMerge.status === "failed") {
             opts.log.write("pr-auto-merge-failed", failureLogFields(node, autoMerge));
@@ -334,8 +360,8 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
             continue;
           }
           opts.log.write("pr-auto-merge-enabled", { ticket: node.ticket.id, branch: node.branch, url: summary.pr.url });
-        } else if (completionMode === "auto-merge" && reviewProvider === "gitlab" && pr.status === "existing") {
-          const autoMerge = enableGitLabAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true);
+        } else if (completionMode === "auto-merge" && reviewProvider === "gitlab") {
+          const autoMerge = enableGitLabAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true, opts.mergeMethod ?? "squash");
           summary.pr = autoMerge.status === "failed" ? autoMerge : { ...pr, status: "auto_merge_enabled", url: autoMerge.url ?? pr.url };
           if (autoMerge.status === "failed") {
             opts.log.write("mr-auto-merge-failed", failureLogFields(node, autoMerge));
@@ -352,16 +378,17 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           }
           opts.log.write("mr-auto-merge-enabled", { ticket: node.ticket.id, branch: node.branch, url: summary.pr.url });
         }
-      } else if (createsReview) {
+      } else if (createsReviewForNode) {
         summary.pushStatus = "skipped";
         summary.pr = { status: "skipped", error: commit ? undefined : "no_changes" };
-      } else if (commit && completionMode === "direct-merge") {
+      } else if (commit && completionMode === "direct-merge" && completesSharedUnit) {
         if (!opts.keepWorktrees) removeTicketWorktree(opts.projectDir, worktreePath);
-        const mergeCommit = squashMergeBranchToLocalBase(
+        const mergeCommit = mergeBranchToLocalBase(
           opts.projectDir,
           node.branch,
           node.baseBranch,
           `${node.ticket.id}: ${node.ticket.title}`,
+          opts.mergeMethod ?? "squash",
         );
         summary.pr = { status: "merged", url: mergeCommit };
         opts.log.write("branch-direct-merge", {
@@ -391,7 +418,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         detail: summary.detail,
       });
 
-      if (!opts.keepWorktrees && completionMode !== "direct-merge") removeTicketWorktree(opts.projectDir, worktreePath);
+      if (node.deliveryUnitId && node.deliveryUnitFinal) rmSync(deliverySessionPath(opts.projectDir, node.deliveryUnitId), { force: true });
+
+      if (!opts.keepWorktrees && completionMode !== "direct-merge" && completesSharedUnit) removeTicketWorktree(opts.projectDir, worktreePath);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const code: "branch_switch" | "tracker_touched" | "builder_error" = message.includes("switched branch")

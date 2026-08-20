@@ -5,12 +5,14 @@ import {
   skillManifestSchema,
   agentManifestSchema,
   projectConfigSchema,
+  agentDefaultsSchema,
 } from "./schemas.js";
 import type {
   RulePackFrontmatter,
   SkillManifest,
   AgentManifest,
   ProjectConfig,
+  AgentDefaultsV1,
 } from "./types.js";
 
 const ajv = new Ajv({ allErrors: true, allowUnionTypes: true });
@@ -35,11 +37,13 @@ const vRulePack = ajv.compile(rulePackSchema);
 const vSkill = ajv.compile(skillManifestSchema);
 const vAgent = ajv.compile(agentManifestSchema);
 const vProject = ajv.compile(projectConfigSchema);
+const vAgentDefaults = ajv.compile(agentDefaultsSchema);
 
 export const validateRulePack = (d: unknown): ValidationResult => run(vRulePack, d);
 export const validateSkillManifest = (d: unknown): ValidationResult => run(vSkill, d);
 export const validateAgentManifest = (d: unknown): ValidationResult => run(vAgent, d);
 export const validateProjectConfig = (d: unknown): ValidationResult => run(vProject, d);
+export const validateAgentDefaults = (d: unknown): ValidationResult => run(vAgentDefaults, d);
 
 /** Validate and narrow, throwing on failure. */
 export function assertRulePack(d: unknown): asserts d is RulePackFrontmatter {
@@ -57,4 +61,8 @@ export function assertAgentManifest(d: unknown): asserts d is AgentManifest {
 export function assertProjectConfig(d: unknown): asserts d is ProjectConfig {
   const r = validateProjectConfig(d);
   if (!r.valid) throw new Error(`Invalid project config: ${r.errors.join("; ")}`);
+}
+export function assertAgentDefaults(d: unknown): asserts d is AgentDefaultsV1 {
+  const r = validateAgentDefaults(d);
+  if (!r.valid) throw new Error(`Invalid agent defaults: ${r.errors.join("; ")}`);
 }

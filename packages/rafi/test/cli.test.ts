@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -66,6 +66,7 @@ test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nod
   const cases = [
     { heading: "rafi --help", command: program },
     { heading: "rafi plan --help", command: commandByPath(["plan"]) },
+    { heading: "rafi tickets plan --help", command: commandByPath(["tickets", "plan"]) },
     { heading: "rafi tickets init --help", command: commandByPath(["tickets", "init"]) },
     { heading: "rafi tickets populate --help", command: commandByPath(["tickets", "populate"]) },
     { heading: "rafi tickets queue --help", command: commandByPath(["tickets", "queue"]) },
@@ -74,6 +75,25 @@ test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nod
   for (const item of cases) {
     assert.equal(item.command.helpInformation().trimEnd(), docsHelpBlock(docs, item.heading), item.heading);
   }
+});
+
+test("status discovers nested projects while explicit paths are exact", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+  const root = tempDir();
+  const nested = join(root, "packages", "web");
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(root, "rafi-config.yaml"), stringify(buildProjectConfig({ ...defaultAnswers(), appName: "Status App" })), "utf8");
+  mkdirSync(join(root, ".foreman"));
+  writeFileSync(join(root, ".foreman", "2026.jsonl"), `${JSON.stringify({ event: "batch-end", outcome: "completed", completed: 1, requested: 1 })}\n`, "utf8");
+  const projectRoot = join(HERE, "..");
+  const entry = join(projectRoot, "src", "index.ts");
+  const output = execFileSync(tsxBin(projectRoot), [entry, "status"], { cwd: nested, encoding: "utf8" });
+  assert.match(output, /rafi: project Status App/);
+  assert.match(output, new RegExp(`rafi: root ${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.match(output, /foreman: outcome — completed/);
+
+  const explicit = spawnSync(tsxBin(projectRoot), [entry, "status", nested], { cwd: projectRoot, encoding: "utf8" });
+  assert.notEqual(explicit.status, 0);
+  assert.match(explicit.stderr, /explicit project directory/);
 });
 
 test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {

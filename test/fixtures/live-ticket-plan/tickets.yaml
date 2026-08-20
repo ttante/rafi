@@ -1,0 +1,22 @@
+tickets:
+  - id: LIVE-CSV-EXPORT
+    order: 1000
+    title: Export tasks to CSV
+    area: Tasks
+    priority: P1
+    size: S
+    risk: Low
+    depends_on: []
+    summary: Export the complete task list as CSV.
+    acceptance:
+      - CSV contains task text and completion state.
+      - Export includes every task in the list.
+    required_tests:
+      - API export tests cover successful CSV generation.
+      - Frontend tests cover starting a CSV download.
+    likely_files:
+      - api/app/main.py
+      - web/src.tsx
+    source_refs:
+      - source: live-baseline
+        item: BASE-CSV-EXPORT

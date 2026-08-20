@@ -5,6 +5,7 @@ export {
   skillManifestSchema,
   agentManifestSchema,
   projectConfigSchema,
+  agentDefaultsSchema,
 } from "./schemas.js";
 export {
   type ValidationResult,
@@ -12,8 +13,10 @@ export {
   validateSkillManifest,
   validateAgentManifest,
   validateProjectConfig,
+  validateAgentDefaults,
   assertRulePack,
   assertSkillManifest,
   assertAgentManifest,
   assertProjectConfig,
+  assertAgentDefaults,
 } from "./validate.js";

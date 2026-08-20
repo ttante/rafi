@@ -11,6 +11,25 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgent } from "special-agents";
+import type { ConfigurableAgentRole } from "rafi-spec";
+
+export interface AgentRoleRegistration {
+  id: ConfigurableAgentRole;
+  label: string;
+  consumers: string[];
+  configurable: boolean;
+  manifest: string;
+  commands: string[];
+}
+
+/** One registry drives compilation, settings UI, and independently launched roles. */
+export const AGENT_ROLE_REGISTRY: readonly AgentRoleRegistration[] = [
+  { id: "planner", label: "Planner", consumers: ["initial planning", "ticket planning"], configurable: true, manifest: "planner", commands: ["rafi create", "rafi plan", "rafi tickets plan"] },
+  { id: "builder", label: "Builder", consumers: ["implementation"], configurable: true, manifest: "builder", commands: ["rafi start", "rafi build:resume"] },
+  { id: "qa", label: "QA (separate review session)", consumers: ["run-wide independent review"], configurable: true, manifest: "qa", commands: ["rafi start", "rafi build:resume"] },
+  { id: "ticket-maker", label: "Ticket maker", consumers: ["ticket population"], configurable: true, manifest: "ticket-maker", commands: ["rafi tickets populate"] },
+  { id: "uninstaller", label: "Uninstaller", consumers: ["non-empty uninstall instructions only"], configurable: true, manifest: "uninstaller", commands: ["rafi uninstall"] },
+] as const;
 
 export interface RoleBundle {
   system: string;

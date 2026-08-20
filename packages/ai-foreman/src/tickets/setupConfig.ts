@@ -17,7 +17,8 @@ export type TicketPopulateEnrichmentPolicy = "none" | "recommendations" | "agent
 export type TicketSourceConfig =
   | { type: "local"; paths: string[] }
   | { type: "linear"; api_key_env: string; team_key?: string | null; filter?: string | null }
-  | { type: "jira"; site: string; email_env: string; token_env: string; jql: string };
+  | { type: "jira"; site: string; email_env: string; token_env: string; jql: string }
+  | { type: "url"; url: string };
 
 export interface TicketPopulateSetupConfig {
   source_handling: "saved" | "prompt" | "manual";
@@ -52,7 +53,7 @@ export interface MinimalRafiConfigOptions {
   targets?: HarnessTarget[];
 }
 
-const AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker"] as const;
+const AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker", "uninstaller"] as const;
 const SKILL_NAMES = [
   "better-sqlite3-rebuild",
   "grill-me",
@@ -193,6 +194,33 @@ export function externalSources(setup: TicketsSetupConfig | undefined): Extract<
     (source): source is Extract<TicketSourceConfig, { type: "linear" | "jira" }> =>
       source.type === "linear" || source.type === "jira",
   );
+}
+
+export function urlSources(setup: TicketsSetupConfig | undefined): Extract<TicketSourceConfig, { type: "url" }>[] {
+  return (setup?.sources ?? []).filter((source): source is Extract<TicketSourceConfig, { type: "url" }> => source.type === "url");
+}
+
+export function normalizedSourceKey(source: TicketSourceConfig): string {
+  if (source.type === "local") return `local:${unique(source.paths.map((path) => path.trim())).sort().join("|")}`;
+  if (source.type === "url") {
+    const url = new URL(source.url);
+    url.hash = "";
+    url.hostname = url.hostname.toLowerCase();
+    if ((url.protocol === "https:" && url.port === "443") || (url.protocol === "http:" && url.port === "80")) url.port = "";
+    return `url:${url.toString()}`;
+  }
+  if (source.type === "linear") return `linear:${source.api_key_env}:${source.team_key ?? ""}:${source.filter ?? ""}`;
+  return `jira:${source.site.replace(/\/+$/, "").toLowerCase()}:${source.jql}`;
+}
+
+export function dedupeTicketSources(sources: TicketSourceConfig[]): TicketSourceConfig[] {
+  const seen = new Set<string>();
+  return sources.filter((source) => {
+    const key = normalizedSourceKey(source);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function configuredDocsRoot(projectDir: string): string | undefined {
@@ -345,7 +373,18 @@ function normalizeSource(value: unknown, label: string): TicketSourceConfig {
       jql,
     };
   }
-  throw new Error(`${label}.type: expected local, linear, or jira`);
+  if (raw.type === "url") {
+    const url = stringField(raw.url);
+    if (!url) throw new Error(`${label}.url: expected a public HTTP(S) URL`);
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { throw new Error(`${label}.url: expected a valid URL`); }
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+      throw new Error(`${label}.url: expected HTTP(S) without embedded credentials`);
+    }
+    parsed.hash = "";
+    return { type: "url", url: parsed.toString() };
+  }
+  throw new Error(`${label}.type: expected local, linear, jira, or url`);
 }
 
 function normalizePopulate(value: unknown, label: string): TicketPopulateSetupConfig {

@@ -407,6 +407,10 @@ function importedItemToTicket(item: ImportedTicketItem, id: string, order: numbe
       key: item.key ?? null,
       url: item.url ?? null,
     }),
+    source_refs: [
+      ...(existing?.source_refs ?? []).filter((ref) => !(ref.source === item.provider && ref.item === item.providerId)),
+      { source: item.provider, item: item.providerId, url: item.url ?? null },
+    ],
   };
 }
 

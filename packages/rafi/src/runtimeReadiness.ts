@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
 import type { AgentRuntime } from "./compiler.js";
+import { probeRuntime, formatRuntimeProbeFailure } from "ai-foreman/runtime-readiness.js";
 import {
   isRuntimeAuthFailure,
   runtimeCommandLabel,
@@ -34,48 +34,26 @@ export class RuntimeReadinessError extends Error {
   }
 }
 
-export function checkAgentRuntimeReady(targetDir: string, runtime: AgentRuntime): void {
-  try {
-    if (runtime === "claude") {
-      execFileSync("claude", ["-p", "Return exactly OK"], {
-        cwd: targetDir,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } else {
-      execFileSync("codex", ["exec", "--skip-git-repo-check", "-C", targetDir, "Return exactly OK"], {
-        cwd: targetDir,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    }
-  } catch (err) {
-    const failure = err as {
-      status?: number | null;
-      stdout?: string | Buffer;
-      stderr?: string | Buffer;
-    };
-    throw new RuntimeReadinessError({
-      runtime,
-      exitCode: failure.status,
-      stdout: outputToString(failure.stdout),
-      stderr: outputToString(failure.stderr),
-      cause: err,
-    });
-  }
+export async function checkAgentRuntimeReady(targetDir: string, runtime: AgentRuntime): Promise<void> {
+  const result = await probeRuntime(targetDir, runtime, { phase: "readiness" });
+  if (!result.ok) throw new RuntimeReadinessError({
+    runtime,
+    exitCode: result.exitCode,
+    stderr: formatRuntimeProbeFailure(result),
+  });
 }
 
 export async function ensureAgentRuntimesReady(
   targetDir: string,
   runtimes: readonly AgentRuntime[],
   choose: (err: RuntimeReadinessError, otherRuntime: AgentRuntime) => Promise<RuntimeReadinessChoice>,
-  check: (targetDir: string, runtime: AgentRuntime) => void = checkAgentRuntimeReady,
+  check: (targetDir: string, runtime: AgentRuntime) => void | Promise<void> = checkAgentRuntimeReady,
 ): Promise<AgentRuntime[]> {
   const selected = uniqueRuntimes(runtimes);
   for (const runtime of selected) {
     while (true) {
       try {
-        check(targetDir, runtime);
+        await check(targetDir, runtime);
         break;
       } catch (err) {
         const failure = err instanceof RuntimeReadinessError
@@ -85,7 +63,7 @@ export async function ensureAgentRuntimesReady(
         const choice = await choose(failure, fallbackRuntime);
         if (choice === "retry") continue;
         if (choice === "switch") {
-          check(targetDir, fallbackRuntime);
+          await check(targetDir, fallbackRuntime);
           return [fallbackRuntime];
         }
         throw failure;

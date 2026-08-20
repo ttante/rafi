@@ -49,11 +49,13 @@ import {
   mergeTicketSetup,
   recommendedBuildDefaults,
   saveTicketSetupConfig,
+  urlSources,
   type HarnessTarget,
   type TicketBuildCompletionMode,
   type TicketSourceConfig,
   type TicketsSetupConfig,
 } from "../tickets/setupConfig.js";
+import { fetchAndSnapshotUrl, snapshotExternalLocalFile } from "../tickets/sourceFetch.js";
 import {
   checkpointInterview,
   completeInterview,
@@ -214,6 +216,7 @@ interface SetupCommandOptions {
   linearFilter?: string;
   jiraSite?: string;
   jiraJql?: string;
+  urlSource?: string[];
   completion?: string;
   provider?: string;
   autoMergeWait?: boolean;
@@ -245,6 +248,7 @@ async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
   try {
     const answers = await collectTicketSetup(dir, opts, undefined);
     if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "save-setup", answers: { setup: answers } });
+    await validateConfiguredSourcesIfRequested(dir, answers, Boolean(opts.skipAccessCheck));
     ensureRafiConfigForTicketSetup(dir, {
       appName: opts.appName ?? defaultAppName(dir),
       docsRoot: opts.docsRoot,
@@ -256,8 +260,6 @@ async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
       targets: parseRuntimeTargets(opts.runtime),
     });
     console.log(`foreman tickets setup: saved ticket setup in ${join(dir, "rafi-config.yaml")}`);
-
-    await validateConfiguredSourcesIfRequested(answers, Boolean(opts.skipAccessCheck));
 
     if (!isTicketsInitialized(dir)) {
       if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "initialize-tracker" });
@@ -298,6 +300,7 @@ async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
     const patch = await collectTicketSetupPatch(dir, opts, current);
     const next = mergeTicketSetup(current, patch);
     if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "save-setup", answers: { setup: next } });
+    await validateConfiguredSourcesIfRequested(dir, next, Boolean(opts.skipAccessCheck));
     ensureRafiConfigForTicketSetup(dir, {
       appName: opts.appName ?? defaultAppName(dir),
       docsRoot: opts.docsRoot,
@@ -309,8 +312,6 @@ async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
       targets: parseRuntimeTargets(opts.runtime),
     });
     console.log(`foreman tickets setup: updated ticket setup in ${join(dir, "rafi-config.yaml")}`);
-
-    await validateConfiguredSourcesIfRequested(next, Boolean(opts.skipAccessCheck));
 
     if (isTicketsInitialized(dir)) {
       const rows = cmdQueue(dir, 1);
@@ -479,6 +480,7 @@ async function promptTicketSources(dir: string, current: TicketSourceConfig[]): 
       { value: "local", label: "Local docs, files, folders, or globs" },
       { value: "linear", label: "Linear" },
       { value: "jira", label: "Jira Cloud" },
+      { value: "url", label: "Public URL (HTML, text, Markdown, or PDF)" },
       { value: "none", label: "No saved source" },
     ],
   });
@@ -505,6 +507,16 @@ async function promptTicketSources(dir: string, current: TicketSourceConfig[]): 
       team_key: String(team).trim() || null,
       filter: String(filter).trim() || null,
     }];
+  }
+  if (kind === "url") {
+    const existing = current.find((source) => source.type === "url") as Extract<TicketSourceConfig, { type: "url" }> | undefined;
+    const answer = await text({
+      message: "Public HTTP(S) URL:",
+      initialValue: existing?.url,
+      validate: (value) => /^https?:\/\//i.test(String(value ?? "")) ? undefined : "Enter an HTTP(S) URL",
+    });
+    if (isCancel(answer)) process.exit(0);
+    return [{ type: "url", url: String(answer).trim() }];
   }
   const site = await text({
     message: "Jira Cloud site URL:",
@@ -548,10 +560,11 @@ function sourcesFromSetupOptions(opts: SetupCommandOptions): TicketSourceConfig[
       jql: opts.jiraJql,
     });
   }
+  for (const url of opts.urlSource ?? []) sources.push({ type: "url", url });
   return sources;
 }
 
-async function validateConfiguredSourcesIfRequested(setup: TicketsSetupConfig, skip: boolean): Promise<void> {
+async function validateConfiguredSourcesIfRequested(projectDir: string, setup: TicketsSetupConfig, skip: boolean): Promise<void> {
   if (skip) return;
   for (const source of externalSources(setup)) {
     try {
@@ -560,6 +573,12 @@ async function validateConfiguredSourcesIfRequested(setup: TicketsSetupConfig, s
     } catch (err) {
       console.log(`foreman tickets setup: ${source.type} access check skipped/failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+  for (const source of urlSources(setup)) {
+    const fetched = await fetchAndSnapshotUrl(projectDir, source.url).catch((err) => {
+      throw new Error(`URL access validation failed for ${source.url}: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    console.log(`foreman tickets setup: validated URL access (${fetched.contentType}, ${fetched.bytes} bytes)`);
   }
 }
 
@@ -733,12 +752,21 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
 
   const ticketsConfig = loadTicketsConfig(dir);
   const setup = loadTicketSetupConfig(dir);
-  const explicitSources = opts.sources;
+  const explicitSources = opts.sources ? await prepareDocumentSources(dir, opts.sources) : undefined;
   const configuredExternalSources = explicitSources?.length ? [] : externalSources(setup);
+  const configuredUrlSources = explicitSources?.length ? [] : urlSources(setup);
   const savedLocalSources = explicitSources?.length ? [] : localSourcePaths(setup);
-  const sourceHints = configuredExternalSources.length > 0 && savedLocalSources.length === 0
+  const selectedLocalHints = configuredExternalSources.length > 0 && savedLocalSources.length === 0 && configuredUrlSources.length === 0
     ? undefined
     : await resolvePopulateSourceSelection(dir, explicitSources, ticketsConfig, Boolean(opts.yes));
+  const localHints = selectedLocalHints ? await prepareDocumentSources(dir, selectedLocalHints) : undefined;
+  const urlHints: string[] = [];
+  for (const source of configuredUrlSources) {
+    const fetched = await fetchAndSnapshotUrl(dir, source.url);
+    urlHints.push(fetched.snapshotPath);
+    console.log(`foreman tickets: fetched ${source.url} -> ${fetched.snapshotPath}`);
+  }
+  const sourceHints = unique([...(localHints ?? []), ...urlHints]);
   const populateAgent = opts.agent
     ?? (setup?.populate.agent_preference && setup.populate.agent_preference !== "configured"
       ? setup.populate.agent_preference
@@ -774,7 +802,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
       console.log(formatValidationIssues(validation.issues));
       if (!validation.clean) process.exit(1);
     }
-    if (!sourceHints?.length) {
+    if (!sourceHints.length) {
       console.log(`foreman tickets: imported external tickets and rendered ${ticketsConfig.paths.progressDoc}`);
       return;
     }
@@ -819,7 +847,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     console.log(`foreman tickets: role ${TICKET_POPULATE_ROLE}`);
     console.log(`foreman tickets: log ${logPath}\n`);
 
-    if (sourceHints?.length) {
+    if (sourceHints.length) {
       console.log(`foreman tickets: source hints ${sourceHints.join(" ")}`);
     }
     const turn = await foreman.runInstruction(buildPopulateInstruction(sourceHints, ticketsConfig.paths.progressDoc));
@@ -863,6 +891,20 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
   }
 }
 
+async function prepareDocumentSources(projectDir: string, sources: string[]): Promise<string[]> {
+  const prepared: string[] = [];
+  for (const source of sources) {
+    if (/^https?:\/\//i.test(source)) {
+      prepared.push((await fetchAndSnapshotUrl(projectDir, source)).snapshotPath);
+      continue;
+    }
+    const absolute = resolve(source);
+    if (isAbsolute(source) && existsSync(absolute)) prepared.push(snapshotExternalLocalFile(projectDir, absolute));
+    else prepared.push(source);
+  }
+  return unique(prepared);
+}
+
 export function buildTicketsCommand(): Command {
   const tickets = new Command("tickets").description(
     "Manage the structured ticket tracker for a project.",
@@ -885,12 +927,13 @@ export function buildTicketsCommand(): Command {
     .option("--linear-filter <filter>", "Linear IssueFilter JSON or title search text")
     .option("--jira-site <url>", "Jira Cloud site URL")
     .option("--jira-jql <jql>", "Jira JQL query")
+    .option("--url-source <urls...>", "add public HTTP(S) source URLs")
     .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
     .option("--completion <mode>", "build completion default (pr | auto-merge | direct-merge | none)")
     .option("--provider <provider>", "PR/MR provider default (auto | github | gitlab | local)")
     .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
     .option("--auto-merge-timeout-minutes <n>", "auto-merge dependency wait timeout in minutes (blank means no timeout)")
-    .option("--skip-access-check", "do not validate Linear/Jira access during setup")
+    .option("--skip-access-check", "do not validate configured source access during setup")
     .action(async (opts) => {
       try {
         await cmdSetupInitCli(opts);
@@ -914,12 +957,13 @@ export function buildTicketsCommand(): Command {
     .option("--linear-filter <filter>", "Linear IssueFilter JSON or title search text")
     .option("--jira-site <url>", "Jira Cloud site URL")
     .option("--jira-jql <jql>", "Jira JQL query")
+    .option("--url-source <urls...>", "replace saved sources with public HTTP(S) URLs")
     .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
     .option("--completion <mode>", "build completion default (pr | auto-merge | direct-merge | none)")
     .option("--provider <provider>", "PR/MR provider default (auto | github | gitlab | local)")
     .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
     .option("--auto-merge-timeout-minutes <n>", "auto-merge dependency wait timeout in minutes (blank means no timeout)")
-    .option("--skip-access-check", "do not validate Linear/Jira access during setup")
+    .option("--skip-access-check", "do not validate configured source access during setup")
     .action(async (opts) => {
       try {
         await cmdSetupUpdateCli(opts);

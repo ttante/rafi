@@ -11,6 +11,7 @@ import type {
   GitHubRemoteResult,
   PrResult,
   ReviewMergeStatus,
+  MergeMethod,
 } from "./types.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
@@ -205,8 +206,8 @@ export function createOrReusePr(cwd: string, opts: CreatePrOptions): PrResult {
   return prFailure(classifyPrFailure(created, opts.node.branch, "Failed to create GitHub PR.", remoteForRepair));
 }
 
-export function enableGitHubAutoMerge(cwd: string, branch: string, cleanup: boolean): PrResult {
-  const args = ["pr", "merge", branch, "--auto", "--squash"];
+export function enableGitHubAutoMerge(cwd: string, branch: string, cleanup: boolean, method: MergeMethod = "squash"): PrResult {
+  const args = ["pr", "merge", branch, "--auto", `--${method}`];
   if (cleanup) args.push("--delete-branch");
   const result = runCommand(cwd, "gh", args, 30_000);
   if (result.ok) return { status: "auto_merge_enabled", url: result.stdout };
