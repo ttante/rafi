@@ -563,7 +563,13 @@ function fingerprintProtectedTree(root: string): Map<string, string> {
       const path = join(directory, entry.name);
       const rel = relative(root, path).replace(/\\/g, "/");
       if (entry.isDirectory()) {
-        if (ignored.has(entry.name) || rel.startsWith(".foreman/") || rel.startsWith(".rafi/cache/")) continue;
+        if (
+          ignored.has(entry.name)
+          || rel === ".foreman"
+          || rel.startsWith(".foreman/")
+          || rel === ".rafi/cache"
+          || rel.startsWith(".rafi/cache/")
+        ) continue;
         visit(path);
       } else if (entry.isFile() && statSync(path).size <= 10 * 1024 * 1024) {
         out.set(rel, createHash("sha256").update(readFileSync(path)).digest("hex"));

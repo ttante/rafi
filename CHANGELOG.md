@@ -4,6 +4,17 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.8.3 / ai-foreman 1.6.2 - 2026-08-20
+
+### Fixed
+
+- Independent QA no longer reports Foreman's own `.foreman` runtime logs or `.rafi/cache` state as protected project-file changes, preventing false `needs-human` outcomes after otherwise successful work.
+- Interrupted Rafi runs now print the single canonical recovery command, `rafi build:resume <project>`, instead of an incomplete or confusing low-level `start --resume` hint. Standalone Foreman prints its complete `ai-foreman start <project> --steps <remaining> --resume <sessionId>` command when a provider session is available, and successful runs no longer print unnecessary resume guidance.
+
+### Packages
+
+- Bumped `@rafi-ai/cli` to `0.8.3` and `ai-foreman` to `1.6.2`. `special-agents` and `rafi-spec` remain at `0.7.0`.
+
 ## @rafi-ai/cli 0.8.2 / ai-foreman 1.6.1 - 2026-08-20
 
 ### Fixed

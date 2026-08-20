@@ -65,6 +65,42 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
+export function formatStartResumeCommand(
+  executable: "ai-foreman",
+  projectDir: string,
+  steps: number,
+  sessionId: string,
+): string {
+  return [
+    executable,
+    "start",
+    shellQuote(projectDir),
+    "--steps",
+    String(steps),
+    "--resume",
+    shellQuote(sessionId),
+  ].join(" ");
+}
+
+export function formatResumeGuidance(
+  executable: "rafi" | "ai-foreman",
+  projectDir: string,
+  steps: number,
+  sessionId?: string,
+): string[] {
+  if (executable === "rafi") {
+    return [
+      "foreman: resume this run with:",
+      `  rafi build:resume ${shellQuote(projectDir)}`,
+    ];
+  }
+  if (!sessionId) return [];
+  return [
+    "foreman: resume this builder with:",
+    `  ${formatStartResumeCommand("ai-foreman", projectDir, steps, sessionId)}`,
+  ];
+}
+
 function optionWasProvided(command: Command, name: string): boolean {
   const source = command.getOptionValueSource(name);
   return source !== undefined && source !== "default";
@@ -802,8 +838,13 @@ export function buildStartCommand(): Command {
         console.log(`\nforeman: ${result.completed}/${result.requested} step(s) completed`);
         console.log(`foreman: outcome — ${result.outcome}`);
         if (result.detail) console.log(`foreman: ${result.detail}`);
-        const sid = builder.sessionId();
-        if (sid) console.log(`foreman: resume this builder with  --resume ${sid}`);
+        if (result.outcome !== "all-done" && result.outcome !== "plan-complete") {
+          const executable = command.parent?.name() === "rafi" ? "rafi" : "ai-foreman";
+          const remainingSteps = Math.max(1, result.requested - result.completed);
+          for (const line of formatResumeGuidance(executable, cwd, remainingSteps, builder.sessionId())) {
+            console.log(line);
+          }
+        }
         process.exit(result.outcome === "needs-human" ? 2 : 0);
       } catch (err) {
         clearInterval(heartbeat);
@@ -834,4 +875,10 @@ function explicitDefaultValue(value: string | undefined): string | undefined {
 
 function explicitEffort(value: string | undefined): EffortLevel | undefined {
   return value && ["low", "medium", "high", "xhigh"].includes(value) ? value as EffortLevel : undefined;
+}
+
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
+    ? value
+    : `'${value.replace(/'/g, `'"'"'`)}'`;
 }

@@ -4,8 +4,10 @@ Rafi is an interview-led engineering framework for Claude Code and Codex. It hel
 
 You do not need to learn a long sequence of setup and planning commands. Rafi is designed around two guided conversations:
 
-1. Run `rafi create .` when Rafi is new to a project.
-2. Run `rafi tickets plan` when a Rafi project needs more work.
+1A. Run `rafi create .` when Rafi is new to a project.
+1B. Run `rafi tickets plan` when a Rafi project needs more work.
+2.  Run `rafi tickets queue` to view tickets when they're ready.
+    Run `rafi start . --steps NUMBER_OF_TICKETS` to start building. ex: `rafi start . --steps 5`
 
 Those two interviews cover the normal lifecycle. Rafi asks the questions, explains meaningful choices, remembers the project, and shows you what it intends to do before it changes shared planning state.
 
@@ -71,6 +73,7 @@ rafi compile .       # refresh generated guidance after editing rafi-config.yaml
 rafi status          # show the nearest project's latest builder run
 rafi doctor .        # check project, runtime, and tracker readiness
 rafi tickets queue   # view all tickets in queue
+rafi build:resume .  # resumes a build that stopped
 ```
 
 `rafi doctor .` reports the exact Claude executable, SDK-wrapper availability, setting sources, and the names (not values) of relevant proxy/certificate environment variables. If `claude -p "Return exactly OK"` succeeds but a Rafi Claude run still fails, use `rafi doctor . --live-claude` to exercise the same no-tools SDK execution path. The live check is opt-in, bounded, and uses account quota.

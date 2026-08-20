@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify } from "yaml";
@@ -39,9 +39,13 @@ class FakeBuilder implements BuilderAdapter {
   readonly agent = "claude" as const;
   private index = 0;
 
-  constructor(private readonly turns: string[]) {}
+  constructor(
+    private readonly turns: string[],
+    private readonly beforeTurn?: (index: number) => void,
+  ) {}
 
   async sendTurn(_text: string): Promise<TurnResult> {
+    this.beforeTurn?.(this.index);
     const text = this.turns[this.index++] ?? "";
     return { text, isError: false, numTurns: 1, costUsd: 0 };
   }
@@ -110,6 +114,69 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
     } finally {
       db.close();
     }
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("independent QA may write Foreman's own .foreman runtime files", async () => {
+  const dir = makeTmpDir();
+  try {
+    const builder = new FakeBuilder([
+      'implemented\nSTEP_STATUS: done | summary="implemented"',
+    ]);
+    const qa = new FakeBuilder(
+      ['checked\nSTEP_STATUS: qa_pass | summary="tests passed"'],
+      () => {
+        writeFileSync(join(dir, ".foreman/qa-runtime.jsonl"), "runtime output\n", "utf8");
+        mkdirSync(join(dir, ".rafi/cache"), { recursive: true });
+        writeFileSync(join(dir, ".rafi/cache/qa-runtime.json"), "{}\n", "utf8");
+      },
+    );
+    const foreman = new Foreman(
+      builder,
+      new Log(join(dir, ".foreman/test.jsonl")),
+      false,
+      true,
+      3,
+      dir,
+      qa,
+    );
+
+    const result = await foreman.runBatch(1);
+
+    assert.equal(result.outcome, "all-done", result.detail);
+    assert.equal(result.completed, 1);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("independent QA source changes still require human review", async () => {
+  const dir = makeTmpDir();
+  try {
+    writeFileSync(join(dir, "source.ts"), "before\n", "utf8");
+    const builder = new FakeBuilder([
+      'implemented\nSTEP_STATUS: done | summary="implemented"',
+    ]);
+    const qa = new FakeBuilder(
+      ['checked\nSTEP_STATUS: qa_pass | summary="tests passed"'],
+      () => writeFileSync(join(dir, "source.ts"), "after\n", "utf8"),
+    );
+    const foreman = new Foreman(
+      builder,
+      new Log(join(dir, ".foreman/test.jsonl")),
+      false,
+      true,
+      3,
+      dir,
+      qa,
+    );
+
+    const result = await foreman.runBatch(1);
+
+    assert.equal(result.outcome, "needs-human");
+    assert.match(result.detail ?? "", /independent QA changed protected files: source\.ts/);
   } finally {
     rmSync(dir, { recursive: true });
   }

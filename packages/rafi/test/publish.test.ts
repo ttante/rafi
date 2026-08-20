@@ -64,6 +64,6 @@ test("@rafi-ai/cli depends on published rafi-spec", () => {
 });
 
 test("@rafi-ai/cli depends on the published ai-foreman version", () => {
-  assert.equal(aiForemanPackageJson.version, "1.6.1");
+  assert.equal(aiForemanPackageJson.version, "1.6.2");
   assert.equal(packageJson.dependencies?.["ai-foreman"], aiForemanPackageJson.version);
 });
