@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync,
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import type { BuildRunRecordV1, ResolvedAgentSettings } from "rafi-spec";
+import { WorkflowDb, type WorkflowRunStatus } from "./workflowDb.js";
 
 export const BUILD_RUN_VERSION = 1;
 export const BUILD_RUN_DIRECTORY = ".foreman/runs";
@@ -18,8 +19,8 @@ export interface CreateBuildRunInput {
   branch?: string;
   baseHead?: string;
   startHead?: string;
-  builder?: ResolvedAgentSettings;
-  qa?: ResolvedAgentSettings;
+  builder?: LegacyResolvedAgentSettings;
+  qa?: LegacyResolvedAgentSettings;
   now?: Date;
 }
 
@@ -35,8 +36,8 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV1 {
     branchMode: input.branchMode ?? "current",
     checkpoint: "created",
     currentTicket: input.tickets[0],
-    builder: input.builder ? { settings: input.builder } : undefined,
-    qa: input.qa ? { settings: input.qa } : undefined,
+    builder: input.builder ? { settings: normalizeCapturedSettings(input.builder) } : undefined,
+    qa: input.qa ? { settings: normalizeCapturedSettings(input.qa) } : undefined,
     repository: {
       root: resolve(input.repositoryRoot),
       worktree: resolve(input.worktree ?? input.repositoryRoot),
@@ -50,7 +51,29 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV1 {
     createdAt: stamp,
     updatedAt: stamp,
   };
-  return saveBuildRun(input.repositoryRoot, run, now);
+  const saved = saveBuildRun(input.repositoryRoot, run, now);
+  const workflow = new WorkflowDb(input.repositoryRoot);
+  try { workflow.acquireLease(saved.runId, undefined, now, BUILD_LEASE_STALE_MS); } finally { workflow.close(); }
+  return saved;
+}
+
+export function resumeBuildRun(projectDir: string, runId: string, patch: { builder?: LegacyResolvedAgentSettings; qa?: LegacyResolvedAgentSettings; builderSessionId?: string | null }, now = new Date()): BuildRunRecordV1 {
+  const existing = readBuildRuns(projectDir).find((run) => run.runId === runId);
+  if (!existing) throw new Error(`recoverable build run not found: ${runId}`);
+  if (existing.status === "completed") throw new Error(`build run ${runId} is already complete`);
+  const workflow = new WorkflowDb(projectDir);
+  try { workflow.acquireLease(runId, undefined, now, BUILD_LEASE_STALE_MS); } finally { workflow.close(); }
+  return saveBuildRun(projectDir, {
+    ...existing, status: "running", checkpoint: "recovery-resumed", completedAt: undefined,
+    builder: patch.builder ? { settings: normalizeCapturedSettings(patch.builder), ...(patch.builderSessionId === null ? {} : { sessionId: patch.builderSessionId ?? existing.builder?.sessionId }) } : existing.builder,
+    qa: patch.qa ? { settings: normalizeCapturedSettings(patch.qa), sessionId: existing.qa?.sessionId } : existing.qa,
+    lease: currentLease(now),
+  }, now);
+}
+
+type LegacyResolvedAgentSettings = Omit<ResolvedAgentSettings, "session_strategy" | "settings_revision"> & Partial<Pick<ResolvedAgentSettings, "session_strategy" | "settings_revision">>;
+function normalizeCapturedSettings(settings: LegacyResolvedAgentSettings): ResolvedAgentSettings {
+  return { ...settings, session_strategy: settings.session_strategy ?? (["builder", "qa", "ticket-maker"].includes(settings.role) ? "compact" : "fresh"), settings_revision: settings.settings_revision ?? 0 };
 }
 
 export function saveBuildRun(projectDir: string, run: BuildRunRecordV1, now = new Date()): BuildRunRecordV1 {
@@ -62,6 +85,21 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV1, now = ne
   const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   renameSync(temp, target);
+  const workflow = new WorkflowDb(projectDir);
+  try {
+    const existing = workflow.getRun(next.runId);
+    if (!existing) workflow.createRun({
+      runId: next.runId, kind: "build", checkpoint: next.checkpoint,
+      originalWork: { tickets: next.tickets, deliveryUnit: next.deliveryUnit, branchMode: next.branchMode },
+      remainingWork: { tickets: remainingTickets(next) }, state: next as unknown as Record<string, unknown>,
+    }, now);
+    else workflow.transition(next.runId, {
+      status: workflowStatus(next.status), checkpoint: next.checkpoint,
+      remainingWork: { tickets: remainingTickets(next) }, state: next as unknown as Record<string, unknown>, event: "build_snapshot",
+    }, now);
+    if (next.builder?.sessionId) workflow.recordSession(next.runId, "builder", "builder", next.builder.sessionId, "checkpoint", next.builder.settings, now);
+    if (next.qa?.sessionId) workflow.recordSession(next.runId, "qa", "qa", next.qa.sessionId, "checkpoint", next.qa.settings, now);
+  } finally { workflow.close(); }
   return next;
 }
 
@@ -92,22 +130,30 @@ export function recordBuildReceipt(
   detail?: { externalId?: string; detail?: string },
 ): BuildRunRecordV1 {
   if (run.receipts[operationId]) return run;
-  return saveBuildRun(projectDir, {
+  const next = saveBuildRun(projectDir, {
     ...run,
     receipts: { ...run.receipts, [operationId]: { completedAt: new Date().toISOString(), ...detail } },
   });
+  const workflow = new WorkflowDb(projectDir);
+  try {
+    workflow.planOperation({ runId: run.runId, idempotencyKey: operationId, kind: operationId.split(":", 1)[0] ?? "operation", intent: { checkpoint: run.checkpoint } });
+    workflow.updateOperation(operationId, "confirmed", { externalId: detail?.externalId, result: { detail: detail?.detail } });
+  } finally { workflow.close(); }
+  return next;
 }
 
 export function heartbeatBuildRun(projectDir: string, run: BuildRunRecordV1, now = new Date()): BuildRunRecordV1 {
-  return saveBuildRun(projectDir, { ...run, lease: { ...(run.lease ?? currentLease(now)), heartbeatAt: now.toISOString() } }, now);
+  const saved = saveBuildRun(projectDir, { ...run, lease: { ...(run.lease ?? currentLease(now)), heartbeatAt: now.toISOString() } }, now);
+  const workflow = new WorkflowDb(projectDir); try { const lease = workflow.currentLease(); if (lease?.runId === run.runId) workflow.heartbeatLease(lease, now); } finally { workflow.close(); }
+  return saved;
 }
 
 export function releaseBuildLease(projectDir: string, run: BuildRunRecordV1, status: BuildRunRecordV1["status"] = "interrupted"): BuildRunRecordV1 {
-  return saveBuildRun(projectDir, { ...run, status, lease: undefined });
+  const saved = saveBuildRun(projectDir, { ...run, status, lease: undefined }); releaseWorkflowLease(projectDir, run.runId); return saved;
 }
 
 export function completeBuildRun(projectDir: string, run: BuildRunRecordV1, now = new Date()): BuildRunRecordV1 {
-  return saveBuildRun(projectDir, { ...run, status: "completed", checkpoint: "complete", lease: undefined, completedAt: now.toISOString() }, now);
+  const saved = saveBuildRun(projectDir, { ...run, status: "completed", checkpoint: "complete", lease: undefined, completedAt: now.toISOString() }, now); releaseWorkflowLease(projectDir, run.runId, now); return saved;
 }
 
 export function readBuildRuns(projectDir: string): BuildRunRecordV1[] {
@@ -183,4 +229,21 @@ function validateBuildRun(run: BuildRunRecordV1): void {
   if (run.version !== BUILD_RUN_VERSION || !run.runId || !run.repository?.root || !run.repository.worktree || !run.createdAt || !run.updatedAt) {
     throw new Error("invalid build run record");
   }
+}
+
+function workflowStatus(status: BuildRunRecordV1["status"]): WorkflowRunStatus {
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  if (status === "blocked") return "blocked";
+  if (status === "interrupted" || status === "recoverable") return "paused";
+  return "running";
+}
+
+function remainingTickets(run: BuildRunRecordV1): string[] {
+  const current = run.currentTicket ? run.tickets.indexOf(run.currentTicket) : 0;
+  return run.status === "completed" ? [] : run.tickets.slice(Math.max(0, current));
+}
+
+function releaseWorkflowLease(projectDir: string, runId: string, now = new Date()): void {
+  const workflow = new WorkflowDb(projectDir); try { const lease = workflow.currentLease(); if (lease?.runId === runId) workflow.releaseLease(lease, now); } finally { workflow.close(); }
 }

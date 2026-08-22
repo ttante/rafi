@@ -4,6 +4,47 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.9.0 / ai-foreman 1.7.0 / special-agents 0.8.0 / rafi-spec 0.8.0 - 2026-08-22
+
+### Added
+
+- Added validated structured plans with stable plan, slice, and stack identities; deterministic Markdown rendering; immutable revision history; paired content digests; explicit revision and regeneration commands; and proposal-only Planner and Ticket Maker roles.
+- Added a project-local SQLite workflow database with transactional snapshots, append-only checkpoint events, project leases, settings revisions, provider sessions, typed issues, operation receipts, content-addressed evidence, publication journals, and one-time legacy recovery imports.
+- Added workflow-scoped `compact` and `fresh` role-session strategies, provider-native compaction, context telemetry, guarded live setting transitions, durable fresh-session handoffs, Codex app-server JSON-RPC control, and Claude Agent SDK session continuation.
+- Added named straight delivery stacks, dependency-normalized PR chains, exact `--stacks` batching, partial-stack resumption, cached and live remote reconciliation, GitHub and GitLab publication, and explicit `awaiting_review` delivery state.
+- Added transactional plan-to-ticket population with exact slice mappings, durable `plan_ref` provenance, stable ticket reuse, explicit `obsolete` retirement, exact noninteractive retirement authorization, and interrupted-publication recovery.
+- Added disposable QA review worktrees that reproduce staged, unstaged, binary, renamed, deleted, symlink, and untracked changes without mutating Builder worktrees, including QA modification detection and one clean-session retry.
+- Added structured QA remediation, explicit QA waivers with preserved evidence, deterministic side-effect recovery, bounded protocol correction, typed operational outcomes, and five-minute context-aware status telemetry.
+- Added deterministic fake-adapter coverage and opt-in authenticated Claude and Codex session and compaction smoke tests.
+
+### Changed
+
+- Increased the generated delivery-stack limit from two PR nodes to five, with the root PR counted as depth one and depth six rejected.
+- Made one structured proposal the plan source of truth; generated Markdown is validated output instead of model-authored state.
+- Made one master run ID cover an entire selected ticket batch or stack run and preserve the original remainder across repeated recovery.
+- Made stack publication stop after branches are pushed and PRs or MRs are opened; ticket work becomes done while delivery remains awaiting review until remote reconciliation confirms merges.
+- Made QA use an independent run-scoped provider stream and a newly constructed disposable review copy for every initial review and re-review.
+- Made uncertain remote operations pause for explicit inspection instead of retrying actions that could duplicate commits, pushes, or PRs.
+- Normalized missing role session strategies without rewriting existing project configuration: Builder, QA, and Ticket Maker use `compact`; Planner and Uninstaller use `fresh`.
+
+### Fixed
+
+- Updated Codex native compaction completion to use the current app-server `contextCompaction` lifecycle item instead of the deprecated `thread/compacted` notification, preventing compact session boundaries from waiting indefinitely.
+
+### Compatibility and operations
+
+- Existing project agent settings remain valid and require no migration command; individually omitted role fields continue to inherit resolved defaults.
+- Existing readable run, interview, and delivery-session artifacts are preserved and imported as legacy audit records without fabricated checkpoints.
+- The recovery database is project-local and ignored by Git; full Claude and Codex transcripts are not copied into projects.
+- Authenticated provider tests remain explicit release gates and are never run implicitly by normal package tests.
+
+### Packages
+
+- Bumped `rafi-spec` to `0.8.0` for the structured plan, role-session, settings-revision, delivery, and typed-outcome interfaces.
+- Bumped `special-agents` to `0.8.0` for its exact `rafi-spec@0.8.0` dependency.
+- Bumped `ai-foreman` to `1.7.0` for unified recovery, session control, delivery execution, QA isolation, ticket population, and operational status.
+- Bumped `@rafi-ai/cli` to `0.9.0` for the new planning, revision, queue, stack batching, population, recovery, and agent-setting command behavior.
+
 ## @rafi-ai/cli 0.8.3 / ai-foreman 1.6.2 - 2026-08-20
 
 ### Fixed

@@ -16,6 +16,7 @@
     "test:live-create": "node scripts/live-create.mjs",
     "test:live-ticket-plan": "node scripts/live-ticket-plan.mjs",
     "test:live-interview": "node scripts/live-interview.mjs",
+    "test:live-providers": "pnpm --filter ai-foreman test:live-providers",
     "docs:generate": "tsx packages/rafi/scripts/generate-cli-docs.ts",
     "docs:check": "tsx packages/rafi/scripts/generate-cli-docs.ts --check"
   },

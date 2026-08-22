@@ -23,6 +23,13 @@ import { join } from "node:path";
 test("--defaults produces a config that validates against ProjectConfig schema", () => {
   const config = buildProjectConfig(defaultAnswers());
   assert.ok(validateProjectConfig(config).valid, "default config failed schema validation");
+  assert.deepEqual(config.agent_defaults?.roles, {
+    builder: { session_strategy: "compact" },
+    qa: { session_strategy: "compact" },
+    "ticket-maker": { session_strategy: "compact" },
+    planner: { session_strategy: "fresh" },
+    uninstaller: { session_strategy: "fresh" },
+  });
 });
 
 test("--defaults stack matches defaults.yaml verbatim", () => {

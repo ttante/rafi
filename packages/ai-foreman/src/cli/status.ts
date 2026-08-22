@@ -4,6 +4,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { findResumableBranchSessions, formatBranchContinueCommand } from "../branch/resume.js";
 import type { GitHubFailureCode } from "../branch/types.js";
 import { recoverableBuildRuns } from "../buildRuns.js";
+import { WorkflowDb, WORKFLOW_DB_FILE } from "../workflowDb.js";
+import { formatWorkflowIssue } from "../outcomes.js";
 
 type StatusGitHubFailureCode = GitHubFailureCode | "pr_failed";
 
@@ -34,13 +36,18 @@ export function runStatus(project: string): void {
       const projectDir = resolve(project);
       const dir = join(projectDir, ".foreman");
       const recoverable = recoverableBuildRuns(projectDir);
-      if (!existsSync(dir)) fail(`no foreman runs found under ${dir}`);
+      const workflowPath = join(projectDir, WORKFLOW_DB_FILE);
+      const workflow = existsSync(workflowPath) ? new WorkflowDb(projectDir, workflowPath) : undefined;
+      const activeWorkflows = workflow?.activeRuns() ?? [];
+      if (!existsSync(dir) && activeWorkflows.length === 0) { workflow?.close(); fail(`no foreman runs found under ${dir}`); }
       const logs = readdirSync(dir)
         .filter((f) => f.endsWith(".jsonl"))
         .sort();
       if (logs.length === 0) {
-        if (recoverable.length === 0) fail(`no foreman runs found under ${dir}`);
+        if (recoverable.length === 0 && activeWorkflows.length === 0) { workflow?.close(); fail(`no foreman runs found under ${dir}`); }
         printRecoverable(projectDir, recoverable);
+        printWorkflowIssues(workflow, activeWorkflows);
+        workflow?.close();
         return;
       }
 
@@ -93,6 +100,17 @@ export function runStatus(project: string): void {
         console.log(`  escalated: ${esc.tool} — ${esc.reason}`);
       }
       if (recoverable.length > 0) printRecoverable(projectDir, recoverable);
+      printWorkflowIssues(workflow, activeWorkflows);
+      workflow?.close();
+}
+
+function printWorkflowIssues(workflow: WorkflowDb | undefined, runs: ReturnType<WorkflowDb["activeRuns"]>): void {
+  if (!workflow || runs.length === 0) return;
+  console.log(`foreman: ${runs.length} active workflow record(s) in ${WORKFLOW_DB_FILE}`);
+  for (const run of runs) {
+    console.log(`  ${run.runId} ${run.kind} ${run.status} checkpoint=${run.checkpoint}`);
+    for (const value of workflow.issues(run.runId)) console.log(`    ${formatWorkflowIssue(value).replace(/\n/g, " | ")}`);
+  }
 }
 
 function printRecoverable(projectDir: string, runs: ReturnType<typeof recoverableBuildRuns>): void {

@@ -1,7 +1,7 @@
 import { isCancel, log, select } from "@clack/prompts";
 import type { AgentRuntime } from "../runtimeAuth.js";
 import { AsyncQueue } from "../util/asyncQueue.js";
-import type { BuilderAdapter, BuilderEvent, TurnResult } from "./types.js";
+import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, TurnResult } from "./types.js";
 
 export type TurnRecoveryChoice = "retry" | "switch" | "cancel";
 
@@ -58,6 +58,9 @@ export class RecoveringAdapter implements BuilderAdapter {
   sessionId(): string | undefined {
     return this.adapter.sessionId();
   }
+
+  compact(): Promise<CompactResult> { return this.adapter.compact?.() ?? Promise.resolve({ ok: false, error: "native compaction unavailable" }); }
+  contextUsage(): Promise<ContextUsage | undefined> { return this.adapter.contextUsage?.() ?? Promise.resolve(undefined); }
 
   events(): AsyncIterable<BuilderEvent> {
     return this.eventQueue;

@@ -116,7 +116,7 @@ export function selectTicketsForBranchRun(
     .filter((ticket) => {
       if (allowed && !allowed.has(ticket.id)) return false;
       const status = states.get(ticket.id)?.status ?? "planned";
-      return status !== "done" && status !== "canceled";
+      return status !== "done" && status !== "canceled" && status !== "obsolete";
     })
     .sort((a, b) => a.order - b.order);
 

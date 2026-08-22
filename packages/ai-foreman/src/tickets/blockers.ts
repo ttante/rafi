@@ -18,7 +18,7 @@ export function resolveBlockers(
   return [...new Set([...unresolvedDeps, ...explicitBlockers])];
 }
 
-export type DisplayStatus = "next" | "in_progress" | "blocked" | "done" | "canceled";
+export type DisplayStatus = "next" | "in_progress" | "blocked" | "done" | "canceled" | "obsolete";
 
 export function computeDisplayStatus(
   storedStatus: string,
@@ -26,6 +26,7 @@ export function computeDisplayStatus(
 ): DisplayStatus {
   if (storedStatus === "done") return "done";
   if (storedStatus === "canceled") return "canceled";
+  if (storedStatus === "obsolete") return "obsolete";
   if (storedStatus === "in_progress") return "in_progress";
   if (blockedBy.length > 0 || storedStatus === "blocked") return "blocked";
   return "next";

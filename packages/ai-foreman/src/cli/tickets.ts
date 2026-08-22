@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import type { StructuredPlanV1 } from "rafi-spec";
 import { select, text, confirm, isCancel } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
@@ -21,9 +22,11 @@ import {
   cmdRender,
   cmdValidate,
   cmdQueue,
+  cmdStackQueue,
   cmdArchive,
   cmdReview,
 } from "../tickets/commands.js";
+import { loadDeliveryConfig } from "../tickets/delivery.js";
 import { DEFAULT_TICKETS_CONFIG, isTicketsInitialized, loadTicketsConfig } from "../tickets/config.js";
 import { validateDocsRoot } from "../tickets/config.js";
 import { importExternalSources, importFromMarkdown, validateExternalSourceAccess } from "../tickets/importer.js";
@@ -32,6 +35,7 @@ import {
   assertEffortLevel,
   createRoleBuilder,
   makeLogPath,
+  readOnlyPermissionConfig,
   type RoleBuilderOptions,
 } from "../agentRun.js";
 import type { TicketsConfig } from "../tickets/config.js";
@@ -63,6 +67,9 @@ import {
   failInterview,
   type InterviewRecord,
 } from "../interviews.js";
+import { applyTicketPopulation, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
+import { loadTickets } from "../tickets/ticketLoader.js";
+import { resolveTicketPaths } from "../tickets/config.js";
 
 function fail(msg: string): never {
   console.error(`foreman tickets: ${msg}`);
@@ -113,30 +120,28 @@ Goal:
 - Do not implement product/code changes. Only update ticket-tracker files.
 ${sourceHintBlock}
 
-Before editing, read these tracker control files:
+Before proposing, read these tracker control files:
 - .tickets/config.yaml
 - .tickets/tickets.yaml
 - .tickets/tracker-rules.md
 - ${progressDoc} if it exists
 
-Then inspect the repository for existing planning sources. Check root and docs-style Markdown/YAML/TXT files whose names suggest tickets, backlog, roadmap, plan, TODOs, milestones, progress, specs, phases, or implementation steps. Preserve every ticket or task you find. Do not leave out details.
+Then inspect the repository for existing planning sources, beginning with the approved structured Rafi plan. You are proposal-only: do not edit any file, run tracker mutation commands, allocate final ticket IDs, or write delivery configuration. Rafi validates and performs all writes after approval.
 
-Write the canonical ticket definitions to .tickets/tickets.yaml using Foreman's schema:
-- id: stable ticket ID. Preserve existing IDs. If no IDs exist, assign T001, T002, ... in implementation order.
+Return ticket content using Foreman's schema:
+- slice_ref: the exact approved plan slice reference. Do not allocate ticket IDs.
 - order: unique numeric implementation order. Use gaps like 1000, 2000, 3000.
 - title, area, priority, size, risk, depends_on, summary, acceptance, required_tests, likely_files, rollback, notes.
 - Keep dependencies, acceptance criteria, testing expectations, file hints, risk notes, and implementation notes from the source material.
 - Do not store mutable status/progress fields in .tickets/tickets.yaml.
-- Do not edit .tickets/ticket-state.sqlite directly.
+- Dependencies must reference slice_ref values. Include the exact IDs of existing populated tickets whose removed slices should become obsolete.
 
 If source content does not cleanly map to the new schema, ask for guidance instead of guessing. Use:
 STEP_STATUS: needs_input | question="..." choices="..."
 
-After editing:
-- Run foreman tickets render.
-- Run foreman tickets validate.
-- Fix validation errors if possible.
-- Triple-check that every source ticket/task is represented exactly once and no important detail was dropped.
+Output one JSON object between ${TICKET_POPULATION_PROPOSAL_START} and ${TICKET_POPULATION_PROPOSAL_END} with shape:
+{"version":1,"plan_id":"approved plan ID","revision":1,"tickets":[{"slice_ref":"slc_...","title":"...","area":"...","priority":"P1","size":"S","risk":"Low","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"depends_on":["slice_ref"],"rollback":null,"notes":null}],"retirements":["exact existing ticket ID"]}
+Triple-check that every approved slice appears exactly once.
 
 End with exactly one marker line as the final non-empty line:
 STEP_STATUS: done | summary="populated Foreman tickets from existing project ticket sources"
@@ -200,6 +205,8 @@ export function buildPopulateAgentRunOptions(opts: {
     yes: opts.yes,
     label: "tickets populate",
     log: opts.log,
+    permissionConfig: readOnlyPermissionConfig(),
+    sandboxMode: "read-only",
   };
 }
 
@@ -233,6 +240,7 @@ interface PopulateCommandOptions {
   sources?: string[];
   fast?: boolean;
   yes?: boolean;
+  authorizeRetire?: string[];
 }
 
 async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
@@ -808,11 +816,13 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     }
   }
 
+  const structuredPlan = loadPopulationPlan(dir, sourceHints);
+
   if (!opts.yes) {
     const action = await select({
-      message: "Populate .tickets/tickets.yaml by letting the builder edit this project?",
+      message: "Ask the read-only Ticket Maker for a structured population proposal?",
       options: [
-        { value: "proceed", label: "Proceed - builder may edit ticket files" },
+        { value: "proceed", label: "Proceed - generate proposal only" },
         { value: "cancel", label: "Cancel" },
       ],
     });
@@ -874,16 +884,23 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
       process.exit(2);
     }
 
-    cmdRender(dir);
-    const validation = cmdValidate(dir);
-    if (validation.issues.length > 0) {
-      console.log(`foreman tickets: ${validation.issues.length} validation issue(s) found:`);
-      console.log(formatValidationIssues(validation.issues));
-      if (!validation.clean) process.exit(1);
-    } else {
-      console.log("foreman tickets: validation passed — all 4 passes clean");
+    const existing = loadTickets(resolveTicketPaths(ticketsConfig, dir).tickets);
+    const proposal = extractTicketPopulationProposal(turn.result.text);
+    const materialized = materializeTicketPopulation(proposal, structuredPlan, existing);
+    let retirementsConfirmed = false;
+    if (!opts.yes) {
+      console.log(`foreman tickets: proposal maps ${materialized.sliceToTicket.size} slice(s) and retires ${materialized.retirements.join(", ") || "none"}`);
+      const approved = await confirm({ message: "Apply this exact ticket and delivery proposal?", initialValue: false });
+      if (isCancel(approved) || !approved) { console.log("foreman tickets: cancelled; no files or tracker state changed"); return; }
+      if (materialized.retirements.length) {
+        const retirement = await confirm({ message: `Mark these removed-slice tickets obsolete: ${materialized.retirements.join(", ")}?`, initialValue: false });
+        if (isCancel(retirement) || !retirement) { console.log("foreman tickets: cancelled; no files or tracker state changed"); return; }
+        retirementsConfirmed = true;
+      }
     }
-    console.log(`foreman tickets: populated .tickets/tickets.yaml and rendered ${ticketsConfig.paths.progressDoc}`);
+    authorizeTicketRetirements(materialized.retirements, { interactiveConfirmed: retirementsConfirmed, authorizedIds: opts.authorizeRetire, computerRun: Boolean(opts.yes) });
+    const applied = applyTicketPopulation(dir, materialized);
+    console.log(`foreman tickets: populated atomically (run ${applied.runId}, transaction ${applied.transactionId})`);
   } catch (err) {
     await builder?.close().catch(() => {});
     await viewer?.catch(() => {});
@@ -903,6 +920,16 @@ async function prepareDocumentSources(projectDir: string, sources: string[]): Pr
     else prepared.push(source);
   }
   return unique(prepared);
+}
+
+function loadPopulationPlan(projectDir: string, sources: string[]): StructuredPlanV1 {
+  for (const source of sources) {
+    const candidate = source.endsWith(".json") ? resolve(projectDir, source) : source.endsWith(".md") ? resolve(projectDir, source.replace(/\.md$/, ".json")) : undefined;
+    if (!candidate || !existsSync(candidate)) continue;
+    const plan = JSON.parse(readFileSync(candidate, "utf8")) as StructuredPlanV1;
+    if (plan.version === 1 && plan.plan_id && Number.isInteger(plan.revision) && plan.content_digest) return plan;
+  }
+  throw new Error("ticket population requires the approved paired structured plan (normally docs/rafi-plan.json); run `rafi plan --validate` first");
 }
 
 export function buildTicketsCommand(): Command {
@@ -1020,7 +1047,8 @@ export function buildTicketsCommand(): Command {
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--sources <paths...>", "source hint files, folders, or globs to check first")
     .option("--fast", "fast mode - lower latency")
-    .option("-y, --yes", "skip confirmation prompt before letting the builder edit tickets")
+    .option("--authorize-retire <ids...>", "exact ticket IDs authorized to become obsolete in computer-run mode")
+    .option("-y, --yes", "computer-run approval; retirements still require --authorize-retire exact IDs")
     .action(async (opts) => {
       try {
         await cmdPopulateCli(opts);
@@ -1347,9 +1375,17 @@ export function buildTicketsCommand(): Command {
     .description("Print the ticket queue to stdout.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--limit <n>", "override view limit")
+    .option("--refresh", "query GitHub/GitLab and refresh cached stack review state")
     .action((opts) => {
       try {
-        const rows = cmdQueue(cwd(opts), opts.limit !== undefined ? Number(opts.limit) : undefined);
+        const dir = cwd(opts);
+        const delivery = loadDeliveryConfig(dir);
+        if (delivery?.stacks?.length) {
+          const lines = cmdStackQueue(dir, Boolean(opts.refresh));
+          if (!lines.length) console.log("No remaining tickets."); else for (const line of lines) console.log(line);
+          return;
+        }
+        const rows = cmdQueue(dir, opts.limit !== undefined ? Number(opts.limit) : undefined);
         if (rows.length === 0) {
           console.log("No remaining tickets.");
         } else {

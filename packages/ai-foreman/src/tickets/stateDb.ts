@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export type TicketStatus = "planned" | "next" | "in_progress" | "blocked" | "done" | "canceled";
+export type TicketStatus = "planned" | "next" | "in_progress" | "blocked" | "done" | "canceled" | "obsolete";
 export type ValidationResult = "passed" | "failed" | "not_run" | "not_applicable";
 
 export interface TicketState {
@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS ticket_state (
   validation_notes TEXT,
   updated_at TEXT NOT NULL,
   updated_by TEXT,
-  CHECK (status IN ('planned','next','in_progress','blocked','done','canceled')),
+  CHECK (status IN ('planned','next','in_progress','blocked','done','canceled','obsolete')),
   CHECK (validation_result IS NULL OR validation_result IN ('passed','failed','not_run','not_applicable'))
 );
 
@@ -224,6 +224,29 @@ export class StateDb {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(INIT_SQL);
+    this.migrateObsoleteStatus();
+  }
+
+  private migrateObsoleteStatus(): void {
+    const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='ticket_state'").get() as { sql: string } | undefined;
+    if (!row || row.sql.includes("'obsolete'")) return;
+    this.db.pragma("foreign_keys = OFF");
+    this.db.exec(`
+      DROP INDEX IF EXISTS idx_ticket_state_status;
+      ALTER TABLE ticket_state RENAME TO ticket_state_legacy;
+      CREATE TABLE ticket_state (
+        ticket_id TEXT PRIMARY KEY,status TEXT NOT NULL DEFAULT 'planned',owner TEXT,current_step TEXT,next_action TEXT,
+        blocked_by_json TEXT NOT NULL DEFAULT '[]',blocker_type TEXT,blocker_notes TEXT,first_blocked_at TEXT,last_checked_at TEXT,
+        last_worked_at TEXT,completed_at TEXT,attempt_count INTEGER NOT NULL DEFAULT 0,last_error TEXT,evidence TEXT,
+        validation_result TEXT,validation_commands TEXT,validation_notes TEXT,updated_at TEXT NOT NULL,updated_by TEXT,
+        CHECK (status IN ('planned','next','in_progress','blocked','done','canceled','obsolete')),
+        CHECK (validation_result IS NULL OR validation_result IN ('passed','failed','not_run','not_applicable'))
+      );
+      INSERT INTO ticket_state SELECT * FROM ticket_state_legacy;
+      DROP TABLE ticket_state_legacy;
+      CREATE INDEX idx_ticket_state_status ON ticket_state(status);
+    `);
+    this.db.pragma("foreign_keys = ON");
   }
 
   close(): void {

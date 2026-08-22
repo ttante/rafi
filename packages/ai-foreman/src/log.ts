@@ -39,6 +39,8 @@ export interface LogRecord {
     | "qa"
     | "qa-fix"
     | "qa-protected-files-changed"
+    | "qa-evidence"
+    | "agent-status"
     | "error";
   [key: string]: unknown;
 }

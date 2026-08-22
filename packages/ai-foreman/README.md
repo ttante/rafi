@@ -110,7 +110,7 @@ What each part does:
 | `--ticket <id>` | `T001` | none | Selects a branch-mode ticket to continue. Repeatable with `--continue`. |
 | `--base <ref>` | `main` / `origin/main` / `HEAD` | current branch or `HEAD` | Base ref for root ticket branches. |
 | `--branch-prefix <prefix>` | `rafi` / `feature` | `rafi` | Prefix for generated ticket branches. |
-| `--max-branch-depth <n>` | `1` / `2` / `3` | `2` | Maximum selected branch stack depth. |
+| `--max-branch-depth <n>` | positive integer | `5` | Maximum selected branch/PR stack depth (root PR is depth 1). |
 
 Auto-detected tracker files:
 

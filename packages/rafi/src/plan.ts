@@ -23,6 +23,7 @@ import { DEFAULT_DOCS_ROOT, LEGACY_PROJECT_CONFIG_FILE, RAFI_CONFIG_FILE } from 
 import { normalizePlanningSources } from "./project.js";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 import type { PlanningMode } from "rafi-spec";
+import type { StructuredPlanV1 } from "rafi-spec";
 import {
   checkpointInterview,
   completeInterview,
@@ -32,6 +33,18 @@ import {
   outputsChanged,
   type InterviewRecord,
 } from "ai-foreman/interviews.js";
+import { WorkflowDb, type ProjectLease } from "ai-foreman/workflow-db.js";
+import {
+  extractStructuredPlanProposal,
+  materializeStructuredPlan,
+  readAndValidateStructuredPlanPair,
+  readNamedApprovedPlan,
+  regenerateStructuredPlanMarkdown,
+  renderStructuredPlanMarkdown,
+  writeStructuredPlanArtifacts,
+  PLAN_PROPOSAL_END,
+  PLAN_PROPOSAL_START,
+} from "./structuredPlan.js";
 
 export const REQUIRED_PLAN_SECTIONS = [
   "Goal",
@@ -103,21 +116,26 @@ ${conversation}
 - If a question can be answered by inspecting the repository, inspect the repository instead of asking the user.
 - Use prd-to-issues only as vertical-slice planning guidance. Do not create issues/*.md or any other issue files.
 
+Delivery planning:
+- Infer delivery facts from the repository, brief, or saved setup before asking.
+- When material, ask one focused question at a time with a recommended answer covering unit membership, branch mode, completion, dependencies, provider, readiness, merge method, cleanup, and exact PR targets.
+- Support multiple delivery groups and straight cross-group stacks. Current-branch units cannot be stacked. Stacked units use completion=pr with GitHub or GitLab, no auto/direct merge, and at most five ordered PR nodes.
+
 Permissions and file rules:
 - This is a non-mutating planning run. Read, search, inspect, and ask questions as needed.
 - Do not edit source files, docs, .tickets, generated artifacts, or configuration.
-- Rafi CLI will write your final Markdown plan to ${opts.latestPlanPath} and keep timestamped history under ${opts.historyDirPath}.
+- Return a structured proposal only. Rafi assigns plan, slice, and stack identities and deterministically renders Markdown at ${opts.latestPlanPath} with immutable paired history under ${opts.historyDirPath}.
 
 Inspect the repository enough to make the plan concrete. Prefer facts from files over assumptions. If a decision is genuinely blocked, ask one focused question with:
 STEP_STATUS: needs_input | question="..." choices="recommended option|alternative"
 
 Output contract:
-- Return one Markdown plan.
-- Include these sections: Goal, Problem Statement, Repo Findings, Locked Decisions, Open Questions, Scope, Out Of Scope, Risks, Rollback Notes, Ticket-Maker Guidance.
-- Ticket-Maker Guidance must include proposed ticket slices, dependencies, acceptance criteria, required tests, likely files, and branch/batch strategy for repeated component-library work.
-- Include a Planning Assessment covering scope, dependencies, failure/edge cases, compatibility/rollout, and verification. For every area state the finding, basis, resolution, and whether user judgment remains.
-- Make each ticket slice small enough for \`rafi start --steps ...\` or branch-per-ticket execution.
-- Do not include implementation patches.
+- Cover the planning concepts Goal, Problem Statement, Repo Findings, Locked Decisions, Open Questions, Scope, Out Of Scope, Risks, Rollback Notes, and Ticket-Maker Guidance in the corresponding structured fields. Include a branch/batch strategy for repeated component-library work when relevant.
+- Return exactly one JSON object between ${PLAN_PROPOSAL_START} and ${PLAN_PROPOSAL_END}.
+- Shape: {"version":1,"summary":"...","assumptions":["..."],"implementation_changes":["..."],"acceptance_criteria":["..."],"test_plan":["..."],"slices":[{"local_ref":"S1","retains":"optional existing slice_ref only when revising","title":"...","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"depends_on":["local_ref"]}],"delivery_units":[{"id":"unit-name","slice_refs":["local_ref"],"branch_mode":"current|per-ticket|shared","completion":"pr|auto-merge|direct-merge|none","provider":"auto|github|gitlab|local","pr_ready":false,"merge_method":"squash|merge|rebase","cleanup":false,"depends_on":["unit-id"],"dependency_mode":"combine|wait|stack"}],"stacks":[{"local_ref":"STACK1","retains":"optional existing stack_id only when revising","name":"...","units":["root-unit","child-unit"]}]}.
+- Local refs exist only inside the proposal. Never invent plan_id, slice_ref, stack_id, revision, or digest values.
+- Every slice maps to exactly one delivery unit. Use independent non-stacked units when delivery grouping is not otherwise material.
+- Make each slice small enough for \`rafi start --steps ...\` or branch-per-ticket execution. Do not include patches or Markdown.
 
 End with exactly one marker line as the final non-empty line:
 STEP_STATUS: plan_complete | summary="created ticket-maker-ready Rafi plan"`;
@@ -286,6 +304,9 @@ export function buildPlanCommand(): Command {
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--fast", "fast mode - lower latency")
     .option("--resume-session <id>", "resume a saved planner agent session")
+    .option("--revise [plan-id]", "revise the latest or named approved plan lineage")
+    .option("--validate", "validate the latest Markdown/structured plan pair without running an agent")
+    .option("--render", "regenerate latest Markdown from validated structured data")
     .option("--grill-me", "use exhaustive one-question-at-a-time planning")
     .option("--no-grill-me", "use standard focused planning (default)")
     .option("-y, --yes", "skip confirmation prompt before running the planning agent")
@@ -315,6 +336,9 @@ export function buildPlanCommand(): Command {
           planningMode,
         })
         : undefined;
+      let workflow: WorkflowDb | undefined;
+      let workflowRunId: string | undefined;
+      let workflowLease: ProjectLease | undefined;
       try {
         if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "planning-brief" });
         if (!existsSync(projectDir)) fail(`project directory not found: ${projectDir}`);
@@ -322,9 +346,27 @@ export function buildPlanCommand(): Command {
 
         const docsRoot = resolvePlanDocsRoot(projectDir);
         const previewPaths = resolvePlanArtifactPaths(projectDir, docsRoot);
+        const latestMarkdown = resolve(projectDir, docsRoot, "rafi-plan.md");
+        const latestData = resolve(projectDir, docsRoot, "rafi-plan.json");
+        if (opts.validate) {
+          const plan = readAndValidateStructuredPlanPair(latestMarkdown, latestData);
+          console.log(`rafi plan: valid ${plan.plan_id} revision ${plan.revision} (${plan.content_digest})`);
+          return;
+        }
+        if (opts.render) {
+          const plan = regenerateStructuredPlanMarkdown(latestMarkdown, latestData);
+          console.log(`rafi plan: regenerated Markdown for ${plan.plan_id} revision ${plan.revision}`);
+          return;
+        }
+        let previous: StructuredPlanV1 | undefined;
+        if (opts.revise !== undefined) {
+          previous = typeof opts.revise === "string"
+            ? readNamedApprovedPlan(projectDir, docsRoot, opts.revise)
+            : readAndValidateStructuredPlanPair(latestMarkdown, latestData);
+        }
         if (interview) interview = checkpointInterview(projectDir, interview, {
           checkpoint: "planning-brief",
-          outputs: fingerprintOutputs(projectDir, [previewPaths.latestRel]),
+          outputs: fingerprintOutputs(projectDir, [previewPaths.latestRel, `${docsRoot}/rafi-plan.json`]),
         });
         const brief = await resolveBrief(opts);
         if (interview) interview = checkpointInterview(projectDir, interview, {
@@ -357,40 +399,46 @@ export function buildPlanCommand(): Command {
         }
 
         const logPath = makeLogPath(projectDir, "rafi-plan");
+        workflow = new WorkflowDb(projectDir);
+        const workflowRun = workflow.createRun({ kind: "plan", checkpoint: "planner-session-before", originalWork: { brief, planningMode, revise: previous?.plan_id }, remainingWork: { approval: true }, state: {} });
+        workflowRunId = workflowRun.runId; workflowLease = workflow.acquireLease(workflowRunId);
         if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "agent-run" });
         console.log("rafi plan: running read-only planner");
         console.log(`rafi plan: project ${projectDir}`);
         console.log(`rafi plan: role planner; mode ${planningMode}`);
         console.log(`rafi plan: log ${logPath}\n`);
 
-        const run = await runRoleInstruction(buildPlanAgentRunOptions({
-          projectDir,
-          agent: opts.agent as string | undefined,
-          model: opts.model as string | undefined,
-          effort: opts.effort as EffortLevel | undefined,
-          fast: opts.fast as boolean | undefined,
-          yes: Boolean(opts.yes),
-          resumeSessionId: opts.resumeSession as string | undefined,
-          instruction,
-          logPath,
-          planningMode,
-        }));
-
-        const turn = run.turn;
-        if (turn.result.isError) {
-          fail(`planner turn errored: ${turn.result.text.slice(0, 200)}`);
+        let nextInstruction = instruction;
+        let resumeSessionId = opts.resumeSession as string | undefined;
+        let run: Awaited<ReturnType<typeof runRoleInstruction>>;
+        let plan: StructuredPlanV1;
+        while (true) {
+          run = await runRoleInstruction(buildPlanAgentRunOptions({
+            projectDir, agent: opts.agent as string | undefined, model: opts.model as string | undefined,
+            effort: opts.effort as EffortLevel | undefined, fast: opts.fast as boolean | undefined,
+            yes: Boolean(opts.yes), resumeSessionId, instruction: nextInstruction, logPath, planningMode,
+          }));
+          workflow.transition(workflowRunId, { checkpoint: "planner-session-after", state: { sessionId: run.sessionId, runtime: run.runtime, model: run.model }, event: "planner_session" });
+          const turn = run.turn;
+          if (turn.result.isError) fail(`planner turn errored: ${turn.result.text.slice(0, 200)}`);
+          if (turn.status.kind === "blocked") { console.error(`rafi plan: blocked - ${turn.status.reason ?? "planner reported blocked"}`); process.exit(2); }
+          if (!isSuccessfulPlanStatus(turn.status.kind)) { console.error(`rafi plan: needs human - ${turn.status.error ?? "planner did not emit plan_complete"}`); process.exit(2); }
+          plan = materializeStructuredPlan(extractStructuredPlanProposal(turn.result.text), previous);
+          if (opts.yes) break;
+          console.log(`\n${renderStructuredPlanMarkdown(plan)}`);
+          const { select, text, isCancel } = await import("@clack/prompts");
+          const decision = await select({ message: "Approve this structured plan?", options: [
+            { value: "approve", label: "Approve and publish (Recommended)" },
+            { value: "discuss", label: "Discuss and revise" },
+            { value: "cancel", label: "Cancel without changes" },
+          ] });
+          if (isCancel(decision) || decision === "cancel") { workflow.transition(workflowRunId, { status: "cancelled", checkpoint: "approval-cancelled", remainingWork: {} }); if (workflowLease) workflow.releaseLease(workflowLease); workflow.close(); workflow = undefined; console.log("rafi plan: cancelled; no plan or settings were changed"); return; }
+          if (decision === "approve") break;
+          const feedback = await text({ message: "What should the Planner revise?" });
+          if (isCancel(feedback)) { workflow.transition(workflowRunId, { status: "cancelled", checkpoint: "approval-cancelled", remainingWork: {} }); if (workflowLease) workflow.releaseLease(workflowLease); workflow.close(); workflow = undefined; console.log("rafi plan: cancelled; no plan or settings were changed"); return; }
+          resumeSessionId = run.sessionId;
+          nextInstruction = `Revise the proposal using this user feedback: ${String(feedback)}\nReturn the complete replacement proposal using the exact ${PLAN_PROPOSAL_START}/${PLAN_PROPOSAL_END} and STEP_STATUS contract. This is the same planning work session.`;
         }
-        if (turn.status.kind === "blocked") {
-          console.error(`rafi plan: blocked - ${turn.status.reason ?? "planner reported blocked"}`);
-          process.exit(2);
-        }
-        if (!isSuccessfulPlanStatus(turn.status.kind)) {
-          console.error(`rafi plan: needs human - ${turn.status.error ?? "planner did not emit plan_complete"}`);
-          process.exit(2);
-        }
-
-        const planMarkdown = stripFinalStepStatusMarker(turn.result.text);
-        if (!planMarkdown.trim()) fail("planner returned an empty plan");
         if (interview) {
           const drifted = outputsChanged(projectDir, interview.outputs);
           if (drifted.length > 0) {
@@ -398,7 +446,9 @@ export function buildPlanCommand(): Command {
             throw new Error(`planned output changed during this interview: ${drifted.join(", ")}; review it and retry instead of overwriting`);
           }
         }
-        const written = writeValidatedPlanArtifacts(projectDir, docsRoot, planMarkdown, new Date(), planningMode);
+        const written = writeStructuredPlanArtifacts(projectDir, docsRoot, plan);
+        workflow.transition(workflowRunId, { status: "completed", checkpoint: "plan-pair-published", remainingWork: {}, state: { planId: plan.plan_id, revision: plan.revision, digest: plan.content_digest } });
+        if (workflowLease) workflow.releaseLease(workflowLease); workflow.close(); workflow = undefined;
         if (interview) {
           interview = checkpointInterview(projectDir, interview, {
             checkpoint: "write-plan-artifacts",
@@ -411,11 +461,14 @@ export function buildPlanCommand(): Command {
           completeInterview(projectDir, interview);
         }
 
-        console.log(`\nrafi plan: wrote ${written.historyRel}`);
-        console.log(`rafi plan: refreshed ${written.latestRel}`);
+        console.log(`\nrafi plan: wrote ${relative(projectDir, written.historyMarkdown)} and ${relative(projectDir, written.historyData)}`);
+        console.log(`rafi plan: refreshed ${relative(projectDir, written.latestMarkdown)} and ${relative(projectDir, written.latestData)}`);
         console.log("rafi plan: next:");
-        console.log(`  ${nextPopulateCommand(projectDir, written.latestRel)}`);
+        console.log(`  ${nextPopulateCommand(projectDir, relative(projectDir, written.latestData))}`);
       } catch (err) {
+        if (workflow && workflowRunId) {
+          try { workflow.transition(workflowRunId, { status: "failed", checkpoint: "plan-failed", remainingWork: {}, state: { error: err instanceof Error ? err.message.slice(0, 1000) : String(err).slice(0, 1000) } }); if (workflowLease) workflow.releaseLease(workflowLease); } finally { workflow.close(); workflow = undefined; }
+        }
         if (interview) failInterview(projectDir, interview, interview.checkpoint, err);
         fail(err instanceof Error ? err.message : String(err));
       }

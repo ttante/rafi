@@ -59,8 +59,8 @@ Commands:
   start [options] <project>         Enlist a builder and drive it through a batch of N steps.
   build:resume [options] [project]  Inspect and resume one interrupted implementation run without
                                     discarding partial work.
-  agents [options] [project]        Configure persistent runtime, model, reasoning, and fast
-                                    defaults for Rafi roles.
+  agents [options] [project]        Configure persistent runtime, model, reasoning, fast, and
+                                    session defaults for Rafi roles.
   uninstall [options] [project]     Preview and safely remove selected project-local Rafi material.
   status [project]                  Summarize the most recent Foreman run for a Rafi project.
   doctor [options] [project]        Check Foreman, agent CLIs, config, and optional ticket tracker
@@ -141,6 +141,9 @@ Options:
   --effort <level>       reasoning effort level (low|medium|high|xhigh)
   --fast                 fast mode - lower latency
   --resume-session <id>  resume a saved planner agent session
+  --revise [plan-id]     revise the latest or named approved plan lineage
+  --validate             validate the latest Markdown/structured plan pair without running an agent
+  --render               regenerate latest Markdown from validated structured data
   --grill-me             use exhaustive one-question-at-a-time planning
   --no-grill-me          use standard focused planning (default)
   -y, --yes              skip confirmation prompt before running the planning agent
@@ -322,14 +325,16 @@ Ask the ticket-maker role to populate .tickets/tickets.yaml from existing projec
 docs.
 
 Options:
-  -p, --project <dir>   project directory (default: cwd)
-  -a, --agent <agent>   builder agent (claude | codex)
-  -m, --model <model>   override the builder's model
-  --effort <level>      reasoning effort level (low|medium|high|xhigh)
-  --sources <paths...>  source hint files, folders, or globs to check first
-  --fast                fast mode - lower latency
-  -y, --yes             skip confirmation prompt before letting the builder edit tickets
-  -h, --help            display help for command
+  -p, --project <dir>          project directory (default: cwd)
+  -a, --agent <agent>          builder agent (claude | codex)
+  -m, --model <model>          override the builder's model
+  --effort <level>             reasoning effort level (low|medium|high|xhigh)
+  --sources <paths...>         source hint files, folders, or globs to check first
+  --fast                       fast mode - lower latency
+  --authorize-retire <ids...>  exact ticket IDs authorized to become obsolete in computer-run mode
+  -y, --yes                    computer-run approval; retirements still require --authorize-retire
+                               exact IDs
+  -h, --help                   display help for command
 ```
 
 ### `rafi tickets update --help`
@@ -504,6 +509,7 @@ Print the ticket queue to stdout.
 Options:
   -p, --project <dir>  project directory (default: cwd)
   --limit <n>          override view limit
+  --refresh            query GitHub/GitLab and refresh cached stack review state
   -h, --help           display help for command
 ```
 
@@ -563,10 +569,12 @@ Arguments:
   project                           path to the project directory the builder works in
 
 Options:
-  -s, --steps <n>                   number of steps to drive
+  -s, --steps <n>                   number of tickets to drive; may stop within a stack
+  --stacks <n>                      number of complete eligible delivery stacks to build
   -a, --agent <agent>               builder agent (claude | codex)
   -m, --model <model>               override the builder's model
   -r, --resume <sessionId>          resume a prior builder session
+  --recover-run <id>                continue an existing master recovery run ID
   --continue                        resume the most recent logged session for this project
   -t, --tickets <path>              path to ticket file (.md, .txt, .yaml, …) — passed to the
                                     builder as context
@@ -593,7 +601,7 @@ Options:
   --base <ref>                      base ref for root ticket branches (default: current branch or
                                     HEAD)
   --branch-prefix <prefix>          branch name prefix for ticket branches (default: "rafi")
-  --max-branch-depth <n>            maximum selected branch stack depth (default: "2")
+  --max-branch-depth <n>            maximum selected branch stack depth (default: "5")
   --pr-ready                        create ready-for-review PRs instead of draft PRs
   --keep-worktrees                  keep successful ticket worktrees for inspection
   --ticket <id>                     ticket id to continue in branch mode; repeat for multiple
@@ -799,18 +807,20 @@ Options:
 ```text
 Usage: rafi agents [options] [project]
 
-Configure persistent runtime, model, reasoning, and fast defaults for Rafi roles.
+Configure persistent runtime, model, reasoning, fast, and session defaults for Rafi roles.
 
 Arguments:
-  project                 project directory (default: ".")
+  project                        project directory (default: ".")
 
 Options:
-  --agent-type <role>     planner | builder | qa | ticket-maker | uninstaller | all
-  --agent-make <runtime>  claude | codex
-  --model <model>         provider model ID or default
-  --reasoning <level>     provider reasoning level or default
-  --fast                  enable provider fast/speed capability
-  -h, --help              display help for command
+  --agent-type <role>            planner | builder | qa | ticket-maker | uninstaller | all
+  --agent-make <runtime>         claude | codex
+  --model <model>                provider model ID or default
+  --reasoning <level>            provider reasoning level or default
+  --fast                         enable provider fast/speed capability
+  --no-fast                      disable provider fast/speed capability
+  --session-strategy <strategy>  compact | fresh
+  -h, --help                     display help for command
 ```
 
 ### `rafi uninstall --help`

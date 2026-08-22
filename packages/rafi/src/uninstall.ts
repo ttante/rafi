@@ -6,6 +6,7 @@ import type { InstallManifestEntryV1, UninstallProposal } from "rafi-spec";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 import { INSTALL_MANIFEST, readInstallManifest, removeOwnedPathsTransaction, validateOwnedPath } from "./ownership.js";
 import { readOnlyPermissionConfig, runRoleInstruction } from "ai-foreman/agent-run.js";
+import { WorkflowDb, type ProjectLease } from "ai-foreman/workflow-db.js";
 
 export type UninstallCategory = "tickets" | "plans" | "generated-agents" | "dependencies" | "modified-owned" | "core";
 export interface UninstallChoice { category: UninstallCategory; remove: boolean }
@@ -84,13 +85,23 @@ export function buildUninstallCommand(opts: { interpret?: (projectDir: string, i
       if (expected !== plan.fingerprint) throw new Error("project changed after preview; rerun uninstall");
       const final = await confirm({ message: `Permanently remove ${plan.remove.length} path(s) and ${plan.dependencies.length} dependency item(s) from ${root}?`, initialValue: false });
       if (isCancel(final) || !final) { console.log("rafi uninstall: cancelled; no transaction was created"); return; }
-      const rechecked = buildUninstallPlan(root, choices, proposal);
-      if (rechecked.fingerprint !== plan.fingerprint) throw new Error("project changed after preview; uninstall aborted");
-      if (plan.dependencies.length) throw new Error(`dependency removal requires package-manager reconciliation before file removal: ${plan.dependencies.join(", ")}`);
-      const result = removeOwnedPathsTransaction(root, plan.remove.map((item) => item.path));
-      console.log(`rafi uninstall: removed ${result.removed.length} path(s); transaction journal ${join(".rafi-uninstall", result.runId, "journal.json")}`);
-      if (plan.preserve.length) console.log(`rafi uninstall: preserved ${plan.preserve.join(", ")}`);
-      console.log("rafi uninstall: local branches, commits, stashes, remotes, and remote PR/MR state were not changed.");
+      const workflow = new WorkflowDb(root); const run = workflow.createRun({ kind: "uninstall", checkpoint: "before-recheck", originalWork: { remove: plan.remove, dependencies: plan.dependencies }, state: { fingerprint: plan.fingerprint } });
+      let lease: ProjectLease | undefined;
+      try {
+        lease = workflow.acquireLease(run.runId);
+        const rechecked = buildUninstallPlan(root, choices, proposal);
+        if (rechecked.fingerprint !== plan.fingerprint) throw new Error("project changed after preview; uninstall aborted");
+        if (plan.dependencies.length) throw new Error(`dependency removal requires package-manager reconciliation before file removal: ${plan.dependencies.join(", ")}`);
+        workflow.transition(run.runId, { checkpoint: "before-local-transaction", event: "uninstall_intent" });
+        const result = removeOwnedPathsTransaction(root, plan.remove.map((item) => item.path));
+        workflow.transition(run.runId, { status: "completed", checkpoint: "uninstall-committed", remainingWork: {}, state: { fingerprint: plan.fingerprint, transactionRunId: result.runId, removed: result.removed } });
+        console.log(`rafi uninstall: removed ${result.removed.length} path(s); transaction journal ${join(".rafi-uninstall", result.runId, "journal.json")}`);
+        if (plan.preserve.length) console.log(`rafi uninstall: preserved ${plan.preserve.join(", ")}`);
+        console.log("rafi uninstall: local branches, commits, stashes, remotes, and remote PR/MR state were not changed.");
+      } catch (error) {
+        workflow.transition(run.runId, { status: "failed", checkpoint: "uninstall-failed", state: { fingerprint: plan.fingerprint, error: error instanceof Error ? error.message.slice(0, 1000) : String(error).slice(0, 1000) } });
+        throw error;
+      } finally { if (lease) workflow.releaseLease(lease); workflow.close(); }
     });
 }
 

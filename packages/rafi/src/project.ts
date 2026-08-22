@@ -186,6 +186,17 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
     docs: {
       root: answers.docsRoot ?? DEFAULT_DOCS_ROOT,
     },
+    agent_defaults: {
+      version: 1,
+      revision: 0,
+      roles: {
+        builder: { session_strategy: "compact" },
+        qa: { session_strategy: "compact" },
+        "ticket-maker": { session_strategy: "compact" },
+        planner: { session_strategy: "fresh" },
+        uninstaller: { session_strategy: "fresh" },
+      },
+    },
     ...(normalizePlanningSources(answers.planningSources).length > 0
       ? { planning: { sources: normalizePlanningSources(answers.planningSources) } }
       : {}),

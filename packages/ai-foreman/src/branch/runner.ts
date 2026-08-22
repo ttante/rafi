@@ -1,5 +1,8 @@
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
-import { Foreman, MARKER_SPEC } from "../foreman.js";
+import type { SessionStrategy } from "rafi-spec";
+import { buildDurableQaFixHandoff, compactWithRetry, runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaStreamState } from "../qaReview.js";
+import { changeManifest } from "../qaSnapshot.js";
+import { Foreman, MARKER_SPEC, parseStepStatus } from "../foreman.js";
 import type { Log } from "../log.js";
 import { fireNotification } from "../notify.js";
 import { cmdBlock, cmdComplete, cmdUpdate } from "../tickets/commands.js";
@@ -22,6 +25,7 @@ import { checkGitHubPrMerged, createOrReusePr, enableGitHubAutoMerge, pushBranch
 import { checkGitLabMrMerged, createOrReuseMr, enableGitLabAutoMerge, pushBranchForMr } from "./gitlab.js";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { WorkflowDb } from "../workflowDb.js";
 
 export interface DeliveryUnitSession { unitId: string; branch: string; worktreePath: string; sessionId: string; ticket: string; }
 
@@ -59,7 +63,11 @@ export interface BranchRunnerOptions {
   trackerPaths?: { progressDoc: string; archiveDoc: string };
   resumeSessions?: Map<string, { worktreePath: string; sessionId: string }>;
   createBuilder: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>;
+  createQa?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>;
+  builderSessionStrategy?: SessionStrategy;
+  qaSessionStrategy?: SessionStrategy;
   observeBuilder?: (builder: BuilderAdapter) => Promise<void>;
+  qaNonconvergence?: (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision>;
 }
 
 export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRunSummary[]> {
@@ -72,6 +80,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
   const summaries: BranchRunSummary[] = [];
   const successfulBranches = new Set<string>();
   const pushedBranches = new Set<string>();
+  let builderStreamSession: string | undefined;
+  let builderWorkSessions = 0;
+  const qaStream: QaStreamState = { reviews: 0, modificationViolations: 0 };
 
   for (const issue of opts.plan.issues) {
     opts.log.write("branch-issue", { ...issue });
@@ -149,6 +160,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       base: node.baseBranch,
       dependencies: node.dependencies,
     });
+    workflowCheckpoint(opts.projectDir, opts.runId, "builder-before", node.ticket.id, { branch: node.branch, worktree: node.worktreePath });
 
     const resumeSession = opts.resumeSessions?.get(node.ticket.id);
     const worktreePath = resumeSession?.worktreePath
@@ -169,13 +181,18 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         });
       }
 
-      cmdUpdate(opts.projectDir, node.ticket.id, {
-        status: "in_progress",
-        actor: "foreman",
+      journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:in-progress`, { ticket: node.ticket.id, status: "in_progress" }, () => cmdUpdate(opts.projectDir, node.ticket.id, {
+        status: "in_progress", actor: "foreman",
         summary: resumeSession ? `Resuming branch ${node.branch}` : `Starting branch ${node.branch}`,
-      });
+      }));
 
-      builder = await opts.createBuilder(worktreePath, resumeSession?.sessionId);
+      const continuedBuilderSession = resumeSession?.sessionId ?? (opts.builderSessionStrategy === "compact" ? builderStreamSession : undefined);
+      builder = await opts.createBuilder(worktreePath, continuedBuilderSession);
+      if (opts.builderSessionStrategy === "compact" && builderWorkSessions > 0 && continuedBuilderSession) {
+        const compacted = await compactWithRetry(builder);
+        if (!compacted.ok) { await builder.close(); builder = await opts.createBuilder(worktreePath); }
+      }
+      builderWorkSessions += 1;
       viewer = opts.observeBuilder?.(builder);
       const foreman = new Foreman(
         builder,
@@ -189,7 +206,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       const { result, status } = await foreman.runInstruction(
         resumeSession ? buildBranchTicketResumeInstruction(node, opts.trackerPaths) : buildBranchTicketInstruction(node, opts.trackerPaths),
       );
+      workflowCheckpoint(opts.projectDir, opts.runId, "builder-after", node.ticket.id, { status: status.kind, sessionId: builder.sessionId(), worktree: worktreePath });
       const sessionId = builder.sessionId();
+      builderStreamSession = opts.builderSessionStrategy === "compact" ? sessionId : undefined;
       if (sessionId) {
         opts.log.write("branch-session", {
           ticket: node.ticket.id,
@@ -230,20 +249,44 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       }
       if (status.kind !== "done" && status.kind !== "plan_complete") {
         const detail = status.reason ?? status.error ?? `builder emitted ${status.kind}`;
-        cmdBlock(opts.projectDir, node.ticket.id, { summary: detail, actor: "foreman" });
+        journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:builder-block`, { ticket: node.ticket.id, status: "blocked", detail }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: detail, actor: "foreman" }));
         summaries.push(summaryFor(node, status.kind === "blocked" ? "blocked" : "needs-human", detail));
         continue;
       }
 
       let qaSummary: string | undefined;
+      let qaWaived = false;
       if (opts.qaEnabled) {
-        const qa = await foreman.runQaReview(summaries.length + 1);
-        if (qa.outcome !== "passed") {
+        if (!opts.createQa) throw new Error("independent disposable QA factory is required when QA is enabled");
+        workflowCheckpoint(opts.projectDir, opts.runId, "qa-before", node.ticket.id, { worktree: worktreePath });
+        const qa = await runIsolatedQa({
+          ticket: node.ticket, builderWorktree: worktreePath, builderSummary: status.summary ?? result.text,
+          qaStrategy: opts.qaSessionStrategy ?? "compact", state: qaStream, createQa: opts.createQa, maxCycles: 3,
+          evidence: (entry) => opts.log.write("qa-evidence", { ticket: node.ticket.id, ...entry }),
+          fix: async (issues) => {
+            if (!builder) return { ok: false, detail: "Builder session unavailable" };
+            builderWorkSessions += 1;
+            if (opts.builderSessionStrategy === "compact" && builder.sessionId()) {
+              const compacted = await compactWithRetry(builder);
+              if (!compacted.ok) { await builder.close(); builder = await opts.createBuilder(worktreePath); }
+            } else if (opts.builderSessionStrategy === "fresh") {
+              await builder.close(); builder = await opts.createBuilder(worktreePath);
+            }
+            const digest = changeManifest(worktreePath).diffDigest;
+            const fixed = await builder.sendTurn(buildDurableQaFixHandoff(node.ticket, issues, worktreePath, result.text, digest));
+            const fixedStatus = parseStepStatus(fixed.text);
+            builderStreamSession = opts.builderSessionStrategy === "compact" ? builder.sessionId() : undefined;
+            return { ok: !fixed.isError && fixedStatus.kind === "done", detail: fixedStatus.error ?? fixed.text.slice(0, 500) };
+          },
+          onNonconvergence: opts.qaNonconvergence,
+        });
+        workflowCheckpoint(opts.projectDir, opts.runId, "qa-after", node.ticket.id, { outcome: qa.outcome, detail: qa.detail });
+        if (qa.outcome !== "passed" && qa.outcome !== "waived") {
           const detail = qa.detail ?? "QA did not pass";
-          cmdBlock(opts.projectDir, node.ticket.id, { summary: detail, actor: "foreman" });
-          summaries.push(summaryFor(node, qa.outcome === "blocked" ? "blocked" : "needs-human", detail));
-          continue;
+          journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:qa-block`, { ticket: node.ticket.id, status: "blocked", detail }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: detail, actor: "foreman" }));
+          summaries.push(summaryFor(node, qa.outcome === "blocked" ? "blocked" : "needs-human", detail)); continue;
         }
+        qaWaived = qa.outcome === "waived";
         qaSummary = qa.summary;
       } else {
         opts.log.write("qa", {
@@ -266,7 +309,11 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
 
       let commit: string | undefined;
       if (hasWorktreeChanges(worktreePath)) {
-        commit = commitAll(worktreePath, `${node.ticket.id}: ${node.ticket.title}`);
+        workflowCheckpoint(opts.projectDir, opts.runId, "commit-before", node.ticket.id, { branch: node.branch });
+        const operation = `${opts.runId}:commit:${node.ticket.id}`;
+        planJournal(opts.projectDir, opts.runId, operation, "commit", { ticket: node.ticket.id, branch: node.branch, worktreePath });
+        try { commit = commitAll(worktreePath, `${node.ticket.id}: ${node.ticket.title}`); confirmJournal(opts.projectDir, operation, commit, { sha: commit }); workflowCheckpoint(opts.projectDir, opts.runId, "commit-after", node.ticket.id, { sha: commit }); }
+        catch (error) { failJournal(opts.projectDir, operation, error, false); throw error; }
       }
       if (!commit && (createsReviewForNode || (completionMode === "direct-merge" && completesSharedUnit))) {
         commit = headCommitIfAhead(worktreePath, node.baseBranch);
@@ -276,13 +323,19 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       summary.commit = commit;
 
       if (commit && createsReviewForNode) {
+        workflowCheckpoint(opts.projectDir, opts.runId, "push-before", node.ticket.id, { branch: node.branch, sha: commit });
+        const pushOperation = `${opts.runId}:push:${node.branch}`;
+        planJournal(opts.projectDir, opts.runId, pushOperation, "push", { branch: node.branch, sha: commit, remote: "origin" });
         const push = reviewProvider === "gitlab"
           ? pushBranchForMr(worktreePath, node.branch)
           : pushBranchForPr(worktreePath, node.branch);
         if (push.ok) {
+          confirmJournal(opts.projectDir, pushOperation, node.branch, { sha: commit });
           opts.log.write("branch-push", { ticket: node.ticket.id, branch: node.branch, status: "pushed" });
           summary.pushStatus = "pushed";
+          workflowCheckpoint(opts.projectDir, opts.runId, "push-after", node.ticket.id, { branch: node.branch, sha: commit });
         } else {
+          failJournal(opts.projectDir, pushOperation, push.message, push.code === "network_or_timeout");
           summary.pushStatus = "failed";
           summary.pr = {
             status: "skipped",
@@ -309,6 +362,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         }
 
         pushedBranches.add(node.branch);
+        workflowCheckpoint(opts.projectDir, opts.runId, "review-creation-before", node.ticket.id, { provider: reviewProvider, head: node.branch, base: node.baseBranch });
+        const reviewOperation = `${opts.runId}:${reviewProvider === "gitlab" ? "mr" : "pr"}:${node.branch}:${node.baseBranch}`;
+        planJournal(opts.projectDir, opts.runId, reviewOperation, reviewProvider === "gitlab" ? "mr-create" : "pr-create", { head: node.branch, base: node.baseBranch, sha: commit });
         const pr = reviewProvider === "gitlab"
           ? createOrReuseMr(opts.projectDir, {
             node,
@@ -328,6 +384,8 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
             commit,
           });
         summary.pr = pr;
+        if (pr.status === "created" || pr.status === "existing") { confirmJournal(opts.projectDir, reviewOperation, pr.url, { head: node.branch, base: node.baseBranch, url: pr.url }); workflowCheckpoint(opts.projectDir, opts.runId, "review-creation-after", node.ticket.id, { provider: reviewProvider, head: node.branch, base: node.baseBranch, url: pr.url }); }
+        else if (pr.status === "failed") failJournal(opts.projectDir, reviewOperation, pr.message ?? pr.error ?? "review creation failed", pr.code === "network_or_timeout");
         if (pr.status === "created") opts.log.write(reviewProvider === "gitlab" ? "mr-created" : "pr-created", { ticket: node.ticket.id, branch: node.branch, url: pr.url });
         if (pr.status === "existing") opts.log.write(reviewProvider === "gitlab" ? "mr-existing" : "pr-existing", { ticket: node.ticket.id, branch: node.branch, url: pr.url });
         if (pr.status === "failed") {
@@ -400,13 +458,18 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         if (opts.cleanupBranches ?? true) deleteLocalBranch(opts.projectDir, node.branch);
       }
 
+      const completionOperation = `${opts.runId}:ticket-complete:${node.ticket.id}`;
+      workflowCheckpoint(opts.projectDir, opts.runId, "ticket-completion-before", node.ticket.id, { validationResult: qaWaived ? "failed" : opts.qaEnabled ? "passed" : "not_applicable" });
+      planJournal(opts.projectDir, opts.runId, completionOperation, "ticket-complete", { ticket: node.ticket.id });
       cmdComplete(opts.projectDir, node.ticket.id, {
         actor: "foreman",
         summary: status.summary ?? `Completed ${node.ticket.id}`,
-        validationResult: opts.qaEnabled ? "passed" : "not_applicable",
-        validationNotes: opts.qaEnabled ? "Foreman QA emitted qa_pass" : "Foreman QA disabled for this run",
-        evidence: opts.qaEnabled ? (qaSummary ?? "Foreman QA emitted qa_pass") : undefined,
+        validationResult: qaWaived ? "failed" : opts.qaEnabled ? "passed" : "not_applicable",
+        validationNotes: qaWaived ? "User explicitly waived unresolved QA failures" : opts.qaEnabled ? "Foreman QA emitted qa_pass" : "Foreman QA disabled for this run",
+        evidence: opts.qaEnabled ? (qaSummary ?? (qaWaived ? "Unresolved QA issues preserved in run evidence" : "Foreman QA emitted qa_pass")) : undefined,
       });
+      confirmJournal(opts.projectDir, completionOperation, node.ticket.id, { status: "done" });
+      workflowCheckpoint(opts.projectDir, opts.runId, "ticket-completion-after", node.ticket.id, { status: "done" });
 
       successfulBranches.add(node.ticket.id);
       summaries.push(summary);
@@ -430,7 +493,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         : "builder_error";
       opts.log.write("branch-issue", { ticket: node.ticket.id, code, message, blocking: false });
       notifyIssue(opts.notificationsEnabled, `${node.ticket.id}: ${message}`);
-      cmdBlock(opts.projectDir, node.ticket.id, { summary: message, actor: "foreman" });
+      journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:runtime-block`, { ticket: node.ticket.id, status: "blocked", detail: message }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: message, actor: "foreman" }));
       summaries.push(summaryFor(node, "blocked", message));
     } finally {
       await builder?.close().catch(() => {});
@@ -439,6 +502,28 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
   }
 
   return summaries;
+}
+
+function planJournal(projectDir: string, runId: string, key: string, kind: string, intent: unknown): void {
+  const db = new WorkflowDb(projectDir); try { if (!db.getRun(runId)) db.createRun({ runId, kind: "build", originalWork: {}, state: {} }); db.planOperation({ runId, idempotencyKey: key, kind, intent }); db.updateOperation(key, "in_progress"); } finally { db.close(); }
+}
+function confirmJournal(projectDir: string, key: string, externalId: string | undefined, result: unknown): void {
+  const db = new WorkflowDb(projectDir); try { db.updateOperation(key, "confirmed", { externalId, result }); } finally { db.close(); }
+}
+function failJournal(projectDir: string, key: string, error: unknown, uncertain: boolean): void {
+  const db = new WorkflowDb(projectDir); try { db.updateOperation(key, uncertain ? "uncertain" : "failed", { error: error instanceof Error ? error.message : String(error) }); } finally { db.close(); }
+}
+function journalTracker(projectDir: string, runId: string, key: string, intent: unknown, action: () => void): void {
+  planJournal(projectDir, runId, key, "tracker-update", intent);
+  try { action(); confirmJournal(projectDir, key, undefined, intent); }
+  catch (error) { failJournal(projectDir, key, error, false); throw error; }
+}
+function workflowCheckpoint(projectDir: string, runId: string, checkpoint: string, ticket: string, payload: Record<string, unknown>): void {
+  const db = new WorkflowDb(projectDir);
+  try {
+    const run = db.getRun(runId); if (!run) return;
+    db.transition(runId, { checkpoint, state: { ...run.state, currentTicket: ticket, ...payload }, event: checkpoint, payload: { ticket, ...payload } });
+  } finally { db.close(); }
 }
 
 interface AutoMergeDependencyResult {
@@ -545,7 +630,7 @@ function blockBranchIssue(
     output: details?.output,
   });
   notifyIssue(opts.notificationsEnabled, `${node.ticket.id}: ${message}`);
-  cmdBlock(opts.projectDir, node.ticket.id, { summary: message, actor: "foreman" });
+  journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:remote-block`, { ticket: node.ticket.id, status: "blocked", detail: message }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: message, actor: "foreman" }));
 }
 
 function failureLogFields(node: BranchPlanNode, pr: PrResult): Record<string, unknown> {

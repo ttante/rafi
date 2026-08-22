@@ -44,6 +44,8 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
       "--steps",
       "1",
       "--yes",
+      "--recover-run",
+      run.runId,
       "--resume",
       "session-123",
       "--agent",
@@ -77,7 +79,7 @@ test("build:resume supports explicit fresh-session recovery", async () => {
 
     await command.parseAsync([dir, "--run", run.runId, "--yes", "--fresh-session"], { from: "user" });
 
-    assert.deepEqual(invoked, ["start", resolve(dir), "--steps", "1", "--yes", "--agent", "claude"]);
+    assert.deepEqual(invoked, ["start", resolve(dir), "--steps", "1", "--yes", "--recover-run", run.runId, "--agent", "claude"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

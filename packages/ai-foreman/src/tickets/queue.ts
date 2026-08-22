@@ -1,6 +1,8 @@
 import type { TicketDef } from "./ticketSchema.js";
 import type { TicketState } from "./stateDb.js";
 import { resolveBlockers, computeDisplayStatus } from "./blockers.js";
+import type { DeliveryConfig, DeliveryStack, StackDeliveryState } from "./delivery.js";
+import { normalizeStackNodes } from "./delivery.js";
 
 export interface QueueRow {
   rank: number;
@@ -51,7 +53,7 @@ export function buildNextQueue(
     .filter((t) => {
       const s = states.get(t.id);
       const status = s?.status ?? "planned";
-      return status !== "done" && status !== "canceled";
+      return status !== "done" && status !== "canceled" && status !== "obsolete";
     })
     .sort((a, b) => a.order - b.order);
 
@@ -109,4 +111,43 @@ export function buildActiveStatusRows(
       futureWorkNotes: state?.blocker_notes ?? "N/A",
     };
   });
+}
+
+/** Human-readable queue blocks keep a whole unfinished stack and its resume point visible. */
+export function formatStackAwareQueue(ticketDefs: TicketDef[], states: Map<string, TicketState>, delivery?: DeliveryConfig): string[] {
+  if (!delivery?.stacks?.length) return buildNextQueue(ticketDefs, states, Number.MAX_SAFE_INTEGER).map((row) => `${row.ticket} ${row.status} ${row.title}`);
+  const defs = new Map(ticketDefs.map((ticket) => [ticket.id, ticket]));
+  const unitById = new Map(delivery.units.map((unit) => [unit.id, unit]));
+  const stackedTickets = new Set<string>(); const lines: string[] = [];
+  for (const stack of delivery.stacks) {
+    const nodes = normalizeStackNodes(stack, delivery.units, ticketDefs);
+    const ticketIds = stack.units.flatMap((id) => unitById.get(id)?.tickets ?? []);
+    ticketIds.forEach((id) => stackedTickets.add(id));
+    const completed = ticketIds.filter((id) => terminal(states.get(id)?.status));
+    if (completed.length === ticketIds.length && (stack.status ?? "planned") === "merged") continue;
+    const next = ticketIds.find((id) => !terminal(states.get(id)?.status));
+    const blockers = next && defs.get(next) ? resolveBlockers(defs.get(next)!, states) : [];
+    const state = deriveStackState(stack, ticketIds, states, blockers);
+    lines.push(`=== STACK START: ${stack.name} (${stack.id}) ===`);
+    lines.push(`status=${state}; size=${ticketIds.length}; pr_depth=${nodes.length}; blockers=${blockers.join(",") || "none"}; completed_prefix=${completed.join(",") || "none"}; next=${next ?? "none"}`);
+    lines.push(`reviews=${stack.review_links?.join(",") || "none"}; remote_checked=${stack.remote_checked_at ?? "never"}${stack.remote_stale ? " (stale; run --refresh for a live check)" : ""}`);
+    for (const id of ticketIds) lines.push(`${id} ${states.get(id)?.status ?? "planned"} ${defs.get(id)?.title ?? "unknown ticket"}`);
+    lines.push(`=== STACK END: ${stack.name} (${stack.id}) ===`);
+  }
+  for (const ticket of ticketDefs.sort((a, b) => a.order - b.order)) {
+    if (stackedTickets.has(ticket.id) || terminal(states.get(ticket.id)?.status)) continue;
+    const blockers = resolveBlockers(ticket, states); lines.push(`${ticket.id} ${computeDisplayStatus(states.get(ticket.id)?.status ?? "planned", blockers)} ${ticket.title}`);
+  }
+  return lines;
+}
+
+function terminal(status: string | undefined): boolean { return status === "done" || status === "canceled" || status === "obsolete"; }
+function deriveStackState(stack: DeliveryStack, tickets: string[], states: Map<string, TicketState>, blockers: string[]): StackDeliveryState {
+  if (stack.status === "merged") return "merged";
+  if (stack.status === "awaiting_review") return "awaiting_review";
+  if (blockers.length) return "blocked";
+  const completed = tickets.filter((id) => terminal(states.get(id)?.status)).length;
+  if (completed === 0) return stack.status ?? "planned";
+  if (completed < tickets.length) return "partial";
+  return "awaiting_review";
 }

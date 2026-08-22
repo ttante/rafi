@@ -1,6 +1,6 @@
 {
   "name": "special-agents",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Rafi library: composable best-practice rules, skills, and agents for Claude Code and Codex.",
   "license": "Apache-2.0",
   "type": "module",
@@ -36,7 +36,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "rafi-spec": "0.7.0",
+    "rafi-spec": "0.8.0",
     "ajv": "^8.20.0",
     "yaml": "^2.5.1"
   },

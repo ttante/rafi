@@ -43,7 +43,22 @@ export type BuilderEvent =
   | { kind: "text"; text: string }
   | { kind: "tool"; name: string; input: unknown }
   | { kind: "turn-complete"; result: TurnResult }
+  | { kind: "session-transition"; transition: "started" | "resumed" | "compacting" | "compacted" | "fresh-fallback"; detail?: string }
+  | { kind: "context-usage"; used: number; maximum?: number; percentage?: number }
   | { kind: "error"; message: string };
+
+export interface ContextUsage {
+  used: number;
+  maximum?: number;
+  percentage?: number;
+}
+
+export interface CompactResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface ProviderSettingSwitch { model?: string; effort?: EffortLevel; fast?: boolean }
 
 export type EffortLevel = "low" | "medium" | "high" | "xhigh";
 
@@ -80,6 +95,15 @@ export interface BuilderAdapter {
 
   /** Current session id, once known — used for resume. */
   sessionId(): string | undefined;
+
+  /** Provider-native compaction on the exact live conversation. */
+  compact?(): Promise<CompactResult>;
+
+  /** Truthful provider context occupancy, when exposed by the provider. */
+  contextUsage?(): Promise<ContextUsage | undefined>;
+
+  /** Attempt a provider-supported in-conversation model/reasoning transition. */
+  switchSettings?(settings: ProviderSettingSwitch): Promise<CompactResult>;
 
   /** Stream of observability events. Iterate to drive a live view. */
   events(): AsyncIterable<BuilderEvent>;

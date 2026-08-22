@@ -58,7 +58,7 @@ export function runAllValidation(
   const queueRows = buildNextQueue(ticketDefs, states, config.implementationLimit);
   const remaining = ticketDefs.filter((t) => {
     const s = states.get(t.id);
-    return s?.status !== "done" && s?.status !== "canceled";
+    return s?.status !== "done" && s?.status !== "canceled" && s?.status !== "obsolete";
   });
   const expectedLen = Math.min(config.implementationLimit, remaining.length);
   if (queueRows.length !== expectedLen) {

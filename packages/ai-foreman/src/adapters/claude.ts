@@ -28,6 +28,9 @@ import type {
   BuilderAdapter,
   BuilderAdapterOptions,
   BuilderEvent,
+  CompactResult,
+  ContextUsage,
+  ProviderSettingSwitch,
   TurnResult,
 } from "./types.js";
 
@@ -77,6 +80,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   private turnSignals: string[] = [];
   private structuredError?: string;
   private apiErrorStatus?: number | null;
+  private compactResult?: CompactResult;
   private pending?: {
     resolve: (r: TurnResult) => void;
     reject: (e: Error) => void;
@@ -166,6 +170,14 @@ export class ClaudeAdapter implements BuilderAdapter {
     } else if (msg.type === "auth_status") {
       if (msg.error) this.turnSignals.push(`auth status: ${msg.error}`);
       if (msg.output.length > 0) this.turnSignals.push(...msg.output.map((line) => `auth: ${line}`));
+    } else if (msg.type === "system" && msg.subtype === "status") {
+      if (msg.status === "compacting") this.eventQueue.push({ kind: "session-transition", transition: "compacting" });
+      if (msg.compact_result === "success") {
+        this.compactResult = { ok: true };
+        this.eventQueue.push({ kind: "session-transition", transition: "compacted" });
+      } else if (msg.compact_result === "failed") {
+        this.compactResult = { ok: false, error: sanitizeDiagnostics(msg.compact_error ?? "Claude native compaction failed") };
+      }
     } else if (msg.type === "system" && msg.subtype === "api_retry") {
       this.structuredError = msg.error;
       this.apiErrorStatus = msg.error_status;
@@ -233,6 +245,30 @@ export class ClaudeAdapter implements BuilderAdapter {
 
   sessionId(): string | undefined {
     return this._sessionId;
+  }
+
+  async compact(): Promise<CompactResult> {
+    this.compactResult = undefined;
+    const result = await this.sendTurn("/compact");
+    if (this.compactResult) return this.compactResult;
+    return { ok: false, error: sanitizeDiagnostics(result.text || "Claude did not emit an explicit compact status") };
+  }
+
+  async contextUsage(): Promise<ContextUsage | undefined> {
+    try {
+      const usage = await this.query.getContextUsage();
+      const result = { used: usage.totalTokens, maximum: usage.maxTokens, percentage: usage.percentage };
+      this.eventQueue.push({ kind: "context-usage", ...result });
+      return result;
+    } catch { return undefined; }
+  }
+
+  async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
+    if (settings.effort !== this.opts.effort || settings.fast !== this.opts.fast) return { ok: false, error: "Claude SDK cannot change reasoning/fast controls on an existing transport" };
+    if (settings.model === this.opts.model) return { ok: true };
+    const result = await this.sendTurn(`/model ${settings.model ?? "default"}`);
+    if (result.isError) return { ok: false, error: result.text };
+    this.opts.model = settings.model; return { ok: true };
   }
 
   events(): AsyncIterable<BuilderEvent> {

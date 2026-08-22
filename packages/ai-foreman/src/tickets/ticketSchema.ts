@@ -18,6 +18,12 @@ export interface TicketSourceRef {
   note?: string | null;
 }
 
+export interface TicketPlanRef {
+  plan_id: string;
+  revision: number;
+  slice_ref: string;
+}
+
 export interface TicketDef {
   id: string;
   order: number;
@@ -37,6 +43,7 @@ export interface TicketDef {
   source_refs?: TicketSourceRef[];
   superseded_by?: string[];
   supersedes?: string[];
+  plan_ref?: TicketPlanRef;
 }
 
 export const TICKET_JSON_SCHEMA = {
@@ -92,6 +99,16 @@ export const TICKET_JSON_SCHEMA = {
     },
     superseded_by: { type: "array", items: { type: "string" }, uniqueItems: true },
     supersedes: { type: "array", items: { type: "string" }, uniqueItems: true },
+    plan_ref: {
+      type: "object",
+      required: ["plan_id", "revision", "slice_ref"],
+      additionalProperties: false,
+      properties: {
+        plan_id: { type: "string", minLength: 1 },
+        revision: { type: "integer", minimum: 1 },
+        slice_ref: { type: "string", minLength: 1 },
+      },
+    },
   },
 } as const;
 

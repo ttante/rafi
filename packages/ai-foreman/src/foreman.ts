@@ -12,6 +12,10 @@ import type { Log } from "./log.js";
 import { fireNotification } from "./notify.js";
 import { isTicketsInitialized, loadTicketsConfig } from "./tickets/config.js";
 import { cmdUpdate, cmdComplete, cmdBlock, cmdImplementationQueue } from "./tickets/commands.js";
+import { loadTickets } from "./tickets/ticketLoader.js";
+import type { TicketDef } from "./tickets/ticketSchema.js";
+import { runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaStreamState } from "./qaReview.js";
+import type { SessionStrategy } from "rafi-spec";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -240,15 +244,22 @@ export interface BatchResult {
 /** Drives one builder through a batch of N steps via the STEP_STATUS protocol. */
 export class Foreman {
   private readonly ticketsEnabled: boolean;
+  private readonly qaStream: QaStreamState = { reviews: 0, modificationViolations: 0 };
+  private builderWorkSessions = 0;
 
   constructor(
-    private readonly builder: BuilderAdapter,
+    private builder: BuilderAdapter,
     private readonly log: Log,
     private readonly notificationsEnabled = false,
     private readonly qaEnabled = true,
     private readonly qaMaxCycles = 3,
     private readonly projectDir?: string,
     private readonly qaReviewer?: BuilderAdapter,
+    private readonly qaFactory?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>,
+    private readonly qaSessionStrategy: SessionStrategy = "compact",
+    private readonly builderFactory?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>,
+    private readonly builderSessionStrategy: SessionStrategy = "compact",
+    private readonly qaNonconvergence?: (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision>,
   ) {
     this.ticketsEnabled = !!(projectDir && isTicketsInitialized(projectDir));
   }
@@ -263,12 +274,48 @@ export class Foreman {
     return this.doTurnWith(this.builder, instruction);
   }
 
+  private async prepareBuilderBoundary(): Promise<void> {
+    if (!this.builderFactory || !this.projectDir) return;
+    if (this.builderSessionStrategy === "fresh") {
+      await this.builder.close(); this.builder = await this.builderFactory(this.projectDir);
+      this.log.write("branch-session", { role: "builder", transition: "fresh", workSession: this.builderWorkSessions + 1 });
+      return;
+    }
+    const priorSession = this.builder.sessionId();
+    if (priorSession && this.builder.compact) {
+      let error = "";
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const result = await this.builder.compact().catch((cause) => ({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
+        if (result.ok) { this.log.write("branch-session", { role: "builder", transition: attempt === 1 ? "compacted" : "compaction-retry-succeeded", workSession: this.builderWorkSessions + 1, sessionId: priorSession }); return; }
+        error = result.error ?? "native compaction failed";
+        if (attempt === 1) this.log.write("branch-session", { role: "builder", transition: "compaction-retry", detail: error });
+      }
+      await this.builder.close(); this.builder = await this.builderFactory(this.projectDir);
+      this.log.write("branch-session", { role: "builder", transition: "compaction-fallback-fresh", continuityLost: true, detail: error });
+      return;
+    }
+    await this.builder.close(); this.builder = await this.builderFactory(this.projectDir);
+    this.log.write("branch-session", { role: "builder", transition: "missing-session-fresh", continuityLost: true });
+  }
+
   private async doTurnWith(
     adapter: BuilderAdapter,
     instruction: string,
   ): Promise<{ result: TurnResult; status: StepStatus }> {
     let result = await adapter.sendTurn(instruction);
     let status = parseStepStatus(result.text);
+    if (status.kind === "unknown") {
+      if (!status.error && looksLikeQuestion(result.text)) {
+        status = { kind: "needs_input", question: lastLine(result.text), choices: ["Continue", "Cancel"] };
+      } else {
+        const qa = /\bQA\b|qa_pass|qa_fail/i.test(instruction);
+        result = await adapter.sendTurn(qa
+          ? "Protocol correction only: based on the review already completed, return exactly one final STEP_STATUS: qa_pass or STEP_STATUS: qa_fail marker. Do not repeat QA, tests, tools, or compaction."
+          : "Protocol correction only: based on the work already completed, return exactly one final STEP_STATUS: done, plan_complete, blocked, or needs_input marker. Do not repeat implementation, tools, or compaction.");
+        status = parseStepStatus(result.text);
+        if (status.kind === "unknown") status = { ...status, error: `protocol correction exhausted: ${status.error ?? "missing final marker"}` };
+      }
+    }
 
     while (status.kind === "needs_input") {
       const question = status.question ?? "The builder has a question";
@@ -335,10 +382,33 @@ export class Foreman {
    * QA turns are free — they do not advance the step counter.
    */
   private async runQa(stepIndex: number): Promise<{
-    outcome: "passed" | "blocked" | "needs-human";
+    outcome: "passed" | "blocked" | "needs-human" | "waived";
     detail?: string;
     summary?: string;
   }> {
+    if (this.projectDir && this.qaFactory) {
+      const review = await runIsolatedQa({
+        ticket: this.ticketForQa(stepIndex),
+        builderWorktree: this.projectDir,
+        builderSummary: `Builder completed step ${stepIndex}`,
+        qaStrategy: this.qaSessionStrategy,
+        state: this.qaStream,
+        createQa: this.qaFactory,
+        maxCycles: this.qaMaxCycles,
+        fix: async (issues) => {
+          await this.prepareBuilderBoundary(); this.builderWorkSessions += 1;
+          const fix = await this.doTurn(buildQaFixInstruction(issues));
+          this.log.write("qa-fix", { stepIndex, statusKind: fix.status.kind, costUsd: fix.result.costUsd, isError: fix.result.isError });
+          return fix.result.isError || fix.status.kind !== "done"
+            ? { ok: false, detail: fix.status.reason ?? fix.status.error ?? fix.result.text.slice(0, 200) }
+            : { ok: true };
+        },
+        evidence: ({ cycle, outcome, detail, qaDiff }) => this.log.write("qa", { stepIndex, cycle, outcome, detail, qaDiff, disposable: true }),
+        onNonconvergence: this.qaNonconvergence,
+      });
+      if (review.outcome === "nonconverged") return { outcome: "needs-human", detail: review.detail };
+      return { outcome: review.outcome, detail: review.detail, summary: review.summary };
+    }
     for (let cycle = 1; cycle <= this.qaMaxCycles; cycle++) {
       const before = this.qaReviewer && this.projectDir ? fingerprintProtectedTree(this.projectDir) : undefined;
       const qa = await this.doTurnWith(this.qaReviewer ?? this.builder, buildQaInstruction());
@@ -406,11 +476,30 @@ export class Foreman {
   }
 
   async runQaReview(stepIndex: number): Promise<{
-    outcome: "passed" | "blocked" | "needs-human";
+    outcome: "passed" | "blocked" | "needs-human" | "waived";
     detail?: string;
     summary?: string;
   }> {
     return this.runQa(stepIndex);
+  }
+
+  qaSessionId(): string | undefined { return this.qaStream.sessionId ?? this.qaReviewer?.sessionId(); }
+  builderSessionId(): string | undefined { return this.builder.sessionId(); }
+  builderAdapter(): BuilderAdapter { return this.builder; }
+  async close(): Promise<void> { await this.builder.close(); }
+
+  private ticketForQa(stepIndex: number): TicketDef {
+    if (this.projectDir && this.ticketsEnabled) {
+      const config = loadTicketsConfig(this.projectDir);
+      const active = cmdImplementationQueue(this.projectDir).find((row) => row.status === "next" || row.status === "in_progress");
+      const ticket = loadTickets(join(this.projectDir, config.paths.tickets)).find((candidate) => candidate.id === active?.ticket);
+      if (ticket) return ticket;
+    }
+    return {
+      id: `STEP-${stepIndex}`, order: stepIndex, title: `Implementation step ${stepIndex}`, area: "project",
+      priority: "P2", size: "M", risk: "Low", depends_on: [], summary: `Review implementation step ${stepIndex}`,
+      acceptance: ["The requested implementation step is complete"], required_tests: ["Run the relevant project validation"], likely_files: [],
+    };
   }
 
   async runBatch(n: number, trackerPath?: string): Promise<BatchResult> {
@@ -444,6 +533,8 @@ export class Foreman {
       const instruction = i === 1
         ? buildPrimer(n, trackerPath, this.ticketsEnabled)
         : buildNextStepInstruction(i, n);
+      if (i > 1) await this.prepareBuilderBoundary();
+      this.builderWorkSessions += 1;
       const { result, status } = await this.doTurn(instruction);
 
       this.log.write("step", {
@@ -465,6 +556,7 @@ export class Foreman {
 
       if (status.kind === "done" || status.kind === "plan_complete") {
         let qaSummary: string | undefined;
+        let qaWaived = false;
         if (this.qaEnabled) {
           const qa = await this.runQa(i);
           if (qa.outcome === "blocked") {
@@ -477,6 +569,7 @@ export class Foreman {
             detail = qa.detail;
             break;
           }
+          qaWaived = qa.outcome === "waived";
           qaSummary = qa.summary;
         }
 
@@ -489,12 +582,12 @@ export class Foreman {
               cmdComplete(this.projectDir, ticketId, {
                 actor: "foreman",
                 summary: status.summary ?? `Step ${i} complete`,
-                validationResult: this.qaEnabled ? "passed" : "not_applicable",
+                validationResult: qaWaived ? "failed" : this.qaEnabled ? "passed" : "not_applicable",
                 validationNotes: this.qaEnabled
-                  ? "Foreman QA emitted qa_pass"
+                  ? qaWaived ? "User explicitly waived unresolved QA failures" : "Foreman QA emitted qa_pass"
                   : "Foreman QA disabled for this run",
                 evidence: this.qaEnabled
-                  ? (qaSummary ?? "Foreman QA emitted qa_pass")
+                  ? (qaSummary ?? (qaWaived ? "Unresolved QA issues preserved in run evidence" : "Foreman QA emitted qa_pass"))
                   : undefined,
               });
             } catch (err) {

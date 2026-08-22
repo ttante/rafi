@@ -231,20 +231,111 @@ export interface RuntimeProbeResult {
 }
 
 export type ConfigurableAgentRole = AgentRole;
+export type SessionStrategy = "compact" | "fresh";
 export interface AgentRoleDefaultsV1 {
+  /** Persisted fields are independent overrides. Resolution always fills them. */
+  make?: "claude" | "codex";
+  model?: string;
+  reasoning?: string;
+  fast?: boolean;
+  session_strategy?: SessionStrategy;
+}
+export interface AgentDefaultsV1 {
+  version: 1;
+  /** Monotonically increases whenever `rafi agents` publishes new defaults. */
+  revision?: number;
+  roles: Partial<Record<ConfigurableAgentRole, AgentRoleDefaultsV1>>;
+}
+export interface ResolvedAgentSettings {
+  role: ConfigurableAgentRole;
   make: "claude" | "codex";
   model: string;
   reasoning: string;
   fast: boolean;
-}
-export interface AgentDefaultsV1 {
-  version: 1;
-  roles: Partial<Record<ConfigurableAgentRole, AgentRoleDefaultsV1>>;
-}
-export interface ResolvedAgentSettings extends AgentRoleDefaultsV1 {
-  role: ConfigurableAgentRole;
+  session_strategy: SessionStrategy;
+  settings_revision: number;
   source: "cli" | "resume" | "project" | "manifest" | "provider";
 }
+
+// ───────────────────────────── Structured plans ─────────────────────────────
+
+export interface StructuredPlanSlice {
+  slice_ref: string;
+  title: string;
+  summary: string;
+  acceptance: string[];
+  required_tests: string[];
+  likely_files: string[];
+  depends_on: string[];
+}
+
+export interface StructuredPlanDeliveryUnit {
+  id: string;
+  slice_refs: string[];
+  branch_mode: "current" | "per-ticket" | "shared";
+  completion: TicketBuildCompletionMode;
+  provider: TicketBuildProvider;
+  pr_ready: boolean;
+  merge_method: TicketBuildMergeMethod;
+  cleanup: boolean;
+  depends_on: string[];
+  dependency_mode: "combine" | "wait" | "stack";
+}
+
+export interface StructuredPlanStack {
+  stack_id: string;
+  name: string;
+  /** Ordered root-to-tip delivery-unit membership. */
+  units: string[];
+}
+
+export interface StructuredPlanV1 {
+  version: 1;
+  plan_id: string;
+  revision: number;
+  content_digest: string;
+  summary: string;
+  assumptions: string[];
+  implementation_changes: string[];
+  acceptance_criteria: string[];
+  test_plan: string[];
+  slices: StructuredPlanSlice[];
+  delivery_units: StructuredPlanDeliveryUnit[];
+  stacks: StructuredPlanStack[];
+}
+
+export type WorkflowIssueCode =
+  | "role_marker_missing" | "role_marker_malformed" | "role_marker_duplicated"
+  | "role_marker_non_final" | "role_marker_invalid" | "role_protocol_exhausted"
+  | "unstructured_agent_question" | "builder_runtime_failure" | "builder_tool_policy_failure"
+  | "qa_runtime_failure" | "qa_marker_failure" | "qa_fix_status_failure"
+  | "qa_nonconvergence" | "qa_file_modification"
+  | "ticket_selection_failure" | "tracker_update_failure" | "ticket_completion_failure"
+  | "ticket_validation_failure" | "ticket_corruption"
+  | "plan_pair_mismatch" | "slice_mapping_failure" | "retirement_authorization_failure"
+  | "delivery_validation_failure" | "session_missing" | "session_compaction_failure"
+  | "session_model_switch_failure" | "recovery_failure" | "remote_action_denied"
+  | "remote_action_failed" | "remote_action_uncertain" | "user_cancelled"
+  | "terminal_incompatibility" | "depth_exceeded";
+
+export interface WorkflowIssue {
+  code: WorkflowIssueCode;
+  role?: ConfigurableAgentRole;
+  phase: string;
+  step?: number;
+  ticket?: string;
+  stack?: string;
+  qa_cycle?: number;
+  provider?: "claude" | "codex";
+  model?: string;
+  detail: string;
+  human_required: boolean;
+  recoverable: boolean;
+  suggested_action: string;
+  occurred_at: string;
+}
+
+export type OperationLifecycle = "planned" | "in_progress" | "confirmed" | "failed" | "uncertain";
 
 export type BuildRunStatus = "running" | "interrupted" | "recoverable" | "blocked" | "completed" | "failed";
 export interface BuildRunRecordV1 {

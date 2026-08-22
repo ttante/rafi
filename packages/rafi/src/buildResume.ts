@@ -69,8 +69,8 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         throw new Error("this run has no captured session ID; rerun with --fresh-session");
       }
 
-      const args = ["start", root, "--steps", "1", "--yes"];
-      if (selected.branchMode !== "current") args.push("--branch-per-ticket", "--ticket", selected.currentTicket ?? selected.tickets[0]!);
+      const args = ["start", root, "--steps", String(Math.max(1, selected.tickets.length)), "--yes", "--recover-run", selected.runId];
+      if (selected.branchMode !== "current") args.push("--branch-per-ticket");
       if (!fresh && selected.builder?.sessionId) args.push("--resume", selected.builder.sessionId);
       else if (selected.branchMode !== "current") args.push("--continue");
       if (fresh && opts.agent) args.push("--agent", String(opts.agent));

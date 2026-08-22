@@ -180,18 +180,19 @@ const agentDefaultsShape = {
   required: ["version", "roles"],
   properties: {
     version: { const: 1 },
+    revision: { type: "integer", minimum: 0 },
     roles: {
       type: "object",
       additionalProperties: false,
       properties: Object.fromEntries(["planner", "builder", "qa", "ticket-maker", "uninstaller"].map((role) => [role, {
         type: "object",
         additionalProperties: false,
-        required: ["make", "model", "reasoning", "fast"],
         properties: {
           make: { enum: ["claude", "codex"] },
           model: { type: "string", minLength: 1 },
           reasoning: { type: "string", minLength: 1 },
           fast: { type: "boolean" },
+          session_strategy: { enum: ["compact", "fresh"] },
         },
       }])),
     },

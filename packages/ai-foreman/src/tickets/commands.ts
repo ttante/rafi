@@ -17,7 +17,10 @@ import { StateDb } from "./stateDb.js";
 import { nowTimestamp, logEvent } from "./events.js";
 import { renderAndWrite, renderTrackerRules } from "./renderMarkdown.js";
 import { runAllValidation } from "./validate.js";
-import { buildNextQueue } from "./queue.js";
+import { buildNextQueue, formatStackAwareQueue } from "./queue.js";
+import { loadDeliveryConfig, saveDeliveryConfig } from "./delivery.js";
+import { checkGitHubPrMerged } from "../branch/github.js";
+import { checkGitLabMrMerged } from "../branch/gitlab.js";
 import { cmdReviewRecommendations, type ReviewCommandOptions, type ReviewCommandResult } from "./recommendations.js";
 
 // ── Context helper ────────────────────────────────────────────────────────────
@@ -616,6 +619,31 @@ export function cmdQueue(projectDir: string, limit?: number) {
   return withContext(projectDir, (ctx) => {
     const states = ctx.db.getAllStates();
     return buildNextQueue(ctx.tickets, states, limit ?? ctx.config.viewLimit);
+  });
+}
+
+export function cmdStackQueue(projectDir: string, refresh = false): string[] {
+  return withContext(projectDir, (ctx) => {
+    let delivery = loadDeliveryConfig(projectDir);
+    if (delivery && refresh) {
+      const unitById = new Map(delivery.units.map((unit) => [unit.id, unit]));
+      delivery = { ...delivery, stacks: (delivery.stacks ?? []).map((stack) => {
+        const links = stack.review_links ?? [];
+        const providers = new Set(stack.units.map((id) => unitById.get(id)?.provider).filter((value): value is "github" | "gitlab" => value === "github" || value === "gitlab"));
+        if (!links.length || providers.size !== 1) return { ...stack, remote_stale: true };
+        const provider = [...providers][0]!;
+        const checks = links.map((link) => provider === "gitlab" ? checkGitLabMrMerged(projectDir, link) : checkGitHubPrMerged(projectDir, link));
+        if (checks.some((check) => !check.ok)) return { ...stack, remote_stale: true };
+        return {
+          ...stack,
+          status: checks.every((check) => check.ok && check.merged) ? "merged" as const : "awaiting_review" as const,
+          review_links: checks.map((check, index) => check.ok ? (check.url ?? links[index]!) : links[index]!),
+          remote_checked_at: new Date().toISOString(), remote_stale: false,
+        };
+      }) };
+      saveDeliveryConfig(projectDir, delivery);
+    }
+    return formatStackAwareQueue(ctx.tickets, ctx.db.getAllStates(), delivery);
   });
 }
 

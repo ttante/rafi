@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { resolve, join, relative } from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { select, text, isCancel } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
@@ -23,7 +24,7 @@ import { currentGitRef, ensureCleanBaseWorktree, generatedTrackerDirtyPaths } fr
 import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
-import { checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, releaseBuildLease } from "../buildRuns.js";
+import { checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
 import type { BuildRunRecordV1, ResolvedAgentSettings } from "rafi-spec";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
 import { parse as parseYaml } from "yaml";
@@ -34,7 +35,11 @@ import {
 } from "../branch/resume.js";
 import type { BranchPlan, BranchPlanNode, CompletionMode, MergeMethod, ReviewProvider } from "../branch/types.js";
 import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig.js";
-import { loadDeliveryConfig, selectDeliveryUnitForRun, type DeliveryUnitProgress } from "../tickets/delivery.js";
+import { loadDeliveryConfig, selectDeliveryUnitForRun, selectStacksForRun, updateStackDeliveryState, type DeliveryConfig, type DeliveryStack, type DeliveryUnitProgress } from "../tickets/delivery.js";
+import { AgentStatusReporter } from "../statusReporter.js";
+import { WorkflowDb } from "../workflowDb.js";
+import { makeLogPath as makeRoleLogPath, readOnlyPermissionConfig, runRoleInstruction } from "../agentRun.js";
+import type { QaNonconvergenceContext, QaNonconvergenceDecision } from "../qaReview.js";
 
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
@@ -298,10 +303,12 @@ export function buildStartCommand(): Command {
   return new Command("start")
     .description("Enlist a builder and drive it through a batch of N steps.")
     .argument("<project>", "path to the project directory the builder works in")
-    .requiredOption("-s, --steps <n>", "number of steps to drive")
+    .option("-s, --steps <n>", "number of tickets to drive; may stop within a stack")
+    .option("--stacks <n>", "number of complete eligible delivery stacks to build")
     .option("-a, --agent <agent>", "builder agent (claude | codex)")
     .option("-m, --model <model>", "override the builder's model")
     .option("-r, --resume <sessionId>", "resume a prior builder session")
+    .option("--recover-run <id>", "continue an existing master recovery run ID")
     .option("--continue", "resume the most recent logged session for this project")
     .option("-t, --tickets <path>", "path to ticket file (.md, .txt, .yaml, …) — passed to the builder as context")
     .option("-y, --yes", "skip pre-flight confirmation prompt")
@@ -320,15 +327,29 @@ export function buildStartCommand(): Command {
     .option("--auto-merge-timeout-minutes <n>", "auto-merge dependency wait timeout in minutes (blank means no timeout)")
     .option("--base <ref>", "base ref for root ticket branches (default: current branch or HEAD)")
     .option("--branch-prefix <prefix>", "branch name prefix for ticket branches", "rafi")
-    .option("--max-branch-depth <n>", "maximum selected branch stack depth", "2")
+    .option("--max-branch-depth <n>", "maximum selected branch stack depth", "5")
     .option("--pr-ready", "create ready-for-review PRs instead of draft PRs")
     .option("--keep-worktrees", "keep successful ticket worktrees for inspection")
     .option("--ticket <id>", "ticket id to continue in branch mode; repeat for multiple tickets", collectTicket, [])
     .option("--skip-delivery-unit <id>", "skip one unfinished delivery unit for this run", collectTicket, [])
     .action(async (project: string, opts, command: Command) => {
-      const steps = Number.parseInt(opts.steps, 10);
+      if (opts.steps !== undefined && opts.stacks !== undefined) fail("--steps and --stacks are mutually exclusive");
+      if (opts.steps === undefined && opts.stacks === undefined) {
+        if (opts.yes || !process.stdin.isTTY || !process.stdout.isTTY) fail("noninteractive/--yes runs require exactly one of --steps or --stacks");
+        const mode = await select({ message: "Build tickets or complete delivery stacks?", options: [
+          { value: "steps", label: "Tickets (Recommended)" }, { value: "stacks", label: "Complete stacks" },
+        ] });
+        if (isCancel(mode)) process.exit(0);
+        const count = await text({ message: mode === "steps" ? "How many tickets?" : "How many complete stacks?", validate: (value) => Number.isInteger(Number(value)) && Number(value) > 0 ? undefined : "Enter a positive integer" });
+        if (isCancel(count)) process.exit(0);
+        opts[mode as "steps" | "stacks"] = String(count);
+      }
+      let steps = Number.parseInt(opts.steps ?? "0", 10);
+      const stackCount = opts.stacks === undefined ? undefined : Number.parseInt(opts.stacks, 10);
+      if (stackCount !== undefined && (!Number.isInteger(stackCount) || stackCount < 1)) fail("--stacks must be a positive integer");
+      if (stackCount !== undefined) steps = 0;
       if (!Number.isInteger(steps) || steps < 1) {
-        fail("--steps must be a positive integer");
+        if (stackCount === undefined) fail("--steps must be a positive integer");
       }
       const VALID_EFFORT = ["low", "medium", "high", "xhigh"];
       if (opts.effort && !VALID_EFFORT.includes(opts.effort)) {
@@ -337,17 +358,31 @@ export function buildStartCommand(): Command {
 
       const cwd = resolve(project);
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
+      const recoveryRecord = opts.recoverRun ? readBuildRuns(cwd).find((run) => run.runId === opts.recoverRun) : undefined;
+      if (opts.recoverRun && !recoveryRecord) fail(`recoverable build run not found: ${opts.recoverRun}`);
       const roleDefaults = readAgentDefaults(cwd);
       let deliveryRun: DeliveryUnitProgress | undefined;
+      let deliveryConfig: DeliveryConfig | undefined;
+      let selectedStacks: DeliveryStack[] = [];
+      let selectedStackTickets: string[] | undefined;
       if (isTicketsInitialized(cwd)) {
-        const delivery = loadDeliveryConfig(cwd);
+        const delivery = loadDeliveryConfig(cwd); deliveryConfig = delivery;
         if (delivery) {
           const earlyConfig = loadTicketsConfig(cwd);
           const earlyPaths = resolveTicketPaths(earlyConfig, cwd);
           const earlyDb = new StateDb(earlyPaths.stateDb);
           const earlyStates = earlyDb.getAllStates();
           earlyDb.close();
-          deliveryRun = selectDeliveryUnitForRun(delivery, earlyStates, (opts.skipDeliveryUnit as string[] | undefined) ?? []);
+          if (stackCount !== undefined) {
+            const earlyTickets = loadTickets(earlyPaths.tickets);
+            const selection = selectStacksForRun(delivery, earlyTickets, earlyStates, stackCount);
+            if (selection.error) fail(selection.error);
+            selectedStacks = selection.stacks; selectedStackTickets = selection.tickets; steps = selection.tickets.length;
+            opts.branchPerTicket = true; opts.completion = "pr";
+            const providers = new Set(selection.stacks.flatMap((stack) => stack.units.map((id) => delivery.units.find((unit) => unit.id === id)?.provider)).filter((provider) => provider === "github" || provider === "gitlab"));
+            if (providers.size !== 1) fail("selected stacks must use one explicit GitHub or GitLab provider per run");
+            opts.provider = [...providers][0];
+          } else deliveryRun = selectDeliveryUnitForRun(delivery, earlyStates, (opts.skipDeliveryUnit as string[] | undefined) ?? []);
           if (deliveryRun?.state === "resume" && !opts.yes && process.stdin.isTTY && process.stdout.isTTY) {
             const answer = await select({ message: `Resume unfinished delivery unit ${deliveryRun.unit.id} (${deliveryRun.remaining.length} remaining)?`, options: [
               { value: "resume", label: "Resume (Recommended)" }, { value: "skip", label: "Skip for this run" },
@@ -357,6 +392,7 @@ export function buildStartCommand(): Command {
           }
         }
       }
+      if (stackCount !== undefined && selectedStacks.length !== stackCount) fail("--stacks requires explicit eligible stacks in .tickets/delivery.yaml");
       const branchDefaults = resolveStartBranchDefaults(cwd, opts as Record<string, unknown>, command, deliveryRun);
       let agent: AgentRuntime;
       try {
@@ -373,6 +409,7 @@ export function buildStartCommand(): Command {
       let qaExecutable: string | undefined;
       const qaEffort = explicitEffort(roleDefaults.qa?.reasoning);
       const qaFast = roleDefaults.qa?.fast ?? false;
+      const settingsRevision = roleDefaults.revision ?? 0;
 
       const configuredTrackerPath = isTicketsInitialized(cwd)
         ? loadTicketsConfig(cwd).paths.progressDoc
@@ -418,7 +455,7 @@ export function buildStartCommand(): Command {
         if (opts.resume && continueTickets.length > 1) {
           fail("--resume <sessionId> in branch mode supports exactly one --ticket; use --continue for multiple tickets");
         }
-        if ((opts.resume || opts.continue) && continueTickets.length === 0) {
+        if ((opts.resume || opts.continue) && continueTickets.length === 0 && !recoveryRecord) {
           fail(branchContinueTicketHelp(cwd, opts.resume ? "--resume" : "--continue"));
         }
         if (continueTickets.length > 0 && !(opts.resume || opts.continue)) {
@@ -528,6 +565,7 @@ export function buildStartCommand(): Command {
           },
         });
       };
+      const qaNonconvergence = createQaNonconvergenceHandler(cwd, Boolean(opts.yes), roleDefaults.planner);
 
       if (branchMode) {
         const ticketsConfig = loadTicketsConfig(cwd);
@@ -605,7 +643,7 @@ export function buildStartCommand(): Command {
             branchPrefix: opts.branchPrefix as string,
             maxBranchDepth,
             rootBaseBranches: branchDefaults.rootBaseBranches,
-            ticketIds: deliveryRun?.remaining.slice(0, steps),
+            ticketIds: selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
           });
 
           let auditBuilder: BuilderAdapter | undefined;
@@ -623,7 +661,7 @@ export function buildStartCommand(): Command {
               maxBranchDepth,
               auditDependencies,
               rootBaseBranches: branchDefaults.rootBaseBranches,
-              ticketIds: deliveryRun?.remaining.slice(0, steps),
+              ticketIds: selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
             });
             log.write("branch-plan", {
               baseRef: plan.baseRef,
@@ -643,6 +681,13 @@ export function buildStartCommand(): Command {
             if (saved && first && saved.branch === first.branch && existsSync(saved.worktreePath)) {
               resumeSessionByTicket.set(first.ticket.id, { worktreePath: saved.worktreePath, sessionId: saved.sessionId });
             }
+          }
+          if (selectedStacks.length && deliveryConfig) {
+            plan = applyExplicitStackTopology(plan, selectedStacks, deliveryConfig, opts.branchPrefix as string);
+          }
+          if (recoveryRecord && opts.resume && plan.nodes[0]) {
+            const prior = findResumableBranchSessions(join(cwd, ".foreman")).find((session) => session.ticket === (recoveryRecord.currentTicket ?? plan.nodes[0]!.ticket.id));
+            if (prior) resumeSessionByTicket.set(plan.nodes[0]!.ticket.id, { worktreePath: prior.worktreePath, sessionId: opts.resume as string });
           }
         }
 
@@ -677,9 +722,23 @@ export function buildStartCommand(): Command {
           }
         }
 
+        const capturedBranchBuilder: ResolvedAgentSettings = {
+          role: "builder", source: opts.agent || opts.model || opts.effort || opts.fast ? "cli" : roleDefaults.builder ? "project" : "provider",
+          make: agent, model: model ?? "default", reasoning: builderEffort ?? "default", fast: Boolean(builderFast),
+          session_strategy: roleDefaults.builder?.session_strategy ?? "compact", settings_revision: settingsRevision,
+        };
+        const capturedBranchQa: ResolvedAgentSettings = {
+          role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default",
+          reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", settings_revision: settingsRevision,
+        };
+        let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: opts.resume ? String(opts.resume) : null }) : createBuildRun({
+          tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
+          repositoryRoot: cwd, branchMode: "per-ticket", builder: capturedBranchBuilder, qa: capturedBranchQa,
+        });
+        const branchHeartbeat = setInterval(() => { masterRun = heartbeatBuildRun(cwd, masterRun); }, 10_000); branchHeartbeat.unref();
         const summaries = await runBranchPlan({
           projectDir: cwd,
-          runId: stamp,
+          runId: masterRun.runId,
           plan,
           log,
           agent,
@@ -692,7 +751,7 @@ export function buildStartCommand(): Command {
           completionMode: branchDefaults.completionMode,
           reviewProvider: branchDefaults.reviewProvider,
           prReady: branchDefaults.prReady,
-          keepWorktrees: Boolean(opts.keepWorktrees),
+          keepWorktrees: Boolean(opts.keepWorktrees) || selectedStacks.length > 0,
           cleanupBranches: branchDefaults.cleanupBranches,
           autoMergeWait: branchDefaults.autoMergeWait,
           autoMergeTimeoutMinutes: branchDefaults.autoMergeTimeoutMinutes,
@@ -704,8 +763,34 @@ export function buildStartCommand(): Command {
           },
           resumeSessions: resumeSessionByTicket,
           createBuilder: (builderCwd, sessionId) => createBuilder(builderCwd, sessionId),
+          createQa: (qaCwd, sessionId) => createQa(qaCwd, sessionId),
+          builderSessionStrategy: roleDefaults.builder?.session_strategy ?? "compact",
+          qaSessionStrategy: roleDefaults.qa?.session_strategy ?? "compact",
           observeBuilder: (builder) => printEvents(builder.events()),
+          qaNonconvergence,
         });
+        clearInterval(branchHeartbeat);
+        if (selectedStacks.length) {
+          let allComplete = true;
+          for (const stack of selectedStacks) {
+            const stackTickets = stack.units.flatMap((id) => deliveryConfig?.units.find((unit) => unit.id === id)?.tickets ?? []);
+            const rows = summaries.filter((row) => stackTickets.includes(row.ticket));
+            const complete = rows.length > 0 && rows.every((row) => row.buildStatus === "done" && (!row.pr || ["created", "existing"].includes(row.pr.status)));
+            allComplete &&= complete;
+            const successful = rows.filter((row) => row.buildStatus === "done");
+            updateStackDeliveryState(cwd, [stack.id], complete ? "awaiting_review" : "partial", {
+              review_links: [...(stack.review_links ?? []), ...successful.flatMap((row) => row.pr?.url ? [row.pr.url] : [])],
+              published_branches: { ...(stack.published_branches ?? {}), ...Object.fromEntries(successful.map((row) => [row.ticket, row.branch])) },
+              completed_prefix: [...(stack.completed_prefix ?? []), ...successful.map((row) => row.ticket)],
+              next_ticket: complete ? undefined : stackTickets.find((ticket) => !successful.some((row) => row.ticket === ticket)),
+              remote_checked_at: stack.remote_checked_at, remote_stale: true,
+            });
+          }
+          console.log(allComplete ? "foreman: stack publication complete; delivery is awaiting_review (no merges were attempted)" : "foreman: partial stack prefix published; resume point is preserved");
+        }
+        masterRun = summaries.every((row) => row.buildStatus === "done")
+          ? completeBuildRun(cwd, masterRun)
+          : releaseBuildLease(cwd, checkpointBuildRun(cwd, masterRun, "branch-run-interrupted", { status: "recoverable" }), "recoverable");
 
         console.log("foreman: branch run summary");
         console.log("ticket\tbranch\tbase\tstatus\tcommit\tpush\tcompletion");
@@ -751,9 +836,10 @@ export function buildStartCommand(): Command {
       const capturedBuilder: ResolvedAgentSettings = {
         role: "builder", source: opts.agent || opts.model || opts.effort || opts.fast ? "cli" : roleDefaults.builder ? "project" : "provider",
         make: agent, model: model ?? "default", reasoning: builderEffort ?? "default", fast: Boolean(builderFast),
+        session_strategy: roleDefaults.builder?.session_strategy ?? "compact", settings_revision: settingsRevision,
       };
-      const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast };
-      let buildRun: BuildRunRecordV1 = createBuildRun({
+      const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", settings_revision: settingsRevision };
+      let buildRun: BuildRunRecordV1 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: opts.resume ? String(opts.resume) : null }) : createBuildRun({
         tickets: [], repositoryRoot: cwd, branchMode: "current", builder: capturedBuilder, qa: capturedQa,
       });
       const heartbeat = setInterval(() => { buildRun = heartbeatBuildRun(cwd, buildRun); }, 10_000);
@@ -764,8 +850,21 @@ export function buildStartCommand(): Command {
       process.once("SIGINT", checkpointSignal);
       process.once("SIGTERM", checkpointSignal);
       const builder = await createBuilder(cwd, resumeSessionId);
-      const qaReviewer = qaEnabled ? await createQa(cwd) : undefined;
-      const foreman = new Foreman(builder, log, config.notifications.enabled, qaEnabled, 3, cwd, qaReviewer);
+      const foreman = new Foreman(
+        builder, log, config.notifications.enabled, qaEnabled, 3, cwd, undefined,
+        qaEnabled ? createQa : undefined, capturedQa.session_strategy,
+        createBuilder, capturedBuilder.session_strategy,
+        qaNonconvergence,
+      );
+      const statusReporter = new AgentStatusReporter({
+        role: "builder", provider: capturedBuilder.make, model: capturedBuilder.model,
+        reasoning: capturedBuilder.reasoning, fast: capturedBuilder.fast, step: 1, total: steps,
+        phase: "builder work session", sessionTransition: resumeSessionId ? "resumed exact session" : "initial session", adapter: () => foreman.builderAdapter(),
+      }, (line, snapshot) => {
+        console.log(line); log.write("agent-status", { ...snapshot });
+        const db = new WorkflowDb(cwd); try { db.recordTelemetry(buildRun.runId, snapshot); } finally { db.close(); }
+      });
+      statusReporter.start();
 
       const modifiers = [
         model ? `model=${model}` : null,
@@ -784,8 +883,8 @@ export function buildStartCommand(): Command {
         console.log("ai-foreman: asking builder to plan the next tickets or steps...\n");
         buildRun = checkpointBuildRun(cwd, buildRun, "before-preflight");
         await foreman.runPreflight(steps, ticketsContent);
-        if (builder.sessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", builder.sessionId()!);
-        if (qaReviewer?.sessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", qaReviewer.sessionId()!);
+        if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderSessionId()!);
+        if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionId()!);
         buildRun = checkpointBuildRun(cwd, buildRun, "preflight-complete");
 
         if (!opts.yes) {
@@ -802,7 +901,8 @@ export function buildStartCommand(): Command {
 
             if (isCancel(action) || action === "cancel") {
               console.log("ai-foreman: cancelled");
-              await builder.close();
+              statusReporter.stop();
+              await foreman.close();
               await viewer;
               process.exit(0);
             }
@@ -817,7 +917,8 @@ export function buildStartCommand(): Command {
             });
             if (isCancel(fb)) {
               console.log("ai-foreman: cancelled");
-              await builder.close();
+              statusReporter.stop();
+              await foreman.close();
               await viewer;
               process.exit(0);
             }
@@ -827,12 +928,13 @@ export function buildStartCommand(): Command {
         }
 
         const result = await foreman.runBatch(steps, trackerRelPath);
+        if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionId()!);
         buildRun = result.outcome === "all-done" || result.outcome === "plan-complete"
           ? completeBuildRun(cwd, buildRun)
           : releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "builder-or-qa-interrupted", { status: "recoverable" }), "recoverable");
         clearInterval(heartbeat);
-        await qaReviewer?.close().catch(() => {});
-        await builder.close();
+        statusReporter.stop();
+        await foreman.close();
         await viewer;
 
         console.log(`\nforeman: ${result.completed}/${result.requested} step(s) completed`);
@@ -841,29 +943,100 @@ export function buildStartCommand(): Command {
         if (result.outcome !== "all-done" && result.outcome !== "plan-complete") {
           const executable = command.parent?.name() === "rafi" ? "rafi" : "ai-foreman";
           const remainingSteps = Math.max(1, result.requested - result.completed);
-          for (const line of formatResumeGuidance(executable, cwd, remainingSteps, builder.sessionId())) {
+          for (const line of formatResumeGuidance(executable, cwd, remainingSteps, foreman.builderSessionId())) {
             console.log(line);
           }
         }
         process.exit(result.outcome === "needs-human" ? 2 : 0);
       } catch (err) {
         clearInterval(heartbeat);
+        statusReporter.stop();
         buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "failed", { status: "failed", failure: { category: "unknown", summary: err instanceof Error ? err.message.slice(0, 1000) : String(err).slice(0, 1000), at: new Date().toISOString() } }), "failed");
-        await qaReviewer?.close().catch(() => {});
-        await builder.close().catch(() => {});
+        await foreman.close().catch(() => {});
         log.write("error", { message: String(err) });
         fail(`run failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
 }
 
-function readAgentDefaults(projectDir: string): { builder?: AgentRoleDefaultsV1; qa?: AgentRoleDefaultsV1 } {
+function createQaNonconvergenceHandler(projectDir: string, noninteractive: boolean, planner?: AgentRoleDefaultsV1): (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision> {
+  return async (context) => {
+    if (noninteractive || !process.stdin.isTTY || !process.stdout.isTTY) return { action: "pause" };
+    while (true) {
+      const choice = await select({ message: `QA did not converge for ${context.ticket.id}. What next?`, options: [
+        { value: "retry", label: "Retry another Builder fix" },
+        { value: "pause", label: "Pause at this checkpoint" },
+        { value: "waive", label: "Explicitly waive QA" },
+        { value: "planner", label: "Discuss with read-only Planner" },
+      ] });
+      if (isCancel(choice) || choice === "pause") return { action: "pause" };
+      if (choice === "retry") return { action: "retry" };
+      if (choice === "waive") {
+        const approved = await select({ message: "Waive QA and record validation_result=failed with all unresolved issues?", options: [
+          { value: "no", label: "No (Recommended)" }, { value: "yes", label: "Yes, waive and continue" },
+        ] });
+        if (approved === "yes") {
+          const db = new WorkflowDb(projectDir);
+          try {
+            const lease = db.currentLease();
+            if (lease) {
+              const detail = JSON.stringify({ decision: "waive", ticket: context.ticket.id, unresolved: context.history, at: new Date().toISOString() });
+              db.putEvidence("test", detail);
+              db.recordIssue(lease.runId, { code: "qa_nonconvergence", role: "qa", phase: "qa-waiver", ticket: context.ticket.id, detail, human_required: false, recoverable: false, suggested_action: "Review the explicit QA waiver before merging.", occurred_at: new Date().toISOString() });
+            }
+          } finally { db.close(); }
+          console.log(`foreman: QA WAIVER recorded for ${context.ticket.id}; validation_result will be failed`);
+          return { action: "waive" };
+        }
+        continue;
+      }
+      const discussion = await text({ message: "What should the Planner focus on?", defaultValue: "Explain the QA failures and propose the safest concrete remediation." });
+      if (isCancel(discussion)) continue;
+      const diff = execFileSync("git", ["-C", context.builderWorktree, "diff", "--binary", "HEAD"], { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
+      let instruction = [
+        "You are the read-only Planner mediating QA nonconvergence. Do not edit files or run mutating tools.",
+        `Ticket: ${context.ticket.id} — ${context.ticket.title}`,
+        `Requirements: ${context.ticket.acceptance.join("; ")}`,
+        `Required tests: ${context.ticket.required_tests.join("; ")}`,
+        `User discussion: ${String(discussion)}`,
+        `Complete QA history:\n${JSON.stringify(context.history, null, 2)}`,
+        `Full Builder diff:\n${diff || "(no tracked diff)"}`,
+        "Return RAFI_QA_REMEDIATION_START, then one JSON object {\"summary\":\"...\",\"fix_instructions\":[\"...\"]}, then RAFI_QA_REMEDIATION_END.",
+        "End with STEP_STATUS: plan_complete | summary=\"QA remediation proposed\"",
+      ].join("\n\n");
+      let resumeSessionId: string | undefined;
+      while (true) {
+        const run = await runRoleInstruction({
+          projectDir, role: "planner", instruction, label: "QA Planner remediation", agent: planner?.make,
+          model: explicitDefaultValue(planner?.model), effort: explicitEffort(planner?.reasoning), fast: planner?.fast,
+          resumeSessionId, permissionConfig: readOnlyPermissionConfig(), sandboxMode: "read-only",
+          logPath: makeRoleLogPath(projectDir, "qa-remediation"), logEvent: "rafi-plan",
+        });
+        if (run.turn.result.isError || run.turn.status.kind !== "plan_complete") throw new Error(`Planner remediation failed: ${run.turn.status.error ?? run.turn.result.text.slice(0, 500)}`);
+        const match = /RAFI_QA_REMEDIATION_START\s*([\s\S]*?)\s*RAFI_QA_REMEDIATION_END/.exec(run.turn.result.text);
+        if (!match) throw new Error("Planner remediation did not return the required structured proposal");
+        const proposal = JSON.parse(match[1]!.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")) as { summary?: string; fix_instructions?: string[] };
+        if (!proposal.summary || !Array.isArray(proposal.fix_instructions) || !proposal.fix_instructions.every((item) => typeof item === "string")) throw new Error("Planner remediation proposal is malformed");
+        console.log(`\nPlanner remediation: ${proposal.summary}\n${proposal.fix_instructions.map((item) => `- ${item}`).join("\n")}`);
+        const decision = await select({ message: "Use this remediation for a new Builder fix session?", options: [
+          { value: "approve", label: "Approve (Recommended)" }, { value: "revise", label: "Discuss/revise" }, { value: "cancel", label: "Cancel and return to choices" },
+        ] });
+        if (decision === "approve") return { action: "remediate", remediation: [proposal.summary, ...proposal.fix_instructions].join("\n") };
+        if (isCancel(decision) || decision === "cancel") break;
+        const feedback = await text({ message: "Planner revision feedback:" }); if (isCancel(feedback)) break;
+        resumeSessionId = run.sessionId; instruction = `Revise the complete QA remediation proposal using this feedback: ${String(feedback)}. Keep the exact structured envelope and final plan_complete marker.`;
+      }
+    }
+  };
+}
+
+function readAgentDefaults(projectDir: string): { revision?: number; builder?: AgentRoleDefaultsV1; qa?: AgentRoleDefaultsV1; planner?: AgentRoleDefaultsV1 } {
   const path = join(projectDir, "rafi-config.yaml");
   if (!existsSync(path)) return {};
   try {
     const parsed = parseYaml(readFileSync(path, "utf8")) as { agent_defaults?: AgentDefaultsV1 } | undefined;
     if (parsed?.agent_defaults?.version !== 1) return {};
-    return { builder: parsed.agent_defaults.roles.builder, qa: parsed.agent_defaults.roles.qa };
+    return { revision: parsed.agent_defaults.revision, builder: parsed.agent_defaults.roles.builder, qa: parsed.agent_defaults.roles.qa, planner: parsed.agent_defaults.roles.planner };
   } catch {
     return {};
   }
@@ -872,6 +1045,47 @@ function readAgentDefaults(projectDir: string): { builder?: AgentRoleDefaultsV1;
 function explicitDefaultValue(value: string | undefined): string | undefined {
   return value && value !== "default" ? value : undefined;
 }
+
+/** Make the executable branch plan exactly match each explicit root-to-tip stack. */
+export function applyExplicitStackTopology(plan: BranchPlan, stacks: DeliveryStack[], delivery: DeliveryConfig, branchPrefix: string): BranchPlan {
+  const nodeByTicket = new Map(plan.nodes.map((node) => [node.ticket.id, node]));
+  const unitById = new Map(delivery.units.map((unit) => [unit.id, unit]));
+  const ordered: BranchPlanNode[] = [];
+  for (const stack of stacks) {
+    let predecessorBranch = plan.baseRef;
+    let predecessorActiveTicket: string | undefined;
+    let missingPredecessorIdentity: string | undefined;
+    let depth = 0;
+    for (const unitId of stack.units) {
+      const unit = unitById.get(unitId); if (!unit) throw new Error(`stack ${stack.id} references missing delivery unit ${unitId}`);
+      const sharedBranch = unit.branch_mode === "shared" ? `${branchPrefix.replace(/^\/+|\/+$/g, "") || "rafi"}/${slug(unitId)}` : undefined;
+      const unitBaseBranch = predecessorBranch;
+      for (let ticketIndex = 0; ticketIndex < unit.tickets.length; ticketIndex++) {
+        const ticketId = unit.tickets[ticketIndex]!; depth += unit.branch_mode === "shared" && ticketIndex > 0 ? 0 : 1;
+        const node = nodeByTicket.get(ticketId);
+        const recorded = stack.published_branches?.[ticketId];
+        if (!node) {
+          if (recorded || sharedBranch) predecessorBranch = recorded ?? sharedBranch!;
+          else missingPredecessorIdentity = ticketId;
+          predecessorActiveTicket = undefined;
+          continue;
+        }
+        if (missingPredecessorIdentity) throw new Error(`partial stack ${stack.id} is missing the saved branch identity for completed predecessor ${missingPredecessorIdentity}`);
+        const branch = sharedBranch ?? node.branch;
+        ordered.push({
+          ...node, branch, baseBranch: sharedBranch ? unitBaseBranch : predecessorBranch,
+          dependencies: predecessorActiveTicket ? [predecessorActiveTicket] : [], depth,
+          ...(unit.branch_mode === "shared" ? { deliveryUnitId: unit.id, deliveryUnitFinal: ticketIndex === unit.tickets.length - 1 } : {}),
+        });
+        predecessorBranch = branch; predecessorActiveTicket = ticketId;
+      }
+    }
+  }
+  if (ordered.length !== plan.nodes.length) throw new Error("explicit stack topology did not assign every selected ticket exactly once");
+  return { ...plan, nodes: ordered };
+}
+
+function slug(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "group"; }
 
 function explicitEffort(value: string | undefined): EffortLevel | undefined {
   return value && ["low", "medium", "high", "xhigh"].includes(value) ? value as EffortLevel : undefined;
