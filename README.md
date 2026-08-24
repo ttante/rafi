@@ -200,7 +200,9 @@ my-project/
   .tickets/tickets.yaml              Canonical ticket definitions
   .tickets/delivery.yaml             Approved delivery groups and behavior
   .tickets/ticket-state.sqlite       Ignored local status and evidence history
-  .tickets/imports/                  Ignored source snapshots
+  .rafi/source-cache/                Ignored private source snapshots
+  .rafi/sources/                     Optional tracked source snapshots
+  .tickets/imports/                  Legacy/import compatibility snapshots
   docs/rafi-plan.md                  Initial setup plan, when requested
   docs/rafi-ticket-plan.md           Latest approved ticket-planning result
   docs/rafi-ticket-plans/            Timestamped ticket-plan history

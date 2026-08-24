@@ -19,13 +19,20 @@ import {
   validateTicketPlanProposal,
   type TicketPlanProposal,
 } from "ai-foreman/ticket-planning.js";
+import type { ProjectSourceEntry, SourceRegistryConfig } from "rafi-spec";
 import {
-  dedupeTicketSources,
-  loadTicketSetupConfigWithDefaults,
-  saveTicketSetupConfig,
-  type TicketSourceConfig,
-} from "ai-foreman/tickets/setup-config.js";
-import { fetchAndSnapshotUrl, snapshotExternalLocalFile } from "ai-foreman/tickets/source-fetch.js";
+  loadSourceRegistry,
+  refreshSourceRegistry,
+  registerSourceRequests,
+  saveSourceRegistry,
+  setSourceStorage,
+  sourceContext,
+  sourceRequestFromAnswer,
+  validateSourceVersionRef,
+  SOURCE_REQUEST_END,
+  SOURCE_REQUEST_START,
+} from "ai-foreman/sources/source-registry.js";
+import { chooseStagedSourceDisposition, handlePlanningInput, parseSourceStorage, promptSourceStorage } from "./planningDriver.js";
 import {
   checkpointInterview,
   completeInterview,
@@ -44,7 +51,7 @@ import { assertLifecycleForCommand } from "./lifecycle.js";
 export interface TicketPlanInstructionOptions {
   brief: string;
   sourceChoice: string;
-  sources: TicketSourceConfig[];
+  sources: ProjectSourceEntry[] | Array<Record<string, unknown>>;
   sourceSnapshots: string[];
   context: ReturnType<typeof readTicketPlanningContext>;
   grill: "standard" | "exhaustive";
@@ -69,7 +76,8 @@ Conversation rules:
 - Inspect the repository read-only. Do not edit files, configuration, YAML, SQLite, git, branches, or docs.
 - Questions must be focused and include a recommended answer first plus alternatives, but the human may answer with any free text.
 - Session choices may cover inspection depth, ticket size, estimates, source treatment, delivery grouping, branch mode, PRs, merge behavior, and next work.
-- If more source content is needed, emit a line \`SOURCE_REQUEST: <public-url-or-local-path>\` and then ask a needs_input question.
+- If more source content is needed, emit one JSON object (or an array) between ${SOURCE_REQUEST_START}/${SOURCE_REQUEST_END}, then ask a needs_input question. Preserve the human's complete answer; never split on spaces, commas, or plus signs.
+- Source request types are local, url, github, gitlab, linear, and jira. For Linear/Jira request only non-secret query settings and environment-variable names, never credentials.
 - Account for every discovered source item with mapped, split, combined, deferred, or excluded disposition and a reason where required.
 - Existing IDs are stable. Preserve completed state/evidence. Represent replacements with reciprocal supersession links through the proposal.
 - Every addition is a full ticket object with: id, order, title, area, priority (P0-P3), size (XS-XL), risk (Low/Medium/High), depends_on, summary, acceptance, required_tests, likely_files, optional rollback/notes, source_refs, and optional supersession links.
@@ -99,6 +107,7 @@ export function buildTicketPlanCommand(): Command {
     .option("-m, --model <model>", "session-only model override")
     .option("--effort <level>", "session-only reasoning override (low|medium|high|xhigh)")
     .option("--resume-session <id>", "resume the planning agent session")
+    .option("--source-storage <mode>", "storage for newly captured source versions (local | tracked)")
     .option("--grill-me", "start in exhaustive one-question-at-a-time mode")
     .option("--no-grill-me", "start in standard focused mode (default)")
     .option("-y, --yes", "non-interactive mode; requires --brief and approves a valid proposal")
@@ -108,7 +117,7 @@ export function buildTicketPlanCommand(): Command {
     });
 }
 
-interface TicketPlanOptions { project?: string; brief?: string; agent?: string; model?: string; effort?: string; resumeSession?: string; yes?: boolean; grillMe?: boolean; }
+interface TicketPlanOptions { project?: string; brief?: string; agent?: string; model?: string; effort?: string; resumeSession?: string; sourceStorage?: string; yes?: boolean; grillMe?: boolean; }
 
 async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.slice(2)): Promise<void> {
   assertEffortLevel(opts.effort);
@@ -148,10 +157,14 @@ async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.sli
     if (!brief.trim()) throw new Error("ticket planning needs an initial description");
     if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "sources", answers: { ...interview.answers, brief } });
 
-    const setup = loadTicketSetupConfigWithDefaults(projectDir);
+    const loadedSources = loadSourceRegistry(projectDir);
+    let stagedSources: SourceRegistryConfig = loadedSources.registry;
+    let selectedStorage = parseSourceStorage(opts.sourceStorage);
     let sourceChoice = interactive
-      ? await promptText(`Remembered sources: ${setup.sources.length ? setup.sources.map(sourceLabel).join(", ") : "none"}. Which should this session use?`, setup.sources.length ? "Use all relevant remembered sources" : "Use sources from my description and repository")
+      ? await promptText(`Remembered sources: ${stagedSources.entries.length ? stagedSources.entries.map(sourceLabel).join(", ") : "none"}. Which should this session use?`, stagedSources.entries.length ? "Use all relevant remembered sources" : "Use sources from my description and repository")
       : "Use all relevant remembered sources";
+    if (!selectedStorage && interactive && !loadedSources.configured && (brief.trim() || sourceChoice.trim())) selectedStorage = await promptSourceStorage();
+    if (selectedStorage) stagedSources = setSourceStorage(stagedSources, selectedStorage);
     const openFuture = context.futureWork.filter((item) => item.disposition === "triage");
     if (interactive && openFuture.length) {
       const choice = await promptText(`Future-work ideas: ${openFuture.map((item) => `${item.id}: ${item.summary}`).join("; ")}. Which should be included, left for later, or dismissed?`, "Leave them for later unless directly related")
@@ -161,10 +174,16 @@ async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.sli
       const choice = await promptText(`Existing next tickets: ${context.existingNext.join(", ")}. Should the proposal retain or replace them?`, "Retain them unless the new work must come first")
       sourceChoice += `\nExisting-next decision: ${choice}`;
     }
-    const refreshed = await refreshRememberedSources(projectDir, setup.sources);
-    const registered = await registerSourcesFromText(projectDir, brief, refreshed.sources);
-    registered.snapshots.unshift(...refreshed.snapshots);
-    if (registered.sources.length !== setup.sources.length) saveTicketSetupConfig(projectDir, { ...setup, sources: registered.sources });
+    const briefRequest = sourceRequestFromAnswer(brief, projectDir);
+    const choiceRequest = sourceRequestFromAnswer(sourceChoice, projectDir);
+    const initialRequests = [briefRequest, choiceRequest].filter((request) => request.type && request.locator);
+    let registered = await registerSourceRequests(projectDir, stagedSources, initialRequests, { storage: selectedStorage });
+    stagedSources = registered.registry;
+    const uncaptured = stagedSources.entries.filter((entry) => entry.active && entry.versions.length === 0).map((entry) => entry.id);
+    if (uncaptured.length) {
+      const refreshed = await refreshSourceRegistry(projectDir, stagedSources, uncaptured);
+      stagedSources = refreshed.registry; registered.snapshots.push(...refreshed.snapshots);
+    }
     const grill = argv.includes("--grill-me")
       ? "exhaustive"
       : interactive && !argv.includes("--no-grill-me") ? await promptGrill() : "standard";
@@ -192,25 +211,24 @@ async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.sli
     console.log(`rafi tickets plan: interview=${grill}; agent changes are disabled\n`);
     if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() } });
 
-    let result = await role.builder.sendTurn(buildTicketPlanInstruction({ brief, sourceChoice, sources: registered.sources, sourceSnapshots: registered.snapshots, context, grill, docsRoot }));
+    let result = await role.builder.sendTurn(buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot }));
     while (true) {
       if (result.isError) throw new Error(`planning agent failed: ${result.text.slice(0, 300)}`);
       const marker = parseConversationMarker(result.text);
       if (marker.kind === "needs_input") {
         console.log(stripMachineTail(result.text));
-        const newSources = await registerRequestedSources(projectDir, result.text, registered.sources);
-        registered.sources = newSources.sources;
-        registered.snapshots.push(...newSources.snapshots);
-        if (newSources.snapshots.length) result = await role.builder.sendTurn(`Validated and registered these source snapshots: ${newSources.snapshots.join(", ")}. Continue without editing files.`);
-        else result = await role.builder.sendTurn(await promptText(marker.question ?? "Planner question", marker.choices?.[0]));
+        const input = await handlePlanningInput({ projectDir, output: result.text, question: marker.question, choices: marker.choices, registry: stagedSources, storage: selectedStorage, interactive, context: (registry) => sourceContextForTickets(projectDir, registry, context) });
+        stagedSources = input.registry; registered.snapshots.push(...input.snapshots);
+        if (input.cancelled) { await role.builder.close(); await chooseStagedSourceDisposition(projectDir, loadedSources.registry, stagedSources); console.log("rafi tickets plan: cancelled; tracker unchanged"); return; }
+        result = await role.builder.sendTurn(input.continuation!);
         continue;
       }
       if (marker.kind !== "plan_complete") throw new Error("planning agent did not return proposal_ready or a valid question");
       let proposal = extractTicketPlanProposal(result.text, context.tickets);
-      const issues = validateTicketPlanProposal(proposal, context.tickets);
+      const issues = [...validateTicketPlanProposal(proposal, context.tickets), ...validateProposalSourceRefs(proposal, stagedSources, projectDir)];
       if (issues.length) { result = await role.builder.sendTurn(`Your proposal failed validation. Correct it without changing agreed decisions:\n${issues.join("\n")}`); continue; }
       const decision = opts.yes ? "approve" : await reviewProposal(proposal);
-      if (decision === "cancel") { await role.builder.close(); console.log("rafi tickets plan: cancelled; tracker unchanged"); return; }
+      if (decision === "cancel") { await role.builder.close(); await chooseStagedSourceDisposition(projectDir, loadedSources.registry, stagedSources); console.log("rafi tickets plan: cancelled; tracker unchanged"); return; }
       if (decision !== "approve") {
         const upgrade = /upgrade(?:\s+to)?\s+(?:exhaustive|grill-me)|grill-me/i.test(decision) && grill === "standard";
         result = await role.builder.sendTurn(upgrade
@@ -222,6 +240,7 @@ async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.sli
       if (drift.length) { result = await role.builder.sendTurn(`The tracker/config changed during review (${drift.join(", ")}). Re-read current state, refresh the exact proposal, and request approval again.`); continue; }
       await role.builder.close();
       const applied = applyApprovedTicketPlan(projectDir, proposal, { expectedFingerprint: fingerprint, docsRoot });
+      saveSourceRegistry(projectDir, stagedSources);
       if (interview) completeInterview(projectDir, interview);
       console.log(`rafi tickets plan: created ${applied.added.length}, edited ${applied.edited.length}; validation passed`);
       console.log(`rafi tickets plan: wrote ${applied.artifacts.join(" and ")}`);
@@ -310,60 +329,52 @@ async function reviewProposal(proposal: TicketPlanProposal): Promise<string> {
   return promptText("What should change? You may also say 'upgrade to grill-me':");
 }
 
-async function registerSourcesFromText(projectDir: string, text: string, existing: TicketSourceConfig[]): Promise<{ sources: TicketSourceConfig[]; snapshots: string[] }> {
-  const sources = [...existing]; const snapshots: string[] = [];
-  for (const match of text.matchAll(/https?:\/\/[^\s<>"')]+/gi)) {
-    const fetched = await fetchAndSnapshotUrl(projectDir, match[0]); snapshots.push(fetched.snapshotPath); sources.push({ type: "url", url: fetched.requestedUrl });
+function sourceContextForTickets(projectDir: string, registry: SourceRegistryConfig, context: ReturnType<typeof readTicketPlanningContext>): Array<Record<string, unknown>> {
+  const state = new Map(context.states.map((item) => [item.ticket_id, item.status]));
+  const byId = new Map(context.tickets.map((ticket) => [ticket.id, ticket]));
+  const unfinished = new Set(context.tickets.filter((ticket) => !["done", "canceled", "obsolete"].includes(state.get(ticket.id) ?? "planned")).map((ticket) => ticket.id));
+  const visit = (id: string): void => {
+    const ticket = byId.get(id); if (!ticket) return;
+    for (const dependency of ticket.depends_on) if (!unfinished.has(dependency)) { unfinished.add(dependency); visit(dependency); }
+  };
+  for (const id of [...unfinished]) visit(id);
+  const pinned = new Map<string, Set<string>>();
+  const referencedByUnfinished = new Set<string>();
+  const referencedOnlyByCompleted = new Set<string>();
+  for (const ticket of context.tickets) for (const ref of ticket.source_refs ?? []) {
+    const sourceId = ref.source_id ?? uniqueLegacySourceId(registry, ref.source);
+    if (!sourceId) continue;
+    if (unfinished.has(ticket.id)) {
+      referencedByUnfinished.add(sourceId);
+      if (ref.fingerprint) { const set = pinned.get(sourceId) ?? new Set<string>(); set.add(ref.fingerprint); pinned.set(sourceId, set); }
+    } else referencedOnlyByCompleted.add(sourceId);
   }
-  for (const token of text.match(/(?:\.{0,2}\/|\/)[^\s,;]+/g) ?? []) {
-    const path = resolve(projectDir, token);
-    if (existsSync(path)) { const snapshot = snapshotExternalLocalFile(projectDir, path); snapshots.push(snapshot); sources.push({ type: "local", paths: [snapshot] }); }
+  const metadataOnly = new Set([...referencedOnlyByCompleted].filter((id) => !referencedByUnfinished.has(id)));
+  for (const [sourceId, fingerprints] of pinned) for (const fingerprint of fingerprints) {
+    const issue = validateSourceVersionRef(registry, { source_id: sourceId, fingerprint }, projectDir);
+    if (issue) throw new Error(issue);
   }
-  return { sources: dedupeTicketSources(sources), snapshots };
+  return sourceContext(registry, { pinned, metadataOnly });
 }
 
-async function refreshRememberedSources(projectDir: string, existing: TicketSourceConfig[]): Promise<{ sources: TicketSourceConfig[]; snapshots: string[] }> {
-  const sources: TicketSourceConfig[] = [];
-  const snapshots: string[] = [];
-  for (const source of existing) {
-    if (source.type === "url") {
-      const fetched = await fetchAndSnapshotUrl(projectDir, source.url);
-      snapshots.push(fetched.snapshotPath);
-      sources.push({ type: "url", url: fetched.requestedUrl });
-    } else if (source.type === "local") {
-      const paths: string[] = [];
-      for (const path of source.paths) {
-        const absolute = resolve(projectDir, path);
-        if (existsSync(absolute)) {
-          const snapshot = snapshotExternalLocalFile(projectDir, absolute);
-          paths.push(snapshot);
-          if (snapshot.startsWith(".tickets/imports/")) snapshots.push(snapshot);
-        } else paths.push(path);
-      }
-      sources.push({ type: "local", paths });
-    } else sources.push(source);
-  }
-  return { sources: dedupeTicketSources(sources), snapshots };
+function uniqueLegacySourceId(registry: SourceRegistryConfig, value: string): string | undefined {
+  const matches = registry.entries.filter((entry) => entry.id === value || entry.label === value || entry.type === value);
+  return matches.length === 1 ? matches[0]!.id : undefined;
 }
 
-async function registerRequestedSources(projectDir: string, output: string, existing: TicketSourceConfig[]): Promise<{ sources: TicketSourceConfig[]; snapshots: string[] }> {
-  const requests = [...output.matchAll(/^SOURCE_REQUEST:\s*(.+)$/gmi)].map((match) => match[1]!.trim());
-  if (!requests.length) return { sources: existing, snapshots: [] };
-  const registered = await registerSourcesFromText(projectDir, requests.join(" "), existing);
-  for (const request of requests) {
-    if (/^https?:\/\//i.test(request)) continue;
-    const path = resolve(projectDir, request);
-    if (existsSync(path) && !registered.snapshots.includes(request)) {
-      const snapshot = snapshotExternalLocalFile(projectDir, path);
-      registered.snapshots.push(snapshot);
-      registered.sources.push({ type: "local", paths: [snapshot] });
-    }
-  }
-  registered.sources = dedupeTicketSources(registered.sources);
-  const setup = loadTicketSetupConfigWithDefaults(projectDir);
-  saveTicketSetupConfig(projectDir, { ...setup, sources: registered.sources });
-  return registered;
+function validateProposalSourceRefs(proposal: TicketPlanProposal, registry: SourceRegistryConfig, projectDir: string): string[] {
+  const refs = [
+    ...proposal.additions.flatMap((ticket) => ticket.source_refs ?? []),
+    ...proposal.edits.flatMap((edit) => edit.patch.source_refs ?? []),
+  ];
+  return refs.flatMap((ref) => {
+    if (!ref.source_id) return [];
+    if (!ref.fingerprint) return [`source reference ${ref.source_id} must pin an immutable fingerprint`];
+    const issue = validateSourceVersionRef(registry, { source_id: ref.source_id, fingerprint: ref.fingerprint }, projectDir);
+    return issue ? [issue] : [];
+  });
 }
+
 
 function parseConversationMarker(text: string): { kind: string; question?: string; choices?: string[] } {
   const line = text.trimEnd().split(/\r?\n/).at(-1) ?? "";
@@ -374,7 +385,7 @@ function parseConversationMarker(text: string): { kind: string; question?: strin
 }
 
 function stripMachineTail(text: string): string { return text.replace(/^SOURCE_REQUEST:.*$/gmi, "").replace(/^STEP_STATUS:.*$/gmi, "").trim(); }
-function sourceLabel(source: TicketSourceConfig): string { return source.type === "local" ? `local:${source.paths.join(",")}` : source.type === "url" ? source.url : source.type; }
+function sourceLabel(source: ProjectSourceEntry): string { return `${source.label} (${source.id})`; }
 function readProjectConfig(projectDir: string): Record<string, unknown> { const active = join(projectDir, RAFI_CONFIG_FILE); const path = existsSync(active) ? active : join(projectDir, "project.yaml"); return parseYaml(readFileSync(path, "utf8")) as Record<string, unknown>; }
 async function promptText(message: string, initialValue?: string): Promise<string> { const { text, isCancel } = await import("@clack/prompts"); const answer = await text({ message, initialValue, defaultValue: initialValue, validate: (value) => String(value ?? "").trim() ? undefined : "Enter a response" }); if (isCancel(answer)) throw new Error("ticket planning cancelled"); return String(answer).trim(); }
 function runSelf(args: string[]): void { const extension = fileURLToPath(import.meta.url).endsWith(".ts") ? "ts" : "js"; const result = spawnSync(process.execPath, [...process.execArgv, fileURLToPath(new URL(`./index.${extension}`, import.meta.url)), ...args], { stdio: "inherit" }); if (result.error) throw result.error; if (result.status !== 0) throw new Error(`rafi ${args[0]} exited with status ${result.status}`); }

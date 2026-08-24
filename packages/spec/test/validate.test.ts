@@ -236,6 +236,24 @@ test("project: optional tickets setup is accepted", () => {
   );
 });
 
+test("project: shared source registry accepts immutable version metadata and rejects bad storage", () => {
+  const sourceConfig = {
+    ...validProject,
+    sources: {
+      version: 1,
+      snapshot_storage: "local",
+      pending: [{ description: "some files in docs", created_at: "2026-08-24T00:00:00.000Z" }],
+      entries: [{
+        id: "src_0123456789abcdef", type: "local", label: "requirements", active: true,
+        locator: { path: "docs/requirements.md" },
+        versions: [{ fingerprint: "a".repeat(64), captured_at: "2026-08-24T00:00:00.000Z", storage: "local", snapshot_path: ".rafi/source-cache/src_0123456789abcdef/a.md", manifest_path: ".rafi/source-cache/src_0123456789abcdef/a.manifest.json", bytes: 10 }],
+      }],
+    },
+  };
+  assert.equal(validateProjectConfig(sourceConfig).valid, true);
+  assert.equal(validateProjectConfig({ ...sourceConfig, sources: { ...sourceConfig.sources, snapshot_storage: "cloud" } }).valid, false);
+});
+
 // ───────────────────────── assert* (throwing narrowers) ─────────────────────────
 // These are part of the public surface: foreman/special-agents call them to fail
 // fast on bad authoring inputs. They must pass through valid data and throw with a

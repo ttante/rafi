@@ -14,7 +14,7 @@ const plan: StructuredPlanV1 = {
   version: 1, plan_id: "pln_a", revision: 2, content_digest: "digest", summary: "Plan", assumptions: [], implementation_changes: [], acceptance_criteria: [], test_plan: [],
   slices: [
     { slice_ref: "slc_keep", title: "Keep", summary: "keep", acceptance: ["works"], required_tests: ["test"], likely_files: [], depends_on: [] },
-    { slice_ref: "slc_new", title: "New", summary: "new", acceptance: ["works"], required_tests: ["test"], likely_files: [], depends_on: ["slc_keep"] },
+    { slice_ref: "slc_new", title: "New", summary: "new", acceptance: ["works"], required_tests: ["test"], likely_files: [], depends_on: ["slc_keep"], source_refs: [{ source_id: "src_0123456789abcdef", fingerprint: "a".repeat(64), item: "REQ-1" }] },
   ],
   delivery_units: [{ id: "unit", slice_refs: ["slc_keep", "slc_new"], branch_mode: "current", completion: "none", provider: "local", pr_ready: false, merge_method: "squash", cleanup: false, depends_on: [], dependency_mode: "combine" }],
   stacks: [],
@@ -33,6 +33,7 @@ test("population retains plan slice ticket IDs and preserves unrelated tickets",
   assert.equal(result.sliceToTicket.get("slc_new"), "T001");
   assert.ok(result.tickets.some((ticket) => ticket.id === "T100" && ticket.title === "Unrelated"));
   assert.deepEqual(result.tickets.find((ticket) => ticket.id === "T001")?.depends_on, ["T009"]);
+  assert.deepEqual(result.tickets.find((ticket) => ticket.id === "T001")?.source_refs, [{ source: "src_0123456789abcdef", item: "REQ-1", source_id: "src_0123456789abcdef", fingerprint: "a".repeat(64) }]);
 });
 
 test("population rejects missing/duplicate mappings and requires exact computer-run retirement IDs", () => {

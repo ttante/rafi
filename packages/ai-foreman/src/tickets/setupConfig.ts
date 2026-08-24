@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { loadDefaults } from "special-agents";
+import { appendLegacyTicketSources, loadSourceRegistry } from "../sources/sourceRegistry.js";
 
 export const RAFI_CONFIG_FILE = "rafi-config.yaml";
 
@@ -98,7 +99,9 @@ export function loadRafiConfigObject(projectDir: string): Record<string, unknown
 export function loadTicketSetupConfig(projectDir: string): TicketsSetupConfig | undefined {
   const raw = loadRafiConfigObject(projectDir);
   if (!raw || raw.tickets === undefined) return undefined;
-  return normalizeTicketsSetupConfig(raw.tickets, `${RAFI_CONFIG_FILE}.tickets`);
+  const setup = normalizeTicketsSetupConfig(raw.tickets, `${RAFI_CONFIG_FILE}.tickets`);
+  if (setup.sources.length === 0) setup.sources = legacySourcesFromRegistry(loadSourceRegistry(projectDir).registry.entries);
+  return setup;
 }
 
 export function loadTicketSetupConfigWithDefaults(projectDir: string): TicketsSetupConfig {
@@ -116,7 +119,13 @@ export function saveTicketSetupConfig(
   opts: MinimalRafiConfigOptions = {},
 ): void {
   const config = loadRafiConfigObject(projectDir) ?? minimalRafiConfig(projectDir, opts);
-  config.tickets = denormalizeTicketsSetupConfig(normalizeTicketsSetupConfig(setup, "tickets"));
+  const normalized = normalizeTicketsSetupConfig(setup, "tickets");
+  const ticketConfig = denormalizeTicketsSetupConfig(normalized);
+  delete ticketConfig.sources;
+  config.tickets = ticketConfig;
+  config.sources = appendLegacyTicketSources(loadSourceRegistry(projectDir).registry, normalized.sources);
+  const planning = config.planning && typeof config.planning === "object" && !Array.isArray(config.planning) ? config.planning as Record<string, unknown> : undefined;
+  if (planning) { delete planning.sources; if (Object.keys(planning).length === 0) delete config.planning; }
   mkdirSync(projectDir, { recursive: true });
   writeFileSync(join(projectDir, RAFI_CONFIG_FILE), stringify(config, { lineWidth: 100 }), "utf8");
 }
@@ -486,4 +495,15 @@ function cloneTicketSetup(setup: TicketsSetupConfig): TicketsSetupConfig {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function legacySourcesFromRegistry(entries: import("rafi-spec").ProjectSourceEntry[]): TicketSourceConfig[] {
+  const out: TicketSourceConfig[] = [];
+  for (const entry of entries.filter((item) => item.active)) {
+    if (entry.type === "local" && entry.locator.path) out.push({ type: "local", paths: [entry.locator.path] });
+    else if (entry.type === "url" && entry.locator.url) out.push({ type: "url", url: entry.locator.url });
+    else if (entry.type === "linear") out.push({ type: "linear", api_key_env: entry.locator.api_key_env ?? "LINEAR_API_KEY", team_key: entry.locator.team_key, filter: entry.locator.filter });
+    else if (entry.type === "jira" && entry.locator.site && entry.locator.jql) out.push({ type: "jira", site: entry.locator.site, email_env: entry.locator.email_env ?? "JIRA_EMAIL", token_env: entry.locator.token_env ?? "JIRA_API_TOKEN", jql: entry.locator.jql });
+  }
+  return dedupeTicketSources(out);
 }

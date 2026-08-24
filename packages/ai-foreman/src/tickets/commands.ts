@@ -181,6 +181,7 @@ export function cmdInit(projectDir: string, opts: InitOptions): void {
           properties: {
             source: { type: "string", minLength: 1 },
             item: { type: "string", minLength: 1 },
+            source_id: { type: "string", pattern: "^src_[A-Za-z0-9_-]+$" },
             url: { type: ["string", "null"] },
             fingerprint: { type: ["string", "null"] },
             note: { type: ["string", "null"] },

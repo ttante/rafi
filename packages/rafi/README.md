@@ -92,7 +92,7 @@ rafi plan .
 | `<docs.root>/rafi-plans/<timestamp>.md` | Versioned plan history. |
 | `<docs.root>/rafi-plan.md` | Latest plan used by ticket population. |
 
-`plan` uses the `planning.sources` captured during `rafi create`; this is separate from completed ticket setup sources. For scripted briefs, custom sources, runtime/model selection, effort, or fast mode, use the [plan command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-plan---help).
+`plan` and `tickets plan` use one project-wide source registry. `create` preserves a complete source description without reading it when planning is skipped; the next planner resolves it. Captures are immutable and append-only, with private copies under `.rafi/source-cache/` or tracked copies under `.rafi/sources/`. For scripted briefs, custom sources, storage selection, runtime/model selection, effort, or fast mode, use the [command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-plan---help).
 
 ## Ticket lifecycle
 
@@ -102,7 +102,7 @@ rafi tickets plan
 rafi tickets validate
 ```
 
-`tickets plan` runs a read-only guided planning conversation and applies only the exact validated proposal you approve. `tickets setup:init` / `setup:update` saves local, public URL, Linear, or Jira Cloud sources and populate/build defaults in `rafi-config.yaml`. URL snapshots are stored under ignored `.tickets/imports/`; Linear uses `LINEAR_API_KEY`, and Jira Cloud uses `JIRA_EMAIL` and `JIRA_API_TOKEN`.
+`tickets plan` runs a read-only guided planning conversation and applies only the exact validated proposal you approve. `tickets setup:init` / `setup:update` appends local, public URL, Linear, or Jira Cloud sources to the shared registry and saves populate/build defaults. Linear uses `LINEAR_API_KEY`; Jira Cloud uses `JIRA_EMAIL` and `JIRA_API_TOKEN`; only those environment-variable names are persisted.
 
 `tickets populate` uses explicit sources first, then saved ticket sources, then the latest Rafi plan when available. It runs the `ticket-maker` role, writes canonical tickets to `.tickets/tickets.yaml`, renders tracker docs, and validates the tracker. Source overrides, external-import setup, agent/model controls, review, queue, render, archive, and manual ticket maintenance are in the [ticket command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-tickets---help).
 

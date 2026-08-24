@@ -4,6 +4,22 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.9.1 / ai-foreman 1.7.1 / special-agents 0.8.1 / rafi-spec 0.8.1 - 2026-08-24
+
+### Fixed
+
+- Fixed the `rafi create` to `rafi plan` handoff so a completed child planning workflow returns to the parent create flow instead of terminating the process before the ticket setup prompt.
+- Hardened structured-plan proposal and materialized-plan validation so malformed delivery units, dependencies, source references, enums, booleans, and string-array fields return clear validation errors before rendering.
+- Added bounded planner repair attempts for malformed structured plan proposals, reusing the same planner session and failing cleanly with resume guidance after repeated invalid replacements.
+- Preserved create interview continuity around child planning with handoff checkpoints and parent/child interview linkage, including resume from the post-plan ticket setup prompt.
+
+### Packages
+
+- Bumped `rafi-spec` to `0.8.1`.
+- Bumped `special-agents` to `0.8.1` for its exact `rafi-spec@0.8.1` dependency.
+- Bumped `ai-foreman` to `1.7.1` for its exact shared package dependencies.
+- Bumped `@rafi-ai/cli` to `0.9.1` for the create-to-plan handoff and structured planner repair fixes.
+
 ## @rafi-ai/cli 0.9.0 / ai-foreman 1.7.0 / special-agents 0.8.0 / rafi-spec 0.8.0 - 2026-08-22
 
 ### Added

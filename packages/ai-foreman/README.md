@@ -176,7 +176,7 @@ gh repo view <host>/<owner>/<repo>
 | `--fast` | flag | off | Lower latency. |
 | `-y, --yes` | flag | off | Skips confirmation before builder edits ticket files. |
 
-Use `ai-foreman tickets setup:init` or `setup:update` to save local, Linear, or Jira Cloud ticket sources in `rafi-config.yaml`. Linear imports use `LINEAR_API_KEY`; Jira Cloud imports use `JIRA_EMAIL` and `JIRA_API_TOKEN`. Imported provider payloads are snapshotted under ignored `.tickets/imports/`, and mirrored tickets carry `external_refs`.
+Use `ai-foreman tickets setup:init` or `setup:update` to append local, Linear, or Jira Cloud sources to the project-wide registry in `rafi-config.yaml`. Linear imports use `LINEAR_API_KEY`; Jira Cloud imports use `JIRA_EMAIL` and `JIRA_API_TOKEN`. Credentials are never persisted, and mirrored tickets retain source provenance.
 
 Use `ai-foreman tickets review` to accept, defer, or dismiss pending split/combine/duplicate recommendations rendered in the progress doc.
 

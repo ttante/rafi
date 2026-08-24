@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   materializeStructuredPlan, readAndValidateStructuredPlanPair, regenerateStructuredPlanMarkdown,
   readNamedApprovedPlan, renderStructuredPlanMarkdown, validateMaterializedPlan, writeStructuredPlanArtifacts,
+  validateStructuredPlanProposal,
   type StructuredPlanProposalV1,
 } from "../src/structuredPlan.js";
 
@@ -60,4 +61,53 @@ test("named revision loads the newest immutable revision of a non-latest lineage
   const other = materializeStructuredPlan(proposal(), undefined, () => `c${++n}`); writeStructuredPlanArtifacts(root, "docs", other);
   assert.equal(readNamedApprovedPlan(root, "docs", first.plan_id).revision, 2);
   assert.equal(readNamedApprovedPlan(root, "docs", first.plan_id).content_digest, second.content_digest);
+});
+
+test("structured plan proposal validation rejects malformed delivery units clearly", () => {
+  const p = proposal() as unknown as Record<string, unknown>;
+  const units = structuredClone(p.delivery_units) as Array<Record<string, unknown>>;
+  delete units[0]!.depends_on;
+  units[1]!.branch_mode = "sideways";
+  units[1]!.pr_ready = "false";
+  units[1]!.slice_refs = "S2";
+  p.delivery_units = units;
+
+  const issues = validateStructuredPlanProposal(p);
+  assert.ok(issues.includes("delivery unit api.depends_on must be a string array"));
+  assert.ok(issues.includes("delivery unit ui.branch_mode must be one of: current, per-ticket, shared"));
+  assert.ok(issues.includes("delivery unit ui.pr_ready must be a boolean"));
+  assert.ok(issues.includes("delivery unit ui.slice_refs must be a string array"));
+});
+
+test("structured plan proposal validation rejects invalid dependencies and source refs without throwing", () => {
+  const p = proposal() as unknown as Record<string, unknown>;
+  const slices = structuredClone(p.slices) as Array<Record<string, unknown>>;
+  slices[0]!.depends_on = ["S1"];
+  slices[0]!.source_refs = "not-array";
+  const units = structuredClone(p.delivery_units) as Array<Record<string, unknown>>;
+  units[0]!.depends_on = ["api"];
+  units[1]!.depends_on = ["missing"];
+  p.slices = slices;
+  p.delivery_units = units;
+
+  const issues = validateStructuredPlanProposal(p);
+  assert.ok(issues.includes("slice S1 cannot depend on itself"));
+  assert.ok(issues.includes("slice S1.source_refs must be an array"));
+  assert.ok(issues.includes("delivery unit api cannot depend on itself"));
+  assert.ok(issues.includes("delivery unit ui depends on unknown unit missing"));
+});
+
+test("invalid materialized plan JSON returns validation errors before rendering can crash", () => {
+  let n = 0;
+  const plan = materializeStructuredPlan(proposal(), undefined, () => `stable-${++n}`);
+  const edited = structuredClone(plan) as unknown as Record<string, unknown>;
+  const units = structuredClone(edited.delivery_units) as Array<Record<string, unknown>>;
+  delete units[0]!.depends_on;
+  units[0]!.cleanup = "no";
+  edited.delivery_units = units;
+
+  const issues = validateMaterializedPlan(edited as never);
+  assert.ok(issues.includes("unit api.depends_on must be a string array"));
+  assert.ok(issues.includes("unit api.cleanup must be a boolean"));
+  assert.throws(() => renderStructuredPlanMarkdown(edited as never), /plan data is invalid/);
 });

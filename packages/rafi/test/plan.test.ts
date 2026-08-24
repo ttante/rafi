@@ -14,14 +14,78 @@ import {
   resolveBrief,
   resolvePlanDocsRoot,
   resolvePlanSources,
+  runPlanWorkflow,
   stripFinalStepStatusMarker,
   validatePlanMarkdown,
   writePlanArtifacts,
   writeValidatedPlanArtifacts,
+  type PlanWorkflowOptions,
 } from "../src/plan.js";
+import { buildProjectConfig, defaultAnswers } from "../src/project.js";
+import {
+  PLAN_PROPOSAL_END,
+  PLAN_PROPOSAL_START,
+  type StructuredPlanProposalV1,
+} from "../src/structuredPlan.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "rafi-plan-test-"));
+}
+
+function installRafiConfig(dir: string): void {
+  writeFileSync(join(dir, "rafi-config.yaml"), stringify(buildProjectConfig(defaultAnswers())), "utf8");
+}
+
+function validStructuredProposal(): StructuredPlanProposalV1 {
+  return {
+    version: 1,
+    summary: "Ship labels",
+    assumptions: ["Use current ticket setup defaults."],
+    implementation_changes: ["Add label metadata."],
+    acceptance_criteria: ["Labels can be saved."],
+    test_plan: ["Run unit tests."],
+    slices: [{
+      local_ref: "S1",
+      title: "Labels",
+      summary: "Add label support.",
+      acceptance: ["Labels persist."],
+      required_tests: ["Unit test label persistence."],
+      likely_files: ["src/labels.ts"],
+      depends_on: [],
+    }],
+    delivery_units: [{
+      id: "labels",
+      slice_refs: ["S1"],
+      branch_mode: "per-ticket",
+      completion: "none",
+      provider: "local",
+      pr_ready: false,
+      merge_method: "squash",
+      cleanup: false,
+      depends_on: [],
+      dependency_mode: "combine",
+    }],
+    stacks: [],
+  };
+}
+
+function planCompleteOutput(proposal: unknown): string {
+  return `${PLAN_PROPOSAL_START}\n${JSON.stringify(proposal)}\n${PLAN_PROPOSAL_END}\nSTEP_STATUS: plan_complete | summary="created ticket-maker-ready Rafi plan"`;
+}
+
+function fakePlanRun(text: string, sessionId: string): Awaited<ReturnType<NonNullable<PlanWorkflowOptions["runInstruction"]>>> {
+  return {
+    turn: {
+      result: { text, isError: false, numTurns: 1, costUsd: 0 },
+      status: { kind: "plan_complete", summary: "created ticket-maker-ready Rafi plan" },
+    },
+    runtime: "codex",
+    model: "test-model",
+    sessionId,
+    logPath: "",
+    roleBundle: {} as never,
+    skills: [],
+  };
 }
 
 test("standard plan instruction excludes grill-me and keeps the output contract", () => {
@@ -307,6 +371,76 @@ test("nextPopulateCommand points tickets populate at the latest plan", () => {
       nextPopulateCommand(dir, "docs-rafi/rafi-plan.md"),
       `rafi tickets populate --project "${dir}" --sources "docs-rafi/rafi-plan.md"`,
     );
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("plan workflow repairs a malformed structured proposal in the same session", async () => {
+  const dir = tempDir();
+  installRafiConfig(dir);
+  const malformed = validStructuredProposal() as unknown as Record<string, unknown>;
+  const units = structuredClone(malformed.delivery_units) as Array<Record<string, unknown>>;
+  delete units[0]!.depends_on;
+  malformed.delivery_units = units;
+  const fixed = validStructuredProposal();
+  const instructions: string[] = [];
+  const sessions: Array<string | undefined> = [];
+  let calls = 0;
+  const runInstruction: PlanWorkflowOptions["runInstruction"] = async (options) => {
+    calls += 1;
+    instructions.push(options.instruction);
+    sessions.push(options.resumeSessionId);
+    return fakePlanRun(planCompleteOutput(calls === 1 ? malformed : fixed), `session-${calls}`);
+  };
+
+  try {
+    const outcome = await runPlanWorkflow({
+      project: dir,
+      brief: "Add labels.",
+      yes: true,
+      rawArgs: ["--no-grill-me"],
+      runInstruction,
+    });
+
+    assert.equal(outcome.status, "completed");
+    assert.equal(calls, 2);
+    assert.equal(sessions[0], undefined);
+    assert.equal(sessions[1], "session-1");
+    assert.match(instructions[1]!, /delivery unit labels\.depends_on must be a string array/);
+    assert.match(instructions[1]!, /STEP_STATUS: plan_complete/);
+    assert.ok(outcome.result?.latestData.endsWith("docs/rafi-plan.json"));
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("plan workflow stops after three unsuccessful structured proposal repairs", async () => {
+  const dir = tempDir();
+  installRafiConfig(dir);
+  const malformed = validStructuredProposal() as unknown as Record<string, unknown>;
+  const units = structuredClone(malformed.delivery_units) as Array<Record<string, unknown>>;
+  delete units[0]!.depends_on;
+  malformed.delivery_units = units;
+  let calls = 0;
+  const runInstruction: PlanWorkflowOptions["runInstruction"] = async () => {
+    calls += 1;
+    return fakePlanRun(planCompleteOutput(malformed), `session-${calls}`);
+  };
+
+  try {
+    const outcome = await runPlanWorkflow({
+      project: dir,
+      brief: "Add labels.",
+      yes: true,
+      rawArgs: ["--no-grill-me"],
+      runInstruction,
+    });
+
+    assert.equal(outcome.status, "failed");
+    assert.equal(calls, 4);
+    assert.match(outcome.diagnostic ?? "", /invalid structured proposal after 3 repair attempts/);
+    assert.match(outcome.resumeCommand ?? "", /--resume-session "session-4"/);
   } finally {
     rmSync(dir, { recursive: true });
   }

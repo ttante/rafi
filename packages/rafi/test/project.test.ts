@@ -150,9 +150,11 @@ test("buildProjectConfig preserves a custom docs root", () => {
   assert.deepEqual(config.docs, { root: "docs-rafi" });
 });
 
-test("planning sources are normalized into the backward-compatible planning block", () => {
+test("create preserves the complete source answer as pending registry input", () => {
   const config = buildProjectConfig({ ...defaultAnswers(), planningSources: "docs/brief.md, notes/** docs/brief.md" });
-  assert.deepEqual(config.planning, { sources: ["docs/brief.md", "notes/**"] });
+  assert.equal(config.planning, undefined);
+  assert.equal(config.sources?.snapshot_storage, "local");
+  assert.deepEqual(config.sources?.pending?.map((item) => item.description), ["docs/brief.md, notes/** docs/brief.md"]);
   const legacy = normalizeProjectConfig({ ...config, planning: { sources: "docs/brief.md" } });
   assert.deepEqual(legacy.planning, { sources: ["docs/brief.md"] });
 });

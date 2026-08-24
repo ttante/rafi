@@ -136,9 +136,64 @@ export interface DocsConfig {
   root: string;
 }
 
-/** Input documents carried from create into planning. Ticket setup has its own sources. */
+/** Legacy planning hints. New writes use the project-wide source registry. */
 export interface PlanningConfig {
   sources?: string[];
+}
+
+export type SourceSnapshotStorage = "local" | "tracked";
+export type ProjectSourceType = "local" | "url" | "github" | "gitlab" | "linear" | "jira";
+
+/** A normalized locator. Credentials are represented only by environment-variable names. */
+export interface ProjectSourceLocator {
+  path?: string;
+  description?: string;
+  url?: string;
+  repository?: string;
+  mode?: "issue" | "issues" | "project" | "board";
+  issue?: number;
+  project?: string;
+  filters?: Record<string, string>;
+  api_key_env?: string;
+  team_key?: string | null;
+  filter?: string | null;
+  site?: string;
+  email_env?: string;
+  token_env?: string;
+  jql?: string;
+}
+
+/** Immutable source capture metadata. Versions are append-only. */
+export interface ProjectSourceVersion {
+  fingerprint: string;
+  captured_at: string;
+  storage: SourceSnapshotStorage;
+  snapshot_path: string;
+  manifest_path: string;
+  content_type?: string;
+  bytes?: number;
+  item_count?: number;
+}
+
+export interface ProjectSourceEntry {
+  id: string;
+  type: ProjectSourceType;
+  label: string;
+  active: boolean;
+  locator: ProjectSourceLocator;
+  versions: ProjectSourceVersion[];
+}
+
+export interface PendingSourceDescription {
+  description: string;
+  created_at: string;
+}
+
+export interface SourceRegistryConfig {
+  version: 1;
+  snapshot_storage: SourceSnapshotStorage;
+  entries: ProjectSourceEntry[];
+  pending?: PendingSourceDescription[];
 }
 
 // ───────────────────────────── Workflow state ─────────────────────────────
@@ -267,6 +322,16 @@ export interface StructuredPlanSlice {
   required_tests: string[];
   likely_files: string[];
   depends_on: string[];
+  source_refs?: SourceVersionRef[];
+}
+
+/** Stable registry/version provenance, also accepted alongside legacy source/item fields. */
+export interface SourceVersionRef {
+  source_id: string;
+  fingerprint: string;
+  item?: string;
+  url?: string | null;
+  note?: string | null;
 }
 
 export interface StructuredPlanDeliveryUnit {
@@ -507,6 +572,7 @@ export interface ProjectConfig {
   agent_files: AgentFilesConfig;
   docs?: DocsConfig;
   planning?: PlanningConfig;
+  sources?: SourceRegistryConfig;
   tickets?: TicketsSetupConfig;
   agent_defaults?: AgentDefaultsV1;
   agents: Record<string, RuntimeArtifactConfig>;

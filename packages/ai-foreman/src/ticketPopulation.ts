@@ -16,6 +16,7 @@ export interface TicketSliceProposal {
   title: string; area: string; priority: TicketDef["priority"]; size: TicketDef["size"]; risk: TicketDef["risk"];
   summary: string; acceptance: string[]; required_tests: string[]; likely_files: string[];
   depends_on: string[]; rollback?: string | null; notes?: string | null;
+  source_refs?: Array<{ source_id: string; fingerprint: string; item?: string; url?: string | null; note?: string | null }>;
 }
 export interface TicketPopulationProposalV1 { version: 1; plan_id: string; revision: number; tickets: TicketSliceProposal[]; retirements: string[] }
 export const TICKET_POPULATION_PROPOSAL_START = "RAFI_TICKET_POPULATION_PROPOSAL_START";
@@ -60,6 +61,10 @@ export function materializeTicketPopulation(proposal: TicketPopulationProposalV1
       depends_on: slice.depends_on.map((ref) => sliceToTicket.get(ref)!), summary: slice.summary,
       acceptance: [...slice.acceptance], required_tests: [...slice.required_tests], likely_files: [...slice.likely_files],
       rollback: slice.rollback, notes: slice.notes, plan_ref: { plan_id: plan.plan_id, revision: plan.revision, slice_ref: slice.slice_ref },
+      source_refs: (plan.slices.find((item) => item.slice_ref === slice.slice_ref)?.source_refs ?? slice.source_refs)?.map((ref) => ({
+        source: ref.source_id, item: ref.item ?? "document", source_id: ref.source_id, fingerprint: ref.fingerprint,
+        ...(ref.url !== undefined ? { url: ref.url } : {}), ...(ref.note !== undefined ? { note: ref.note } : {}),
+      })),
     };
   });
   const ownedIds = new Set(materialized.map((ticket) => ticket.id));

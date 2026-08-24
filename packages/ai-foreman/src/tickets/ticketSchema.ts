@@ -13,6 +13,7 @@ export interface TicketExternalRef {
 export interface TicketSourceRef {
   source: string;
   item: string;
+  source_id?: string;
   url?: string | null;
   fingerprint?: string | null;
   note?: string | null;
@@ -91,6 +92,7 @@ export const TICKET_JSON_SCHEMA = {
         properties: {
           source: { type: "string", minLength: 1 },
           item: { type: "string", minLength: 1 },
+          source_id: { type: "string", pattern: "^src_[A-Za-z0-9_-]+$" },
           url: { type: ["string", "null"] },
           fingerprint: { type: ["string", "null"] },
           note: { type: ["string", "null"] },

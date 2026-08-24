@@ -199,6 +199,31 @@ const agentDefaultsShape = {
   },
 } as const;
 
+const sourceRegistry = {
+  type: "object",
+  additionalProperties: false,
+  required: ["version", "snapshot_storage", "entries"],
+  properties: {
+    version: { const: 1 },
+    snapshot_storage: { enum: ["local", "tracked"] },
+    pending: { type: "array", items: { type: "object", additionalProperties: false, required: ["description", "created_at"], properties: { description: { type: "string", minLength: 1 }, created_at: { type: "string", minLength: 1 } } } },
+    entries: { type: "array", items: {
+      type: "object", additionalProperties: false,
+      required: ["id", "type", "label", "active", "locator", "versions"],
+      properties: {
+        id: { type: "string", pattern: "^src_[A-Za-z0-9_-]+$" },
+        type: { enum: ["local", "url", "github", "gitlab", "linear", "jira"] },
+        label: { type: "string", minLength: 1 }, active: { type: "boolean" },
+        locator: { type: "object", additionalProperties: true },
+        versions: { type: "array", items: { type: "object", additionalProperties: false, required: ["fingerprint", "captured_at", "storage", "snapshot_path", "manifest_path"], properties: {
+          fingerprint: { type: "string", pattern: "^[a-f0-9]{64}$" }, captured_at: { type: "string", minLength: 1 }, storage: { enum: ["local", "tracked"] },
+          snapshot_path: { type: "string", minLength: 1 }, manifest_path: { type: "string", minLength: 1 }, content_type: { type: "string" }, bytes: { type: "integer", minimum: 0 }, item_count: { type: "integer", minimum: 0 },
+        } } },
+      },
+    } },
+  },
+} as const;
+
 export const agentDefaultsSchema = {
   $id: "rafi/agentDefaultsV1",
   ...agentDefaultsShape,
@@ -252,6 +277,7 @@ export const projectConfigSchema = {
         sources: { type: "array", items: { type: "string", minLength: 1 } },
       },
     },
+    sources: sourceRegistry,
     tickets: ticketsSetupConfig,
     agent_defaults: agentDefaultsShape,
     agents: artifactPathMap,

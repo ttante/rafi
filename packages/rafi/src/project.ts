@@ -27,6 +27,8 @@ export interface WalkthroughAnswers {
   docsRoot?: string;
   /** Files, folders, or globs with existing tickets or planning material. */
   planningSources?: string | string[];
+  /** Storage preference for future immutable source captures. */
+  sourceStorage?: "local" | "tracked";
 }
 
 export const RAFI_CONFIG_FILE = "rafi-config.yaml";
@@ -198,7 +200,12 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
       },
     },
     ...(normalizePlanningSources(answers.planningSources).length > 0
-      ? { planning: { sources: normalizePlanningSources(answers.planningSources) } }
+      ? { sources: {
+        version: 1 as const,
+        snapshot_storage: answers.sourceStorage ?? "local",
+        entries: [],
+        pending: normalizePlanningSources(answers.planningSources).map((description) => ({ description, created_at: new Date().toISOString() })),
+      } }
       : {}),
     agents: defaultAgentsConfig(),
     skills: defaultSkillsConfig(),
@@ -232,10 +239,7 @@ export function normalizeProjectConfig(raw: unknown): ProjectConfig {
 
 export function normalizePlanningSources(value: unknown): string[] {
   const raw = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
-  return [...new Set(raw
-    .flatMap((entry) => String(entry).split(/\s*(?:,|\+)\s*|\s+/))
-    .map((entry) => entry.trim())
-    .filter(Boolean))];
+  return [...new Set(raw.map((entry) => String(entry).trim()).filter(Boolean))];
 }
 
 function normalizeArtifactMap(

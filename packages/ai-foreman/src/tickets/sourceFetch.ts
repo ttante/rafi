@@ -49,7 +49,7 @@ export async function fetchAndSnapshotUrl(
       response = await fetch(current, {
         redirect: "manual",
         signal: controller.signal,
-        headers: { Accept: "text/html,text/plain,text/markdown,application/pdf;q=0.9" },
+        headers: { Accept: "text/html,text/plain,text/markdown,application/json,application/yaml,text/yaml,application/pdf;q=0.9" },
       });
     } finally {
       clearTimeout(timer);
@@ -158,6 +158,10 @@ function detectContentType(header: string | null, bytes: Uint8Array, url: string
   if (["application/pdf"].includes(mime)) throw new Error("response claimed PDF but PDF magic bytes were missing");
   if (["text/html", "application/xhtml+xml"].includes(mime)) return "html";
   if (["text/markdown", "text/x-markdown"].includes(mime) || /\.md(?:own)?$/i.test(new URL(url).pathname)) return "markdown";
+  if (["application/json", "application/yaml", "application/x-yaml", "text/yaml", "text/x-yaml"].includes(mime) || /\.(?:json|ya?ml)$/i.test(new URL(url).pathname)) {
+    if (bytes.subarray(0, Math.min(bytes.length, 1024)).includes(0)) throw new Error("binary URL content is not supported");
+    return "text";
+  }
   if (!mime || mime.startsWith("text/") || mime === "application/octet-stream") {
     if (bytes.subarray(0, Math.min(bytes.length, 1024)).includes(0)) throw new Error("binary URL content is not supported");
     if ((!mime || mime === "application/octet-stream") && /^\s*(?:<!doctype\s+html|<html\b)/i.test(Buffer.from(bytes.subarray(0, 1024)).toString("utf8"))) return "html";

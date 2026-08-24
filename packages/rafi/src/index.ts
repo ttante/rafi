@@ -42,8 +42,9 @@ import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
 import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { runStatus } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
-import { buildPlanCommand } from "./plan.js";
+import { buildPlanCommand, runPlanWorkflow } from "./plan.js";
 import { buildTicketPlanCommand } from "./ticketPlan.js";
+import { buildSourcesCommand } from "./sources.js";
 import { buildAgentsCommand } from "./agents.js";
 import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildUninstallCommand, interpretUninstallInstruction } from "./uninstall.js";
@@ -68,6 +69,8 @@ program
   .name("rafi")
   .description("Scaffold and compile Rafi AI framework configs for a target repo.")
   .version(PACKAGE_VERSION);
+
+program.addCommand(buildSourcesCommand());
 
 program
   .command("compile")
@@ -243,6 +246,7 @@ program
       checkpointCreateAnswer("planning-sources", "hasPlanningSources", Boolean(hasPlanningSources));
 
       let planningSources: string | undefined;
+      let sourceStorage: "local" | "tracked" | undefined;
       if (hasPlanningSources) {
         log.info("Any format is OK: Markdown, YAML, text notes, folders, or globs. `rafi tickets populate` will scan relevant docs too.");
         const planningSourcesRaw = await text({
@@ -251,6 +255,12 @@ program
         });
         if (isCancel(planningSourcesRaw)) process.exit(0);
         planningSources = String(planningSourcesRaw) || undefined;
+        const storageAnswer = await select({ message: "Where should future source snapshots be stored?", options: [
+          { value: "local", label: "Private/local (Recommended)" },
+          { value: "tracked", label: "Team-visible/tracked" },
+        ] });
+        if (isCancel(storageAnswer)) process.exit(0);
+        sourceStorage = storageAnswer as "local" | "tracked";
         checkpointCreateAnswer("compile-config", "planningSources", planningSources);
       }
 
@@ -267,6 +277,7 @@ program
         qa: true,
         docsRoot,
         planningSources,
+        sourceStorage,
       };
       if (interview) interview = checkpointInterview(targetDir, interview, {
         checkpoint: "compile-config",
@@ -325,12 +336,17 @@ program
 
     console.log(`rafi: verified agent runtime auth for ${config.harness.targets.join(" and ")}.`);
 
-    const journeyComplete = await runCreateTicketHandoff(targetDir, config, answers, Boolean(opts.defaults), {
+    const handoff = await runCreateTicketHandoff(targetDir, config, answers, Boolean(opts.defaults), {
       planningMode: createArgv.includes("--grill-me") ? "exhaustive" : createArgv.includes("--no-grill-me") ? "standard" : undefined,
+      interview,
     });
+    if (handoff.interview) interview = handoff.interview;
     if (interview) {
-      if (journeyComplete) completeInterview(targetDir, interview);
-      else checkpointInterview(targetDir, interview, { status: "paused", checkpoint: "create-paused" });
+      if (handoff.journeyComplete) completeInterview(targetDir, interview);
+      else checkpointInterview(targetDir, interview, {
+        status: "paused",
+        checkpoint: ["child-plan-paused", "ticket-setup-prompt"].includes(interview.checkpoint) ? interview.checkpoint : "create-paused",
+      });
     }
   });
 
@@ -609,13 +625,19 @@ function ticketsInitCommand(appName: string, docsRoot: string): string {
   return `rafi tickets init --app-name ${shellQuote(appName)}${docsArg}`;
 }
 
+interface CreateHandoffResult {
+  journeyComplete: boolean;
+  interview?: InterviewRecord;
+}
+
 async function runCreateTicketHandoff(
   targetDir: string,
   config: ProjectConfig,
   answers: WalkthroughAnswers,
   defaultsMode: boolean,
-  opts: { planningMode?: "standard" | "exhaustive" } = {},
-): Promise<boolean> {
+  opts: { planningMode?: "standard" | "exhaustive"; interview?: InterviewRecord } = {},
+): Promise<CreateHandoffResult> {
+  let interview = opts.interview;
   const docsRoot = config.docs?.root ?? DEFAULT_DOCS_ROOT;
   const setupCommand = setupInitCommand(targetDir, answers, docsRoot);
   const planCommand = `rafi plan ${shellQuote(targetDir)}`;
@@ -627,7 +649,7 @@ async function runCreateTicketHandoff(
     console.log(`  ${planCommand}`);
     console.log(`  ${setupCommand}`);
     console.log(`  ${populateCommand}`);
-    return true;
+    return { journeyComplete: true, interview };
   }
 
   const { confirm, select, isCancel } = await import("@clack/prompts");
@@ -635,7 +657,7 @@ async function runCreateTicketHandoff(
     message: "Run `rafi plan .` now?",
     initialValue: false,
   });
-  if (isCancel(runPlan)) return false;
+  if (isCancel(runPlan)) return { journeyComplete: false, interview };
   if (runPlan) {
     let mode = opts.planningMode;
     if (!mode) {
@@ -643,17 +665,47 @@ async function runCreateTicketHandoff(
         { value: "standard", label: "Standard (Recommended)" },
         { value: "exhaustive", label: "Exhaustive grill-me" },
       ] });
-      if (isCancel(answer)) return false;
+      if (isCancel(answer)) return { journeyComplete: false, interview };
       mode = answer as "standard" | "exhaustive";
     }
-    await buildPlanCommand().parseAsync(["node", "rafi-plan", targetDir, "--yes", mode === "exhaustive" ? "--grill-me" : "--no-grill-me"]);
+    if (interview) {
+      interview = checkpointInterview(targetDir, interview, {
+        checkpoint: "child-plan-before",
+        answers: { ...interview.answers, childPlanMode: mode },
+      });
+    }
+    const planOutcome = await runPlanWorkflow({
+      project: targetDir,
+      skipRunConfirmation: true,
+      grillMe: mode === "exhaustive",
+      rawArgs: [mode === "exhaustive" ? "--grill-me" : "--no-grill-me"],
+      parentInterview: interview ? { id: interview.id, journeyId: interview.journeyId } : undefined,
+      invocationLabel: "rafi create child plan",
+    });
+    if (interview) {
+      const latestParent = findInterviewRecord(targetDir, interview.id) ?? interview;
+      interview = checkpointInterview(targetDir, latestParent, {
+        checkpoint: planOutcome.status === "completed" ? "child-plan-completed" : "child-plan-paused",
+        answers: { ...latestParent.answers, childPlanOutcome: planOutcome.status },
+      });
+    }
+    if (planOutcome.status !== "completed") {
+      console.log(`rafi create: plan handoff ${planOutcome.status}; create is paused before ticket setup.`);
+      if (planOutcome.diagnostic) console.log(`rafi create: ${planOutcome.diagnostic}`);
+      if (planOutcome.resumeCommand) console.log(`rafi create: resume plan with:\n  ${planOutcome.resumeCommand}`);
+      console.log(`rafi create: after plan completes, resume with:\n  rafi resume ${shellQuote(targetDir)}`);
+      return { journeyComplete: false, interview };
+    }
   }
 
+  if (interview) {
+    interview = checkpointInterview(targetDir, interview, { checkpoint: "ticket-setup-prompt" });
+  }
   const runSetup = await confirm({
     message: "Run `rafi tickets setup:init` now?",
     initialValue: true,
   });
-  if (isCancel(runSetup)) return false;
+  if (isCancel(runSetup)) return { journeyComplete: false, interview };
   if (runSetup) {
     await buildTicketsCommand().parseAsync(["node", "rafi-tickets", "setup:init", "--project", targetDir]);
   } else {
@@ -661,9 +713,9 @@ async function runCreateTicketHandoff(
     console.log(`  ${setupCommand}`);
     console.log(`  ${populateCommand}`);
     console.log(`  rafi resume ${shellQuote(targetDir)}`);
-    return false;
+    return { journeyComplete: false, interview };
   }
-  return true;
+  return { journeyComplete: true, interview };
 }
 
 function setupInitCommand(targetDir: string, answers: WalkthroughAnswers, docsRoot: string): string {
@@ -675,9 +727,6 @@ function setupInitCommand(targetDir: string, answers: WalkthroughAnswers, docsRo
     shellQuote(answers.appName),
   ];
   if (docsRoot !== DEFAULT_DOCS_ROOT) args.push("--docs-root", shellQuote(docsRoot));
-  if (answers.planningSources) {
-    args.push("--local-source", ...parsePlanningSources(answers.planningSources).map(shellQuote));
-  }
   return args.join(" ");
 }
 
@@ -710,6 +759,10 @@ async function resumeInterview(projectDir: string, record: InterviewRecord): Pro
     if (invocation.fast) args.push("--fast");
     if (record.runtime.sessionId) args.push("--resume-session", record.runtime.sessionId);
   } else if (record.workflow === "create") {
+    if (record.checkpoint === "ticket-setup-prompt" || record.checkpoint === "child-plan-completed") {
+      await resumeCreateTicketSetupPrompt(projectDir, record);
+      return;
+    }
     // Create's saved values are retained for audit and recovery. Its historical
     // prompt implementation does not yet accept answer injection, so re-enter
     // the walkthrough rather than replacing configuration with defaults.
@@ -729,6 +782,36 @@ async function resumeInterview(projectDir: string, record: InterviewRecord): Pro
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`resumed ${record.workflow} exited with status ${result.status ?? "unknown"}`);
   completeInterview(projectDir, record);
+}
+
+async function resumeCreateTicketSetupPrompt(projectDir: string, record: InterviewRecord): Promise<void> {
+  const loaded = loadRafiConfig(projectDir);
+  if (!loaded) throw new Error(`rafi-config.yaml not found at ${join(projectDir, RAFI_CONFIG_FILE)}`);
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("ticket setup resume requires an interactive terminal");
+  }
+  const answers = { ...defaultAnswers(), ...record.answers } as WalkthroughAnswers;
+  const docsRoot = loaded.config.docs?.root ?? DEFAULT_DOCS_ROOT;
+  const setupCommand = setupInitCommand(projectDir, answers, docsRoot);
+  const populateCommand = `rafi tickets populate --project ${shellQuote(projectDir)}`;
+  const { confirm, isCancel } = await import("@clack/prompts");
+  const runSetup = await confirm({
+    message: "Run `rafi tickets setup:init` now?",
+    initialValue: true,
+  });
+  if (isCancel(runSetup)) {
+    checkpointInterview(projectDir, record, { status: "paused", checkpoint: "ticket-setup-prompt" });
+    return;
+  }
+  if (runSetup) {
+    await buildTicketsCommand().parseAsync(["node", "rafi-tickets", "setup:init", "--project", projectDir]);
+    completeInterview(projectDir, record);
+    return;
+  }
+  console.log("\nrafi: ticket setup commands:");
+  console.log(`  ${setupCommand}`);
+  console.log(`  ${populateCommand}`);
+  checkpointInterview(projectDir, record, { status: "paused", checkpoint: "ticket-setup-prompt" });
 }
 
 function artifactCollisions(
@@ -778,13 +861,6 @@ function setArtifactPaths(
 
 function cloneArtifactMap(map: ProjectConfig["agents"]): ProjectConfig["agents"] {
   return Object.fromEntries(Object.entries(map).map(([name, paths]) => [name, { ...paths }]));
-}
-
-function parsePlanningSources(raw: string | string[]): string[] {
-  return (Array.isArray(raw) ? raw.join(" ") : raw)
-    .split(/\s*(?:,|\+)\s*|\s+/)
-    .map((source) => source.trim())
-    .filter(Boolean);
 }
 
 function shellQuote(value: string): string {

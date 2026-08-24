@@ -29,8 +29,9 @@ Runtime behavior not fully expressible in Commander help:
 - `@anthropic-ai/claude-agent-sdk` is an optional dependency of `ai-foreman`; `rafi create` does not install it into the target application. `rafi doctor --live-claude` runs an opt-in bounded no-tools request through the real adapter path and uses account quota.
 - `rafi plan` accepts only `STEP_STATUS: plan_complete` as a successful planner result, validates required plan sections before writing, writes versioned history to `<docs.root>/rafi-plans/<timestamp>.md`, and refreshes `<docs.root>/rafi-plan.md`.
 - Interactive `create`, `plan`, and ticket setup runs save compact, local recovery records under `.rafi/interviews/`, which Rafi adds to `.gitignore`. Records hold answers/checkpoints and redacted failure context—not transcripts or agent output. Use `rafi resume [project] --id <id>` to continue or `rafi resume [project] --discard <id>` to remove a record. Completed records are pruned after 30 days; incompatible records remain until discarded.
-- `rafi create` saves planning hints as `planning.sources`. `rafi plan` uses explicit `--sources` first, then those hints. Ticket setup uses those values only as its initial local-source prefill; completed ticket sources remain in `tickets.sources`.
-- `rafi tickets populate` uses explicit `--sources` first, then saved `tickets.sources` from `rafi-config.yaml`. When omitted, it checks `<docs.root>/rafi-plan.md`; interactive runs ask before using it, while non-interactive runs print next-step options when no source is available.
+- `rafi create` preserves the complete source description in the project-wide `sources` registry. It performs no source reads when planning is skipped; the next `rafi plan` or `rafi tickets plan` resolves it.
+- Both planners append immutable source versions to the same registry. Private copies live under ignored `.rafi/source-cache/`; team-visible copies live under `.rafi/sources/`. Use `rafi sources list|refresh|remove|storage` to manage them.
+- `rafi tickets populate` uses explicit `--sources` first, then compatible active registry sources. When omitted, it checks `<docs.root>/rafi-plan.md`; interactive runs ask before using it, while non-interactive runs print next-step options when no source is available.
 - `rafi start` and `ai-foreman start` can read saved `tickets.build` defaults from `rafi-config.yaml`; explicit flags such as `--completion`, `--no-branch-per-ticket`, `--no-create-pr`, and `--auto-merge-wait` / `--no-auto-merge-wait` win for the current run.
 
 ## `rafi`
@@ -47,6 +48,7 @@ Options:
   -h, --help                        display help for command
 
 Commands:
+  sources                           Inspect and manage the project-wide planning source registry.
   compile [options] <project>       Re-render .claude/, .codex/, AGENTS.md, and role bundles from
                                     an existing rafi-config.yaml.
   create [options] <project>        Run the walkthrough, write rafi-config.yaml, and compile the
@@ -130,24 +132,27 @@ Usage: rafi plan [options] [project]
 Create a ticket-maker-ready implementation plan from a brief and repo inspection.
 
 Arguments:
-  project                path to the target repo (default: ".")
+  project                  path to the target repo (default: ".")
 
 Options:
-  --brief <text>         planning brief
-  --brief-file <path>    file containing the planning brief
-  --sources <paths...>   source hint files, folders, or globs to check first
-  -a, --agent <agent>    planning agent (claude | codex)
-  -m, --model <model>    override the planning agent's model
-  --effort <level>       reasoning effort level (low|medium|high|xhigh)
-  --fast                 fast mode - lower latency
-  --resume-session <id>  resume a saved planner agent session
-  --revise [plan-id]     revise the latest or named approved plan lineage
-  --validate             validate the latest Markdown/structured plan pair without running an agent
-  --render               regenerate latest Markdown from validated structured data
-  --grill-me             use exhaustive one-question-at-a-time planning
-  --no-grill-me          use standard focused planning (default)
-  -y, --yes              skip confirmation prompt before running the planning agent
-  -h, --help             display help for command
+  --brief <text>           planning brief
+  --brief-file <path>      file containing the planning brief
+  --sources <paths...>     source hint files, folders, or globs to check first
+  --source-storage <mode>  storage for newly captured source versions (local | tracked)
+  -a, --agent <agent>      planning agent (claude | codex)
+  -m, --model <model>      override the planning agent's model
+  --effort <level>         reasoning effort level (low|medium|high|xhigh)
+  --fast                   fast mode - lower latency
+  --resume-session <id>    resume a saved planner agent session
+  --revise [plan-id]       revise the latest or named approved plan lineage
+  --validate               validate the latest Markdown/structured plan pair without running an
+                           agent
+  --render                 regenerate latest Markdown from validated structured data
+  --grill-me               use exhaustive one-question-at-a-time planning
+  --no-grill-me            use standard focused planning (default)
+  --skip-run-confirmation  skip only the duplicate run confirmation (used by interactive create)
+  -y, --yes                skip confirmation prompt before running the planning agent
+  -h, --help               display help for command
 ```
 
 ### `rafi tickets --help`
@@ -202,16 +207,17 @@ Usage: rafi tickets plan [options]
 Plan and approve ticket work through a guided, project-aware conversation.
 
 Options:
-  -p, --project <dir>    exact project directory (default: discover from cwd)
-  --brief <text>         initial description (primarily for recovery and non-interactive use)
-  -a, --agent <agent>    session runtime (claude | codex)
-  -m, --model <model>    session-only model override
-  --effort <level>       session-only reasoning override (low|medium|high|xhigh)
-  --resume-session <id>  resume the planning agent session
-  --grill-me             start in exhaustive one-question-at-a-time mode
-  --no-grill-me          start in standard focused mode (default)
-  -y, --yes              non-interactive mode; requires --brief and approves a valid proposal
-  -h, --help             display help for command
+  -p, --project <dir>      exact project directory (default: discover from cwd)
+  --brief <text>           initial description (primarily for recovery and non-interactive use)
+  -a, --agent <agent>      session runtime (claude | codex)
+  -m, --model <model>      session-only model override
+  --effort <level>         session-only reasoning override (low|medium|high|xhigh)
+  --resume-session <id>    resume the planning agent session
+  --source-storage <mode>  storage for newly captured source versions (local | tracked)
+  --grill-me               start in exhaustive one-question-at-a-time mode
+  --no-grill-me            start in standard focused mode (default)
+  -y, --yes                non-interactive mode; requires --brief and approves a valid proposal
+  -h, --help               display help for command
 ```
 
 ### `rafi tickets setup:init --help`
@@ -836,4 +842,75 @@ Arguments:
 Options:
   --dry-run   show the final preview without writing transaction state or changing files
   -h, --help  display help for command
+```
+
+### `rafi sources --help`
+
+```text
+Usage: rafi sources [options] [command]
+
+Inspect and manage the project-wide planning source registry.
+
+Options:
+  -h, --help                  display help for command
+
+Commands:
+  list [options]
+  refresh [options] [ids...]
+  remove [options] <id>
+  storage [options] [mode]
+  help [command]              display help for command
+```
+
+### `rafi sources list --help`
+
+```text
+Usage: rafi sources list [options]
+
+Options:
+  -p, --project <dir>  project directory (default: ".")
+  --all                include inactive sources
+  --json               print machine-readable JSON
+  -h, --help           display help for command
+```
+
+### `rafi sources refresh --help`
+
+```text
+Usage: rafi sources refresh [options] [ids...]
+
+Arguments:
+  ids                      source IDs (default: all active sources)
+
+Options:
+  -p, --project <dir>      project directory (default: ".")
+  --source-storage <mode>  storage for newly captured versions (local | tracked)
+  -h, --help               display help for command
+```
+
+### `rafi sources remove --help`
+
+```text
+Usage: rafi sources remove [options] <id>
+
+Arguments:
+  id                   source ID to deactivate
+
+Options:
+  -p, --project <dir>  project directory (default: ".")
+  -y, --yes            confirm removal non-interactively
+  -h, --help           display help for command
+```
+
+### `rafi sources storage --help`
+
+```text
+Usage: rafi sources storage [options] [mode]
+
+Arguments:
+  mode                 local or tracked
+
+Options:
+  -p, --project <dir>  project directory (default: ".")
+  -h, --help           display help for command
 ```
