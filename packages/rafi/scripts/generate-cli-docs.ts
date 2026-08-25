@@ -30,6 +30,8 @@ const cases: Array<[string, typeof program]> = [
   ["rafi tickets --help", commandByPath(["tickets"])],
   ["rafi tickets plan --help", commandByPath(["tickets", "plan"])],
   ["rafi tickets init --help", commandByPath(["tickets", "init"])],
+  ["rafi tickets setup:init --help", commandByPath(["tickets", "setup:init"])],
+  ["rafi tickets setup:update --help", commandByPath(["tickets", "setup:update"])],
   ["rafi tickets populate --help", commandByPath(["tickets", "populate"])],
   ["rafi tickets queue --help", commandByPath(["tickets", "queue"])],
   ["rafi build:resume --help", commandByPath(["build:resume"])],

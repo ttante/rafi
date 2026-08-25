@@ -113,13 +113,14 @@ export function buildActiveStatusRows(
   });
 }
 
-/** Human-readable queue blocks keep a whole unfinished stack and its resume point visible. */
+/** Human-readable queue blocks keep a whole unfinished batch and its resume point visible. */
 export function formatStackAwareQueue(ticketDefs: TicketDef[], states: Map<string, TicketState>, delivery?: DeliveryConfig): string[] {
-  if (!delivery?.stacks?.length) return buildNextQueue(ticketDefs, states, Number.MAX_SAFE_INTEGER).map((row) => `${row.ticket} ${row.status} ${row.title}`);
+  if (!delivery?.stacks?.length) return ["Batches: none configured. Queue is flat.", ...buildNextQueue(ticketDefs, states, Number.MAX_SAFE_INTEGER).map((row) => `${row.ticket} ${row.status} ${row.title}`)];
   const defs = new Map(ticketDefs.map((ticket) => [ticket.id, ticket]));
   const unitById = new Map(delivery.units.map((unit) => [unit.id, unit]));
   const stackedTickets = new Set<string>(); const lines: string[] = [];
-  for (const stack of delivery.stacks) {
+  lines.push(`Batches: ${delivery.stacks.length} configured.`);
+  for (const [index, stack] of delivery.stacks.entries()) {
     const nodes = normalizeStackNodes(stack, delivery.units, ticketDefs);
     const ticketIds = stack.units.flatMap((id) => unitById.get(id)?.tickets ?? []);
     ticketIds.forEach((id) => stackedTickets.add(id));
@@ -128,14 +129,23 @@ export function formatStackAwareQueue(ticketDefs: TicketDef[], states: Map<strin
     const next = ticketIds.find((id) => !terminal(states.get(id)?.status));
     const blockers = next && defs.get(next) ? resolveBlockers(defs.get(next)!, states) : [];
     const state = deriveStackState(stack, ticketIds, states, blockers);
-    lines.push(`=== STACK START: ${stack.name} (${stack.id}) ===`);
-    lines.push(`status=${state}; size=${ticketIds.length}; pr_depth=${nodes.length}; blockers=${blockers.join(",") || "none"}; completed_prefix=${completed.join(",") || "none"}; next=${next ?? "none"}`);
+    const units = stack.units.map((id) => unitById.get(id)).filter((unit): unit is NonNullable<typeof unit> => Boolean(unit));
+    const branchModes = [...new Set(units.map((unit) => unit.branch_mode))].join(",") || "unknown";
+    const prChain = units.some((unit) => unit.dependency_mode === "stack") || nodes.length > 1;
+    lines.push(`=== Batch ${index + 1}: ${stack.name} (${stack.id}) ===`);
+    lines.push(`status=${state}; tickets=${ticketIds.length}; branch_mode=${branchModes}; blockers=${blockers.join(",") || "none"}; completed=${completed.join(",") || "none"}; next=${next ?? "none"}`);
+    if (prChain) lines.push(`delivery=PR chain (${nodes.length} dependent branch${nodes.length === 1 ? "" : "es"})`);
     lines.push(`reviews=${stack.review_links?.join(",") || "none"}; remote_checked=${stack.remote_checked_at ?? "never"}${stack.remote_stale ? " (stale; run --refresh for a live check)" : ""}`);
     for (const id of ticketIds) lines.push(`${id} ${states.get(id)?.status ?? "planned"} ${defs.get(id)?.title ?? "unknown ticket"}`);
-    lines.push(`=== STACK END: ${stack.name} (${stack.id}) ===`);
+    lines.push(`=== End Batch ${index + 1}: ${stack.name} (${stack.id}) ===`);
   }
+  let unbatched = false;
   for (const ticket of ticketDefs.sort((a, b) => a.order - b.order)) {
     if (stackedTickets.has(ticket.id) || terminal(states.get(ticket.id)?.status)) continue;
+    if (!unbatched) {
+      lines.push("Unbatched tickets:");
+      unbatched = true;
+    }
     const blockers = resolveBlockers(ticket, states); lines.push(`${ticket.id} ${computeDisplayStatus(states.get(ticket.id)?.status ?? "planned", blockers)} ${ticket.title}`);
   }
   return lines;

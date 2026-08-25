@@ -161,7 +161,7 @@ const ticketsSetupConfig = {
       type: "object",
       additionalProperties: false,
       properties: {
-        branch_strategy: { enum: ["branch-per-ticket", "batch"] },
+        branch_strategy: { enum: ["current", "batch", "branch-per-ticket"] },
         completion: { enum: ["pr", "auto-merge", "direct-merge", "none"] },
         provider: { enum: ["auto", "github", "gitlab", "local"] },
         pr_ready: { type: "boolean" },

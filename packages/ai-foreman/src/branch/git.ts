@@ -37,13 +37,17 @@ export function generatedTrackerDirtyPaths(paths: { stateDb: string; progressDoc
   return out;
 }
 
-export function ensureCleanBaseWorktree(cwd: string, opts: BaseWorktreeCleanOptions = {}): void {
+export function collectBaseWorktreeDirtyPaths(cwd: string, opts: BaseWorktreeCleanOptions = {}): string[] {
   const allowedDirtyPaths = new Set([".tickets/.gitignore", ...(opts.allowedDirtyPaths ?? []).map(normalizeRepoPath)]);
   const status = runGit(cwd, ["status", "--porcelain", "--untracked-files=all"]).stdout;
-  const dirty = status.split("\n").filter(Boolean).filter((line) => {
+  return status.split("\n").filter(Boolean).filter((line) => {
     const path = normalizeRepoPath(line.slice(3));
     return !path.startsWith(".foreman/") && !allowedDirtyPaths.has(path);
   });
+}
+
+export function ensureCleanBaseWorktree(cwd: string, opts: BaseWorktreeCleanOptions = {}): void {
+  const dirty = collectBaseWorktreeDirtyPaths(cwd, opts);
   if (dirty.length > 0) {
     throw new Error(`base worktree has uncommitted changes:\n${dirty.join("\n")}`);
   }

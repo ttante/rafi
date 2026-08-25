@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import type { ProjectConfig } from "rafi-spec";
+import type { ProjectConfig, TicketBuildBranchStrategy } from "rafi-spec";
 import {
   compile,
   formatRuntimeUpdateFailure,
@@ -45,9 +45,10 @@ import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
 import { buildPlanCommand, runPlanWorkflow } from "./plan.js";
 import { buildTicketPlanCommand } from "./ticketPlan.js";
 import { buildSourcesCommand } from "./sources.js";
-import { buildAgentsCommand } from "./agents.js";
+import { buildAgentsCommand, defaultAgentDefaults, promptSessionStrategyDefaults } from "./agents.js";
 import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildUninstallCommand, interpretUninstallInstruction } from "./uninstall.js";
+import { createGitignoreModeFromSelection, updateCreateGitignore, type CreateGitignoreMode } from "./gitignore.js";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 import {
   checkpointInterview,
@@ -129,7 +130,7 @@ program
     // Detect timezone from the runtime — no need to ask
     const detectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-    let answers = {
+    let answers: WalkthroughAnswers = {
       ...defaultAnswers(),
       ...(targetPkgName ? { appName: targetPkgName } : {}),
       timezone: detectedTimezone,
@@ -264,6 +265,40 @@ program
         checkpointCreateAnswer("compile-config", "planningSources", planningSources);
       }
 
+      const branchStrategy = await select({
+        message: "Default ticket work mode:",
+        initialValue: "branch-per-ticket",
+        options: [
+          { value: "current", label: "One branch - work the queue on the current branch" },
+          { value: "batch", label: "Batch branch - use shared branches for explicit delivery batches" },
+          { value: "branch-per-ticket", label: "Branch per ticket - isolate each ticket on its own branch" },
+        ],
+      });
+      if (isCancel(branchStrategy)) process.exit(0);
+      checkpointCreateAnswer("agent-session-defaults", "branchStrategy", String(branchStrategy));
+
+      const agentDefaultsChoice = await promptSessionStrategyDefaults(defaultAgentDefaults());
+      checkpointCreateAnswer("gitignore-choice", "agentSessionDefaults", agentDefaultsChoice.defaults.roles);
+
+      let gitignoreMode: CreateGitignoreMode | undefined;
+      const addRafiGitignore = await confirm({
+        message: "Add Rafi files to .gitignore?",
+        initialValue: false,
+      });
+      if (isCancel(addRafiGitignore)) process.exit(0);
+      if (addRafiGitignore) {
+        const ignoreChoice = await select({
+          message: "Which Rafi files should be ignored?",
+          options: [
+            { value: "local-junk", label: "Local junk - logs, cache, recovery, local ticket DB" },
+            { value: "all-rafi", label: "All Rafi - every file Rafi created" },
+          ],
+        });
+        if (isCancel(ignoreChoice)) process.exit(0);
+        gitignoreMode = ignoreChoice as CreateGitignoreMode;
+      }
+      checkpointCreateAnswer("compile-config", "gitignoreMode", gitignoreMode ?? "none");
+
       answers = {
         appName: String(appName),
         timezone: detectedTimezone,
@@ -278,6 +313,9 @@ program
         docsRoot,
         planningSources,
         sourceStorage,
+        branchStrategy: branchStrategy as TicketBuildBranchStrategy,
+        agentDefaults: agentDefaultsChoice.defaults,
+        gitignoreMode: gitignoreMode ?? "none",
       };
       if (interview) interview = checkpointInterview(targetDir, interview, {
         checkpoint: "compile-config",
@@ -296,6 +334,7 @@ program
     let config = await applyCollisionChoices(targetDir, buildProjectConfig(answers), rootFileMode);
     if (interview) interview = checkpointInterview(targetDir, interview, { checkpoint: "write-config" });
     writeRafiConfigYaml(targetDir, config);
+    updateCreateGitignore(targetDir, createGitignoreModeFromSelection(answers.gitignoreMode));
     config = await compileCreateConfig(
       targetDir,
       config,
@@ -304,6 +343,7 @@ program
       },
       promptRootUpdateRecovery,
     );
+    updateCreateGitignore(targetDir, createGitignoreModeFromSelection(answers.gitignoreMode));
 
     const finalTargets = await ensureCreateRuntimesReady(targetDir, config, Boolean(opts.defaults));
     if (!sameTargets(config.harness.targets, finalTargets)) {
@@ -316,6 +356,7 @@ program
         },
       };
       writeRafiConfigYaml(targetDir, config);
+      updateCreateGitignore(targetDir, createGitignoreModeFromSelection(answers.gitignoreMode));
       config = await compileCreateConfig(
         targetDir,
         config,
@@ -324,6 +365,7 @@ program
         },
         promptRootUpdateRecovery,
       );
+      updateCreateGitignore(targetDir, createGitignoreModeFromSelection(answers.gitignoreMode));
       if (!sameTargets(previousTargets, config.harness.targets) && sameTargets(config.harness.targets, finalTargets)) {
         console.log(`rafi: switched runtime target to ${config.harness.targets.join(" and ")} and updated ${RAFI_CONFIG_FILE}.`);
       }
@@ -339,6 +381,7 @@ program
     const handoff = await runCreateTicketHandoff(targetDir, config, answers, Boolean(opts.defaults), {
       planningMode: createArgv.includes("--grill-me") ? "exhaustive" : createArgv.includes("--no-grill-me") ? "standard" : undefined,
       interview,
+      gitignoreMode: createGitignoreModeFromSelection(answers.gitignoreMode),
     });
     if (handoff.interview) interview = handoff.interview;
     if (interview) {
@@ -635,11 +678,12 @@ async function runCreateTicketHandoff(
   config: ProjectConfig,
   answers: WalkthroughAnswers,
   defaultsMode: boolean,
-  opts: { planningMode?: "standard" | "exhaustive"; interview?: InterviewRecord } = {},
+  opts: { planningMode?: "standard" | "exhaustive"; interview?: InterviewRecord; gitignoreMode?: CreateGitignoreMode } = {},
 ): Promise<CreateHandoffResult> {
   let interview = opts.interview;
   const docsRoot = config.docs?.root ?? DEFAULT_DOCS_ROOT;
   const setupCommand = setupInitCommand(targetDir, answers, docsRoot);
+  const setupArgs = setupInitArgs(targetDir, answers, docsRoot);
   const planCommand = `rafi plan ${shellQuote(targetDir)}`;
   const populateCommand = `rafi tickets populate --project ${shellQuote(targetDir)}`;
   const interactive = !defaultsMode && process.stdin.isTTY && process.stdout.isTTY;
@@ -655,7 +699,7 @@ async function runCreateTicketHandoff(
   const { confirm, select, isCancel } = await import("@clack/prompts");
   const runPlan = await confirm({
     message: "Run `rafi plan .` now?",
-    initialValue: false,
+    initialValue: true,
   });
   if (isCancel(runPlan)) return { journeyComplete: false, interview };
   if (runPlan) {
@@ -696,18 +740,21 @@ async function runCreateTicketHandoff(
       console.log(`rafi create: after plan completes, resume with:\n  rafi resume ${shellQuote(targetDir)}`);
       return { journeyComplete: false, interview };
     }
+    updateCreateGitignore(targetDir, opts.gitignoreMode);
   }
 
   if (interview) {
     interview = checkpointInterview(targetDir, interview, { checkpoint: "ticket-setup-prompt" });
   }
+  updateCreateGitignore(targetDir, opts.gitignoreMode);
   const runSetup = await confirm({
     message: "Run `rafi tickets setup:init` now?",
     initialValue: true,
   });
   if (isCancel(runSetup)) return { journeyComplete: false, interview };
   if (runSetup) {
-    await buildTicketsCommand().parseAsync(["node", "rafi-tickets", "setup:init", "--project", targetDir]);
+    await buildTicketsCommand().parseAsync(["node", "rafi-tickets", ...setupArgs]);
+    updateCreateGitignore(targetDir, opts.gitignoreMode);
   } else {
     console.log("\nrafi: ticket setup commands:");
     console.log(`  ${setupCommand}`);
@@ -719,15 +766,22 @@ async function runCreateTicketHandoff(
 }
 
 function setupInitCommand(targetDir: string, answers: WalkthroughAnswers, docsRoot: string): string {
+  const [command, ...args] = setupInitArgs(targetDir, answers, docsRoot);
+  const shellArgs = args.map((arg, index) => index % 2 === 1 ? shellQuote(arg) : arg);
+  return ["rafi", "tickets", command, ...shellArgs].join(" ");
+}
+
+function setupInitArgs(targetDir: string, answers: WalkthroughAnswers, docsRoot: string): string[] {
   const args = [
-    "rafi tickets setup:init",
+    "setup:init",
     "--project",
-    shellQuote(targetDir),
+    targetDir,
     "--app-name",
-    shellQuote(answers.appName),
+    answers.appName,
   ];
-  if (docsRoot !== DEFAULT_DOCS_ROOT) args.push("--docs-root", shellQuote(docsRoot));
-  return args.join(" ");
+  if (docsRoot !== DEFAULT_DOCS_ROOT) args.push("--docs-root", docsRoot);
+  if (answers.branchStrategy) args.push("--branch-strategy", answers.branchStrategy);
+  return args;
 }
 
 function runSelfCommand(args: string[]): void {
@@ -793,8 +847,11 @@ async function resumeCreateTicketSetupPrompt(projectDir: string, record: Intervi
   const answers = { ...defaultAnswers(), ...record.answers } as WalkthroughAnswers;
   const docsRoot = loaded.config.docs?.root ?? DEFAULT_DOCS_ROOT;
   const setupCommand = setupInitCommand(projectDir, answers, docsRoot);
+  const setupArgs = setupInitArgs(projectDir, answers, docsRoot);
   const populateCommand = `rafi tickets populate --project ${shellQuote(projectDir)}`;
+  const gitignoreMode = createGitignoreModeFromSelection(answers.gitignoreMode);
   const { confirm, isCancel } = await import("@clack/prompts");
+  updateCreateGitignore(projectDir, gitignoreMode);
   const runSetup = await confirm({
     message: "Run `rafi tickets setup:init` now?",
     initialValue: true,
@@ -804,7 +861,8 @@ async function resumeCreateTicketSetupPrompt(projectDir: string, record: Intervi
     return;
   }
   if (runSetup) {
-    await buildTicketsCommand().parseAsync(["node", "rafi-tickets", "setup:init", "--project", projectDir]);
+    await buildTicketsCommand().parseAsync(["node", "rafi-tickets", ...setupArgs]);
+    updateCreateGitignore(projectDir, gitignoreMode);
     completeInterview(projectDir, record);
     return;
   }

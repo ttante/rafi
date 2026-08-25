@@ -225,41 +225,36 @@ Options:
 ```text
 Usage: rafi tickets setup:init [options]
 
-Configure ticket sources, populate defaults, and build defaults in
-rafi-config.yaml.
+Configure ticket sources, populate defaults, and build defaults in rafi-config.yaml.
 
 Options:
-  -p, --project <dir>         project directory (default: cwd)
-  --defaults                  skip prompts and use recommended ticket setup
-                              defaults
-  -y, --yes                   skip prompts where possible
-  --app-name <name>           application name for a new minimal
-                              rafi-config.yaml
-  --docs-root <dir>           repo-relative docs root for a new minimal
-                              rafi-config.yaml and ticket docs
-  --runtime <runtime>         runtime targets for a new minimal
-                              rafi-config.yaml (both | claude | codex)
-  --local-source <paths...>   saved local ticket source files, folders, or
-                              globs
-  --linear                    add a Linear source using LINEAR_API_KEY
-  --linear-team-key <key>     Linear team key filter
-  --linear-filter <filter>    Linear IssueFilter JSON or title search text
-  --jira-site <url>           Jira Cloud site URL
-  --jira-jql <jql>            Jira JQL query
-  --url-source <urls...>      add public HTTP(S) source URLs
-  --agent-preference <agent>  populate runtime preference (configured | claude
-                              | codex)
-  --completion <mode>         build completion default (pr | auto-merge |
-                              direct-merge | none)
-  --provider <provider>       PR/MR provider default (auto | github | gitlab |
-                              local)
-  --auto-merge-wait           wait for dependency PR/MRs to merge before
-                              starting dependent tickets
-  --auto-merge-timeout-minutes <n>
-                              auto-merge dependency wait timeout in minutes
-                              (blank means no timeout)
-  --skip-access-check         do not validate configured source access during setup
-  -h, --help                  display help for command
+  -p, --project <dir>               project directory (default: cwd)
+  --defaults                        skip prompts and use recommended ticket setup defaults
+  -y, --yes                         skip prompts where possible
+  --app-name <name>                 application name for a new minimal rafi-config.yaml
+  --docs-root <dir>                 repo-relative docs root for a new minimal rafi-config.yaml and
+                                    ticket docs
+  --runtime <runtime>               runtime targets for a new minimal rafi-config.yaml (both |
+                                    claude | codex)
+  --local-source <paths...>         saved local ticket source files, folders, or globs
+  --linear                          add a Linear source using LINEAR_API_KEY
+  --linear-team-key <key>           Linear team key filter
+  --linear-filter <filter>          Linear IssueFilter JSON or title search text
+  --jira-site <url>                 Jira Cloud site URL
+  --jira-jql <jql>                  Jira JQL query
+  --url-source <urls...>            add public HTTP(S) source URLs
+  --agent-preference <agent>        populate runtime preference (configured | claude | codex)
+  --branch-strategy <strategy>      build branch strategy default (current | batch |
+                                    branch-per-ticket)
+  --completion <mode>               build completion default (pr | auto-merge | direct-merge |
+                                    none)
+  --provider <provider>             PR/MR provider default (auto | github | gitlab | local)
+  --auto-merge-wait                 wait for dependency PR/MRs to merge before starting dependent
+                                    tickets
+  --auto-merge-timeout-minutes <n>  auto-merge dependency wait timeout in minutes (blank means no
+                                    timeout)
+  --skip-access-check               do not validate configured source access during setup
+  -h, --help                        display help for command
 ```
 
 ### `rafi tickets setup:update --help`
@@ -270,37 +265,34 @@ Usage: rafi tickets setup:update [options]
 Update selected ticket setup sections in rafi-config.yaml.
 
 Options:
-  -p, --project <dir>         project directory (default: cwd)
-  --defaults                  skip prompts and keep existing values unless
-                              explicit options are provided
-  -y, --yes                   skip prompts where possible
-  --app-name <name>           application name for a new minimal
-                              rafi-config.yaml
-  --docs-root <dir>           repo-relative docs root for a new minimal
-                              rafi-config.yaml and ticket docs
-  --runtime <runtime>         runtime targets for a new minimal
-                              rafi-config.yaml (both | claude | codex)
-  --local-source <paths...>   replace saved local ticket source files, folders,
-                              or globs
-  --linear                    replace saved sources with a Linear source using
-                              LINEAR_API_KEY
-  --linear-team-key <key>     Linear team key filter
-  --linear-filter <filter>    Linear IssueFilter JSON or title search text
-  --jira-site <url>           Jira Cloud site URL
-  --jira-jql <jql>            Jira JQL query
-  --agent-preference <agent>  populate runtime preference (configured | claude
-                              | codex)
-  --completion <mode>         build completion default (pr | auto-merge |
-                              direct-merge | none)
-  --provider <provider>       PR/MR provider default (auto | github | gitlab |
-                              local)
-  --auto-merge-wait           wait for dependency PR/MRs to merge before
-                              starting dependent tickets
-  --auto-merge-timeout-minutes <n>
-                              auto-merge dependency wait timeout in minutes
-                              (blank means no timeout)
-  --skip-access-check         do not validate Linear/Jira access during setup
-  -h, --help                  display help for command
+  -p, --project <dir>               project directory (default: cwd)
+  --defaults                        skip prompts and keep existing values unless explicit options
+                                    are provided
+  -y, --yes                         skip prompts where possible
+  --app-name <name>                 application name for a new minimal rafi-config.yaml
+  --docs-root <dir>                 repo-relative docs root for a new minimal rafi-config.yaml and
+                                    ticket docs
+  --runtime <runtime>               runtime targets for a new minimal rafi-config.yaml (both |
+                                    claude | codex)
+  --local-source <paths...>         replace saved local ticket source files, folders, or globs
+  --linear                          replace saved sources with a Linear source using LINEAR_API_KEY
+  --linear-team-key <key>           Linear team key filter
+  --linear-filter <filter>          Linear IssueFilter JSON or title search text
+  --jira-site <url>                 Jira Cloud site URL
+  --jira-jql <jql>                  Jira JQL query
+  --url-source <urls...>            replace saved sources with public HTTP(S) URLs
+  --agent-preference <agent>        populate runtime preference (configured | claude | codex)
+  --branch-strategy <strategy>      build branch strategy default (current | batch |
+                                    branch-per-ticket)
+  --completion <mode>               build completion default (pr | auto-merge | direct-merge |
+                                    none)
+  --provider <provider>             PR/MR provider default (auto | github | gitlab | local)
+  --auto-merge-wait                 wait for dependency PR/MRs to merge before starting dependent
+                                    tickets
+  --auto-merge-timeout-minutes <n>  auto-merge dependency wait timeout in minutes (blank means no
+                                    timeout)
+  --skip-access-check               do not validate configured source access during setup
+  -h, --help                        display help for command
 ```
 
 ### `rafi tickets init --help`
@@ -515,7 +507,7 @@ Print the ticket queue to stdout.
 Options:
   -p, --project <dir>  project directory (default: cwd)
   --limit <n>          override view limit
-  --refresh            query GitHub/GitLab and refresh cached stack review state
+  --refresh            query GitHub/GitLab and refresh cached batch review state
   -h, --help           display help for command
 ```
 

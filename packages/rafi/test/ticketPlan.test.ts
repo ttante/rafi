@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildTicketPlanInstruction } from "../src/ticketPlan.js";
+import { applyTicketPlanWorkModeDefault, buildTicketPlanInstruction } from "../src/ticketPlan.js";
+import type { TicketPlanProposal } from "ai-foreman/ticket-planning.js";
 
 test("guided ticket plan instruction is read-only, conversational, and exact-apply ready", () => {
   const instruction = buildTicketPlanInstruction({
@@ -20,4 +21,28 @@ test("guided ticket plan instruction is read-only, conversational, and exact-app
   assert.match(instruction, /replace_existing/);
   assert.match(instruction, /RAFI_PROPOSAL_START/);
   assert.match(instruction, /proposal_ready/);
+});
+
+test("ticket plan work-mode default fills missing build defaults without overriding explicit planner choice", () => {
+  const proposal: TicketPlanProposal = {
+    version: 1,
+    title: "Plan",
+    markdown: "# Plan",
+    additions: [],
+    edits: [],
+    supersessions: [],
+    state_changes: [],
+    source_reconciliation: [],
+    future_work: [],
+    next: { ticket_ids: [], replace_existing: false },
+  };
+
+  const filled = applyTicketPlanWorkModeDefault(proposal, "current");
+  assert.equal(filled.build_defaults?.branch_strategy, "current");
+
+  const explicit = applyTicketPlanWorkModeDefault({
+    ...proposal,
+    build_defaults: { branch_strategy: "batch" },
+  }, "current");
+  assert.equal(explicit.build_defaults?.branch_strategy, "batch");
 });

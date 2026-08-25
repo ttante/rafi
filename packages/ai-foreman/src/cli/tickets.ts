@@ -224,6 +224,7 @@ interface SetupCommandOptions {
   jiraSite?: string;
   jiraJql?: string;
   urlSource?: string[];
+  branchStrategy?: string;
   completion?: string;
   provider?: string;
   autoMergeWait?: boolean;
@@ -372,11 +373,20 @@ async function collectTicketSetupPatch(
   const buildPatch: Partial<TicketsSetupConfig["build"]> = {};
 
   if (opts.agentPreference) populatePatch.agent_preference = parseAgentPreference(opts.agentPreference);
+  if (opts.branchStrategy) buildPatch.branch_strategy = parseBranchStrategy(opts.branchStrategy);
   if (opts.completion) buildPatch.completion = parseCompletionMode(opts.completion);
   if (opts.provider) buildPatch.provider = parseProvider(opts.provider);
   if (opts.autoMergeWait !== undefined) buildPatch.auto_merge_wait = Boolean(opts.autoMergeWait);
   if (opts.autoMergeTimeoutMinutes !== undefined) {
     buildPatch.auto_merge_timeout_minutes = parseOptionalPositiveInteger(opts.autoMergeTimeoutMinutes, "--auto-merge-timeout-minutes");
+  }
+  if (buildPatch.branch_strategy === "current") {
+    if (buildPatch.completion && buildPatch.completion !== "none") fail("--branch-strategy current requires --completion none");
+    buildPatch.completion = "none";
+    buildPatch.provider = buildPatch.provider ?? "local";
+    buildPatch.pr_ready = false;
+    buildPatch.auto_merge_wait = false;
+    buildPatch.auto_merge_timeout_minutes = null;
   }
 
   if (!shouldPrompt(opts)) {
@@ -425,6 +435,31 @@ async function collectTicketSetupPatch(
   }
   if (section === "build" || section === "all") {
     const recommended = recommendedBuildDefaults(dir);
+    const strategy = await select({
+      message: "Default ticket work mode:",
+      initialValue: current.build.branch_strategy,
+      options: [
+        { value: "current", label: "One branch - work the queue on the current branch" },
+        { value: "batch", label: "Batch branch - use shared branches for explicit delivery batches" },
+        { value: "branch-per-ticket", label: "Branch per ticket - isolate each ticket on its own branch" },
+      ],
+    });
+    if (isCancel(strategy)) process.exit(0);
+    buildPatch.branch_strategy = strategy as TicketsSetupConfig["build"]["branch_strategy"];
+    if (strategy === "current") {
+      buildPatch.completion = "none";
+      buildPatch.provider = "local";
+      buildPatch.pr_ready = false;
+      buildPatch.merge_method = "squash";
+      buildPatch.cleanup = true;
+      buildPatch.auto_merge_wait = false;
+      buildPatch.auto_merge_timeout_minutes = null;
+      return {
+        sources,
+        populate: populatePatch,
+        build: buildPatch,
+      };
+    }
     const completion = await select({
       message: "Default completion behavior for branch ticket runs:",
       initialValue: current.build.completion === "none" ? recommended.completion : current.build.completion,
@@ -436,7 +471,6 @@ async function collectTicketSetupPatch(
       ],
     });
     if (isCancel(completion)) process.exit(0);
-    buildPatch.branch_strategy = "branch-per-ticket";
     buildPatch.completion = completion as TicketBuildCompletionMode;
     buildPatch.provider = recommended.provider;
     buildPatch.pr_ready = completion === "auto-merge";
@@ -604,6 +638,11 @@ function parseRuntimeTargets(value: string | undefined): HarnessTarget[] | undef
 function parseCompletionMode(value: string): TicketBuildCompletionMode {
   if (["pr", "auto-merge", "direct-merge", "none"].includes(value)) return value as TicketBuildCompletionMode;
   fail("--completion must be one of: pr, auto-merge, direct-merge, none");
+}
+
+function parseBranchStrategy(value: string): TicketsSetupConfig["build"]["branch_strategy"] {
+  if (["current", "batch", "branch-per-ticket"].includes(value)) return value as TicketsSetupConfig["build"]["branch_strategy"];
+  fail("--branch-strategy must be one of: current, batch, branch-per-ticket");
 }
 
 function parseProvider(value: string): TicketsSetupConfig["build"]["provider"] {
@@ -956,6 +995,7 @@ export function buildTicketsCommand(): Command {
     .option("--jira-jql <jql>", "Jira JQL query")
     .option("--url-source <urls...>", "add public HTTP(S) source URLs")
     .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
+    .option("--branch-strategy <strategy>", "build branch strategy default (current | batch | branch-per-ticket)")
     .option("--completion <mode>", "build completion default (pr | auto-merge | direct-merge | none)")
     .option("--provider <provider>", "PR/MR provider default (auto | github | gitlab | local)")
     .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
@@ -986,6 +1026,7 @@ export function buildTicketsCommand(): Command {
     .option("--jira-jql <jql>", "Jira JQL query")
     .option("--url-source <urls...>", "replace saved sources with public HTTP(S) URLs")
     .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
+    .option("--branch-strategy <strategy>", "build branch strategy default (current | batch | branch-per-ticket)")
     .option("--completion <mode>", "build completion default (pr | auto-merge | direct-merge | none)")
     .option("--provider <provider>", "PR/MR provider default (auto | github | gitlab | local)")
     .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
@@ -1375,7 +1416,7 @@ export function buildTicketsCommand(): Command {
     .description("Print the ticket queue to stdout.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--limit <n>", "override view limit")
-    .option("--refresh", "query GitHub/GitLab and refresh cached stack review state")
+    .option("--refresh", "query GitHub/GitLab and refresh cached batch review state")
     .action((opts) => {
       try {
         const dir = cwd(opts);
@@ -1385,6 +1426,7 @@ export function buildTicketsCommand(): Command {
           if (!lines.length) console.log("No remaining tickets."); else for (const line of lines) console.log(line);
           return;
         }
+        console.log("Batches: none configured. Queue is flat.");
         const rows = cmdQueue(dir, opts.limit !== undefined ? Number(opts.limit) : undefined);
         if (rows.length === 0) {
           console.log("No remaining tickets.");

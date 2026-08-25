@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:pa
 import { DOCS_DIR, loadDocsIndex, render } from "special-agents";
 import type { ProjectFlags } from "rafi-spec";
 import { DEFAULT_DOCS_ROOT } from "./project.js";
+import { capturePreimage, finalizeOwnedWrite } from "./ownership.js";
 
 export interface CopyDocsOptions {
   force?: boolean;
@@ -103,9 +104,11 @@ export function copyDocs(
     if (!opts.force && existsSync(dest)) continue;
 
     mkdirSync(dirname(dest), { recursive: true });
+    const ownership = capturePreimage(targetDir, `${docsRoot}/${entry.path}`, `docs:${entry.path}`);
     const raw = readFileSync(join(DOCS_DIR, entry.path), "utf8");
     const rendered = render(raw, { vars: { docsRoot }, flags: {} });
     writeFileSync(dest, rendered, "utf8");
+    finalizeOwnedWrite(targetDir, ownership);
     written.push(entry.path);
   }
 

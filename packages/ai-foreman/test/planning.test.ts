@@ -8,6 +8,7 @@ import { cmdInit } from "../src/tickets/commands.js";
 import { loadTickets } from "../src/tickets/ticketLoader.js";
 import { loadTicketsConfig, resolveTicketPaths } from "../src/tickets/config.js";
 import { StateDb } from "../src/tickets/stateDb.js";
+import { loadTicketSetupConfig } from "../src/tickets/setupConfig.js";
 import {
   applyApprovedTicketPlan,
   extractTicketPlanProposal,
@@ -62,6 +63,18 @@ test("approved proposal applies exact tickets, next state, artifacts, and valida
   assert.ok(existsSync(join(project, applied.artifacts[1]!)));
   assert.match(readFileSync(paths.progressDoc, "utf8"), /T001/);
   assert.match(readFileSync(join(project, applied.backupDir, "journal.json"), "utf8"), /"status": "committed"/);
+});
+
+test("approved proposal saves ticket build defaults", () => {
+  const project = dir();
+  cmdInit(project, { appName: "Build Defaults", docsRoot: "docs" });
+  const expected = ticketPlanningFingerprint(project);
+  const value = proposal();
+  value.build_defaults = { branch_strategy: "current" };
+
+  applyApprovedTicketPlan(project, value, { expectedFingerprint: expected, docsRoot: "docs" });
+
+  assert.equal(loadTicketSetupConfig(project)?.build.branch_strategy, "current");
 });
 
 test("apply detects drift and rolls back YAML when a SQLite disposition fails", () => {

@@ -16,6 +16,9 @@ const packageJson = JSON.parse(
 const aiForemanPackageJson = JSON.parse(
   readFileSync(join(PKG_DIR, "..", "ai-foreman", "package.json"), "utf8"),
 ) as { version: string };
+const specPackageJson = JSON.parse(
+  readFileSync(join(PKG_DIR, "..", "spec", "package.json"), "utf8"),
+) as { version: string };
 
 function packList(): string[] {
   const out = execSync("npm pack --dry-run --json 2>/dev/null", {
@@ -58,12 +61,11 @@ test("@rafi-ai/cli pack includes LICENSE", () => {
 });
 
 test("@rafi-ai/cli depends on published rafi-spec", () => {
-  assert.equal(packageJson.dependencies?.["rafi-spec"], "0.8.1");
+  assert.equal(packageJson.dependencies?.["rafi-spec"], specPackageJson.version);
   assert.ok(!packageJson.bundledDependencies?.includes("rafi-spec"), "rafi-spec should not be bundled");
   assert.ok(packageJson.dependencies?.ajv, "ajv must be a direct dependency for rafi-spec runtime imports");
 });
 
 test("@rafi-ai/cli depends on the published ai-foreman version", () => {
-  assert.equal(aiForemanPackageJson.version, "1.7.1");
   assert.equal(packageJson.dependencies?.["ai-foreman"], aiForemanPackageJson.version);
 });

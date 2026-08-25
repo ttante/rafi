@@ -48,6 +48,34 @@ function makeDef(id: string, order: number, overrides: Partial<TicketDef> = {}):
   };
 }
 
+test("runBranchPlan skips base worktree cleanliness check when policy is skip", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "foreman-branch-skip-clean-test-"));
+  try {
+    const summaries = await runBranchPlan({
+      projectDir: dir,
+      runId: "run-1",
+      plan: {
+        baseRef: "main",
+        nodes: [],
+        issues: [{ code: "blocked", message: "blocked before work", blocking: true }],
+      },
+      log: new Log(join(dir, ".foreman", "test.jsonl")),
+      notificationsEnabled: false,
+      qaEnabled: false,
+      createPr: false,
+      prReady: false,
+      keepWorktrees: false,
+      baseWorktreePolicy: "skip",
+      createBuilder: async () => {
+        throw new Error("builder should not be created");
+      },
+    });
+    assert.equal(summaries[0]?.buildStatus, "blocked");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 class FakeBuilder implements BuilderAdapter {
   readonly agent = "codex" as const;
   private turnCount = 0;

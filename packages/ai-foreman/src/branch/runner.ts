@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { WorkflowDb } from "../workflowDb.js";
 
 export interface DeliveryUnitSession { unitId: string; branch: string; worktreePath: string; sessionId: string; ticket: string; }
+export type BaseWorktreePolicy = "enforce" | "warn" | "skip";
 
 export function readDeliveryUnitSession(projectDir: string, unitId: string): DeliveryUnitSession | undefined {
   const path = deliverySessionPath(projectDir, unitId);
@@ -60,6 +61,7 @@ export interface BranchRunnerOptions {
   autoMergeTimeoutMinutes?: number | null;
   mergeMethod?: MergeMethod;
   allowedBaseDirtyPaths?: string[];
+  baseWorktreePolicy?: BaseWorktreePolicy;
   trackerPaths?: { progressDoc: string; archiveDoc: string };
   resumeSessions?: Map<string, { worktreePath: string; sessionId: string }>;
   createBuilder: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>;
@@ -71,7 +73,18 @@ export interface BranchRunnerOptions {
 }
 
 export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRunSummary[]> {
-  ensureCleanBaseWorktree(opts.projectDir, { allowedDirtyPaths: opts.allowedBaseDirtyPaths });
+  const baseWorktreePolicy = opts.baseWorktreePolicy ?? "enforce";
+  if (baseWorktreePolicy !== "skip") {
+    try {
+      ensureCleanBaseWorktree(opts.projectDir, { allowedDirtyPaths: opts.allowedBaseDirtyPaths });
+    } catch (error) {
+      if (baseWorktreePolicy === "warn") {
+        console.warn(`foreman: warning: ${error instanceof Error ? error.message : String(error)}`);
+      } else {
+        throw error;
+      }
+    }
+  }
   ensureForemanExcluded(opts.projectDir);
 
   const completionMode: CompletionMode = opts.completionMode ?? (opts.createPr ? "pr" : "none");

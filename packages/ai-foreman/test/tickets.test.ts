@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse, stringify } from "yaml";
 
-import { buildNextQueue } from "../src/tickets/queue.js";
+import { buildNextQueue, formatStackAwareQueue } from "../src/tickets/queue.js";
 import { computeDisplayStatus, resolveBlockers } from "../src/tickets/blockers.js";
 import { validateTicketDefs, detectCycles } from "../src/tickets/ticketLoader.js";
 import {
@@ -458,6 +458,29 @@ test("buildNextQueue: ranks are contiguous starting at 1", () => {
   const defs = Array.from({ length: 5 }, (_, i) => makeDef(`T00${i + 1}`, (i + 1) * 1000));
   const rows = buildNextQueue(defs, new Map(), 50);
   rows.forEach((r, i) => assert.equal(r.rank, i + 1));
+});
+
+test("formatStackAwareQueue: flat queue states that no batches are configured", () => {
+  const lines = formatStackAwareQueue([makeDef("T001", 1000)], new Map());
+  assert.equal(lines[0], "Batches: none configured. Queue is flat.");
+  assert.match(lines.join("\n"), /T001 next Ticket T001/);
+});
+
+test("formatStackAwareQueue: delivery stacks are labeled as batches with PR-chain wording", () => {
+  const defs = [makeDef("T001", 1000), makeDef("T002", 2000)];
+  const lines = formatStackAwareQueue(defs, new Map(), {
+    version: 1,
+    units: [
+      { id: "u1", tickets: ["T001"], branch_mode: "per-ticket", dependency_mode: "stack" },
+      { id: "u2", tickets: ["T002"], branch_mode: "per-ticket", dependency_mode: "stack", depends_on: ["u1"] },
+    ],
+    stacks: [{ id: "s1", name: "Checkout", units: ["u1", "u2"] }],
+  });
+  const output = lines.join("\n");
+  assert.match(output, /Batches: 1 configured/);
+  assert.match(output, /=== Batch 1: Checkout \(s1\) ===/);
+  assert.match(output, /delivery=PR chain/);
+  assert.doesNotMatch(output, /STACK START/);
 });
 
 test("buildNextQueue: sorted by order not by ID", () => {

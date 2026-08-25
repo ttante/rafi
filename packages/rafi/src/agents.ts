@@ -31,6 +31,75 @@ export const DEFAULT_SESSION_STRATEGY: Readonly<Record<ConfigurableAgentRole, Se
   uninstaller: "fresh",
 };
 
+export function defaultAgentDefaults(): AgentDefaultsV1 {
+  return {
+    version: 1,
+    revision: 0,
+    roles: Object.fromEntries(CONFIGURABLE_ROLES.map((role) => [role, { session_strategy: DEFAULT_SESSION_STRATEGY[role] }])) as AgentDefaultsV1["roles"],
+  };
+}
+
+export function normalizeSessionStrategyDefaults(defaults?: AgentDefaultsV1): AgentDefaultsV1 {
+  const base = structuredClone(defaults ?? defaultAgentDefaults());
+  base.version = 1;
+  base.revision ??= 0;
+  base.roles ??= {};
+  for (const role of CONFIGURABLE_ROLES) {
+    base.roles[role] = {
+      ...base.roles[role],
+      session_strategy: base.roles[role]?.session_strategy ?? DEFAULT_SESSION_STRATEGY[role],
+    };
+  }
+  return base;
+}
+
+export function formatSessionStrategyDefaults(defaults?: AgentDefaultsV1): string {
+  const normalized = normalizeSessionStrategyDefaults(defaults);
+  return CONFIGURABLE_ROLES
+    .map((role) => `${role}: ${normalized.roles[role]?.session_strategy ?? DEFAULT_SESSION_STRATEGY[role]}`)
+    .join(", ");
+}
+
+export async function promptSessionStrategyDefaults(defaults?: AgentDefaultsV1): Promise<{ defaults: AgentDefaultsV1; customized: boolean }> {
+  const current = normalizeSessionStrategyDefaults(defaults);
+  const { confirm, select, isCancel, log } = await import("@clack/prompts");
+  log.info(`Agent session defaults: ${formatSessionStrategyDefaults(current)}`);
+  const useDefaults = await confirm({
+    message: "Use these compact/fresh defaults?",
+    initialValue: true,
+  });
+  if (isCancel(useDefaults) || useDefaults) return { defaults: current, customized: false };
+
+  const next = structuredClone(current);
+  for (const role of CONFIGURABLE_ROLES) {
+    const answer = await select({
+      message: `${role} session continuity:`,
+      initialValue: next.roles[role]?.session_strategy ?? DEFAULT_SESSION_STRATEGY[role],
+      options: [
+        { value: "compact", label: "Compact and continue" },
+        { value: "fresh", label: "Fresh conversation" },
+      ],
+    });
+    if (isCancel(answer)) return { defaults: current, customized: false };
+    next.roles[role] = { ...next.roles[role], session_strategy: answer as SessionStrategy };
+  }
+  next.revision = (current.revision ?? 0) + 1;
+  const validation = validateAgentDefaults(next);
+  if (!validation.valid) throw new Error(validation.errors.join("; "));
+  return { defaults: next, customized: true };
+}
+
+export function saveAgentDefaults(root: string, config: ProjectConfig, defaults: AgentDefaultsV1): ProjectConfig {
+  const validation = validateAgentDefaults(defaults);
+  if (!validation.valid) throw new Error(validation.errors.join("; "));
+  const next = { ...config, agent_defaults: defaults };
+  writeConfigAtomic(root, next);
+  const workflow = new WorkflowDb(root);
+  try { workflow.recordProjectSettingsRevision(defaults.revision ?? 0, defaults); } finally { workflow.close(); }
+  compile(root, next, { skipDocs: true });
+  return next;
+}
+
 export function resolveAgentSettings(input: {
   role: ConfigurableAgentRole;
   cli?: AgentCliOverrides;
@@ -111,10 +180,7 @@ export function buildAgentsCommand(): Command {
       defaults.revision = (defaults.revision ?? 0) + 1;
       const validation = validateAgentDefaults(defaults);
       if (!validation.valid) throw new Error(validation.errors.join("; "));
-      const next = { ...config, agent_defaults: defaults };
-      writeConfigAtomic(root, next);
-      const workflow = new WorkflowDb(root); try { workflow.recordProjectSettingsRevision(defaults.revision!, defaults); } finally { workflow.close(); }
-      compile(root, next, { skipDocs: true });
+      saveAgentDefaults(root, config, defaults);
       console.log(`rafi agents: saved revision ${defaults.revision} for ${selected.join(", ")}`);
     });
 }

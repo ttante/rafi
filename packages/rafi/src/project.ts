@@ -1,8 +1,9 @@
 import { loadDefaults } from "special-agents";
 import { assertProjectConfig } from "rafi-spec";
-import type { ProjectConfig, HarnessTarget, RuntimeArtifactConfig } from "rafi-spec";
+import type { AgentDefaultsV1, ProjectConfig, HarnessTarget, RuntimeArtifactConfig, TicketBuildBranchStrategy } from "rafi-spec";
 import { existsSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import type { CreateGitignoreSelection } from "./gitignore.js";
 
 export const NO_UI = "No UI";
 export const LOCAL_ONLY = "Local only";
@@ -29,6 +30,12 @@ export interface WalkthroughAnswers {
   planningSources?: string | string[];
   /** Storage preference for future immutable source captures. */
   sourceStorage?: "local" | "tracked";
+  /** Optional create-time compact/fresh defaults for configurable Rafi roles. */
+  agentDefaults?: AgentDefaultsV1;
+  /** Default ticket work mode passed into ticket setup. */
+  branchStrategy?: TicketBuildBranchStrategy;
+  /** Create-time Rafi .gitignore choice, saved so handoff resume can reapply it. */
+  gitignoreMode?: CreateGitignoreSelection;
 }
 
 export const RAFI_CONFIG_FILE = "rafi-config.yaml";
@@ -188,7 +195,7 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
     docs: {
       root: answers.docsRoot ?? DEFAULT_DOCS_ROOT,
     },
-    agent_defaults: {
+    agent_defaults: answers.agentDefaults ?? {
       version: 1,
       revision: 0,
       roles: {

@@ -11,7 +11,7 @@ export type HarnessTarget = "claude" | "codex";
 export type TicketBuildCompletionMode = "pr" | "auto-merge" | "direct-merge" | "none";
 export type TicketBuildProvider = "auto" | "github" | "gitlab" | "local";
 export type TicketBuildMergeMethod = "squash" | "merge" | "rebase";
-export type TicketBuildBranchStrategy = "branch-per-ticket" | "batch";
+export type TicketBuildBranchStrategy = "current" | "batch" | "branch-per-ticket";
 export type TicketPopulateAgentPreference = "configured" | "claude" | "codex";
 export type TicketPopulateEnrichmentPolicy = "none" | "recommendations" | "agent";
 
@@ -411,7 +411,7 @@ function normalizePopulate(value: unknown, label: string): TicketPopulateSetupCo
 function normalizeBuild(value: unknown, label: string): TicketBuildSetupConfig {
   const raw = objectOrEmpty(value, label);
   return {
-    branch_strategy: enumField(raw.branch_strategy, ["branch-per-ticket", "batch"], DEFAULT_TICKET_SETUP.build.branch_strategy, `${label}.branch_strategy`),
+    branch_strategy: enumField(raw.branch_strategy, ["current", "batch", "branch-per-ticket"], DEFAULT_TICKET_SETUP.build.branch_strategy, `${label}.branch_strategy`),
     completion: enumField(raw.completion, ["pr", "auto-merge", "direct-merge", "none"], DEFAULT_TICKET_SETUP.build.completion, `${label}.completion`),
     provider: enumField(raw.provider, ["auto", "github", "gitlab", "local"], DEFAULT_TICKET_SETUP.build.provider, `${label}.provider`),
     pr_ready: booleanField(raw.pr_ready, DEFAULT_TICKET_SETUP.build.pr_ready, `${label}.pr_ready`),

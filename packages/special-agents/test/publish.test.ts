@@ -14,6 +14,9 @@ const PKG_DIR = join(HERE, "..");
 const packageJson = JSON.parse(
   readFileSync(join(PKG_DIR, "package.json"), "utf8"),
 ) as { dependencies?: Record<string, string>; bundledDependencies?: string[] };
+const specPackageJson = JSON.parse(
+  readFileSync(join(PKG_DIR, "..", "spec", "package.json"), "utf8"),
+) as { version: string };
 
 function packList(): string[] {
   const out = execSync("npm pack --dry-run --json 2>/dev/null", {
@@ -56,7 +59,7 @@ test("special-agents pack includes LICENSE", () => {
 });
 
 test("special-agents depends on published rafi-spec", () => {
-  assert.equal(packageJson.dependencies?.["rafi-spec"], "0.8.1");
+  assert.equal(packageJson.dependencies?.["rafi-spec"], specPackageJson.version);
   assert.ok(!packageJson.bundledDependencies?.includes("rafi-spec"), "rafi-spec should not be bundled");
   assert.ok(packageJson.dependencies?.ajv, "ajv must be a direct dependency for rafi-spec runtime imports");
 });

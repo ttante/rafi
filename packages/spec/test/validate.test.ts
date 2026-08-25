@@ -73,6 +73,19 @@ test("valid fixtures pass", () => {
   assert.deepEqual(validateProjectConfig(validProject), { valid: true, errors: [] });
 });
 
+test("project tickets build accepts current branch strategy", () => {
+  const project: ProjectConfig = {
+    ...validProject,
+    tickets: {
+      build: {
+        branch_strategy: "current",
+        completion: "none",
+      },
+    },
+  };
+  assert.deepEqual(validateProjectConfig(project), { valid: true, errors: [] });
+});
+
 // ───────────────────────────── invalid fixtures ─────────────────────────────
 
 test("rule pack: bad condition enum is rejected", () => {

@@ -20,7 +20,7 @@ import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "../
 import { loadTickets } from "../tickets/ticketLoader.js";
 import { StateDb } from "../tickets/stateDb.js";
 import { applySharedDeliveryBranch, buildBranchAuditInstruction, buildBranchPlan, parseAuditDependencies } from "../branch/planner.js";
-import { currentGitRef, ensureCleanBaseWorktree, generatedTrackerDirtyPaths } from "../branch/git.js";
+import { collectBaseWorktreeDirtyPaths, currentGitRef, ensureCleanBaseWorktree, generatedTrackerDirtyPaths } from "../branch/git.js";
 import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
@@ -570,10 +570,18 @@ export function buildStartCommand(): Command {
       if (branchMode) {
         const ticketsConfig = loadTicketsConfig(cwd);
         const allowedBaseDirtyPaths = generatedTrackerDirtyPaths(ticketsConfig.paths);
-        try {
-          ensureCleanBaseWorktree(cwd, { allowedDirtyPaths: allowedBaseDirtyPaths });
-        } catch (err) {
-          fail(err instanceof Error ? err.message : String(err));
+        const baseWorktreePolicy = recoveryRecord ? "skip" as const : "enforce" as const;
+        if (baseWorktreePolicy === "skip") {
+          const dirty = collectBaseWorktreeDirtyPaths(cwd, { allowedDirtyPaths: allowedBaseDirtyPaths });
+          if (dirty.length > 0) {
+            console.warn(`foreman: warning: base worktree has uncommitted changes; build recovery will continue.\n${dirty.join("\n")}`);
+          }
+        } else {
+          try {
+            ensureCleanBaseWorktree(cwd, { allowedDirtyPaths: allowedBaseDirtyPaths });
+          } catch (err) {
+            fail(err instanceof Error ? err.message : String(err));
+          }
         }
         if (branchDefaults.createReview && branchDefaults.reviewProvider) {
           await ensureReviewProviderReady(cwd, branchDefaults.reviewProvider, log, Boolean(opts.yes));
@@ -757,6 +765,7 @@ export function buildStartCommand(): Command {
           autoMergeTimeoutMinutes: branchDefaults.autoMergeTimeoutMinutes,
           mergeMethod: branchDefaults.mergeMethod,
           allowedBaseDirtyPaths,
+          baseWorktreePolicy,
           trackerPaths: {
             progressDoc: ticketsConfig.paths.progressDoc,
             archiveDoc: ticketsConfig.paths.archiveDoc,

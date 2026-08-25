@@ -519,7 +519,7 @@ export type TicketSetupSource =
 
 export type TicketPopulateAgentPreference = "configured" | "claude" | "codex";
 export type TicketPopulateEnrichmentPolicy = "none" | "recommendations" | "agent";
-export type TicketBuildBranchStrategy = "branch-per-ticket" | "batch";
+export type TicketBuildBranchStrategy = "current" | "batch" | "branch-per-ticket";
 export type TicketBuildCompletionMode = "pr" | "auto-merge" | "direct-merge" | "none";
 export type TicketBuildProvider = "auto" | "github" | "gitlab" | "local";
 export type TicketBuildMergeMethod = "squash" | "merge" | "rebase";

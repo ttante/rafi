@@ -19,7 +19,7 @@ import {
   validateTicketPlanProposal,
   type TicketPlanProposal,
 } from "ai-foreman/ticket-planning.js";
-import type { ProjectSourceEntry, SourceRegistryConfig } from "rafi-spec";
+import type { ProjectConfig, ProjectSourceEntry, SourceRegistryConfig, TicketBuildBranchStrategy } from "rafi-spec";
 import {
   loadSourceRegistry,
   refreshSourceRegistry,
@@ -42,11 +42,12 @@ import {
   readInterviewRecords,
   type InterviewRecord,
 } from "ai-foreman/interviews.js";
-import { findNearestRafiProject, resolveExplicitRafiProject, RAFI_CONFIG_FILE } from "./project.js";
+import { findNearestRafiProject, normalizeProjectConfig, resolveExplicitRafiProject, RAFI_CONFIG_FILE } from "./project.js";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getAgent, loadSkill } from "special-agents";
 import { assertLifecycleForCommand } from "./lifecycle.js";
+import { promptSessionStrategyDefaults, saveAgentDefaults } from "./agents.js";
 
 export interface TicketPlanInstructionOptions {
   brief: string;
@@ -56,6 +57,7 @@ export interface TicketPlanInstructionOptions {
   context: ReturnType<typeof readTicketPlanningContext>;
   grill: "standard" | "exhaustive";
   docsRoot: string;
+  workMode?: TicketBuildBranchStrategy;
 }
 
 export function buildTicketPlanInstruction(opts: TicketPlanInstructionOptions): string {
@@ -72,10 +74,13 @@ Validated session snapshots: ${opts.sourceSnapshots.join(", ") || "none"}
 Current tracker context (status is authoritative and must be preserved):
 ${JSON.stringify(opts.context, null, 2)}
 
+User-selected default ticket work mode for this planning session: ${opts.workMode ?? "not selected"}
+
 Conversation rules:
 - Inspect the repository read-only. Do not edit files, configuration, YAML, SQLite, git, branches, or docs.
 - Questions must be focused and include a recommended answer first plus alternatives, but the human may answer with any free text.
 - Session choices may cover inspection depth, ticket size, estimates, source treatment, delivery grouping, branch mode, PRs, merge behavior, and next work.
+- Unless later user discussion changes it, set proposal build_defaults.branch_strategy to the selected default ticket work mode when build_defaults is present.
 - If more source content is needed, emit one JSON object (or an array) between ${SOURCE_REQUEST_START}/${SOURCE_REQUEST_END}, then ask a needs_input question. Preserve the human's complete answer; never split on spaces, commas, or plus signs.
 - Source request types are local, url, github, gitlab, linear, and jira. For Linear/Jira request only non-secret query settings and environment-variable names, never credentials.
 - Account for every discovered source item with mapped, split, combined, deferred, or excluded disposition and a reason where required.
@@ -96,6 +101,20 @@ Then end with:
 STEP_STATUS: plan_complete | summary="proposal_ready"
 
 The JSON must contain the exact approved candidate ticket set, full ticket objects for additions, patches for edits, optional delivery units, and no commentary outside the schema after ${PROPOSAL_END}.`;
+}
+
+export function applyTicketPlanWorkModeDefault(
+  proposal: TicketPlanProposal,
+  workMode: TicketBuildBranchStrategy | undefined,
+): TicketPlanProposal {
+  if (!workMode || proposal.build_defaults?.branch_strategy) return proposal;
+  return {
+    ...proposal,
+    build_defaults: {
+      ...(proposal.build_defaults ?? {}),
+      branch_strategy: workMode,
+    },
+  };
 }
 
 export function buildTicketPlanCommand(): Command {
@@ -150,7 +169,7 @@ async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.sli
   let interview = await chooseInterview(projectDir, interactive, opts);
   try {
     const context = readTicketPlanningContext(projectDir);
-    const config = readProjectConfig(projectDir);
+    let config = readProjectConfig(projectDir);
     const docsRoot = String((config.docs as Record<string, unknown> | undefined)?.root ?? "docs");
     const savedBrief = opts.brief ?? String(interview?.answers.brief ?? "");
     const brief = savedBrief || await promptText("What would you like to plan? You can describe work, paste requirements, request a repo audit, or name sources:");
@@ -173,6 +192,15 @@ async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.sli
     if (interactive && context.existingNext.length) {
       const choice = await promptText(`Existing next tickets: ${context.existingNext.join(", ")}. Should the proposal retain or replace them?`, "Retain them unless the new work must come first")
       sourceChoice += `\nExisting-next decision: ${choice}`;
+    }
+    let workMode: TicketBuildBranchStrategy | undefined;
+    if (interactive) {
+      workMode = await promptWorkMode(config.tickets?.build?.branch_strategy);
+      sourceChoice += `\nDefault ticket work mode: ${workMode}`;
+      const sessionDefaults = await promptSessionStrategyDefaults(config.agent_defaults);
+      if (sessionDefaults.customized) {
+        config = saveAgentDefaults(projectDir, config, sessionDefaults.defaults);
+      }
     }
     const briefRequest = sourceRequestFromAnswer(brief, projectDir);
     const choiceRequest = sourceRequestFromAnswer(sourceChoice, projectDir);
@@ -211,7 +239,7 @@ async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.sli
     console.log(`rafi tickets plan: interview=${grill}; agent changes are disabled\n`);
     if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() } });
 
-    let result = await role.builder.sendTurn(buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot }));
+    let result = await role.builder.sendTurn(buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode }));
     while (true) {
       if (result.isError) throw new Error(`planning agent failed: ${result.text.slice(0, 300)}`);
       const marker = parseConversationMarker(result.text);
@@ -236,6 +264,7 @@ async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.sli
           : decision);
         continue;
       }
+      proposal = applyTicketPlanWorkModeDefault(proposal, workMode);
       const drift = planningFingerprintChanges(projectDir, fingerprint);
       if (drift.length) { result = await role.builder.sendTurn(`The tracker/config changed during review (${drift.join(", ")}). Re-read current state, refresh the exact proposal, and request approval again.`); continue; }
       await role.builder.close();
@@ -295,8 +324,8 @@ function ensureTracker(projectDir: string, interactive: boolean): void {
   runSelf(["tickets", "init", "--project", projectDir, "--yes"]);
 }
 
-async function chooseRuntime(config: Record<string, unknown>, interactive: boolean): Promise<string | undefined> {
-  const targets = ((config.harness as Record<string, unknown> | undefined)?.targets as string[] | undefined) ?? [];
+async function chooseRuntime(config: ProjectConfig, interactive: boolean): Promise<string | undefined> {
+  const targets = config.harness.targets;
   if (targets.length === 1) return targets[0];
   if (!interactive) return undefined;
   const { select, isCancel } = await import("@clack/prompts");
@@ -315,6 +344,21 @@ async function promptGrill(): Promise<"standard" | "exhaustive"> {
   ] });
   if (isCancel(answer)) return "standard";
   return answer as "standard" | "exhaustive";
+}
+
+async function promptWorkMode(current?: TicketBuildBranchStrategy): Promise<TicketBuildBranchStrategy> {
+  const { select, isCancel } = await import("@clack/prompts");
+  const answer = await select({
+    message: "Default ticket work mode:",
+    initialValue: current ?? "branch-per-ticket",
+    options: [
+      { value: "current", label: "One branch - work the queue on the current branch" },
+      { value: "batch", label: "Batch branch - use shared branches for explicit delivery batches" },
+      { value: "branch-per-ticket", label: "Branch per ticket - isolate each ticket on its own branch" },
+    ],
+  });
+  if (isCancel(answer)) throw new Error("ticket planning cancelled");
+  return answer as TicketBuildBranchStrategy;
 }
 
 async function reviewProposal(proposal: TicketPlanProposal): Promise<string> {
@@ -386,7 +430,7 @@ function parseConversationMarker(text: string): { kind: string; question?: strin
 
 function stripMachineTail(text: string): string { return text.replace(/^SOURCE_REQUEST:.*$/gmi, "").replace(/^STEP_STATUS:.*$/gmi, "").trim(); }
 function sourceLabel(source: ProjectSourceEntry): string { return `${source.label} (${source.id})`; }
-function readProjectConfig(projectDir: string): Record<string, unknown> { const active = join(projectDir, RAFI_CONFIG_FILE); const path = existsSync(active) ? active : join(projectDir, "project.yaml"); return parseYaml(readFileSync(path, "utf8")) as Record<string, unknown>; }
+function readProjectConfig(projectDir: string): ProjectConfig { const active = join(projectDir, RAFI_CONFIG_FILE); const path = existsSync(active) ? active : join(projectDir, "project.yaml"); return normalizeProjectConfig(parseYaml(readFileSync(path, "utf8"))); }
 async function promptText(message: string, initialValue?: string): Promise<string> { const { text, isCancel } = await import("@clack/prompts"); const answer = await text({ message, initialValue, defaultValue: initialValue, validate: (value) => String(value ?? "").trim() ? undefined : "Enter a response" }); if (isCancel(answer)) throw new Error("ticket planning cancelled"); return String(answer).trim(); }
 function runSelf(args: string[]): void { const extension = fileURLToPath(import.meta.url).endsWith(".ts") ? "ts" : "js"; const result = spawnSync(process.execPath, [...process.execArgv, fileURLToPath(new URL(`./index.${extension}`, import.meta.url)), ...args], { stdio: "inherit" }); if (result.error) throw result.error; if (result.status !== 0) throw new Error(`rafi ${args[0]} exited with status ${result.status}`); }
 function shellQuote(value: string): string { return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'"'"'`)}'`; }
