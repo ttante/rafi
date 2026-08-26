@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stringify } from "yaml";
-import { mergeSkills } from "ai-foreman/agent-run.js";
+import { mergeSkills, type RoleBuilder } from "ai-foreman/agent-run.js";
 import {
   buildPlanAgentRunOptions,
   buildPlanInstruction,
@@ -140,6 +140,27 @@ test("standard plan run uses planner without grill-me and non-mutating permissio
   assert.ok(!opts.permissionConfig?.allowTools.includes("Write"));
   assert.ok(opts.permissionConfig?.escalateTools.includes("Write"));
   assert.ok(opts.permissionConfig?.escalateTools.includes("Edit"));
+});
+
+test("exhaustive plan run loads grill-me and forbids native interactive questions", () => {
+  const instruction = buildPlanInstruction({
+    brief: "Add account settings.",
+    docsRoot: "docs",
+    latestPlanPath: "docs/rafi-plan.md",
+    historyDirPath: "docs/rafi-plans",
+    planningMode: "exhaustive",
+  });
+  const opts = buildPlanAgentRunOptions({
+    projectDir: "/tmp/project",
+    agent: "codex",
+    instruction,
+    planningMode: "exhaustive",
+  });
+
+  assert.deepEqual(opts.extraSkills, ["grill-me"]);
+  assert.match(instruction, /complete grill-me skill instructions/);
+  assert.match(instruction, /Do not call provider-native, host-native, or runtime interactive tools/);
+  assert.match(instruction, /STEP_STATUS: needs_input/);
 });
 
 test("plan docs root resolves from rafi-config.yaml or defaults to docs", () => {
@@ -410,6 +431,71 @@ test("plan workflow repairs a malformed structured proposal in the same session"
     assert.match(instructions[1]!, /delivery unit labels\.depends_on must be a string array/);
     assert.match(instructions[1]!, /STEP_STATUS: plan_complete/);
     assert.ok(outcome.result?.latestData.endsWith("docs/rafi-plan.json"));
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("plan workflow handles grill-me needs_input through Rafi and resumes the same planner session", async () => {
+  const dir = tempDir();
+  installRafiConfig(dir);
+  const turns: string[] = [];
+  const createCalls: Array<{ extraSkills?: string[] }> = [];
+  const createPlanner: PlanWorkflowOptions["createPlanner"] = async (options) => {
+    createCalls.push({ extraSkills: options.extraSkills });
+    let index = 0;
+    const builder = {
+      agent: "codex" as const,
+      async sendTurn(text: string) {
+        turns.push(text);
+        index += 1;
+        if (index === 1) {
+          return {
+            text: 'Before planning, pick a path.\nSTEP_STATUS: needs_input | question="Which path?" choices="Recommended path|Alternative|Stop questions and make the plan now"',
+            isError: false,
+            numTurns: 1,
+            costUsd: 0,
+          };
+        }
+        return { text: planCompleteOutput(validStructuredProposal()), isError: false, numTurns: 1, costUsd: 0 };
+      },
+      sessionId: () => "same-session",
+      async *events() {},
+      async close() {},
+    };
+    return {
+      builder,
+      runtime: "codex",
+      model: "test-model",
+      roleBundle: {} as never,
+      skills: options.extraSkills ?? [],
+      log: { write() {} } as never,
+    } satisfies RoleBuilder;
+  };
+
+  try {
+    const outcome = await runPlanWorkflow({
+      project: dir,
+      brief: "Add labels.",
+      yes: true,
+      grillMe: true,
+      rawArgs: ["--grill-me"],
+      createPlanner,
+      handleInput: async (input) => ({
+        registry: input.registry,
+        snapshots: [],
+        answer: "Recommended path",
+        continuation: "User answer (preserve exactly):\nRecommended path\n\nContinue this same planning session without editing files.",
+        cancelled: false,
+      }),
+    });
+
+    assert.equal(outcome.status, "completed");
+    assert.equal(createCalls.length, 1);
+    assert.deepEqual(createCalls[0]?.extraSkills, ["grill-me"]);
+    assert.equal(turns.length, 2);
+    assert.match(turns[1]!, /Recommended path/);
+    assert.equal(outcome.result?.sessionId, "same-session");
   } finally {
     rmSync(dir, { recursive: true });
   }

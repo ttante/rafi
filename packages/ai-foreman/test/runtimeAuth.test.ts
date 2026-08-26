@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify } from "yaml";
@@ -13,6 +13,7 @@ import {
 } from "../src/runtimeAuth.js";
 import { ensureRuntimeReadyForCommand } from "../src/cli/runtimeAuthPrompt.js";
 import { resolveAgentForProject } from "../src/cli/runtimeSelection.js";
+import { readRoleDefaultsForExecution } from "../src/agentRun.js";
 
 test("runtime auth detection matches 401 credential output", () => {
   assert.equal(isRuntimeAuthFailure("Error: 401 Invalid authentication credentials"), true);
@@ -58,6 +59,32 @@ test("config-derived default agent uses a single rafi-config target", () => {
 
   assert.equal(resolveAgentForProject(dir), "codex");
   assert.equal(resolveAgentForProject(dir, "claude"), "claude");
+});
+
+test("saved role runtime make is pending until the tracker is fully initialized", () => {
+  const dir = mkdtempSync(join(tmpdir(), "foreman-runtime-auth-test-"));
+  writeFileSync(join(dir, "rafi-config.yaml"), stringify({
+    agent_defaults: {
+      version: 1,
+      revision: 3,
+      roles: {
+        planner: { make: "codex", model: "gpt-test", reasoning: "high", fast: true },
+      },
+    },
+  }), "utf8");
+
+  assert.deepEqual(readRoleDefaultsForExecution(dir, "planner"), {
+    model: "gpt-test",
+    reasoning: "high",
+    fast: true,
+  });
+
+  mkdirSync(join(dir, ".tickets"), { recursive: true });
+  writeFileSync(join(dir, ".tickets", "config.yaml"), "app_name: Test\n", "utf8");
+  writeFileSync(join(dir, ".tickets", "tickets.yaml"), "tickets: []\n", "utf8");
+  writeFileSync(join(dir, ".tickets", "ticket-state.sqlite"), Buffer.from("SQLite format 3\0"));
+
+  assert.equal(readRoleDefaultsForExecution(dir, "planner")?.make, "codex");
 });
 
 test("config-derived default agent falls back to Claude for missing or both-target config", () => {

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, DEFAULT_CONFIG, type PermissionConfig } from "./config.js";
 import { Log } from "./log.js";
@@ -141,7 +141,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
   if (!existsSync(opts.projectDir)) {
     throw new Error(`project directory not found: ${opts.projectDir}`);
   }
-  const saved = readRoleDefaults(opts.projectDir, opts.role);
+  const saved = readRoleDefaultsForExecution(opts.projectDir, opts.role);
   const configuredEffort = saved?.reasoning && saved.reasoning !== "default" ? saved.reasoning : undefined;
   const effectiveEffort = opts.effort ?? (VALID_EFFORT.includes(configuredEffort as EffortLevel) ? configuredEffort as EffortLevel : undefined);
   assertEffortLevel(effectiveEffort);
@@ -213,16 +213,37 @@ function phaseForRole(role: string): BuilderAdapterOptions["runtimePhase"] {
   return "builder";
 }
 
-function readRoleDefaults(projectDir: string, role: string): AgentRoleDefaultsV1 | undefined {
+export function readRoleDefaultsForExecution(projectDir: string, role: string): AgentRoleDefaultsV1 | undefined {
   const path = join(projectDir, "rafi-config.yaml");
   if (!existsSync(path)) return undefined;
   try {
     const config = parseYaml(readFileSync(path, "utf8")) as { agent_defaults?: AgentDefaultsV1 } | undefined;
-    return config?.agent_defaults?.version === 1
+    const saved = config?.agent_defaults?.version === 1
       ? config.agent_defaults.roles[role as ConfigurableAgentRole]
       : undefined;
+    if (!saved) return undefined;
+    if (isFullyInitializedTracker(projectDir)) return saved;
+    const { make: _pendingMake, ...active } = saved;
+    return active;
   } catch {
     return undefined;
+  }
+}
+
+function isFullyInitializedTracker(projectDir: string): boolean {
+  try {
+    const trackerPath = join(projectDir, ".tickets", "config.yaml");
+    const ticketsPath = join(projectDir, ".tickets", "tickets.yaml");
+    const statePath = join(projectDir, ".tickets", "ticket-state.sqlite");
+    if (!existsSync(trackerPath) || !existsSync(ticketsPath) || !existsSync(statePath)) return false;
+    const tracker = parseYaml(readFileSync(trackerPath, "utf8"));
+    if (!tracker || typeof tracker !== "object" || Array.isArray(tracker)) return false;
+    const tickets = parseYaml(readFileSync(ticketsPath, "utf8")) as { tickets?: unknown } | undefined;
+    if (!tickets || !Array.isArray(tickets.tickets)) return false;
+    if (!statSync(statePath).isFile()) return false;
+    return readFileSync(statePath).subarray(0, 16).toString("utf8") === "SQLite format 3\u0000";
+  } catch {
+    return false;
   }
 }
 

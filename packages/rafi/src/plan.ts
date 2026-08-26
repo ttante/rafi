@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -12,11 +13,13 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   assertEffortLevel,
+  createRoleBuilder,
   makeLogPath,
   readOnlyPermissionConfig,
-  runRoleInstruction,
   type EffortLevel,
+  type RoleBuilder,
   type RoleInstructionRunOptions,
+  type RoleInstructionRunResult,
 } from "ai-foreman/agent-run.js";
 import { validateDocsRoot } from "./docs.js";
 import { DEFAULT_DOCS_ROOT, LEGACY_PROJECT_CONFIG_FILE, RAFI_CONFIG_FILE } from "./project.js";
@@ -107,7 +110,7 @@ export function buildPlanInstruction(opts: PlanInstructionOptions): string {
 
   const mode = opts.planningMode ?? "standard";
   const conversation = mode === "exhaustive"
-    ? `- Use the complete grill-me skill instructions in this same session. Explore material decision branches one question at a time. Each question must present a recommended choice, meaningful alternatives, a free-text path, and "Stop questions and make the plan now".\n- Zero questions are valid only if the final assessment supplies evidence that every material branch is resolved or inapplicable.`
+    ? `- Use the complete grill-me skill instructions in this same session. Explore material decision branches one question at a time. Each question must present a recommended choice, meaningful alternatives, a free-text path, and "Stop questions and make the plan now".\n- Do not call provider-native, host-native, or runtime interactive tools for questions. Ask only by ending the turn with \`STEP_STATUS: needs_input | question="..." choices="recommended option|alternative|free-text|Stop questions and make the plan now"\`.\n- Zero questions are valid only if the final assessment supplies evidence that every material branch is resolved or inapplicable.`
     : "- Use a standard focused planning conversation. Do not invoke, advertise, or claim use of grill-me.";
 
   return `You are being run by Rafi to create a ticket-maker-ready implementation plan.
@@ -355,7 +358,9 @@ export interface PlanWorkflowOptions {
   parentInterview?: { id: string; journeyId: string };
   invocationLabel?: string;
   rawArgs?: string[];
-  runInstruction?: typeof runRoleInstruction;
+  runInstruction?: (options: RoleInstructionRunOptions) => Promise<RoleInstructionRunResult>;
+  createPlanner?: (options: Parameters<typeof createRoleBuilder>[0]) => Promise<RoleBuilder>;
+  handleInput?: typeof handlePlanningInput;
 }
 
 class PlanCancelled extends Error {
@@ -405,6 +410,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
   let lastSessionId = opts.resumeSession;
   let brief = "";
   let currentPlanningMode: PlanningMode = "standard";
+  let directPlanner: RoleBuilder | undefined;
   try {
     assertLifecycleForCommand(projectDir, "plan");
     const argv = opts.rawArgs ?? [];
@@ -525,16 +531,55 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
 
     let nextInstruction = instruction;
     let resumeSessionId = opts.resumeSession;
-    let run: Awaited<ReturnType<typeof runRoleInstruction>>;
+    let run: RoleInstructionRunResult;
     let plan: StructuredPlanV1;
     let repairAttempts = 0;
-    const runInstruction = opts.runInstruction ?? runRoleInstruction;
+    const runInstruction = opts.runInstruction;
+    const createPlanner = opts.createPlanner ?? createRoleBuilder;
+    const inputHandler = opts.handleInput ?? handlePlanningInput;
     while (true) {
-      run = await runInstruction(buildPlanAgentRunOptions({
-        projectDir, agent: opts.agent, model: opts.model,
-        effort: opts.effort as EffortLevel | undefined, fast: opts.fast,
-        yes: Boolean(opts.yes), resumeSessionId, instruction: nextInstruction, logPath, planningMode,
-      }));
+      if (runInstruction) {
+        run = await runInstruction(buildPlanAgentRunOptions({
+          projectDir, agent: opts.agent, model: opts.model,
+          effort: opts.effort as EffortLevel | undefined, fast: opts.fast,
+          yes: Boolean(opts.yes), resumeSessionId, instruction: nextInstruction, logPath, planningMode,
+        }));
+      } else {
+        if (!directPlanner) {
+          const builderOptions = buildPlanAgentRunOptions({
+            projectDir, agent: opts.agent, model: opts.model,
+            effort: opts.effort as EffortLevel | undefined, fast: opts.fast,
+            yes: Boolean(opts.yes), resumeSessionId, instruction: nextInstruction, logPath, planningMode,
+          });
+          directPlanner = await createPlanner({
+            ...builderOptions,
+            log: plannerLog(logPath),
+          });
+        }
+        const turn = await runPlannerTurn(directPlanner, nextInstruction);
+        run = {
+          turn,
+          runtime: directPlanner.builder.agent,
+          model: directPlanner.builder.agent === directPlanner.runtime ? directPlanner.model : undefined,
+          effort: directPlanner.effort,
+          sessionId: directPlanner.builder.sessionId(),
+          logPath,
+          roleBundle: directPlanner.roleBundle,
+          skills: directPlanner.skills,
+        };
+        directPlanner.log.write("rafi-plan", {
+          role: "planner",
+          runtime: run.runtime,
+          model: run.model,
+          effort: run.effort,
+          sessionId: run.sessionId,
+          statusKind: turn.status.kind,
+          summary: turn.status.summary,
+          reason: turn.status.reason,
+          costUsd: turn.result.costUsd,
+          isError: turn.result.isError,
+        });
+      }
       lastSessionId = run.sessionId;
       workflow.transition(workflowRunId, { checkpoint: "planner-session-after", state: { sessionId: run.sessionId, runtime: run.runtime, model: run.model }, event: "planner_session" });
       const turn = run.turn;
@@ -547,7 +592,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
         return { status: "blocked", diagnostic, resumeCommand: planResumeCommand(projectDir, brief, run.sessionId, planningMode) };
       }
       if (turn.status.kind === "needs_input") {
-        const input = await handlePlanningInput({ projectDir, output: turn.result.text, question: turn.status.question, choices: turn.status.choices, registry: stagedSources, storage: selectedStorage, interactive: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY) });
+        const input = await inputHandler({ projectDir, output: turn.result.text, question: turn.status.question, choices: turn.status.choices, registry: stagedSources, storage: selectedStorage, interactive: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY) });
         stagedSources = input.registry;
         if (input.cancelled) {
           await chooseStagedSourceDisposition(projectDir, loadedSources.registry, stagedSources);
@@ -633,6 +678,10 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       });
       completeInterview(projectDir, interview);
     }
+    if (directPlanner) {
+      await directPlanner.builder.close();
+      directPlanner = undefined;
+    }
 
     console.log(`\nrafi plan: wrote ${relative(projectDir, written.historyMarkdown)} and ${relative(projectDir, written.historyData)}`);
     console.log(`rafi plan: refreshed ${relative(projectDir, written.latestMarkdown)} and ${relative(projectDir, written.latestData)}`);
@@ -657,7 +706,104 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       return { status: "cancelled", diagnostic: err.message, resumeCommand: planResumeCommand(projectDir, brief, lastSessionId, currentPlanningMode) };
     }
     return failPlanOutcome(projectDir, workflow, workflowRunId, workflowLease, interview, err instanceof Error ? err.message : String(err), lastSessionId, brief, currentPlanningMode);
+  } finally {
+    if (directPlanner) await directPlanner.builder.close().catch(() => {});
   }
+}
+
+async function runPlannerTurn(
+  role: RoleBuilder,
+  instruction: string,
+): Promise<RoleInstructionRunResult["turn"]> {
+  let result = await role.builder.sendTurn(instruction);
+  let status = parsePlannerStepStatus(result.text);
+  if (status.kind === "unknown") {
+    if (!status.error && plannerOutputLooksLikeQuestion(result.text)) {
+      status = { kind: "needs_input", question: lastNonEmptyLine(result.text), choices: ["Continue", "Cancel"] };
+    } else {
+      result = await role.builder.sendTurn("Protocol correction only: based on the planning work already completed, return exactly one final STEP_STATUS: plan_complete, blocked, or needs_input marker. Do not repeat tools, repository inspection, or source intake.");
+      status = parsePlannerStepStatus(result.text);
+      if (status.kind === "unknown") status = { ...status, error: `protocol correction exhausted: ${status.error ?? "missing final marker"}` };
+    }
+  }
+  return { result, status };
+}
+
+function plannerLog(path: string): RoleBuilder["log"] {
+  return {
+    write(event: string, fields: Record<string, unknown>): void {
+      mkdirSync(dirname(path), { recursive: true });
+      appendFileSync(path, JSON.stringify({ ts: new Date().toISOString(), event, ...fields }) + "\n", "utf8");
+    },
+  } as never;
+}
+
+function parsePlannerStepStatus(text: string): RoleInstructionRunResult["turn"]["status"] {
+  const markerCount = (text.match(/STEP_STATUS:/g) ?? []).length;
+  if (markerCount > 1) return { kind: "unknown", error: "planner emitted multiple STEP_STATUS markers" };
+  const lines = text.trimEnd().split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const last = lines[lines.length - 1] ?? "";
+  if (!last.includes("STEP_STATUS:")) {
+    if (markerCount === 1) return { kind: "unknown", error: "STEP_STATUS marker was not the final non-empty line" };
+    return { kind: "unknown" };
+  }
+  const match = last.match(/^STEP_STATUS:\s*(plan_complete|blocked|needs_input)\b\s*(?:\|\s*(.*))?$/i);
+  if (!match) return { kind: "unknown", error: "malformed STEP_STATUS marker" };
+  const fields = parsePlannerMarkerFields(match[2] ?? "");
+  if (fields instanceof Error) return { kind: "unknown", error: fields.message };
+  return {
+    kind: match[1].toLowerCase() as "plan_complete" | "blocked" | "needs_input",
+    summary: fields.summary,
+    reason: fields.reason,
+    question: fields.question,
+    choices: fields.choices ? fields.choices.split("|").map((choice) => choice.trim()).filter(Boolean) : undefined,
+  };
+}
+
+function parsePlannerMarkerFields(input: string): Record<string, string> | Error {
+  const fields: Record<string, string> = {};
+  let rest = input.trim();
+  while (rest.length > 0) {
+    const key = rest.match(/^(\w+)="/);
+    if (!key) return new Error(`malformed STEP_STATUS field near: ${rest.slice(0, 40)}`);
+    const name = key[1]!;
+    let i = key[0].length;
+    let value = "";
+    let closed = false;
+    while (i < rest.length) {
+      const ch = rest[i];
+      if (ch === "\\") {
+        const next = rest[i + 1];
+        if (next === undefined) return new Error(`unterminated escape in STEP_STATUS field: ${name}`);
+        value += next;
+        i += 2;
+        continue;
+      }
+      if (ch === "\"") {
+        closed = true;
+        i++;
+        break;
+      }
+      value += ch;
+      i++;
+    }
+    if (!closed) return new Error(`unterminated STEP_STATUS field: ${name}`);
+    if (fields[name] !== undefined) return new Error(`duplicate STEP_STATUS field: ${name}`);
+    fields[name] = value;
+    rest = rest.slice(i).trim();
+  }
+  return fields;
+}
+
+function plannerOutputLooksLikeQuestion(text: string): boolean {
+  const tail = text.trim().toLowerCase().slice(-400);
+  if (tail.endsWith("?")) return true;
+  return ["should i", "would you like", "do you want", "let me know", "please confirm", "could you clarify", "which option"]
+    .some((hint) => tail.includes(hint));
+}
+
+function lastNonEmptyLine(text: string): string {
+  return text.trimEnd().split(/\r?\n/).filter((line) => line.trim().length > 0).at(-1) ?? "Planner needs input";
 }
 
 function parseRepairablePlan(

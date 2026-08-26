@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stringify } from "yaml";
-import { missingAgentFlags, resolveAgentSettings } from "../src/agents.js";
+import { missingAgentFlags, resolveAgentSettings, saveAgentDefaults } from "../src/agents.js";
 import { detectProjectLifecycle, lifecycleCommandError } from "../src/lifecycle.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 import { buildUninstallPlan } from "../src/uninstall.js";
@@ -18,15 +18,35 @@ test("lifecycle distinguishes uninitialized, initializing, initialized, and miss
     assert.equal(detectProjectLifecycle(dir).state, "uninitialized");
     writeFileSync(join(dir, "rafi-config.yaml"), stringify(buildProjectConfig(defaultAnswers())));
     assert.equal(detectProjectLifecycle(dir).state, "initializing");
+    assert.equal(lifecycleCommandError("agents", detectProjectLifecycle(dir)), undefined);
     mkdirSync(join(dir, ".tickets"));
     writeFileSync(join(dir, ".tickets/config.yaml"), "app_name: Test\n");
     writeFileSync(join(dir, ".tickets/tickets.yaml"), "tickets: []\n");
     writeFileSync(join(dir, ".tickets/ticket-state.sqlite"), Buffer.from("SQLite format 3\0"));
     assert.equal(detectProjectLifecycle(dir).state, "initialized");
     rmSync(join(dir, ".tickets/ticket-state.sqlite"));
+    assert.equal(detectProjectLifecycle(dir).state, "partial");
+    assert.equal(lifecycleCommandError("agents", detectProjectLifecycle(dir)), undefined);
     writeFileSync(join(dir, ".tickets/tickets.yaml"), "tickets:\n  - id: T001\n");
     assert.equal(detectProjectLifecycle(dir).state, "corrupt");
     assert.match(lifecycleCommandError("tickets-plan", detectProjectLifecycle(dir)) ?? "", /repair|validate|corrupt/i);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("agent defaults can be saved while initialization is pending", () => {
+  const dir = temp();
+  try {
+    const config = buildProjectConfig(defaultAnswers());
+    writeFileSync(join(dir, "rafi-config.yaml"), stringify(config));
+    const next = saveAgentDefaults(dir, config, {
+      version: 1,
+      revision: 1,
+      roles: { planner: { make: "codex", session_strategy: "fresh" } },
+    });
+    const saved = readFileSync(join(dir, "rafi-config.yaml"), "utf8");
+    assert.equal(next.agent_defaults?.roles.planner?.make, "codex");
+    assert.match(saved, /make: codex/);
+    assert.equal(detectProjectLifecycle(dir).state, "initializing");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

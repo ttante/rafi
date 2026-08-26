@@ -74,7 +74,7 @@ export function lifecycleCommandError(command: LifecycleCommand, lifecycle: Proj
     if (lifecycle.state === "initialized") return "initial planning is complete; use `rafi tickets plan` for later work";
     if (lifecycle.state === "uninitialized") return "project is not initialized; start with `rafi create`";
   }
-  if (["tickets-plan", "start", "agents", "build-resume"].includes(command) && lifecycle.state !== "initialized") {
+  if (["tickets-plan", "start", "build-resume"].includes(command) && lifecycle.state !== "initialized") {
     return `project is ${lifecycle.state}; ${lifecycle.repairCommand ? `run \`${lifecycle.repairCommand}\`` : "repair initialization first"}`;
   }
   if (command === "uninstall" && lifecycle.state === "uninitialized") return "no Rafi installation was found";

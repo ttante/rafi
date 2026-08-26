@@ -157,7 +157,7 @@ export function buildAgentsCommand(): Command {
     .option("--session-strategy <strategy>", "compact | fresh")
     .action(async (project: string, opts: Record<string, unknown>) => {
       const root = resolve(project);
-      assertLifecycleForCommand(root, "agents");
+      const lifecycle = assertLifecycleForCommand(root, "agents");
       const anyFlags = ["agentType", "agentMake", "model", "reasoning", "fast", "sessionStrategy"].some((key) => opts[key] !== undefined);
       let selected: ConfigurableAgentRole[];
       let settings: AgentRoleDefaultsV1;
@@ -182,6 +182,9 @@ export function buildAgentsCommand(): Command {
       if (!validation.valid) throw new Error(validation.errors.join("; "));
       saveAgentDefaults(root, config, defaults);
       console.log(`rafi agents: saved revision ${defaults.revision} for ${selected.join(", ")}`);
+      if (settings.make && lifecycle.state !== "initialized") {
+        console.log("rafi agents: runtime changes are saved but pending until initialization completes; explicit --agent flags still apply immediately.");
+      }
     });
 }
 
