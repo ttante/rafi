@@ -70,7 +70,7 @@ importers:
         specifier: ^1.4.0
         version: 1.5.0
       ai-foreman:
-        specifier: 1.7.3
+        specifier: 1.7.4
         version: link:../ai-foreman
       ajv:
         specifier: ^8.20.0

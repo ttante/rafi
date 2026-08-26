@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildClaudeQueryOptions, requireClaudeSDK } from "../src/adapters/claude.js";
+import { buildClaudeQueryOptions, permissionDecisionToClaudeResult, requireClaudeSDK } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import type { BuilderAdapterOptions } from "../src/adapters/types.js";
 
@@ -56,6 +56,29 @@ test("buildClaudeQueryOptions forwards cwd, model, effort, and resumeSessionId u
   assert.equal(opts.model, "claude-opus-4-8");
   assert.equal(opts.effort, "high");
   assert.equal(opts.resume, "sess-abc");
+});
+
+test("permissionDecisionToClaudeResult preserves updatedInput and interrupt", () => {
+  assert.deepEqual(permissionDecisionToClaudeResult({
+    behavior: "allow",
+    updatedInput: { questions: [], answers: { "Continue?": "Yes" } },
+  }, "toolu_123"), {
+    behavior: "allow",
+    updatedInput: { questions: [], answers: { "Continue?": "Yes" } },
+    updatedPermissions: undefined,
+    toolUseID: "toolu_123",
+  });
+
+  assert.deepEqual(permissionDecisionToClaudeResult({
+    behavior: "deny",
+    message: "cancelled",
+    interrupt: true,
+  }, "toolu_456"), {
+    behavior: "deny",
+    message: "cancelled",
+    interrupt: true,
+    toolUseID: "toolu_456",
+  });
 });
 
 // --- Codex adapter instruction building ---

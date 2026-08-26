@@ -30,6 +30,7 @@ import type {
   BuilderEvent,
   CompactResult,
   ContextUsage,
+  PermissionDecision,
   ProviderSettingSwitch,
   TurnResult,
 } from "./types.js";
@@ -60,6 +61,26 @@ export function buildClaudeQueryOptions(
     base.skills = opts.skills;
   }
   return base;
+}
+
+export function permissionDecisionToClaudeResult(
+  decision: PermissionDecision,
+  toolUseID?: string,
+): PermissionResult {
+  if (decision.behavior === "allow") {
+    return {
+      behavior: "allow",
+      updatedInput: decision.updatedInput,
+      updatedPermissions: decision.updatedPermissions as PermissionResult extends { updatedPermissions?: infer T } ? T : never,
+      toolUseID,
+    };
+  }
+  return {
+    behavior: "deny",
+    message: decision.message,
+    interrupt: decision.interrupt,
+    toolUseID,
+  };
 }
 
 /**
@@ -112,11 +133,28 @@ export class ClaudeAdapter implements BuilderAdapter {
         canUseTool: async (
           toolName: string,
           input: Record<string, unknown>,
+          requestOptions: {
+            signal?: AbortSignal;
+            title?: string;
+            displayName?: string;
+            description?: string;
+            decisionReason?: string;
+            blockedPath?: string;
+            toolUseID?: string;
+          } = {},
         ): Promise<PermissionResult> => {
-          const decision = await opts.permission({ toolName, input });
-          return decision.behavior === "allow"
-            ? { behavior: "allow" }
-            : { behavior: "deny", message: decision.message };
+          const decision = await opts.permission({
+            toolName,
+            input,
+            signal: requestOptions.signal,
+            title: requestOptions.title,
+            displayName: requestOptions.displayName,
+            description: requestOptions.description,
+            decisionReason: requestOptions.decisionReason,
+            blockedPath: requestOptions.blockedPath,
+            toolUseID: requestOptions.toolUseID,
+          });
+          return permissionDecisionToClaudeResult(decision, requestOptions.toolUseID);
         },
       },
     });

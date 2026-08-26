@@ -9,12 +9,30 @@ export interface PermissionRequest {
   input: Record<string, unknown>;
   /** Human-readable prompt from the agent, when available. */
   title?: string;
+  /** Signaled if the provider-side operation should be aborted. */
+  signal?: AbortSignal;
+  /** Provider-native identifier for this specific tool call, when available. */
+  toolUseID?: string;
+  /** Short provider-rendered name for the requested action, when available. */
+  displayName?: string;
+  /** Provider-rendered detail for the requested action, when available. */
+  description?: string;
+  /** Provider explanation for why permission was requested, when available. */
+  decisionReason?: string;
+  /** Provider path that triggered the permission request, when available. */
+  blockedPath?: string;
 }
 
 /** The foreman's verdict on a permission request. */
 export type PermissionDecision =
-  | { behavior: "allow" }
-  | { behavior: "deny"; message: string };
+  | {
+      behavior: "allow";
+      /** Provider-native tool input to continue with after host interaction. */
+      updatedInput?: Record<string, unknown>;
+      /** Provider-native permission updates to apply after approval. */
+      updatedPermissions?: Array<Record<string, unknown>>;
+    }
+  | { behavior: "deny"; message: string; interrupt?: boolean };
 
 /** Decides each permission request. Supplied by the foreman, called by the adapter. */
 export type PermissionHandler = (

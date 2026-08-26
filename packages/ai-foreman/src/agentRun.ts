@@ -164,6 +164,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
 
   const policy = new PermissionPolicy(opts.permissionConfig ?? config.permissions, opts.projectDir);
   const skills = mergeSkills(roleBundle.skills, opts.extraSkills);
+  const interactive = !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const makeAdapter = async (nextRuntime: AgentRuntime, resumeSessionId?: string): Promise<BuilderAdapter> => {
     const adapterOpts: BuilderAdapterOptions = {
       cwd: opts.projectDir,
@@ -171,7 +172,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
       runtimePhase: phaseForRole(opts.role),
       model,
       resumeSessionId,
-      permission: createPermissionHandler(policy, log),
+      permission: createPermissionHandler(policy, log, { interactive }),
       effort,
       fast: opts.fast ?? saved?.fast,
       sandboxMode: opts.sandboxMode,
@@ -187,7 +188,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
     initial,
     runtime,
     label: opts.label,
-    enabled: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    enabled: interactive,
     allowSwitch: opts.allowSwitch !== false && !opts.resumeSessionId,
     recreate: async (nextRuntime, resumeSessionId) => {
       const nextReady = await ensureRuntimeReadyForCommand(opts.projectDir, nextRuntime, {

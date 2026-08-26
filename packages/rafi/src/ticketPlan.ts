@@ -79,6 +79,7 @@ User-selected default ticket work mode for this planning session: ${opts.workMod
 Conversation rules:
 - Inspect the repository read-only. Do not edit files, configuration, YAML, SQLite, git, branches, or docs.
 - Questions must be focused and include a recommended answer first plus alternatives, but the human may answer with any free text.
+- If your runtime provides a native AskUserQuestion-style question tool, you may use it; Rafi will collect the user's structured choice or custom response and return it to this same session.
 - Session choices may cover inspection depth, ticket size, estimates, source treatment, delivery grouping, branch mode, PRs, merge behavior, and next work.
 - Unless later user discussion changes it, set proposal build_defaults.branch_strategy to the selected default ticket work mode when build_defaults is present.
 - If more source content is needed, emit one JSON object (or an array) between ${SOURCE_REQUEST_START}/${SOURCE_REQUEST_END}, then ask a needs_input question. Preserve the human's complete answer; never split on spaces, commas, or plus signs.
@@ -90,7 +91,7 @@ Conversation rules:
 - When setting next work, explicitly honor whether existing next tickets are retained or replaced.
 - The user may ask to upgrade to exhaustive grill-me at any time; retain the current proposal and continue.
 
-Ask questions using a final marker:
+If no native question tool is available, ask questions using a final marker:
 STEP_STATUS: needs_input | question="..." choices="Recommended answer|Alternative"
 
 When a complete proposal is ready, return readable Markdown followed by exactly this machine envelope:

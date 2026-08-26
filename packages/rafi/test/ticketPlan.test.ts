@@ -16,6 +16,7 @@ test("guided ticket plan instruction is read-only, conversational, and exact-app
   assert.match(instruction, /read-only guided ticket planner/);
   assert.match(instruction, /grill-me skill exhaustively/);
   assert.match(instruction, /recommended answer first/);
+  assert.match(instruction, /native AskUserQuestion-style question tool/);
   assert.match(instruction, /SOURCE_REQUEST/);
   assert.match(instruction, /source_reconciliation/);
   assert.match(instruction, /replace_existing/);

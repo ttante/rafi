@@ -142,7 +142,7 @@ test("standard plan run uses planner without grill-me and non-mutating permissio
   assert.ok(opts.permissionConfig?.escalateTools.includes("Edit"));
 });
 
-test("exhaustive plan run loads grill-me and forbids native interactive questions", () => {
+test("exhaustive plan run loads grill-me and allows native interactive questions", () => {
   const instruction = buildPlanInstruction({
     brief: "Add account settings.",
     docsRoot: "docs",
@@ -159,7 +159,8 @@ test("exhaustive plan run loads grill-me and forbids native interactive question
 
   assert.deepEqual(opts.extraSkills, ["grill-me"]);
   assert.match(instruction, /complete grill-me skill instructions/);
-  assert.match(instruction, /Do not call provider-native, host-native, or runtime interactive tools/);
+  assert.match(instruction, /native AskUserQuestion-style question tool/);
+  assert.doesNotMatch(instruction, /Do not call provider-native, host-native, or runtime interactive tools/);
   assert.match(instruction, /STEP_STATUS: needs_input/);
 });
 
