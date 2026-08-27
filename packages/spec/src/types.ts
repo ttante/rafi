@@ -402,7 +402,7 @@ export interface WorkflowIssue {
 
 export type OperationLifecycle = "planned" | "in_progress" | "confirmed" | "failed" | "uncertain";
 
-export type BuildRunStatus = "running" | "interrupted" | "recoverable" | "blocked" | "completed" | "failed";
+export type BuildRunStatus = "running" | "interrupted" | "recoverable" | "blocked" | "completed" | "failed" | "superseded";
 export interface BuildRunRecordV1 {
   version: 1;
   runId: string;
@@ -431,6 +431,40 @@ export interface BuildRunRecordV1 {
   legacy?: boolean;
 }
 
+export interface BuildGitSnapshotV2 {
+  baselineHead?: string;
+  baseRef?: string;
+  branch?: string;
+  startHead?: string;
+  worktree: string;
+  worktreeIdentity?: string;
+  statusPaths: string[];
+  initialStatusPaths: string[];
+  runOwnedPaths: string[];
+  createdBranch: boolean;
+  createdWorktree: boolean;
+  upstream?: string;
+}
+
+export interface BuildRunRecordV2 extends Omit<BuildRunRecordV1, "version" | "repository" | "legacy"> {
+  version: 2;
+  repository: BuildRunRecordV1["repository"] & { git: BuildGitSnapshotV2; baselineComplete: boolean };
+  progress: {
+    completedTickets: string[];
+    completedOperations: string[];
+    currentStep?: string;
+    remainingTickets: string[];
+    lastSuccessfulAction?: string;
+    nextAction?: string;
+    validation?: { status: string; qa?: string; evidence?: string[] };
+  };
+  interruption?: { category: string; summary: string; lastError?: string; at: string };
+  supersededBy?: string;
+  /** True only when this V2 view was upgraded from a record with incomplete V1 metadata. */
+  legacy?: boolean;
+}
+export type BuildRunRecord = BuildRunRecordV1 | BuildRunRecordV2;
+
 export type InstallOwnershipMode = "created" | "managed-block" | "modified" | "generated" | "runtime-produced";
 export interface InstallManifestEntryV1 {
   path: string;
@@ -439,6 +473,16 @@ export interface InstallManifestEntryV1 {
   origin: string;
   marker?: string;
   backup?: string;
+}
+export type InstallOwnershipCategory =
+  | "tickets" | "plans" | "skills" | "agents" | "rules" | "config"
+  | "documentation-created" | "documentation-modified" | "managed-gitignore"
+  | "runtime-state" | "generated-other";
+export interface InstallManifestEntryV2 extends InstallManifestEntryV1 {
+  category: InstallOwnershipCategory;
+  preimageSha256?: string | null;
+  installedSha256?: string | null;
+  lastRafiWriteAt?: string;
 }
 export interface InstallDependencyV1 {
   manager: "npm" | "pnpm" | "yarn" | "bun";
@@ -454,6 +498,22 @@ export interface InstallManifestV1 {
   files: InstallManifestEntryV1[];
   dependencies: InstallDependencyV1[];
 }
+export interface InstallManifestV2 {
+  version: 2;
+  createdAt: string;
+  updatedAt: string;
+  repository: {
+    rootIdentity: string;
+    preInstallHead?: string;
+    initialBranch?: string;
+    initialDirtyDigest?: string;
+    dirtyChoice: "clean" | "snapshot-and-continue" | "stop-and-clean" | "legacy-unknown";
+    baselineComplete: boolean;
+  };
+  files: InstallManifestEntryV2[];
+  dependencies: InstallDependencyV1[];
+}
+export type InstallManifest = InstallManifestV1 | InstallManifestV2;
 
 export interface PlanningAssessmentArea {
   finding: string;
@@ -520,6 +580,8 @@ export type TicketSetupSource =
 export type TicketPopulateAgentPreference = "configured" | "claude" | "codex";
 export type TicketPopulateEnrichmentPolicy = "none" | "recommendations" | "agent";
 export type TicketBuildBranchStrategy = "current" | "batch" | "branch-per-ticket";
+export type TicketBranchPolicyMode = "global" | "size";
+export type TicketTitleStyle = "ticket-title" | "conventional" | "none" | "custom";
 export type TicketBuildCompletionMode = "pr" | "auto-merge" | "direct-merge" | "none";
 export type TicketBuildProvider = "auto" | "github" | "gitlab" | "local";
 export type TicketBuildMergeMethod = "squash" | "merge" | "rebase";
@@ -542,12 +604,25 @@ export interface TicketBuildDefaultsConfig {
   cleanup?: boolean;
   auto_merge_wait?: boolean;
   auto_merge_timeout_minutes?: number | null;
+  base_branch?: string;
+  branch_policy?: {
+    mode: TicketBranchPolicyMode;
+    global_strategy: TicketBuildBranchStrategy;
+    by_size: Record<"XS" | "S" | "M" | "L" | "XL", "shared" | "per-ticket">;
+  };
+  review?: {
+    title_style: TicketTitleStyle;
+    title_template?: string | null;
+    description_sections: string[];
+  };
+  validation_checklist?: string[];
 }
 
 export interface TicketsSetupConfig {
   sources?: TicketSetupSource[];
   populate?: TicketPopulateDefaultsConfig;
   build?: TicketBuildDefaultsConfig;
+  limits?: { implementation: number; view: number };
 }
 
 /** Per-runtime paths for a skill or agent artifact. */

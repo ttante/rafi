@@ -9,6 +9,8 @@ import {
   assertSkillManifest,
   assertAgentManifest,
   assertProjectConfig,
+  validateBuildRunRecord,
+  validateInstallManifest,
 } from "../src/validate.js";
 import type {
   RulePackFrontmatter,
@@ -71,6 +73,23 @@ test("valid fixtures pass", () => {
   assert.deepEqual(validateSkillManifest(validSkill), { valid: true, errors: [] });
   assert.deepEqual(validateAgentManifest(validAgent), { valid: true, errors: [] });
   assert.deepEqual(validateProjectConfig(validProject), { valid: true, errors: [] });
+});
+
+test("build-run schemas accept V1 and V2 recovery records and reject incomplete V2 snapshots", () => {
+  const common = { runId: "run-1", status: "recoverable", tickets: ["T001"], branchMode: "current", checkpoint: "builder", receipts: {}, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z" };
+  assert.equal(validateBuildRunRecord({ version: 1, ...common, repository: { root: "/repo", worktree: "/repo", partialFingerprint: "legacy" } }).valid, true);
+  const v2 = { version: 2, ...common, repository: { root: "/repo", worktree: "/repo", baselineComplete: true, git: { worktree: "/repo", statusPaths: [], initialStatusPaths: [], runOwnedPaths: [], createdBranch: false, createdWorktree: false } }, progress: { completedTickets: [], completedOperations: [], remainingTickets: ["T001"] } };
+  assert.equal(validateBuildRunRecord(v2).valid, true);
+  assert.equal(validateBuildRunRecord({ ...v2, repository: { root: "/repo", worktree: "/repo", baselineComplete: true, git: {} } }).valid, false);
+});
+
+test("install-manifest schemas accept legacy V1 and categorized V2 ownership", () => {
+  const entry = { path: "README.md", sha256: null, mode: "modified", origin: "docs" };
+  const common = { createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z", dependencies: [] };
+  assert.equal(validateInstallManifest({ version: 1, ...common, files: [entry] }).valid, true);
+  const v2 = { version: 2, ...common, repository: { rootIdentity: "root", dirtyChoice: "snapshot-and-continue", baselineComplete: true }, files: [{ ...entry, category: "documentation-modified" }] };
+  assert.equal(validateInstallManifest(v2).valid, true);
+  assert.equal(validateInstallManifest({ ...v2, files: [entry] }).valid, false);
 });
 
 test("project tickets build accepts current branch strategy", () => {

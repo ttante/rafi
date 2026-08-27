@@ -103,6 +103,32 @@ export interface OperationReceipt {
   payload_json: string;
 }
 
+/** The only valid initial/fully-reset active state for a ticket. */
+export function pristineTicketState(ticketId: string, now: string, actor: string | null = null): TicketState {
+  return {
+    ticket_id: ticketId,
+    status: "planned",
+    owner: null,
+    current_step: null,
+    next_action: null,
+    blocked_by_json: "[]",
+    blocker_type: null,
+    blocker_notes: null,
+    first_blocked_at: null,
+    last_checked_at: null,
+    last_worked_at: null,
+    completed_at: null,
+    attempt_count: 0,
+    last_error: null,
+    evidence: null,
+    validation_result: null,
+    validation_commands: null,
+    validation_notes: null,
+    updated_at: now,
+    updated_by: actor,
+  };
+}
+
 const INIT_SQL = `
 PRAGMA foreign_keys = ON;
 
@@ -268,34 +294,17 @@ export class StateDb {
     return m;
   }
 
+  deleteState(ticketId: string): void {
+    this.db.prepare("DELETE FROM ticket_state WHERE ticket_id = ?").run(ticketId);
+  }
+
   upsertState(
     ticketId: string,
     patch: Partial<Omit<TicketState, "ticket_id">>,
     now: string,
   ): void {
     const existing = this.getState(ticketId);
-    const base: TicketState = existing ?? {
-      ticket_id: ticketId,
-      status: "planned",
-      owner: null,
-      current_step: null,
-      next_action: null,
-      blocked_by_json: "[]",
-      blocker_type: null,
-      blocker_notes: null,
-      first_blocked_at: null,
-      last_checked_at: null,
-      last_worked_at: null,
-      completed_at: null,
-      attempt_count: 0,
-      last_error: null,
-      evidence: null,
-      validation_result: null,
-      validation_commands: null,
-      validation_notes: null,
-      updated_at: now,
-      updated_by: null,
-    };
+    const base: TicketState = existing ?? pristineTicketState(ticketId, now);
     const merged: TicketState = { ...base, ...patch, ticket_id: ticketId, updated_at: now };
 
     if (existing) {
@@ -331,8 +340,8 @@ export class StateDb {
 
   // ── ticket_events ─────────────────────────────────────────────────────────
 
-  insertEvent(event: Omit<TicketEvent, "id">): void {
-    this.db.prepare(`
+  insertEvent(event: Omit<TicketEvent, "id">): number {
+    const result = this.db.prepare(`
       INSERT INTO ticket_events (
         timestamp,actor,ticket_id,event_type,old_status,new_status,
         summary,validation,evidence,payload_json
@@ -341,12 +350,24 @@ export class StateDb {
         @summary,@validation,@evidence,@payload_json
       )
     `).run(event);
+    return Number(result.lastInsertRowid);
+  }
+
+  deleteEvents(ids: number[]): void {
+    const remove = this.db.prepare("DELETE FROM ticket_events WHERE id = ?");
+    for (const id of ids) remove.run(id);
   }
 
   getRecentEvents(limit: number): TicketEvent[] {
     return this.db
       .prepare("SELECT * FROM ticket_events ORDER BY timestamp DESC, id DESC LIMIT ?")
       .all(limit) as TicketEvent[];
+  }
+
+  getTicketEvents(ticketId: string): TicketEvent[] {
+    return this.db
+      .prepare("SELECT * FROM ticket_events WHERE ticket_id = ? ORDER BY timestamp, id")
+      .all(ticketId) as TicketEvent[];
   }
 
   // ── validation_snapshots ──────────────────────────────────────────────────
@@ -362,6 +383,17 @@ export class StateDb {
     return this.db
       .prepare("SELECT * FROM validation_snapshots ORDER BY timestamp DESC, id DESC LIMIT 1")
       .get() as ValidationSnapshot | undefined;
+  }
+
+  getValidationSnapshots(scope?: string): ValidationSnapshot[] {
+    if (scope !== undefined) {
+      return this.db
+        .prepare("SELECT * FROM validation_snapshots WHERE scope = ? ORDER BY timestamp, id")
+        .all(scope) as ValidationSnapshot[];
+    }
+    return this.db
+      .prepare("SELECT * FROM validation_snapshots ORDER BY timestamp, id")
+      .all() as ValidationSnapshot[];
   }
 
   // ── future_work ───────────────────────────────────────────────────────────
@@ -412,6 +444,10 @@ export class StateDb {
         pinned_until=excluded.pinned_until,
         updated_at=excluded.updated_at
     `).run(row);
+  }
+
+  deleteRecentCompleted(ticketId: string): void {
+    this.db.prepare("DELETE FROM recent_completed_context WHERE ticket_id = ?").run(ticketId);
   }
 
   // ── archive_index ─────────────────────────────────────────────────────────

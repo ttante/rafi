@@ -48,9 +48,11 @@ import { buildTicketPlanCommand } from "./ticketPlan.js";
 import { buildSourcesCommand } from "./sources.js";
 import { buildAgentsCommand, defaultAgentDefaults, promptSessionStrategyDefaults } from "./agents.js";
 import { buildBuildResumeCommand } from "./buildResume.js";
-import { buildUninstallCommand, interpretUninstallInstruction } from "./uninstall.js";
+import { buildBuildStartOverCommand } from "./buildStartOver.js";
+import { buildUninstallCleanupCommand, buildUninstallCommand, buildUninstallRestoreCommand, interpretUninstallInstruction } from "./uninstall.js";
 import { createGitignoreModeFromSelection, updateCreateGitignore, type CreateGitignoreMode } from "./gitignore.js";
 import { assertLifecycleForCommand } from "./lifecycle.js";
+import { finalizePreparedOwnedWrite, initializeInstallManifest, prepareOwnedWrite, readInstallManifest } from "./ownership.js";
 import {
   checkpointInterview,
   completeInterview,
@@ -114,6 +116,19 @@ program
   .action(async (project: string, opts, command: Command) => {
     const targetDir = resolve(project);
     assertLifecycleForCommand(targetDir, "create");
+    if (existsSync(targetDir) && !readInstallManifest(targetDir)) {
+      const dirty = gitDirtyPaths(targetDir);
+      if (dirty.length) {
+        if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(`repository has uncommitted changes (${dirty.join(", ")}); rerun interactively to snapshot exact preimages or commit/stash first`);
+        const { select, isCancel } = await import("@clack/prompts");
+        const choice = await select({ message: `Repository has ${dirty.length} uncommitted path(s). How should installation proceed?`, options: [
+          { value: "snapshot", label: "Record exact preimages and continue" },
+          { value: "stop", label: "Stop so I can commit or stash first" },
+        ] });
+        if (isCancel(choice) || choice === "stop") { console.log("rafi create: stopped before writing install state"); return; }
+        initializeInstallManifest(targetDir, "snapshot-and-continue");
+      } else initializeInstallManifest(targetDir, "clean");
+    }
     const createArgv = rawCommandArgs(command);
     if (createArgv.includes("--grill-me") && createArgv.includes("--no-grill-me")) {
       throw new Error("choose either --grill-me or --no-grill-me, not both");
@@ -698,12 +713,15 @@ async function runCreateTicketHandoff(
   }
 
   const { confirm, select, isCancel } = await import("@clack/prompts");
-  const runPlan = await confirm({
-    message: "Run `rafi plan .` now?",
-    initialValue: true,
-  });
-  if (isCancel(runPlan)) return { journeyComplete: false, interview };
-  if (runPlan) {
+  const priorWork = hasExistingPlanOrTickets(targetDir, docsRoot);
+  console.log("Planning is optional. It can align implementation details, but may be unnecessary when an approved plan or populated tickets already exist.");
+  const planChoice = await select({ message: "What should Rafi do next?", options: priorWork ? [
+    { value: "skip", label: "Skip planning (Recommended)" }, { value: "plan", label: "Run planning anyway" },
+  ] : [
+    { value: "plan", label: "Run planning (Recommended)" }, { value: "skip", label: "Skip planning" },
+  ] });
+  if (isCancel(planChoice)) return { journeyComplete: false, interview };
+  if (planChoice === "plan") {
     let mode = opts.planningMode;
     if (!mode) {
       const answer = await select({ message: "Initial planning depth (exhaustive may take substantially longer):", options: [
@@ -748,12 +766,12 @@ async function runCreateTicketHandoff(
     interview = checkpointInterview(targetDir, interview, { checkpoint: "ticket-setup-prompt" });
   }
   updateCreateGitignore(targetDir, opts.gitignoreMode);
-  const runSetup = await confirm({
-    message: "Run `rafi tickets setup:init` now?",
-    initialValue: true,
-  });
-  if (isCancel(runSetup)) return { journeyComplete: false, interview };
-  if (runSetup) {
+  console.log("Ticket infrastructure is required before Rafi can implement or build the plan.");
+  const setupChoice = await select({ message: "Set up tickets now?", options: [
+    { value: "setup", label: "Set up now (Recommended)" }, { value: "later", label: "Skip for now" },
+  ] });
+  if (isCancel(setupChoice)) return { journeyComplete: false, interview };
+  if (setupChoice === "setup") {
     await buildTicketsCommand().parseAsync(["node", "rafi-tickets", ...setupArgs]);
     updateCreateGitignore(targetDir, opts.gitignoreMode);
   } else {
@@ -764,6 +782,16 @@ async function runCreateTicketHandoff(
     return { journeyComplete: false, interview };
   }
   return { journeyComplete: true, interview };
+}
+
+function hasExistingPlanOrTickets(targetDir: string, docsRoot: string): boolean {
+  if (existsSync(join(targetDir, docsRoot, "rafi-plan.json")) || existsSync(join(targetDir, docsRoot, "rafi-plan.md"))) return true;
+  const ticketsPath = join(targetDir, ".tickets", "tickets.yaml");
+  if (!existsSync(ticketsPath)) return false;
+  try {
+    const value = parseYaml(readFileSync(ticketsPath, "utf8")) as { tickets?: unknown } | undefined;
+    return Array.isArray(value?.tickets) && value.tickets.length > 0;
+  } catch { return false; }
 }
 
 function setupInitCommand(targetDir: string, answers: WalkthroughAnswers, docsRoot: string): string {
@@ -938,14 +966,30 @@ function sameTargets(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+function gitDirtyPaths(projectDir: string): string[] {
+  const result = spawnSync("git", ["status", "--porcelain=v1", "-z"], { cwd: projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  if (result.status !== 0 || !result.stdout) return [];
+  return result.stdout.split("\0").filter(Boolean).map((line) => line.slice(3)).sort();
+}
+
 program.addCommand(buildPlanCommand());
-const ticketsCommand = buildTicketsCommand();
+const ticketsCommand = buildTicketsCommand({
+  prepareOwnership: (projectDir, receipts) => {
+    for (const receipt of receipts) prepareOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category);
+  },
+  recordOwnership: (projectDir, receipts) => {
+    for (const receipt of receipts) finalizePreparedOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category);
+  },
+});
 ticketsCommand.addCommand(buildTicketPlanCommand());
 program.addCommand(ticketsCommand);
 program.addCommand(buildStartCommand());
 program.addCommand(buildBuildResumeCommand({ executeStart: (args) => runSelfCommandStatus(args) }));
+program.addCommand(buildBuildStartOverCommand());
 program.addCommand(buildAgentsCommand());
 program.addCommand(buildUninstallCommand({ interpret: interpretUninstallInstruction }));
+program.addCommand(buildUninstallRestoreCommand());
+program.addCommand(buildUninstallCleanupCommand());
 program
   .command("status")
   .description("Summarize the most recent Foreman run for a Rafi project.")

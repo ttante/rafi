@@ -112,7 +112,7 @@ What each part does:
 | `--keep-worktrees` | flag | remove successful worktrees | Keeps successful ticket worktrees for inspection. Blocked worktrees are kept automatically. |
 | `--ticket <id>` | `T001` | none | Selects a branch-mode ticket to continue. Repeatable with `--continue`. |
 | `--base <ref>` | `main` / `origin/main` / `HEAD` | current branch or `HEAD` | Base ref for root ticket branches. |
-| `--branch-prefix <prefix>` | `rafi` / `feature` | `rafi` | Prefix for generated ticket branches. |
+| `--branch-prefix <prefix>` | `feature` / `rafi` / another valid Git prefix | `feature` | Prefix for generated ticket branches. Explicit prefixes are preserved verbatim. |
 | `--max-branch-depth <n>` | positive integer | `5` | Maximum selected branch/PR stack depth (root PR is depth 1). |
 
 Auto-detected tracker files:

@@ -144,7 +144,7 @@ export { MARKER_SPEC } from "./markers.js";
 export { QA_MARKER_SPEC } from "./markers.js";
 
 /** Instruction sent on the first turn of a batch. */
-export function buildPrimer(n: number, trackerPath?: string, ticketsEnabled = false): string {
+export function buildPrimer(n: number, trackerPath?: string, ticketsEnabled = false, preferredTicketId?: string): string {
   let trackerRule: string;
   if (ticketsEnabled) {
     const progressDoc = trackerPath ?? "docs/ticket-progress.md";
@@ -157,12 +157,15 @@ export function buildPrimer(n: number, trackerPath?: string, ticketsEnabled = fa
   } else {
     trackerRule = "";
   }
+  const preferredTicketRule = preferredTicketId
+    ? `\n- Resume and finish ticket ${preferredTicketId} first. Do not substitute a different queued ticket.`
+    : "";
   return `You are being run by an automated foreman. We will work through your next ${n} tickets or implementation steps, one per turn.
 
 Rules:
 - Do exactly ONE ticket or step this turn, then stop.
 - ${MARKER_SPEC}
-- If a tool action is denied by foreman policy, do not retry it; report it via the blocked marker.${trackerRule}
+- If a tool action is denied by foreman policy, do not retry it; report it via the blocked marker.${trackerRule}${preferredTicketRule}
 
 This is step 1 of ${n}. Implement the next ticket or step now.`;
 }
@@ -199,11 +202,14 @@ Fix every one of them now. Then end with STEP_STATUS: done so foreman can re-run
 }
 
 /** Pre-flight planning turn: ask the builder to list its next N steps without implementing anything. */
-export function buildPlanningTurn(n: number, ticketsContent?: string): string {
+export function buildPlanningTurn(n: number, ticketsContent?: string, preferredTicketId?: string): string {
   const header = ticketsContent
     ? `Here is the project's ticket list:\n\n${ticketsContent}\n\n`
     : "";
-  return `${header}Before we begin, list the next ${n} ticket(s) or step(s) you plan to implement, in order. Be specific — reference ticket IDs or titles where applicable. Do not implement anything yet; output the numbered list only. Do not emit a STEP_STATUS marker on this turn.`;
+  const preferred = preferredTicketId
+    ? ` The first item must be ticket ${preferredTicketId}; this is an interrupted ticket being resumed.`
+    : "";
+  return `${header}Before we begin, list the next ${n} ticket(s) or step(s) you plan to implement, in order.${preferred} Be specific — reference ticket IDs or titles where applicable. Do not implement anything yet; output the numbered list only. Do not emit a STEP_STATUS marker on this turn.`;
 }
 
 /** Builds the permission callback: classify, log, allow or escalate. */
@@ -371,8 +377,8 @@ export class Foreman {
   }
 
   /** Send a planning turn and return the builder's response text. Does not count toward steps. */
-  async runPreflight(n: number, ticketsContent?: string): Promise<string> {
-    const instruction = buildPlanningTurn(n, ticketsContent);
+  async runPreflight(n: number, ticketsContent?: string, preferredTicketId?: string): Promise<string> {
+    const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId);
     const result = await this.builder.sendTurn(instruction);
     this.log.write("preflight", {
       ticketsProvided: ticketsContent !== undefined,
@@ -402,14 +408,14 @@ export class Foreman {
    * Loops on qa_fail → fix → re-QA until qa_pass or the cycle cap is reached.
    * QA turns are free — they do not advance the step counter.
    */
-  private async runQa(stepIndex: number): Promise<{
+  private async runQa(stepIndex: number, ticketId?: string): Promise<{
     outcome: "passed" | "blocked" | "needs-human" | "waived";
     detail?: string;
     summary?: string;
   }> {
     if (this.projectDir && this.qaFactory) {
       const review = await runIsolatedQa({
-        ticket: this.ticketForQa(stepIndex),
+        ticket: this.ticketForQa(stepIndex, ticketId),
         builderWorktree: this.projectDir,
         builderSummary: `Builder completed step ${stepIndex}`,
         qaStrategy: this.qaSessionStrategy,
@@ -509,10 +515,12 @@ export class Foreman {
   builderAdapter(): BuilderAdapter { return this.builder; }
   async close(): Promise<void> { await this.builder.close(); }
 
-  private ticketForQa(stepIndex: number): TicketDef {
+  private ticketForQa(stepIndex: number, ticketId?: string): TicketDef {
     if (this.projectDir && this.ticketsEnabled) {
       const config = loadTicketsConfig(this.projectDir);
-      const active = cmdImplementationQueue(this.projectDir).find((row) => row.status === "next" || row.status === "in_progress");
+      const active = ticketId
+        ? { ticket: ticketId }
+        : cmdImplementationQueue(this.projectDir).find((row) => row.status === "next" || row.status === "in_progress");
       const ticket = loadTickets(join(this.projectDir, config.paths.tickets)).find((candidate) => candidate.id === active?.ticket);
       if (ticket) return ticket;
     }
@@ -523,7 +531,12 @@ export class Foreman {
     };
   }
 
-  async runBatch(n: number, trackerPath?: string): Promise<BatchResult> {
+  async runBatch(
+    n: number,
+    trackerPath?: string,
+    onTicketStart?: (ticketId: string) => void | Promise<void>,
+    preferredTicketId?: string,
+  ): Promise<BatchResult> {
     this.log.write("batch-start", { requested: n, agent: this.builder.agent });
     let completed = 0;
     let outcome: BatchResult["outcome"] = "all-done";
@@ -535,9 +548,22 @@ export class Foreman {
       if (this.ticketsEnabled && this.projectDir) {
         try {
           const queue = cmdImplementationQueue(this.projectDir);
-          const next = queue.find((r) => r.status === "next");
+          const next = i === 1 && preferredTicketId
+            ? queue.find((row) => row.ticket === preferredTicketId)
+            : queue.find((row) => row.status === "next");
+          if (i === 1 && preferredTicketId && !next) {
+            outcome = "needs-human";
+            detail = `recovery ticket ${preferredTicketId} is no longer available in the implementation queue`;
+            break;
+          }
+          if (i === 1 && preferredTicketId && next && next.status !== "next" && next.status !== "in_progress") {
+            outcome = "needs-human";
+            detail = `recovery ticket ${preferredTicketId} cannot resume while its status is ${next.status}`;
+            break;
+          }
           if (next) {
             pendingTicketId = next.ticket;
+            await onTicketStart?.(next.ticket);
             cmdUpdate(this.projectDir, next.ticket, {
               status: "in_progress",
               actor: "foreman",
@@ -552,7 +578,7 @@ export class Foreman {
       }
 
       const instruction = i === 1
-        ? buildPrimer(n, trackerPath, this.ticketsEnabled)
+        ? buildPrimer(n, trackerPath, this.ticketsEnabled, preferredTicketId)
         : buildNextStepInstruction(i, n);
       if (i > 1) await this.prepareBuilderBoundary();
       this.builderWorkSessions += 1;
@@ -579,7 +605,7 @@ export class Foreman {
         let qaSummary: string | undefined;
         let qaWaived = false;
         if (this.qaEnabled) {
-          const qa = await this.runQa(i);
+          const qa = await this.runQa(i, status.ticket ?? pendingTicketId);
           if (qa.outcome === "blocked") {
             outcome = "blocked";
             detail = qa.detail;

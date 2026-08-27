@@ -11,7 +11,7 @@ import { buildDoctorCommand } from "../src/cli/doctor.js";
 import { buildStartCommand } from "../src/cli/start.js";
 import { buildStatusCommand } from "../src/cli/status.js";
 import { Log } from "../src/log.js";
-import { buildBranchPlan, parseAuditDependencies } from "../src/branch/planner.js";
+import { applySizeBranchPolicy, buildBranchPlan, parseAuditDependencies } from "../src/branch/planner.js";
 import { checkGitHubReadiness, createOrReusePr, pushBranchForPr } from "../src/branch/github.js";
 import { createOrReuseMr } from "../src/branch/gitlab.js";
 import {
@@ -197,6 +197,41 @@ test("branch planner includes later tickets unblocked by earlier selected ticket
   assert.equal(plan.nodes[0].baseBranch, "main");
   assert.equal(plan.nodes[1].baseBranch, plan.nodes[0].branch);
   assert.deepEqual(plan.issues, []);
+});
+
+test("automatic ticket branches use feature prefix while explicit rafi prefix survives", () => {
+  const tickets = [makeDef("T123", 1000, { title: "Add password reset" })];
+  const automatic = buildBranchPlan(tickets, new Map(), { steps: 1, baseRef: "main", branchPrefix: "", maxBranchDepth: 5 });
+  const explicit = buildBranchPlan(tickets, new Map(), { steps: 1, baseRef: "main", branchPrefix: "rafi", maxBranchDepth: 5 });
+  assert.equal(automatic.nodes[0]?.branch, "feature/t123-add-password-reset");
+  assert.equal(explicit.nodes[0]?.branch, "rafi/t123-add-password-reset");
+});
+
+test("size policy creates one XS/S shared branch and an independent M branch without stack metadata", () => {
+  const plan = buildBranchPlan([
+    makeDef("T001", 1000, { size: "XS" }),
+    makeDef("T002", 2000, { size: "M" }),
+    makeDef("T003", 3000, { size: "S" }),
+  ], new Map(), { steps: 3, baseRef: "main", branchPrefix: "feature", maxBranchDepth: 5 });
+  const applied = applySizeBranchPolicy(plan, {
+    mode: "size", global_strategy: "branch-per-ticket",
+    by_size: { XS: "shared", S: "shared", M: "per-ticket", L: "per-ticket", XL: "per-ticket" },
+  });
+  assert.equal(applied.nodes[0]?.branch, applied.nodes[2]?.branch);
+  assert.notEqual(applied.nodes[1]?.branch, applied.nodes[0]?.branch);
+  assert.deepEqual(applied.nodes.flatMap((node) => node.dependencies), []);
+  assert.equal(applied.nodes[0]?.deliveryUnitId, "size-small-t001-t003");
+  assert.equal(applied.nodes[2]?.deliveryUnitFinal, true);
+});
+
+test("explicit delivery membership takes precedence over size policy", () => {
+  const plan = buildBranchPlan([makeDef("T001", 1000), makeDef("T002", 2000)], new Map(), { steps: 2, baseRef: "main", branchPrefix: "feature", maxBranchDepth: 5 });
+  const applied = applySizeBranchPolicy(plan, {
+    mode: "size", global_strategy: "branch-per-ticket",
+    by_size: { XS: "shared", S: "shared", M: "per-ticket", L: "per-ticket", XL: "per-ticket" },
+  }, { version: 1, units: [{ id: "explicit", tickets: ["T001", "T002"], branch_mode: "per-ticket" }], stacks: [{ id: "stack", name: "Explicit", units: ["explicit"] }] });
+  assert.notEqual(applied.nodes[0]?.branch, applied.nodes[1]?.branch);
+  assert.equal(applied.nodes[0]?.deliveryUnitId, undefined);
 });
 
 test("branch planner keeps independent tickets rooted at the run base", () => {

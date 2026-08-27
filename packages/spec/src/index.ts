@@ -6,6 +6,8 @@ export {
   agentManifestSchema,
   projectConfigSchema,
   agentDefaultsSchema,
+  buildRunRecordSchema,
+  installManifestSchema,
 } from "./schemas.js";
 export {
   type ValidationResult,
@@ -14,6 +16,8 @@ export {
   validateAgentManifest,
   validateProjectConfig,
   validateAgentDefaults,
+  validateBuildRunRecord,
+  validateInstallManifest,
   assertRulePack,
   assertSkillManifest,
   assertAgentManifest,

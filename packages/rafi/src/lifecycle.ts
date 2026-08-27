@@ -62,7 +62,7 @@ export function detectProjectLifecycle(projectDir: string): ProjectLifecycleStat
   return state("initialized", [], undefined, false);
 }
 
-export type LifecycleCommand = "create" | "plan" | "tickets-plan" | "start" | "agents" | "uninstall" | "build-resume";
+export type LifecycleCommand = "create" | "plan" | "tickets-plan" | "start" | "agents" | "uninstall" | "build-resume" | "build-start-over" | "uninstall-recovery";
 
 export function lifecycleCommandError(command: LifecycleCommand, lifecycle: ProjectLifecycleState): string | undefined {
   if (command === "create") {
@@ -74,10 +74,11 @@ export function lifecycleCommandError(command: LifecycleCommand, lifecycle: Proj
     if (lifecycle.state === "initialized") return "initial planning is complete; use `rafi tickets plan` for later work";
     if (lifecycle.state === "uninitialized") return "project is not initialized; start with `rafi create`";
   }
-  if (["tickets-plan", "start", "build-resume"].includes(command) && lifecycle.state !== "initialized") {
+  if (["tickets-plan", "start", "build-resume", "build-start-over"].includes(command) && lifecycle.state !== "initialized") {
     return `project is ${lifecycle.state}; ${lifecycle.repairCommand ? `run \`${lifecycle.repairCommand}\`` : "repair initialization first"}`;
   }
   if (command === "uninstall" && lifecycle.state === "uninitialized") return "no Rafi installation was found";
+  if (command === "uninstall-recovery") return undefined;
   if (lifecycle.state === "corrupt") return `${lifecycle.reasons.join("; ")}. ${lifecycle.repairCommand ? `Run \`${lifecycle.repairCommand}\`.` : ""}`.trim();
   return undefined;
 }

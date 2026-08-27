@@ -151,13 +151,15 @@ rafi status
 
 Like ticket planning, status finds the nearest Rafi project when run from a nested directory and identifies the project before showing its latest run.
 
-If implementation is interrupted, use `rafi build:resume .`. It lists every recoverable run, shows the preserved worktree/branch, checkpoint, completed side effects, and exact-session availability, then resumes only the selected ticket. `rafi resume` is exclusively for setup and planning interviews; a new `rafi start` begins new implementation work.
+If implementation is interrupted, use `rafi build:resume .`. It first shows compact candidates, then a complete selected-run preview with ticket title, failure/checkpoint, completed and remaining work, QA state, preserved worktree changes, session availability, and the exact next action. Expected worktree changes are informational; unexpected base/conflicting changes warn but do not block recovery.
+
+Use `rafi build:start-over .` when the whole run—not just tracker state—must restart. Local unmerged work is committed to a reported `archive/...` branch before the original branch returns to its recorded baseline. Pushed/open-review work is left untouched and restarts on a collision-safe `-restart-N` branch. Merged work offers current-base restart, a separate reviewable revert branch, manual guidance, or cancel. The command never force-pushes, deletes a remote branch, closes a review, or edits the base branch directly. `rafi tickets reset` only clears active tracker progress and ownership while preserving ticket definitions, dependencies, validation history, and audit events.
 
 ## Agent defaults and safe removal
 
 Run `rafi agents .` to configure committed defaults independently for planner, Builder, QA, ticket maker, and the read-only uninstaller interpreter. `rafi start --agent` overrides only Builder for that run; QA remains a separate provider session with its own settings.
 
-Run `rafi uninstall .` for an ordered, preview-first project uninstall. Tickets, plans, modified or pre-existing material, and application code are preserved by default. Rafi never changes remote branches or pull requests, rechecks targets after preview, and quarantines selected local files in a recoverable transaction before final removal. `--dry-run` changes no bytes.
+Run `rafi uninstall .` for an ordered, preview-first project uninstall. Manifest categories are reviewed separately, and files containing both Rafi and later user edits require an explicit keep, full-preimage restore, or marker-only removal decision (when markers exist). Removed/displaced bytes remain indefinitely in `.rafi-uninstall/<recovery-id>`; use `rafi uninstall:restore <recovery-id>` to recover them and `rafi uninstall:cleanup` for the separate permanent-delete step. Rafi never changes remote branches or pull requests, and `--dry-run` changes no bytes.
 
 ## Resume an interrupted interview
 

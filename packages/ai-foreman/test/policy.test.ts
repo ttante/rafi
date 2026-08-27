@@ -8,6 +8,7 @@ import {
   looksLikeQuestion,
   buildQaInstruction,
   buildQaFixInstruction,
+  buildPlanningTurn,
   buildPrimer,
 } from "../src/foreman.js";
 
@@ -254,4 +255,9 @@ test("buildQaFixInstruction embeds the reported issues", () => {
 test("buildPrimer anchors turn 1 explicitly to fix off-by-one counting", () => {
   const text = buildPrimer(5);
   assert.ok(text.includes("This is step 1 of 5"));
+});
+
+test("recovery instructions pin planning and implementation to one ticket", () => {
+  assert.match(buildPlanningTurn(1, undefined, "T002"), /first item must be ticket T002/);
+  assert.match(buildPrimer(1, undefined, true, "T002"), /Resume and finish ticket T002 first/);
 });

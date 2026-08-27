@@ -33,6 +33,10 @@ Runtime behavior not fully expressible in Commander help:
 - Both planners append immutable source versions to the same registry. Private copies live under ignored `.rafi/source-cache/`; team-visible copies live under `.rafi/sources/`. Use `rafi sources list|refresh|remove|storage` to manage them.
 - `rafi tickets populate` uses explicit `--sources` first, then compatible active registry sources. When omitted, it checks `<docs.root>/rafi-plan.md`; interactive runs ask before using it, while non-interactive runs print next-step options when no source is available.
 - `rafi start` and `ai-foreman start` can read saved `tickets.build` defaults from `rafi-config.yaml`; explicit flags such as `--completion`, `--no-branch-per-ticket`, `--no-create-pr`, and `--auto-merge-wait` / `--no-auto-merge-wait` win for the current run.
+- Automatic ticket branches use `feature/<ticket-id>-<title>`. Explicit prefixes and delivery branch names, including `rafi/...`, remain exact. The default size policy shares compatible XS/S tickets selected in one invocation and isolates M/L/XL; this creates one review for a shared group and never creates stack edges. Explicit delivery topology always wins.
+- `rafi tickets show <id> --json` returns the complete canonical definition (including unknown fields), active state, recalculated blockers, historical validation, events, and delivery context. `rafi tickets reset` is tracker-only; `rafi build:start-over` is the Git/session/delivery-aware whole-run operation.
+- Build recovery is preview-first. `build:resume` warns without blocking on unexpected changes. `build:start-over` archives local work or creates a new/revert branch according to pushed, reviewed, merged, and legacy-baseline state; it never force-pushes or deletes/closes remote state.
+- Uninstall moves selected bytes into indefinite `.rafi-uninstall/<id>` bundles. Restore backs up collisions; only `uninstall:cleanup` permanently removes a bundle.
 
 ## `rafi`
 
@@ -44,30 +48,45 @@ Usage: rafi [options] [command]
 Scaffold and compile Rafi AI framework configs for a target repo.
 
 Options:
-  -V, --version                     output the version number
-  -h, --help                        display help for command
+  -V, --version                                       output the version number
+  -h, --help                                          display help for command
 
 Commands:
-  sources                           Inspect and manage the project-wide planning source registry.
-  compile [options] <project>       Re-render .claude/, .codex/, AGENTS.md, and role bundles from
-                                    an existing rafi-config.yaml.
-  create [options] <project>        Run the walkthrough, write rafi-config.yaml, and compile the
-                                    target repo.
-  resume [options] [project]        Resume or discard a saved interactive create, plan, or
-                                    ticket-setup interview.
-  plan [options] [project]          Create a ticket-maker-ready implementation plan from a brief
-                                    and repo inspection.
-  tickets                           Manage the structured ticket tracker for a project.
-  start [options] <project>         Enlist a builder and drive it through a batch of N steps.
-  build:resume [options] [project]  Inspect and resume one interrupted implementation run without
-                                    discarding partial work.
-  agents [options] [project]        Configure persistent runtime, model, reasoning, fast, and
-                                    session defaults for Rafi roles.
-  uninstall [options] [project]     Preview and safely remove selected project-local Rafi material.
-  status [project]                  Summarize the most recent Foreman run for a Rafi project.
-  doctor [options] [project]        Check Foreman, agent CLIs, config, and optional ticket tracker
-                                    readiness.
-  help [command]                    display help for command
+  sources                                             Inspect and manage the project-wide planning
+                                                      source registry.
+  compile [options] <project>                         Re-render .claude/, .codex/, AGENTS.md, and
+                                                      role bundles from an existing
+                                                      rafi-config.yaml.
+  create [options] <project>                          Run the walkthrough, write rafi-config.yaml,
+                                                      and compile the target repo.
+  resume [options] [project]                          Resume or discard a saved interactive create,
+                                                      plan, or ticket-setup interview.
+  plan [options] [project]                            Create a ticket-maker-ready implementation
+                                                      plan from a brief and repo inspection.
+  tickets                                             Manage the structured ticket tracker for a
+                                                      project.
+  start [options] <project>                           Enlist a builder and drive it through a batch
+                                                      of N steps.
+  build:resume [options] [project]                    Inspect and resume one interrupted
+                                                      implementation run without discarding partial
+                                                      work.
+  build:start-over [options] [project]                Safely preserve an implementation run,
+                                                      reconcile its tracker state, and prepare a
+                                                      fresh restart.
+  agents [options] [project]                          Configure persistent runtime, model,
+                                                      reasoning, fast, and session defaults for
+                                                      Rafi roles.
+  uninstall [options] [project]                       Preview and safely remove selected
+                                                      project-local Rafi material.
+  uninstall:restore [options] <recoveryId> [project]  Restore files from an indefinite
+                                                      project-local uninstall recovery bundle.
+  uninstall:cleanup [options] [recoveryId] [project]  Permanently remove selected uninstall
+                                                      recovery bundles.
+  status [project]                                    Summarize the most recent Foreman run for a
+                                                      Rafi project.
+  doctor [options] [project]                          Check Foreman, agent CLIs, config, and
+                                                      optional ticket tracker readiness.
+  help [command]                                      display help for command
 ```
 
 ### `rafi resume --help`
@@ -175,6 +194,10 @@ Commands:
   populate [options]                           Ask the ticket-maker role to populate
                                                .tickets/tickets.yaml from existing project
                                                ticket/backlog docs.
+  show [options] <ticketId>                    Show the complete canonical ticket, active state,
+                                               validation, delivery, and history.
+  reset [options] [ticketId]                   Reset one ticket or an explicit ticket scope to
+                                               pristine active state while retaining history.
   update [options] <ticketId>                  Update ticket status or progress fields.
   complete [options] <ticketId>                Mark a ticket done with validation evidence.
   block [options] <ticketId>                   Mark a ticket as blocked.
@@ -598,12 +621,12 @@ Options:
                                     timeout)
   --base <ref>                      base ref for root ticket branches (default: current branch or
                                     HEAD)
-  --branch-prefix <prefix>          branch name prefix for ticket branches (default: "rafi")
+  --branch-prefix <prefix>          branch name prefix for ticket branches (default: "feature")
   --max-branch-depth <n>            maximum selected branch stack depth (default: "5")
   --pr-ready                        create ready-for-review PRs instead of draft PRs
   --keep-worktrees                  keep successful ticket worktrees for inspection
-  --ticket <id>                     ticket id to continue in branch mode; repeat for multiple
-                                    tickets (default: [])
+  --ticket <id>                     select one new ticket, or identify recovery tickets with
+                                    --resume/--continue/--recover-run (default: [])
   --skip-delivery-unit <id>         skip one unfinished delivery unit for this run (default: [])
   -h, --help                        display help for command
 ```

@@ -45,6 +45,23 @@ export interface ProjectLease {
   heartbeatAt: string;
   runId: string;
 }
+
+/** Read the current project lease without creating or migrating recovery state. */
+export function readCurrentWorkflowLease(projectDir: string): ProjectLease | undefined {
+  const path = join(resolve(projectDir), WORKFLOW_DB_FILE);
+  if (!existsSync(path)) return undefined;
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(path, { readonly: true, fileMustExist: true });
+    const row = db.prepare("SELECT * FROM project_lease WHERE singleton=1").get() as DbLease | undefined;
+    return row ? { owner: row.owner, generation: row.generation, pid: row.pid, host: row.host, processStart: row.process_start, heartbeatAt: row.heartbeat_at, runId: row.run_id } : undefined;
+  } catch (error) {
+    if (String(error).includes("no such table")) return undefined;
+    throw error;
+  } finally {
+    db?.close();
+  }
+}
 export interface PublicationTransaction { transactionId: string; runId: string; status: "prepared" | "staged" | "tracker_committed" | "published" | "committed" | "rolled_back"; intent: unknown; previousDigests: unknown; createdAt: string; updatedAt: string }
 
 /** Authoritative persistence for every resumable workflow in a project. */
@@ -88,6 +105,13 @@ export class WorkflowDb {
 
   activeRuns(): WorkflowRunSnapshot[] {
     return (this.db.prepare("SELECT * FROM workflow_runs WHERE status IN ('running','paused','blocked') ORDER BY created_at").all() as DbRun[]).map(rowToRun);
+  }
+
+  resumableRuns(kind?: WorkflowKind): WorkflowRunSnapshot[] {
+    const rows = kind
+      ? this.db.prepare("SELECT * FROM workflow_runs WHERE kind=? AND status NOT IN ('completed','cancelled','superseded') ORDER BY created_at").all(kind)
+      : this.db.prepare("SELECT * FROM workflow_runs WHERE status NOT IN ('completed','cancelled','superseded') ORDER BY created_at").all();
+    return (rows as DbRun[]).map(rowToRun);
   }
 
   transition(runId: string, update: { status?: WorkflowRunStatus; checkpoint: string; remainingWork?: unknown; state?: Record<string, unknown>; event?: string; payload?: unknown }, now = new Date()): WorkflowRunSnapshot {

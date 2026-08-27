@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import type { StructuredPlanDeliveryUnit, StructuredPlanSlice, StructuredPlanStack, StructuredPlanV1 } from "rafi-spec";
+import { capturePreimage, finalizeOwnedWrite } from "./ownership.js";
 
 export const PLAN_PROPOSAL_START = "RAFI_PLAN_PROPOSAL_START";
 export const PLAN_PROPOSAL_END = "RAFI_PLAN_PROPOSAL_END";
@@ -338,9 +339,11 @@ export function writeStructuredPlanArtifacts(projectDir: string, docsRoot: strin
   const paths = resolveStructuredPlanArtifactPaths(projectDir, docsRoot, plan);
   if (existsSync(paths.historyMarkdown) || existsSync(paths.historyData)) throw new Error(`approved plan revision ${plan.plan_id} r${plan.revision} already exists and is immutable`);
   const markdown = renderStructuredPlanMarkdown(plan); const data = `${canonicalJson(plan, 2)}\n`;
+  const ownership = Object.values(paths).map((path) => capturePreimage(projectDir, relative(resolve(projectDir), path).replace(/\\/g, "/"), "structured-plan", "plans"));
   mkdirSync(dirname(paths.historyMarkdown), { recursive: true });
   atomicWrite(paths.historyMarkdown, markdown, false); atomicWrite(paths.historyData, data, false);
   atomicWrite(paths.latestMarkdown, markdown, true); atomicWrite(paths.latestData, data, true);
+  ownership.forEach((entry) => finalizeOwnedWrite(projectDir, entry));
   return paths;
 }
 

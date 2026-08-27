@@ -14,6 +14,7 @@ import type {
   MergeMethod,
 } from "./types.js";
 import { branchNodeFooter } from "./presentation.js";
+import { configuredReviewBody, configuredReviewTitle } from "../tickets/reviewStandards.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
 const OUTPUT_LIMIT = 2_000;
@@ -183,7 +184,7 @@ export function createOrReusePr(cwd: string, opts: CreatePrOptions): PrResult {
   const bodyPath = join(cwd, ".foreman", "pr-bodies", opts.runId, `${opts.node.ticket.id}.md`);
   try {
     mkdirSync(join(cwd, ".foreman", "pr-bodies", opts.runId), { recursive: true });
-    writeFileSync(bodyPath, buildPrBody(opts), "utf8");
+    writeFileSync(bodyPath, configuredReviewBody(cwd, opts.node, opts.qaEvidence, opts.commit), "utf8");
   } catch (err) {
     return prFailure(prBodyWriteFailure(opts.runId, bodyPath, err));
   }
@@ -196,7 +197,7 @@ export function createOrReusePr(cwd: string, opts: CreatePrOptions): PrResult {
     "--head",
     opts.node.branch,
     "--title",
-    `${opts.node.ticket.id}: ${opts.node.ticket.title}`,
+    configuredReviewTitle(cwd, opts.node.ticket),
     "--body-file",
     bodyPath,
   ];

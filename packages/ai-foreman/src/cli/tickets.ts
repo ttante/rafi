@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { StructuredPlanV1 } from "rafi-spec";
-import { select, text, confirm, isCancel } from "@clack/prompts";
+import { select, text, confirm, isCancel, multiselect } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
 import { Foreman } from "../foreman.js";
@@ -42,7 +42,9 @@ import type { TicketsConfig } from "../tickets/config.js";
 import {
   DEFAULT_TICKET_SETUP,
   configuredPlanningSources,
+  configuredAppName,
   defaultAppName,
+  detectDefaultBranch,
   detectPackageName,
   ensureRafiConfigForTicketSetup,
   externalSources,
@@ -53,6 +55,7 @@ import {
   mergeTicketSetup,
   recommendedBuildDefaults,
   saveTicketSetupConfig,
+  syncTicketLimits,
   urlSources,
   type HarnessTarget,
   type TicketBuildCompletionMode,
@@ -70,10 +73,22 @@ import {
 import { applyTicketPopulation, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
 import { loadTickets } from "../tickets/ticketLoader.js";
 import { resolveTicketPaths } from "../tickets/config.js";
+import { formatTicketDetails, getTicketDetails } from "../tickets/details.js";
+import { previewTicketReset, recoverTicketResetPublications, resetTickets, type TicketResetScope } from "../tickets/reset.js";
 
+let nestedTicketCommandDepth = 0;
+class TicketInterviewCancelled extends Error {}
+function cancelTicketInterview(): never { throw new TicketInterviewCancelled("ticket interview cancelled"); }
 function fail(msg: string): never {
+  if (nestedTicketCommandDepth > 0) throw new Error(msg);
   console.error(`foreman tickets: ${msg}`);
   process.exit(1);
+}
+
+async function runNestedTicketCommand<T>(action: () => T | Promise<T>): Promise<T> {
+  nestedTicketCommandDepth += 1;
+  try { return await action(); }
+  finally { nestedTicketCommandDepth -= 1; }
 }
 
 function cwd(opts: { project?: string }): string {
@@ -251,6 +266,8 @@ async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
   if (hasTicketSetupConfig(dir)) {
     console.log("foreman tickets setup: existing setup found; opening setup:update");
     await cmdSetupUpdateCli(opts);
+    const existing = loadTicketSetupConfigWithDefaults(dir);
+    await continueTrackerSetup(dir, opts, existing);
     if (interview) completeInterview(dir, interview);
     return;
   }
@@ -270,33 +287,60 @@ async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
     });
     console.log(`foreman tickets setup: saved ticket setup in ${join(dir, "rafi-config.yaml")}`);
 
-    if (!isTicketsInitialized(dir)) {
-      if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "initialize-tracker" });
-      cmdInit(dir, {
-        appName: opts.appName ?? defaultAppName(dir),
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        docsRoot: opts.docsRoot,
-      });
-      console.log("foreman tickets setup: initialized .tickets/");
-    }
-
-    if (shouldPrompt(opts)) {
-      if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "populate-confirmation" });
-      const populate = await confirm({
-        message: "Run ticket population now?",
-        initialValue: answers.sources.length > 0,
-      });
-      if (isCancel(populate)) return;
-      if (populate) {
-        await cmdPopulateCli({ project: dir, yes: true });
-      }
-    } else {
-      console.log(`foreman tickets setup: next — run \`foreman tickets populate --project ${shellQuote(dir)}\``);
-    }
+    if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "initialize-tracker" });
+    await continueTrackerSetup(dir, opts, answers);
     if (interview) completeInterview(dir, interview);
   } catch (error) {
-    if (interview) failInterview(dir, interview, interview.checkpoint, error);
+    if (interview && !(error instanceof TicketInterviewCancelled)) failInterview(dir, interview, interview.checkpoint, error);
     throw error;
+  }
+}
+
+async function continueTrackerSetup(dir: string, opts: SetupCommandOptions, setup: TicketsSetupConfig): Promise<void> {
+  if (!isTicketsInitialized(dir)) {
+    let initialize = true;
+    if (shouldPrompt(opts)) {
+      const answer = await confirm({ message: "Initialize the ticket tracker now?", initialValue: true });
+      if (isCancel(answer)) return;
+      initialize = Boolean(answer);
+    }
+    if (!initialize) {
+      console.log("foreman tickets setup: preferences were saved. Ticket infrastructure is still required before building.");
+      console.log(`  rafi tickets init --project ${shellQuote(dir)}`);
+      console.log(`  rafi tickets populate --project ${shellQuote(dir)}`);
+      return;
+    }
+    const initialized = await retrySetupStage("ticket initialization", async () => {
+      const appName = opts.appName ?? await resolveInitAppName(dir, Boolean(opts.yes || opts.defaults));
+      cmdInit(dir, { appName, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, docsRoot: opts.docsRoot, implementationLimit: setup.limits.implementation, viewLimit: setup.limits.view });
+      syncTicketLimits(dir, setup.limits);
+    }, shouldPrompt(opts));
+    if (!initialized) return;
+    console.log("foreman tickets setup: initialized .tickets/");
+  }
+  if (shouldPrompt(opts)) {
+    const populate = await confirm({ message: "Populate tickets now?", initialValue: true });
+    if (isCancel(populate)) return;
+    if (populate) await retrySetupStage("ticket population", () => runNestedTicketCommand(() => cmdPopulateCli({ project: dir, yes: true })), true);
+    else {
+      console.log("foreman tickets setup: population is the final prerequisite before building.");
+      console.log(`foreman tickets setup: run \`rafi tickets populate --project ${shellQuote(dir)}\` later.`);
+    }
+  } else {
+    console.log(`foreman tickets setup: next — run \`rafi tickets populate --project ${shellQuote(dir)}\``);
+  }
+}
+
+async function retrySetupStage(label: string, action: () => void | Promise<void>, interactive: boolean): Promise<boolean> {
+  while (true) {
+    try { await action(); return true; }
+    catch (error) {
+      if (!interactive) throw error;
+      console.error(`foreman tickets setup: ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error("Fix the reported problem, then press Enter to retry; enter q to leave setup with saved progress.");
+      const answer = await text({ message: `Retry ${label}?`, defaultValue: "" });
+      if (isCancel(answer) || String(answer).trim().toLowerCase() === "q") return false;
+    }
   }
 }
 
@@ -320,6 +364,7 @@ async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
       docsRoot: opts.docsRoot,
       targets: parseRuntimeTargets(opts.runtime),
     });
+    syncTicketLimits(dir, next.limits);
     console.log(`foreman tickets setup: updated ticket setup in ${join(dir, "rafi-config.yaml")}`);
 
     if (isTicketsInitialized(dir)) {
@@ -330,7 +375,7 @@ async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
     }
     if (interview) completeInterview(dir, interview);
   } catch (error) {
-    if (interview) failInterview(dir, interview, interview.checkpoint, error);
+    if (interview && !(error instanceof TicketInterviewCancelled)) failInterview(dir, interview, interview.checkpoint, error);
     throw error;
   }
 }
@@ -367,7 +412,7 @@ async function collectTicketSetupPatch(
   dir: string,
   opts: SetupCommandOptions,
   current: TicketsSetupConfig,
-): Promise<Partial<{ sources: TicketSourceConfig[]; populate: Partial<TicketsSetupConfig["populate"]>; build: Partial<TicketsSetupConfig["build"]> }>> {
+): Promise<Partial<{ sources: TicketSourceConfig[]; limits: TicketsSetupConfig["limits"]; populate: Partial<TicketsSetupConfig["populate"]>; build: Partial<TicketsSetupConfig["build"]> }>> {
   const nonInteractiveSources = sourcesFromSetupOptions(opts);
   const populatePatch: Partial<TicketsSetupConfig["populate"]> = {};
   const buildPatch: Partial<TicketsSetupConfig["build"]> = {};
@@ -406,10 +451,11 @@ async function collectTicketSetupPatch(
       { value: "sources", label: "Ticket sources" },
       { value: "populate", label: "Populate defaults" },
       { value: "build", label: "Build defaults" },
+      { value: "limits", label: "Tracker limits" },
       { value: "all", label: "All sections" },
     ],
   });
-  if (isCancel(section)) process.exit(0);
+  if (isCancel(section)) cancelTicketInterview();
 
   // Do not silently persist planning hints over a completed ticket setup. They
   // are only the initial local-source suggestion for a fresh setup.
@@ -417,26 +463,84 @@ async function collectTicketSetupPatch(
     ? configuredPlanningSources(dir).map((path) => ({ type: "local" as const, paths: [path] }))
     : current.sources;
   let sources = nonInteractiveSources.length > 0 ? nonInteractiveSources : planningPrefill;
+  let limits = current.limits;
   if (section === "sources" || section === "all") {
     sources = await promptTicketSources(dir, current.sources);
   }
+  if (section === "limits" || section === "all") {
+    console.log("The defaults are a 500-ticket implementation window and a 20,000-ticket view limit. After initialization these live in .tickets/config.yaml.");
+    const keep = await confirm({ message: "Keep both default limits?", initialValue: true });
+    if (isCancel(keep)) cancelTicketInterview();
+    limits = keep ? { implementation: 500, view: 20_000 } : {
+      implementation: await promptPositiveInteger("Implementation window limit:", current.limits.implementation),
+      view: await promptPositiveInteger("View limit:", current.limits.view),
+    };
+  }
   if (section === "populate" || section === "all") {
-    const agent = await select({
-      message: "When both runtimes are configured, which should populate use?",
-      initialValue: current.populate.agent_preference,
-      options: [
-        { value: "configured", label: "Configured project default" },
-        { value: "claude", label: "Claude" },
-        { value: "codex", label: "Codex" },
-      ],
-    });
-    if (isCancel(agent)) process.exit(0);
-    populatePatch.agent_preference = agent as TicketsSetupConfig["populate"]["agent_preference"];
+    const defaults = await confirm({ message: "Use the recommended population settings?", initialValue: true });
+    if (isCancel(defaults)) cancelTicketInterview();
+    if (defaults) Object.assign(populatePatch, DEFAULT_TICKET_SETUP.populate);
+    else {
+      const handling = await select({ message: "How should saved sources be handled?", initialValue: current.populate.source_handling, options: [
+        { value: "saved", label: "Use saved sources" }, { value: "prompt", label: "Ask each time" }, { value: "manual", label: "Manual only" },
+      ] });
+      if (isCancel(handling)) cancelTicketInterview();
+      populatePatch.source_handling = handling as TicketsSetupConfig["populate"]["source_handling"];
+      const agent = await select({ message: "When both runtimes are configured, which should populate use?", initialValue: current.populate.agent_preference, options: [
+        { value: "configured", label: "Configured project default" }, { value: "claude", label: "Claude" }, { value: "codex", label: "Codex" },
+      ] });
+      if (isCancel(agent)) cancelTicketInterview();
+      populatePatch.agent_preference = agent as TicketsSetupConfig["populate"]["agent_preference"];
+      populatePatch.import_cap = await promptPositiveInteger("Maximum tickets imported in one population run (separate from the implementation window):", current.populate.import_cap);
+      populatePatch.comment_limit = await promptNonNegativeInteger("Maximum comments imported per external ticket:", current.populate.comment_limit);
+      const enrichment = await select({ message: "Population enrichment policy:", initialValue: current.populate.enrichment, options: [
+        { value: "recommendations", label: "Deterministic recommendations" }, { value: "agent", label: "Agent enrichment" }, { value: "none", label: "No enrichment" },
+      ] });
+      if (isCancel(enrichment)) cancelTicketInterview();
+      populatePatch.enrichment = enrichment as TicketsSetupConfig["populate"]["enrichment"];
+      const split = await confirm({ message: "Recommend splitting XL tickets?", initialValue: current.populate.recommend_split_for_xl });
+      if (isCancel(split)) cancelTicketInterview();
+      populatePatch.recommend_split_for_xl = Boolean(split);
+    }
   }
   if (section === "build" || section === "all") {
     const recommended = recommendedBuildDefaults(dir);
-    const strategy = await select({
-      message: "Default ticket work mode:",
+    const base = await text({ message: "Base branch:", initialValue: current.build.base_branch || detectDefaultBranch(dir), defaultValue: detectDefaultBranch(dir) });
+    if (isCancel(base)) cancelTicketInterview();
+    buildPatch.base_branch = String(base).trim();
+    const policyMode = await select({ message: "Use one global branch strategy or choose by inferred ticket size?", initialValue: current.build.branch_policy.mode, options: [
+      { value: "size", label: "Size-based: XS/S shared, M/L/XL per ticket (Recommended)" },
+      { value: "global", label: "One global strategy" },
+    ] });
+    if (isCancel(policyMode)) cancelTicketInterview();
+    let sizeMapping = { XS: "shared", S: "shared", M: "per-ticket", L: "per-ticket", XL: "per-ticket" } as TicketsSetupConfig["build"]["branch_policy"]["by_size"];
+    if (policyMode === "size") {
+      console.log("Rafi infers size from each canonical ticket. Recommended mapping: XS/S share a compatible run branch; M/L/XL use one branch per ticket. This never creates stack dependencies, and explicit delivery configuration wins.");
+      const keepMapping = await confirm({ message: "Keep the recommended size mapping?", initialValue: true });
+      if (isCancel(keepMapping)) cancelTicketInterview();
+      if (!keepMapping) {
+        sizeMapping = { ...sizeMapping };
+        for (const size of ["XS", "S", "M", "L", "XL"] as const) {
+          const allocation = await select({
+            message: `${size} ticket branch allocation:`,
+            initialValue: current.build.branch_policy.by_size[size],
+            options: [
+              { value: "shared", label: "Share with compatible tickets selected in this run" },
+              { value: "per-ticket", label: "Use a separate branch per ticket" },
+            ],
+          });
+          if (isCancel(allocation)) cancelTicketInterview();
+          sizeMapping[size] = allocation as "shared" | "per-ticket";
+        }
+      }
+    }
+    buildPatch.branch_policy = {
+      ...current.build.branch_policy,
+      mode: policyMode as "global" | "size",
+      by_size: policyMode === "size" ? sizeMapping : current.build.branch_policy.by_size,
+    };
+    const strategy = policyMode === "size" ? "branch-per-ticket" : await select({
+      message: "Default global ticket work mode:",
       initialValue: current.build.branch_strategy,
       options: [
         { value: "current", label: "One branch - work the queue on the current branch" },
@@ -444,8 +548,9 @@ async function collectTicketSetupPatch(
         { value: "branch-per-ticket", label: "Branch per ticket - isolate each ticket on its own branch" },
       ],
     });
-    if (isCancel(strategy)) process.exit(0);
+    if (isCancel(strategy)) cancelTicketInterview();
     buildPatch.branch_strategy = strategy as TicketsSetupConfig["build"]["branch_strategy"];
+    buildPatch.branch_policy.global_strategy = buildPatch.branch_strategy;
     if (strategy === "current") {
       buildPatch.completion = "none";
       buildPatch.provider = "local";
@@ -454,8 +559,10 @@ async function collectTicketSetupPatch(
       buildPatch.cleanup = true;
       buildPatch.auto_merge_wait = false;
       buildPatch.auto_merge_timeout_minutes = null;
+      buildPatch.validation_checklist = await promptRequirementList("validation checklist", current.build.validation_checklist);
       return {
         sources,
+        limits,
         populate: populatePatch,
         build: buildPatch,
       };
@@ -470,18 +577,40 @@ async function collectTicketSetupPatch(
         { value: "none", label: "No branch completion action" },
       ],
     });
-    if (isCancel(completion)) process.exit(0);
+    if (isCancel(completion)) cancelTicketInterview();
     buildPatch.completion = completion as TicketBuildCompletionMode;
     buildPatch.provider = recommended.provider;
     buildPatch.pr_ready = completion === "auto-merge";
     buildPatch.merge_method = "squash";
     buildPatch.cleanup = true;
+    if (completion === "pr" || completion === "auto-merge") {
+      const title = await select({ message: "PR/MR title standard:", initialValue: current.build.review.title_style, options: [
+        { value: "ticket-title", label: "T123: Add password reset (Recommended)" },
+        { value: "conventional", label: "Conventional Commit" },
+        { value: "none", label: "No required format" },
+        { value: "custom", label: "Custom template" },
+      ] });
+      if (isCancel(title)) cancelTicketInterview();
+      let template: string | null = null;
+      if (title === "custom") {
+        const answer = await text({ message: "Custom title template (use {id} and {title}):" });
+        if (isCancel(answer)) cancelTicketInterview();
+        template = String(answer);
+      }
+      buildPatch.review = {
+        ...current.build.review,
+        title_style: title as TicketsSetupConfig["build"]["review"]["title_style"],
+        title_template: template,
+        description_sections: await promptRequirementList("required PR/MR description sections", current.build.review.description_sections),
+      };
+    }
+    buildPatch.validation_checklist = await promptRequirementList("validation checklist", current.build.validation_checklist);
     if (completion === "auto-merge") {
       const wait = await confirm({
         message: "Wait for dependency PR/MRs to merge before starting dependent tickets?",
         initialValue: current.build.auto_merge_wait,
       });
-      if (isCancel(wait)) process.exit(0);
+      if (isCancel(wait)) cancelTicketInterview();
       buildPatch.auto_merge_wait = Boolean(wait);
       if (wait) {
         const timeout = await text({
@@ -495,7 +624,7 @@ async function collectTicketSetupPatch(
             return Number.isInteger(parsed) && parsed > 0 ? undefined : "Enter a positive integer or leave blank";
           },
         });
-        if (isCancel(timeout)) process.exit(0);
+        if (isCancel(timeout)) cancelTicketInterview();
         buildPatch.auto_merge_timeout_minutes = String(timeout).trim()
           ? Number.parseInt(String(timeout).trim(), 10)
           : null;
@@ -510,9 +639,56 @@ async function collectTicketSetupPatch(
 
   return {
     sources,
+    limits,
     populate: populatePatch,
     build: buildPatch,
   };
+}
+
+async function promptPositiveInteger(message: string, initial: number): Promise<number> {
+  const answer = await text({ message, initialValue: String(initial), defaultValue: String(initial), validate: (value) => Number.isInteger(Number(value)) && Number(value) > 0 ? undefined : "Enter a positive integer" });
+  if (isCancel(answer)) cancelTicketInterview();
+  return Number(answer);
+}
+
+async function promptNonNegativeInteger(message: string, initial: number): Promise<number> {
+  const answer = await text({ message, initialValue: String(initial), defaultValue: String(initial), validate: (value) => Number.isInteger(Number(value)) && Number(value) >= 0 ? undefined : "Enter zero or a positive integer" });
+  if (isCancel(answer)) cancelTicketInterview();
+  return Number(answer);
+}
+
+async function promptRequirementList(label: string, initial: string[]): Promise<string[]> {
+  console.log(`Current recommended ${label}: ${initial.join("; ") || "none"}`);
+  const mode = await select({
+    message: `How should Rafi configure the ${label}?`,
+    initialValue: "keep",
+    options: [
+      { value: "keep", label: "Keep all listed requirements (Recommended)" },
+      { value: "choose", label: "Choose individual requirements and optionally add custom ones" },
+      { value: "replace", label: "Replace with a custom list" },
+    ],
+  });
+  if (isCancel(mode)) cancelTicketInterview();
+  if (mode === "keep") return [...initial];
+  if (mode === "replace") {
+    const replacement = await text({ message: `Custom ${label} (comma-separated):`, defaultValue: "" });
+    if (isCancel(replacement)) cancelTicketInterview();
+    return splitCommaList(String(replacement));
+  }
+  const selected = initial.length ? await multiselect({
+      message: `Select the ${label} to keep:`,
+      options: initial.map((value) => ({ value, label: value })),
+      initialValues: initial,
+      required: false,
+    }) : [];
+  if (isCancel(selected)) cancelTicketInterview();
+  const additions = await text({ message: `Additional custom ${label} (comma-separated, optional):`, defaultValue: "" });
+  if (isCancel(additions)) cancelTicketInterview();
+  return combineRequirementSelections(selected as string[], String(additions));
+}
+
+export function combineRequirementSelections(selected: string[], additions: string): string[] {
+  return [...new Set([...selected, ...splitCommaList(additions)])];
 }
 
 async function promptTicketSources(dir: string, current: TicketSourceConfig[]): Promise<TicketSourceConfig[]> {
@@ -526,7 +702,7 @@ async function promptTicketSources(dir: string, current: TicketSourceConfig[]): 
       { value: "none", label: "No saved source" },
     ],
   });
-  if (isCancel(kind)) process.exit(0);
+  if (isCancel(kind)) cancelTicketInterview();
   if (kind === "none") return [];
   if (kind === "local") {
     const existing = current.find((source) => source.type === "local") as Extract<TicketSourceConfig, { type: "local" }> | undefined;
@@ -535,14 +711,14 @@ async function promptTicketSources(dir: string, current: TicketSourceConfig[]): 
       initialValue: existing?.paths.join(", ") || `${configuredDocsPlanPath(dir)}`,
       defaultValue: existing?.paths.join(", ") || `${configuredDocsPlanPath(dir)}`,
     });
-    if (isCancel(answer)) process.exit(0);
+    if (isCancel(answer)) cancelTicketInterview();
     return [{ type: "local", paths: splitCommaList(String(answer)) }];
   }
   if (kind === "linear") {
     const team = await text({ message: "Linear team key (optional):" });
-    if (isCancel(team)) process.exit(0);
+    if (isCancel(team)) cancelTicketInterview();
     const filter = await text({ message: "Linear IssueFilter JSON or title search text (optional):" });
-    if (isCancel(filter)) process.exit(0);
+    if (isCancel(filter)) cancelTicketInterview();
     return [{
       type: "linear",
       api_key_env: "LINEAR_API_KEY",
@@ -557,7 +733,7 @@ async function promptTicketSources(dir: string, current: TicketSourceConfig[]): 
       initialValue: existing?.url,
       validate: (value) => /^https?:\/\//i.test(String(value ?? "")) ? undefined : "Enter an HTTP(S) URL",
     });
-    if (isCancel(answer)) process.exit(0);
+    if (isCancel(answer)) cancelTicketInterview();
     return [{ type: "url", url: String(answer).trim() }];
   }
   const site = await text({
@@ -565,13 +741,13 @@ async function promptTicketSources(dir: string, current: TicketSourceConfig[]): 
     placeholder: "https://your-domain.atlassian.net",
     validate: (value) => String(value ?? "").trim() ? undefined : "Enter a Jira Cloud site URL",
   });
-  if (isCancel(site)) process.exit(0);
+  if (isCancel(site)) cancelTicketInterview();
   const jql = await text({
     message: "Jira JQL:",
     initialValue: "resolution = Unresolved ORDER BY priority DESC, updated DESC",
     defaultValue: "resolution = Unresolved ORDER BY priority DESC, updated DESC",
   });
-  if (isCancel(jql)) process.exit(0);
+  if (isCancel(jql)) cancelTicketInterview();
   return [{
     type: "jira",
     site: String(site).trim(),
@@ -655,6 +831,11 @@ function parseAgentPreference(value: string): TicketsSetupConfig["populate"]["ag
   fail("--agent-preference must be one of: configured, claude, codex");
 }
 
+function parseResetScope(value: string): TicketResetScope {
+  if (["all", "completed-and-unfinished", "unfinished"].includes(value)) return value as TicketResetScope;
+  throw new Error("--scope must be all, completed-and-unfinished, or unfinished");
+}
+
 function parseOptionalPositiveInteger(value: string, label: string): number | null {
   if (!value.trim()) return null;
   const parsed = Number.parseInt(value, 10);
@@ -685,16 +866,17 @@ function configuredDocsPlanPath(dir: string): string {
 }
 
 async function resolveInitAppName(dir: string, yes: boolean): Promise<string | undefined> {
-  const configured = defaultAppName(dir);
-  if (configured !== "My App") return configured;
-  if (yes || !process.stdin.isTTY || !process.stdout.isTTY) return configured;
+  const established = configuredAppName(dir);
+  if (established) return established;
+  const detected = detectPackageName(dir) ?? "My App";
+  if (yes || !process.stdin.isTTY || !process.stdout.isTTY) return detected;
   const answer = await text({
     message: "App name:",
-    initialValue: configured,
-    defaultValue: configured,
+    initialValue: detected,
+    defaultValue: detected,
   });
-  if (isCancel(answer)) process.exit(0);
-  return String(answer).trim() || configured;
+  if (isCancel(answer)) cancelTicketInterview();
+  return String(answer).trim() || detected;
 }
 
 async function resolvePopulateSourceSelection(
@@ -715,7 +897,7 @@ async function resolvePopulateSourceSelection(
       message: `Use ${defaultPlan.join(", ")} as the ticket population source?`,
       initialValue: true,
     });
-    if (isCancel(usePlan)) process.exit(0);
+    if (isCancel(usePlan)) return undefined;
     return usePlan ? defaultPlan : undefined;
   }
 
@@ -726,7 +908,7 @@ async function resolvePopulateSourceSelection(
     console.log("  rafi tickets setup:init");
     console.log("  rafi tickets populate --sources <files-or-globs>");
     console.log("  edit .tickets/tickets.yaml manually");
-    process.exit(2);
+    throw new Error("no ticket sources were found; create a plan, configure sources, or pass --sources");
   }
 
   const action = await select({
@@ -740,22 +922,22 @@ async function resolvePopulateSourceSelection(
   });
   if (isCancel(action) || action === "none") {
     console.log("foreman tickets: cancelled");
-    process.exit(0);
+    return undefined;
   }
   if (action === "setup") {
     await cmdSetupInitCli({ project: dir });
-    process.exit(0);
+    return undefined;
   }
   if (action === "plan") {
     console.log(`foreman tickets: run \`rafi plan ${shellQuote(dir)}\`, then \`rafi tickets populate --project ${shellQuote(dir)}\`.`);
-    process.exit(0);
+    return undefined;
   }
 
   const entered = await text({
     message: "Source paths or globs, comma-separated:",
     validate: (value) => String(value ?? "").trim() ? undefined : "Enter at least one source path or glob",
   });
-  if (isCancel(entered)) process.exit(0);
+  if (isCancel(entered)) return undefined;
   return splitCommaList(String(entered));
 }
 
@@ -830,7 +1012,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
       });
       if (isCancel(action) || action === "cancel") {
         console.log("foreman tickets: cancelled");
-        process.exit(0);
+        return;
       }
     }
     const results = await importExternalSources(dir, configuredExternalSources, {
@@ -847,7 +1029,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     if (validation.issues.length > 0) {
       console.log(`foreman tickets: ${validation.issues.length} validation issue(s) found:`);
       console.log(formatValidationIssues(validation.issues));
-      if (!validation.clean) process.exit(1);
+      if (!validation.clean) throw new Error("external ticket import failed tracker validation");
     }
     if (!sourceHints.length) {
       console.log(`foreman tickets: imported external tickets and rendered ${ticketsConfig.paths.progressDoc}`);
@@ -867,7 +1049,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     });
     if (isCancel(action) || action === "cancel") {
       console.log("foreman tickets: cancelled");
-      process.exit(0);
+      return;
     }
   }
 
@@ -915,12 +1097,10 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
       fail(`builder turn errored: ${turn.result.text.slice(0, 200)}`);
     }
     if (turn.status.kind === "blocked") {
-      console.error(`foreman tickets: blocked — ${turn.status.reason ?? "builder reported blocked"}`);
-      process.exit(2);
+      throw new Error(`blocked — ${turn.status.reason ?? "builder reported blocked"}`);
     }
     if (turn.status.kind !== "done" && turn.status.kind !== "plan_complete") {
-      console.error(`foreman tickets: needs human — ${turn.status.error ?? "builder did not emit done"}`);
-      process.exit(2);
+      throw new Error(`needs human — ${turn.status.error ?? "builder did not emit done"}`);
     }
 
     const existing = loadTickets(resolveTicketPaths(ticketsConfig, dir).tickets);
@@ -971,10 +1151,41 @@ function loadPopulationPlan(projectDir: string, sources: string[]): StructuredPl
   throw new Error("ticket population requires the approved paired structured plan (normally docs/rafi-plan.json); run `rafi plan --validate` first");
 }
 
-export function buildTicketsCommand(): Command {
+export interface TicketOwnershipReceipt { path: string; category: "tickets"; origin: string }
+function ticketOwnershipReceipts(projectDir: string, commandName: string, _afterWrite: boolean): TicketOwnershipReceipt[] {
+  const candidates = [
+    ".tickets/config.yaml", ".tickets/tickets.yaml", ".tickets/delivery.yaml", ".tickets/tracker-rules.md",
+    ".tickets/schema/tickets.schema.json", ".tickets/migrations/001_init.sql", ".tickets/.gitignore",
+  ];
+  if (isTicketsInitialized(projectDir)) {
+    const config = loadTicketsConfig(projectDir);
+    candidates.push(config.paths.progressDoc, config.paths.archiveDoc);
+  } else {
+    candidates.push(DEFAULT_TICKETS_CONFIG.paths.progressDoc, DEFAULT_TICKETS_CONFIG.paths.archiveDoc);
+  }
+  return unique(candidates).filter((path) => existsSync(join(projectDir, path))).map((path) => ({ path, category: "tickets", origin: `tickets:${commandName}` }));
+}
+export function buildTicketsCommand(options: {
+  prepareOwnership?: (projectDir: string, receipts: TicketOwnershipReceipt[]) => void;
+  recordOwnership?: (projectDir: string, receipts: TicketOwnershipReceipt[]) => void;
+} = {}): Command {
   const tickets = new Command("tickets").description(
     "Manage the structured ticket tracker for a project.",
   );
+  tickets.hook("preAction", (_thisCommand, actionCommand) => {
+    const commandOptions = actionCommand.opts() as { project?: string };
+    const projectDir = cwd(commandOptions);
+    recoverTicketResetPublications(projectDir);
+    if (options.prepareOwnership && !["show", "validate", "queue"].includes(actionCommand.name())) {
+      options.prepareOwnership(projectDir, ticketOwnershipReceipts(projectDir, actionCommand.name(), false));
+    }
+  });
+  tickets.hook("postAction", (_thisCommand, actionCommand) => {
+    if (!options.recordOwnership) return;
+    const commandOptions = actionCommand.opts() as { project?: string };
+    const projectDir = cwd(commandOptions);
+    options.recordOwnership(projectDir, ticketOwnershipReceipts(projectDir, actionCommand.name(), true));
+  });
 
   // ── setup:init / setup:update ─────────────────────────────────────────────
 
@@ -1005,6 +1216,7 @@ export function buildTicketsCommand(): Command {
       try {
         await cmdSetupInitCli(opts);
       } catch (err) {
+        if (err instanceof TicketInterviewCancelled) { console.log("foreman tickets setup: cancelled; saved checkpoints were retained"); return; }
         fail(String(err instanceof Error ? err.message : err));
       }
     });
@@ -1036,6 +1248,7 @@ export function buildTicketsCommand(): Command {
       try {
         await cmdSetupUpdateCli(opts);
       } catch (err) {
+        if (err instanceof TicketInterviewCancelled) { console.log("foreman tickets setup: cancelled; saved checkpoints were retained"); return; }
         fail(String(err instanceof Error ? err.message : err));
       }
     });
@@ -1071,8 +1284,18 @@ export function buildTicketsCommand(): Command {
           docsRoot: opts.docsRoot as string | undefined,
         });
         console.log(`foreman tickets: initialized .tickets/ in ${dir}`);
-        console.log(`foreman tickets: next — add tickets to .tickets/tickets.yaml and run \`foreman tickets render\``);
+        if (shouldPrompt(opts)) {
+          const populate = await confirm({ message: "Populate tickets now?", initialValue: true });
+          if (!isCancel(populate) && populate) await runNestedTicketCommand(() => cmdPopulateCli({ project: dir }));
+          else {
+            console.log("foreman tickets: population is the final prerequisite before building.");
+            console.log(`foreman tickets: run \`rafi tickets populate --project ${shellQuote(dir)}\` later.`);
+          }
+        } else {
+          console.log(`foreman tickets: next — run \`rafi tickets populate --project ${shellQuote(dir)}\``);
+        }
       } catch (err) {
+        if (err instanceof TicketInterviewCancelled) { console.log("foreman tickets: initialization cancelled; no process exit was forced by the nested interview"); return; }
         fail(String(err instanceof Error ? err.message : err));
       }
     });
@@ -1099,6 +1322,71 @@ export function buildTicketsCommand(): Command {
     });
 
   // ── update ──────────────────────────────────────────────────────────────────
+
+  tickets
+    .command("show <ticketId>")
+    .description("Show the complete canonical ticket, active state, validation, delivery, and history.")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("--json", "write the complete stable record as JSON")
+    .action((ticketId: string, opts) => {
+      try {
+        const details = getTicketDetails(cwd(opts), ticketId);
+        if (opts.json) process.stdout.write(`${JSON.stringify(details, null, 2)}\n`);
+        else for (const line of formatTicketDetails(details)) console.log(line);
+      } catch (err) {
+        fail(String(err instanceof Error ? err.message : err));
+      }
+    });
+
+  tickets
+    .command("reset [ticketId]")
+    .description("Reset one ticket or an explicit ticket scope to pristine active state while retaining history.")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("--all", "open the interactive bulk reset scope chooser")
+    .option("--scope <scope>", "bulk scope (all | completed-and-unfinished | unfinished)")
+    .option("--actor <actor>", "who requested the reset", "user")
+    .option("-y, --yes", "confirm an explicit ticket or --scope without prompting")
+    .action(async (ticketId: string | undefined, opts) => {
+      try {
+        if (ticketId && (opts.all || opts.scope)) throw new Error("provide a ticket ID or a bulk scope, not both");
+        if (!ticketId && !opts.all && !opts.scope) throw new Error("provide <ticketId>, --all, or --scope <scope>");
+        let target: string | TicketResetScope | undefined = ticketId;
+        if (opts.scope) target = parseResetScope(String(opts.scope));
+        if (opts.all && !opts.scope) {
+          if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("--all requires an interactive terminal; use --scope <scope> --yes for automation");
+          const answer = await select({
+            message: "Which tickets should return to an unworked state?",
+            options: [
+              { value: "all", label: "All tickets" },
+              { value: "completed-and-unfinished", label: "Completed and unfinished (exclude canceled/obsolete)" },
+              { value: "unfinished", label: "Unfinished only (exclude done/canceled/obsolete)" },
+            ],
+          });
+          if (isCancel(answer)) { console.log("foreman tickets: reset cancelled; nothing changed"); return; }
+          target = answer as TicketResetScope;
+        }
+        if (!target) throw new Error("reset target was not selected");
+        const preview = previewTicketReset(cwd(opts), target);
+        console.log(`foreman tickets reset preview (${preview.scope}):`);
+        if (!preview.tickets.length) console.log("  (no matching tickets)");
+        for (const row of preview.tickets) console.log(`  ${row.id}: ${row.title} [${row.status}] — clears ${row.cleared.join(", ")}`);
+        if (preview.relatedRuns.length) {
+          console.log("  ! Matching build/recovery metadata is not deleted. Use `rafi build:start-over` for a coherent whole-run restart.");
+          for (const run of preview.relatedRuns) console.log(`    ${run.runId.slice(0, 8)} [${run.status}] ${run.tickets.join(", ")}`);
+        }
+        if (!preview.tickets.length) return;
+        const explicitlyConfirmed = Boolean(opts.yes && (ticketId || opts.scope));
+        if (!explicitlyConfirmed) {
+          if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("confirmation requires a TTY; pass --yes with an explicit ticket or --scope");
+          const approved = await confirm({ message: `Reset ${preview.tickets.length} ticket(s)? Historical events and validation remain available.`, initialValue: false });
+          if (isCancel(approved) || !approved) { console.log("foreman tickets: reset cancelled; nothing changed"); return; }
+        }
+        const result = resetTickets(cwd(opts), target, String(opts.actor));
+        console.log(`foreman tickets: reset ${result.tickets.length} ticket(s) (audit ${result.resetId})`);
+      } catch (err) {
+        fail(String(err instanceof Error ? err.message : err));
+      }
+    });
 
   tickets
     .command("update <ticketId>")

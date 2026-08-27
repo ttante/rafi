@@ -22,9 +22,11 @@ import {
   type RoleInstructionRunResult,
 } from "ai-foreman/agent-run.js";
 import { validateDocsRoot } from "./docs.js";
+import { capturePreimage, finalizeOwnedWrite } from "./ownership.js";
 import { DEFAULT_DOCS_ROOT, LEGACY_PROJECT_CONFIG_FILE, RAFI_CONFIG_FILE } from "./project.js";
 import { normalizePlanningSources } from "./project.js";
 import { assertLifecycleForCommand } from "./lifecycle.js";
+import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
 import type { PlanningMode } from "rafi-spec";
 import type { SourceRegistryConfig } from "rafi-spec";
 import type { StructuredPlanV1 } from "rafi-spec";
@@ -257,11 +259,15 @@ export function writePlanArtifacts(
 ): PlanArtifactPaths {
   const paths = resolvePlanArtifactPaths(projectDir, docsRoot, now);
   const content = normalizePlanMarkdown(planMarkdown);
+  const historyOwnership = capturePreimage(projectDir, paths.historyRel, "plan-history", "plans");
+  const latestOwnership = capturePreimage(projectDir, paths.latestRel, "plan-latest", "plans");
   mkdirSync(dirname(paths.historyAbs), { recursive: true });
   assertOutputPathInsideRepo(projectDir, paths.historyAbs, paths.historyRel);
   assertOutputPathInsideRepo(projectDir, paths.latestAbs, paths.latestRel);
   writeFileSync(paths.historyAbs, content, "utf8");
   writeFileSync(paths.latestAbs, content, "utf8");
+  finalizeOwnedWrite(projectDir, historyOwnership);
+  finalizeOwnedWrite(projectDir, latestOwnership);
   return paths;
 }
 
@@ -401,6 +407,20 @@ export function buildPlanCommand(): Command {
       const parent = command.parent as (Command & { rawArgs?: string[] }) | null;
       const argv = parent?.rawArgs ?? (command as Command & { rawArgs?: string[] }).rawArgs ?? process.argv.slice(2);
       const outcome = await runPlanWorkflow({ ...(opts as PlanWorkflowOptions), project, rawArgs: argv });
+      if (outcome.status === "completed" && !opts.validate && !opts.render && !opts.skipRunConfirmation) {
+        const projectDir = resolve(project);
+        if (!existsSync(join(projectDir, ".tickets", "config.yaml"))) {
+          console.log("rafi plan: ticket infrastructure is required before implementation/building.");
+          if (process.stdin.isTTY && process.stdout.isTTY) {
+            const { select, isCancel } = await import("@clack/prompts");
+            const answer = await select({ message: "Set up tickets now?", options: [
+              { value: "setup", label: "Set up now (Recommended)" }, { value: "later", label: "Skip for now" },
+            ] });
+            if (!isCancel(answer) && answer === "setup") await buildTicketsCommand().parseAsync(["node", "rafi-tickets", "setup:init", "--project", projectDir]);
+            else console.log(`rafi plan: run \`rafi tickets setup:init --project ${shellQuote(projectDir)}\` later.`);
+          } else console.log(`rafi plan: run \`rafi tickets setup:init --project ${shellQuote(projectDir)}\` next.`);
+        }
+      }
       if (outcome.status === "completed" || outcome.status === "cancelled") return;
       if (outcome.diagnostic) console.error(`rafi plan: ${outcome.diagnostic}`);
       if (outcome.resumeCommand) console.error(`rafi plan: resume with: ${outcome.resumeCommand}`);

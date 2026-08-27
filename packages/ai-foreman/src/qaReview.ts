@@ -4,6 +4,7 @@ import { currentActivity, withActivityPhase } from "./activity.js";
 import { buildQaFixInstruction, buildQaInstruction, parseStepStatus } from "./foreman.js";
 import { createDisposableQaSnapshotAsync } from "./qaSnapshot.js";
 import type { TicketDef } from "./tickets/ticketSchema.js";
+import { loadTicketSetupConfigWithDefaults } from "./tickets/setupConfig.js";
 
 export interface QaStreamState { sessionId?: string; reviews: number; modificationViolations: number }
 export interface QaNonconvergenceContext { ticket: TicketDef; history: Array<{ cycle: number; outcome: string; detail: string }>; builderWorktree: string }
@@ -58,12 +59,7 @@ async function oneReview(opts: IsolatedQaOptions, cycle: number): Promise<Isolat
       const compacted = await withActivityPhase("compacting QA session", () => compactWithRetry(qa!));
       if (!compacted.ok) { await qa.close(); qa = await opts.createQa(snapshot.path); opts.state.sessionId = undefined; }
     }
-    const handoff = [
-      buildQaInstruction(), "", "QA handoff:", `Ticket: ${opts.ticket.id} — ${opts.ticket.title}`,
-      `Acceptance: ${opts.ticket.acceptance.join("; ")}`, `Builder summary: ${opts.builderSummary}`,
-      `Changed files/diff digest: ${snapshot.manifest.diffDigest}`, `Required tests: ${opts.ticket.required_tests.join("; ")}`,
-      "Do not change source, configuration, documentation, tickets, or control files. Only ignored cache, coverage, and build output is allowed.",
-    ].join("\n");
+    const handoff = buildQaReviewHandoff(opts.ticket, opts.builderSummary, snapshot.manifest.diffDigest, loadTicketSetupConfigWithDefaults(opts.builderWorktree).build.validation_checklist);
     const turn = await qa.sendTurn(handoff); const status = parseStepStatus(turn.text);
     opts.state.reviews += 1; opts.state.sessionId = qa.sessionId();
     const changes = await withActivityPhase("checking QA file changes", () => snapshot.qaChanges());
@@ -82,6 +78,16 @@ async function oneReview(opts: IsolatedQaOptions, cycle: number): Promise<Isolat
     if (qa) await withActivityPhase("closing QA session", () => qa!.close().catch(() => {}));
     await withActivityPhase("cleaning up disposable QA snapshot", () => snapshot.remove());
   }
+}
+
+export function buildQaReviewHandoff(ticket: TicketDef, builderSummary: string, diffDigest: string, validationChecklist: string[]): string {
+  return [
+    buildQaInstruction(), "", "QA handoff:", `Ticket: ${ticket.id} — ${ticket.title}`,
+    `Acceptance: ${ticket.acceptance.join("; ")}`, `Builder summary: ${builderSummary}`,
+    `Changed files/diff digest: ${diffDigest}`, `Required tests: ${ticket.required_tests.join("; ")}`,
+    `Project validation checklist: ${validationChecklist.join("; ")}`,
+    "Do not change source, configuration, documentation, tickets, or control files. Only ignored cache, coverage, and build output is allowed.",
+  ].join("\n");
 }
 
 export async function compactWithRetry(adapter: BuilderAdapter): Promise<{ ok: boolean; error?: string }> {

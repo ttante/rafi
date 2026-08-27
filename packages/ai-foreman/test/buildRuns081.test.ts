@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildRecoveryPreview, completeBuildRun, createBuildRun, persistBuildSession, readBuildRuns, recordBuildReceipt, releaseBuildLease } from "../src/buildRuns.js";
+import { buildRecoveryPreview, completeBuildRun, createBuildRun, persistBuildSession, readBuildRuns, recordBuildReceipt, recoverableBuildRuns, releaseBuildLease } from "../src/buildRuns.js";
+import { cmdInit } from "../src/tickets/commands.js";
+import { StateDb } from "../src/tickets/stateDb.js";
 
 test("build records atomically retain sessions, receipts, and completed history", () => {
   const dir = mkdtempSync(join(tmpdir(), "rafi-build-run-"));
@@ -38,5 +40,40 @@ test("build records persist shared and mixed branch allocation modes", () => {
     const mixed = createBuildRun({ tickets: ["T021", "T022"], repositoryRoot: dir, branchMode: "mixed" });
     releaseBuildLease(dir, mixed, "recoverable");
     assert.deepEqual(readBuildRuns(dir).map((run) => run.branchMode).sort(), ["mixed", "shared"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("recoverable runs infer tickets omitted by legacy current-branch records", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-build-run-legacy-ticket-"));
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    let run = createBuildRun({
+      tickets: [],
+      repositoryRoot: dir,
+      branchMode: "current",
+      now: new Date("2025-01-01T00:00:00.000Z"),
+    });
+    const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try {
+      db.insertEvent({
+        timestamp: "2025-01-01T00:00:01.000Z",
+        actor: "foreman",
+        ticket_id: "T030",
+        event_type: "update",
+        old_status: "next",
+        new_status: "in_progress",
+        summary: "Starting step 1 of 1",
+        validation: null,
+        evidence: null,
+        payload_json: "{}",
+      });
+    } finally {
+      db.close();
+    }
+    run = releaseBuildLease(dir, run, "recoverable");
+
+    const recovered = recoverableBuildRuns(dir).find((candidate) => candidate.runId === run.runId);
+    assert.deepEqual(recovered?.tickets, ["T030"]);
+    assert.equal(recovered?.currentTicket, "T030");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

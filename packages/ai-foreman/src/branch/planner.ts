@@ -1,6 +1,8 @@
 import type { TicketDef } from "../tickets/ticketSchema.js";
 import type { TicketState } from "../tickets/stateDb.js";
 import type { BranchIssue, BranchPlan, BranchPlanNode } from "./types.js";
+import type { DeliveryConfig } from "../tickets/delivery.js";
+import type { TicketBuildSetupConfig } from "../tickets/setupConfig.js";
 
 export interface AuditDependency {
   ticket: string;
@@ -142,11 +144,11 @@ export function applySharedDeliveryBranch(
   plan: BranchPlan,
   unitId: string,
   allRemainingTicketIds: string[],
-  branchPrefix = "rafi",
+  branchPrefix = "feature",
 ): BranchPlan {
   if (plan.nodes.length === 0) return plan;
   const slug = unitId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "group";
-  const branch = `${branchPrefix.replace(/^\/+|\/+$/g, "") || "rafi"}/${slug}`;
+  const branch = `${normalizeBranchPrefix(branchPrefix)}/${slug}`;
   const finalSelected = plan.nodes.at(-1)?.ticket.id;
   const completesUnit = plan.nodes.length === allRemainingTicketIds.length
     && allRemainingTicketIds.every((id) => plan.nodes.some((node) => node.ticket.id === id));
@@ -160,6 +162,41 @@ export function applySharedDeliveryBranch(
       deliveryUnitFinal: completesUnit && node.ticket.id === finalSelected,
     })),
   };
+}
+
+/** Apply branch sharing only; this deliberately never creates delivery stacks or dependency edges. */
+export function applySizeBranchPolicy(
+  plan: BranchPlan,
+  policy: TicketBuildSetupConfig["branch_policy"],
+  delivery?: DeliveryConfig,
+  branchPrefix = "feature",
+): BranchPlan {
+  if (policy.mode !== "size" || plan.nodes.length < 2) return plan;
+  const explicitlyAssigned = new Set(delivery?.units.flatMap((unit) => unit.tickets) ?? []);
+  const candidates = plan.nodes.filter((node) => policy.by_size[node.ticket.size] === "shared" && !explicitlyAssigned.has(node.ticket.id));
+  const groups = new Map<string, BranchPlanNode[]>();
+  for (const node of candidates) {
+    // Tickets with selected dependency edges need their existing topology. Independent
+    // tickets sharing the same base are safe to execute serially in one worktree/review.
+    if (node.dependencies.length) continue;
+    const key = node.baseBranch;
+    groups.set(key, [...(groups.get(key) ?? []), node]);
+  }
+  const replacement = new Map<string, BranchPlanNode>();
+  for (const [base, nodes] of groups) {
+    if (nodes.length < 2) continue;
+    const ids = nodes.map((node) => node.ticket.id.toLowerCase()).join("-");
+    const groupId = `size-small-${ids}`;
+    const branch = `${normalizeBranchPrefix(branchPrefix)}/${groupId}`.slice(0, 120).replace(/-+$/, "");
+    nodes.forEach((node, index) => replacement.set(node.ticket.id, {
+      ...node,
+      branch,
+      baseBranch: base,
+      deliveryUnitId: groupId,
+      deliveryUnitFinal: index === nodes.length - 1,
+    }));
+  }
+  return { ...plan, nodes: plan.nodes.map((node) => replacement.get(node.ticket.id) ?? node) };
 }
 
 export function parseAuditDependencies(text: string): AuditDependency[] {
@@ -191,7 +228,7 @@ ${body}`;
 }
 
 function uniqueBranchName(prefix: string, ticket: TicketDef, used: Set<string>): string {
-  const cleanPrefix = prefix.replace(/^\/+|\/+$/g, "") || "rafi";
+  const cleanPrefix = normalizeBranchPrefix(prefix);
   const baseSlug = `${ticket.id}-${ticket.title}`
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -205,6 +242,14 @@ function uniqueBranchName(prefix: string, ticket: TicketDef, used: Set<string>):
   }
   used.add(branch);
   return branch;
+}
+
+export function normalizeBranchPrefix(prefix: string | undefined): string {
+  const value = prefix === undefined || prefix === "" ? "feature" : prefix;
+  if (value.startsWith("/") || value.endsWith("/") || value.includes("..") || value.includes("//") || /[~^:?*\[\\\s]/.test(value)) {
+    throw new Error(`invalid Git branch prefix: ${value}`);
+  }
+  return value;
 }
 
 function detectSelectedCycles(tickets: TicketDef[], deps: Map<string, string[]>): string[] {

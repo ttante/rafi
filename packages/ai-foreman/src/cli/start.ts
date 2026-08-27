@@ -19,14 +19,14 @@ import { resolveAgentForProject } from "./runtimeSelection.js";
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "../tickets/config.js";
 import { loadTickets } from "../tickets/ticketLoader.js";
 import { StateDb } from "../tickets/stateDb.js";
-import { applySharedDeliveryBranch, buildBranchAuditInstruction, buildBranchPlan, parseAuditDependencies } from "../branch/planner.js";
+import { applySharedDeliveryBranch, applySizeBranchPolicy, buildBranchAuditInstruction, buildBranchPlan, parseAuditDependencies } from "../branch/planner.js";
 import { collectBaseWorktreeDirtyPaths, currentGitRef, ensureCleanBaseWorktree, generatedTrackerDirtyPaths } from "../branch/git.js";
 import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
 import { branchPlanLogMetadata, presentBranchPlan } from "../branch/presentation.js";
-import { checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
-import type { BuildRunRecordV1, ResolvedAgentSettings } from "rafi-spec";
+import { checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
+import type { BuildRunRecordV2, ResolvedAgentSettings } from "rafi-spec";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
 import { parse as parseYaml } from "yaml";
 import {
@@ -39,9 +39,10 @@ import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig
 import { loadDeliveryConfig, selectDeliveryUnitForRun, selectStacksForRun, updateStackDeliveryState, type DeliveryConfig, type DeliveryStack, type DeliveryUnitProgress } from "../tickets/delivery.js";
 import { AgentStatusReporter } from "../statusReporter.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
-import { WorkflowDb } from "../workflowDb.js";
+import { WorkflowDb, readCurrentWorkflowLease } from "../workflowDb.js";
 import { makeLogPath as makeRoleLogPath, readOnlyPermissionConfig, runRoleInstruction } from "../agentRun.js";
 import type { QaNonconvergenceContext, QaNonconvergenceDecision } from "../qaReview.js";
+import { eligibleTickets, evaluateTicketEligibility } from "../tickets/eligibility.js";
 
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
@@ -336,13 +337,18 @@ export function buildStartCommand(): Command {
     .option("--no-auto-merge-wait", "do not wait for dependency PR/MRs before dependent tickets")
     .option("--auto-merge-timeout-minutes <n>", "auto-merge dependency wait timeout in minutes (blank means no timeout)")
     .option("--base <ref>", "base ref for root ticket branches (default: current branch or HEAD)")
-    .option("--branch-prefix <prefix>", "branch name prefix for ticket branches", "rafi")
+    .option("--branch-prefix <prefix>", "branch name prefix for ticket branches", "feature")
     .option("--max-branch-depth <n>", "maximum selected branch stack depth", "5")
     .option("--pr-ready", "create ready-for-review PRs instead of draft PRs")
     .option("--keep-worktrees", "keep successful ticket worktrees for inspection")
-    .option("--ticket <id>", "ticket id to continue in branch mode; repeat for multiple tickets", collectTicket, [])
+    .option("--ticket <id>", "select one new ticket, or identify recovery tickets with --resume/--continue/--recover-run", collectTicket, [])
     .option("--skip-delivery-unit <id>", "skip one unfinished delivery unit for this run", collectTicket, [])
     .action(async (project: string, opts, command: Command) => {
+      const requestedTicketIds = (opts.ticket as string[] | undefined) ?? [];
+      const recoveryIntent = Boolean(opts.resume || opts.continue || opts.recoverRun);
+      if (!recoveryIntent && requestedTicketIds.length > 1) fail("new-ticket selection supports exactly one --ticket");
+      if (!recoveryIntent && requestedTicketIds.length === 1 && opts.steps === undefined && opts.stacks === undefined) opts.steps = "1";
+      if (!recoveryIntent && requestedTicketIds.length && opts.stacks !== undefined) fail("new-ticket selection cannot be combined with --stacks");
       if (opts.steps !== undefined && opts.stacks !== undefined) fail("--steps and --stacks are mutually exclusive");
       if (opts.steps === undefined && opts.stacks === undefined) {
         if (opts.yes || !process.stdin.isTTY || !process.stdout.isTTY) fail("noninteractive/--yes runs require exactly one of --steps or --stacks");
@@ -453,13 +459,14 @@ export function buildStartCommand(): Command {
       }
 
       const branchMode = branchDefaults.branchMode;
-      const continueTickets = (opts.ticket as string[] | undefined) ?? [];
+      const continueTickets = recoveryIntent ? requestedTicketIds : [];
+      let selectedNewTicket = !recoveryIntent ? requestedTicketIds[0] : undefined;
       const maxBranchDepth = Number.parseInt(opts.maxBranchDepth, 10);
       if (!Number.isInteger(maxBranchDepth) || maxBranchDepth < 1) {
         fail("--max-branch-depth must be a positive integer");
       }
-      if (!branchMode && continueTickets.length > 0) {
-        fail("--ticket is only supported when continuing or resuming an isolated branch run");
+      if (!branchMode && continueTickets.length > 1) {
+        fail("current-branch build recovery supports exactly one --ticket");
       }
       if (branchMode) {
         if (opts.resume && continueTickets.length > 1) {
@@ -467,9 +474,6 @@ export function buildStartCommand(): Command {
         }
         if ((opts.resume || opts.continue) && continueTickets.length === 0 && !recoveryRecord) {
           fail(branchContinueTicketHelp(cwd, opts.resume ? "--resume" : "--continue"));
-        }
-        if (continueTickets.length > 0 && !(opts.resume || opts.continue)) {
-          fail("--ticket in branch mode requires --continue or --resume <sessionId>");
         }
         if (opts.tickets) fail("--tickets is not supported with an isolated branch run; initialize and use .tickets/tickets.yaml");
         if (!isTicketsInitialized(cwd)) fail("isolated branch runs require initialized .tickets/ (run ai-foreman tickets init)");
@@ -484,6 +488,50 @@ export function buildStartCommand(): Command {
       if (!branchMode && opts.continue && !resumeSessionId) {
         fail(`no previous session id found under ${join(cwd, ".foreman")}`);
       }
+      if (selectedNewTicket) {
+        if (!isTicketsInitialized(cwd)) fail("--ticket requires initialized .tickets/ (run `rafi tickets init`)");
+        const eligibilityConfig = loadTicketsConfig(cwd);
+        const eligibilityPaths = resolveTicketPaths(eligibilityConfig, cwd);
+        const eligibilityDefs = loadTickets(eligibilityPaths.tickets);
+        const eligibilityDb = new StateDb(eligibilityPaths.stateDb);
+        const eligibilityStates = eligibilityDb.getAllStates();
+        eligibilityDb.close();
+        const activeLease = readCurrentWorkflowLease(cwd);
+        let assessment = evaluateTicketEligibility({
+          tickets: eligibilityDefs,
+          states: eligibilityStates,
+          implementationLimit: eligibilityConfig.implementationLimit,
+          delivery: deliveryConfig,
+          activeLease: activeLease ? { runId: activeLease.runId } : undefined,
+        }, selectedNewTicket);
+        if (!assessment.eligible) {
+          console.error(`foreman: ${selectedNewTicket} is not eligible:`);
+          for (const blocker of assessment.blockers) console.error(`  - ${blocker.detail}`);
+          const dependency = assessment.eligibleDependencies[0];
+          if (!dependency || opts.yes || !process.stdin.isTTY || !process.stdout.isTTY) fail(`cannot start ${selectedNewTicket}`);
+          const answer = await select({ message: `Start eligible dependency ${dependency.id}: ${dependency.title} instead?`, options: [
+            { value: "dependency", label: `Start ${dependency.id} (Recommended)` },
+            { value: "cancel", label: "Cancel" },
+          ] });
+          if (isCancel(answer) || answer === "cancel") { console.log("ai-foreman: cancelled; nothing changed"); return; }
+          selectedNewTicket = dependency.id;
+          assessment = evaluateTicketEligibility({ tickets: eligibilityDefs, states: eligibilityStates, implementationLimit: eligibilityConfig.implementationLimit, delivery: deliveryConfig }, selectedNewTicket);
+        }
+        const recommended = eligibleTickets({ tickets: eligibilityDefs, states: eligibilityStates, implementationLimit: eligibilityConfig.implementationLimit, delivery: deliveryConfig })[0];
+        if (assessment.eligible && recommended && recommended.id !== selectedNewTicket) {
+          console.log(`foreman: recommended ${recommended.id}: ${recommended.title}`);
+          console.log(`foreman: requested ${assessment.ticket!.id}: ${assessment.ticket!.title}`);
+          if (!opts.yes) {
+            if (!process.stdin.isTTY || !process.stdout.isTTY) fail(`starting non-recommended ${selectedNewTicket} requires --yes`);
+            const answer = await select({ message: `Start ${selectedNewTicket} anyway?`, options: [
+              { value: "start", label: `Start ${selectedNewTicket}` }, { value: "cancel", label: "Cancel" },
+            ] });
+            if (isCancel(answer) || answer === "cancel") { console.log("ai-foreman: cancelled; nothing changed"); return; }
+          }
+        }
+      }
+      const recoveryTicket = !branchMode && recoveryRecord ? continueTickets[0] : undefined;
+      const preferredTicket = selectedNewTicket ?? recoveryTicket;
 
       const config = loadConfig(join(cwd, "foreman.yaml"));
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -582,9 +630,14 @@ export function buildStartCommand(): Command {
         const allowedBaseDirtyPaths = generatedTrackerDirtyPaths(ticketsConfig.paths);
         const baseWorktreePolicy = recoveryRecord ? "skip" as const : "enforce" as const;
         if (baseWorktreePolicy === "skip") {
-          const dirty = collectBaseWorktreeDirtyPaths(cwd, { allowedDirtyPaths: allowedBaseDirtyPaths });
-          if (dirty.length > 0) {
-            console.warn(`foreman: warning: base worktree has uncommitted changes; build recovery will continue.\n${dirty.join("\n")}`);
+          const projection = recoveryRecord ? projectBuildRecovery(cwd, recoveryRecord) : undefined;
+          if (projection?.expectedChanges.length) {
+            console.log(`foreman: preserved expected in-progress work: ${projection.expectedChanges.join(", ")}`);
+          }
+          if (projection?.unexpectedChanges.length) {
+            console.warn("foreman: warning: unexpected changes may conflict with recovery; recovery is still allowed:");
+            for (const item of projection.unexpectedChanges) console.warn(`  ${item.path}: ${item.risk}`);
+            console.warn("foreman: recommended action: preserve or move overlapping changes before continuing");
           }
         } else {
           try {
@@ -653,11 +706,11 @@ export function buildStartCommand(): Command {
         } else {
           plan = buildBranchPlan(tickets, states, {
             steps,
-            baseRef: (opts.base as string | undefined) ?? currentGitRef(cwd),
+            baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch ?? currentGitRef(cwd),
             branchPrefix: opts.branchPrefix as string,
             maxBranchDepth,
             rootBaseBranches: branchDefaults.rootBaseBranches,
-            ticketIds: selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
+            ticketIds: selectedNewTicket ? [selectedNewTicket] : selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
           });
 
           let auditBuilder: BuilderAdapter | undefined;
@@ -670,12 +723,12 @@ export function buildStartCommand(): Command {
             const auditDependencies = parseAuditDependencies(audit.text);
             plan = buildBranchPlan(tickets, states, {
               steps,
-              baseRef: (opts.base as string | undefined) ?? currentGitRef(cwd),
+              baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch ?? currentGitRef(cwd),
               branchPrefix: opts.branchPrefix as string,
               maxBranchDepth,
               auditDependencies,
               rootBaseBranches: branchDefaults.rootBaseBranches,
-              ticketIds: selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
+              ticketIds: selectedNewTicket ? [selectedNewTicket] : selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
             });
             auditDependencyCount = auditDependencies.length;
           } finally {
@@ -692,6 +745,9 @@ export function buildStartCommand(): Command {
           }
           if (selectedStacks.length && deliveryConfig) {
             plan = applyExplicitStackTopology(plan, selectedStacks, deliveryConfig, opts.branchPrefix as string);
+          } else if (!deliveryRun) {
+            const branchPolicy = loadTicketSetupConfig(cwd)?.build.branch_policy;
+            if (branchPolicy) plan = applySizeBranchPolicy(plan, branchPolicy, deliveryConfig, opts.branchPrefix as string);
           }
           if (recoveryRecord && opts.resume && plan.nodes[0]) {
             const prior = findResumableBranchSessions(join(cwd, ".foreman")).find((session) => session.ticket === (recoveryRecord.currentTicket ?? plan.nodes[0]!.ticket.id));
@@ -751,7 +807,7 @@ export function buildStartCommand(): Command {
         };
         let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: opts.resume ? String(opts.resume) : null }) : createBuildRun({
           tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
-          repositoryRoot: cwd, branchMode: branchPresentation.allocationMode, builder: capturedBranchBuilder, qa: capturedBranchQa,
+          repositoryRoot: cwd, branchMode: branchPresentation.allocationMode, baseRef: plan.baseRef, builder: capturedBranchBuilder, qa: capturedBranchQa,
         });
         const branchHeartbeat = setInterval(() => { masterRun = heartbeatBuildRun(cwd, masterRun); }, 10_000); branchHeartbeat.unref();
         const summaries = await runBranchPlan({
@@ -858,8 +914,8 @@ export function buildStartCommand(): Command {
         session_strategy: roleDefaults.builder?.session_strategy ?? "compact", settings_revision: settingsRevision,
       };
       const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", settings_revision: settingsRevision };
-      let buildRun: BuildRunRecordV1 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: opts.resume ? String(opts.resume) : null }) : createBuildRun({
-        tickets: [], repositoryRoot: cwd, branchMode: "current", builder: capturedBuilder, qa: capturedQa,
+      let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: opts.resume ? String(opts.resume) : null }) : createBuildRun({
+        tickets: [], repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
       });
       const heartbeat = setInterval(() => { buildRun = heartbeatBuildRun(cwd, buildRun); }, 10_000);
       heartbeat.unref();
@@ -903,7 +959,7 @@ export function buildStartCommand(): Command {
       try {
         console.log("ai-foreman: asking builder to plan the next tickets or steps...\n");
         buildRun = checkpointBuildRun(cwd, buildRun, "before-preflight");
-        await foreman.runPreflight(steps, ticketsContent);
+        await foreman.runPreflight(steps, ticketsContent, preferredTicket);
         if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderSessionId()!);
         if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionId()!);
         buildRun = checkpointBuildRun(cwd, buildRun, "preflight-complete");
@@ -948,7 +1004,15 @@ export function buildStartCommand(): Command {
           }
         }
 
-        const result = await foreman.runBatch(steps, trackerRelPath);
+        const result = await foreman.runBatch(steps, trackerRelPath, (ticketId) => {
+          const tickets = buildRun.tickets.includes(ticketId)
+            ? buildRun.tickets
+            : [...buildRun.tickets, ticketId];
+          buildRun = checkpointBuildRun(cwd, buildRun, "ticket-selected", {
+            tickets,
+            currentTicket: ticketId,
+          });
+        }, preferredTicket);
         if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionId()!);
         buildRun = result.outcome === "all-done" || result.outcome === "plan-complete"
           ? completeBuildRun(cwd, buildRun)
@@ -1079,7 +1143,7 @@ export function applyExplicitStackTopology(plan: BranchPlan, stacks: DeliverySta
     let depth = 0;
     for (const unitId of stack.units) {
       const unit = unitById.get(unitId); if (!unit) throw new Error(`stack ${stack.id} references missing delivery unit ${unitId}`);
-      const sharedBranch = unit.branch_mode === "shared" ? `${branchPrefix.replace(/^\/+|\/+$/g, "") || "rafi"}/${slug(unitId)}` : undefined;
+      const sharedBranch = unit.branch_mode === "shared" ? `${branchPrefix || "feature"}/${slug(unitId)}` : undefined;
       const unitBaseBranch = predecessorBranch;
       for (let ticketIndex = 0; ticketIndex < unit.tickets.length; ticketIndex++) {
         const ticketId = unit.tickets[ticketIndex]!; depth += unit.branch_mode === "shared" && ticketIndex > 0 ? 0 : 1;

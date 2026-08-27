@@ -12,6 +12,8 @@ export type TicketBuildCompletionMode = "pr" | "auto-merge" | "direct-merge" | "
 export type TicketBuildProvider = "auto" | "github" | "gitlab" | "local";
 export type TicketBuildMergeMethod = "squash" | "merge" | "rebase";
 export type TicketBuildBranchStrategy = "current" | "batch" | "branch-per-ticket";
+export type TicketBranchPolicyMode = "global" | "size";
+export type TicketTitleStyle = "ticket-title" | "conventional" | "none" | "custom";
 export type TicketPopulateAgentPreference = "configured" | "claude" | "codex";
 export type TicketPopulateEnrichmentPolicy = "none" | "recommendations" | "agent";
 
@@ -39,12 +41,25 @@ export interface TicketBuildSetupConfig {
   cleanup: boolean;
   auto_merge_wait: boolean;
   auto_merge_timeout_minutes: number | null;
+  base_branch: string;
+  branch_policy: {
+    mode: TicketBranchPolicyMode;
+    global_strategy: TicketBuildBranchStrategy;
+    by_size: Record<"XS" | "S" | "M" | "L" | "XL", "shared" | "per-ticket">;
+  };
+  review: {
+    title_style: TicketTitleStyle;
+    title_template: string | null;
+    description_sections: string[];
+  };
+  validation_checklist: string[];
 }
 
 export interface TicketsSetupConfig {
   sources: TicketSourceConfig[];
   populate: TicketPopulateSetupConfig;
   build: TicketBuildSetupConfig;
+  limits: { implementation: number; view: number };
 }
 
 export interface MinimalRafiConfigOptions {
@@ -66,6 +81,7 @@ const SKILL_NAMES = [
 
 export const DEFAULT_TICKET_SETUP: TicketsSetupConfig = {
   sources: [],
+  limits: { implementation: 500, view: 20_000 },
   populate: {
     source_handling: "saved",
     agent_preference: "configured",
@@ -83,6 +99,25 @@ export const DEFAULT_TICKET_SETUP: TicketsSetupConfig = {
     cleanup: true,
     auto_merge_wait: false,
     auto_merge_timeout_minutes: null,
+    base_branch: "main",
+    branch_policy: {
+      mode: "global",
+      global_strategy: "branch-per-ticket",
+      by_size: { XS: "shared", S: "shared", M: "per-ticket", L: "per-ticket", XL: "per-ticket" },
+    },
+    review: {
+      title_style: "ticket-title",
+      title_template: null,
+      description_sections: ["Summary", "Linked ticket", "Changes made", "Tests and validation performed", "Risks or rollback notes", "Checklist"],
+    },
+    validation_checklist: [
+      "Acceptance criteria satisfied",
+      "Required tests pass",
+      "Configured project checks pass",
+      "Documentation updated when needed",
+      "Database and deployment changes reviewed when present",
+      "Validation evidence attached",
+    ],
   },
 };
 
@@ -130,6 +165,17 @@ export function saveTicketSetupConfig(
   writeFileSync(join(projectDir, RAFI_CONFIG_FILE), stringify(config, { lineWidth: 100 }), "utf8");
 }
 
+/** Synchronize pending setup limits into the tracker, once the tracker exists. */
+export function syncTicketLimits(projectDir: string, limits: TicketsSetupConfig["limits"]): void {
+  const path = join(projectDir, ".tickets", "config.yaml");
+  if (!existsSync(path)) return;
+  const raw = parse(readFileSync(path, "utf8")) as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${path}: expected a YAML object`);
+  raw.implementation_limit = positiveInteger(limits.implementation, 500, "tickets.limits.implementation");
+  raw.view_limit = positiveInteger(limits.view, 20_000, "tickets.limits.view");
+  writeFileSync(path, stringify(raw, { lineWidth: 100 }), "utf8");
+}
+
 export function ensureRafiConfigForTicketSetup(
   projectDir: string,
   opts: MinimalRafiConfigOptions = {},
@@ -150,6 +196,7 @@ export function normalizeTicketsSetupConfig(value: unknown, label = "tickets"): 
   const raw = value as Record<string, unknown>;
   const setup: TicketsSetupConfig = {
     sources: normalizeSources(raw.sources, `${label}.sources`),
+    limits: normalizeLimits(raw.limits, `${label}.limits`),
     populate: normalizePopulate(raw.populate, `${label}.populate`),
     build: normalizeBuild(raw.build, `${label}.build`),
   };
@@ -159,6 +206,7 @@ export function normalizeTicketsSetupConfig(value: unknown, label = "tickets"): 
 export function denormalizeTicketsSetupConfig(setup: TicketsSetupConfig): Record<string, unknown> {
   return {
     sources: setup.sources.map((source) => ({ ...source })),
+    limits: { ...setup.limits },
     populate: { ...setup.populate },
     build: { ...setup.build },
   };
@@ -168,6 +216,7 @@ export function mergeTicketSetup(
   current: TicketsSetupConfig | undefined,
   patch: Partial<{
     sources: TicketSourceConfig[];
+    limits: TicketsSetupConfig["limits"];
     populate: Partial<TicketPopulateSetupConfig>;
     build: Partial<TicketBuildSetupConfig>;
   }>,
@@ -175,6 +224,7 @@ export function mergeTicketSetup(
   const base = current ? cloneTicketSetup(current) : cloneTicketSetup(DEFAULT_TICKET_SETUP);
   return normalizeTicketsSetupConfig({
     sources: patch.sources ?? base.sources,
+    limits: patch.limits ?? base.limits,
     populate: { ...base.populate, ...(patch.populate ?? {}) },
     build: { ...base.build, ...(patch.build ?? {}) },
   });
@@ -281,6 +331,21 @@ export function detectGitProvider(projectDir: string): Exclude<TicketBuildProvid
   return undefined;
 }
 
+export function detectDefaultBranch(projectDir: string): string {
+  const attempts = [
+    ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+    ["config", "--get", "init.defaultBranch"],
+    ["branch", "--show-current"],
+  ];
+  for (const args of attempts) {
+    try {
+      const value = execFileSync("git", args, { cwd: projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      if (value) return value.replace(/^origin\//, "");
+    } catch { /* try the next safe source */ }
+  }
+  return "main";
+}
+
 export function recommendedBuildDefaults(projectDir: string): TicketBuildSetupConfig {
   const provider = detectGitProvider(projectDir);
   return {
@@ -290,6 +355,7 @@ export function recommendedBuildDefaults(projectDir: string): TicketBuildSetupCo
     pr_ready: Boolean(provider),
     merge_method: "squash",
     cleanup: true,
+    base_branch: detectDefaultBranch(projectDir),
   };
 }
 
@@ -419,6 +485,47 @@ function normalizeBuild(value: unknown, label: string): TicketBuildSetupConfig {
     cleanup: booleanField(raw.cleanup, DEFAULT_TICKET_SETUP.build.cleanup, `${label}.cleanup`),
     auto_merge_wait: booleanField(raw.auto_merge_wait, DEFAULT_TICKET_SETUP.build.auto_merge_wait, `${label}.auto_merge_wait`),
     auto_merge_timeout_minutes: nullablePositiveInteger(raw.auto_merge_timeout_minutes, DEFAULT_TICKET_SETUP.build.auto_merge_timeout_minutes, `${label}.auto_merge_timeout_minutes`),
+    base_branch: stringField(raw.base_branch, DEFAULT_TICKET_SETUP.build.base_branch),
+    branch_policy: normalizeBranchPolicy(raw.branch_policy, raw.branch_strategy, `${label}.branch_policy`),
+    review: normalizeReview(raw.review, `${label}.review`),
+    validation_checklist: stringArray(raw.validation_checklist, DEFAULT_TICKET_SETUP.build.validation_checklist, `${label}.validation_checklist`),
+  };
+}
+
+function normalizeLimits(value: unknown, label: string): TicketsSetupConfig["limits"] {
+  const raw = objectOrEmpty(value, label);
+  return {
+    implementation: positiveInteger(raw.implementation, DEFAULT_TICKET_SETUP.limits.implementation, `${label}.implementation`),
+    view: positiveInteger(raw.view, DEFAULT_TICKET_SETUP.limits.view, `${label}.view`),
+  };
+}
+
+function normalizeBranchPolicy(value: unknown, legacyStrategy: unknown, label: string): TicketBuildSetupConfig["branch_policy"] {
+  const raw = objectOrEmpty(value, label);
+  const sizes = objectOrEmpty(raw.by_size, `${label}.by_size`);
+  const globalStrategy = enumField(raw.global_strategy ?? legacyStrategy, ["current", "batch", "branch-per-ticket"], DEFAULT_TICKET_SETUP.build.branch_policy.global_strategy, `${label}.global_strategy`);
+  return {
+    mode: enumField(raw.mode, ["global", "size"], DEFAULT_TICKET_SETUP.build.branch_policy.mode, `${label}.mode`),
+    global_strategy: globalStrategy,
+    by_size: {
+      XS: enumField(sizes.XS, ["shared", "per-ticket"], "shared", `${label}.by_size.XS`),
+      S: enumField(sizes.S, ["shared", "per-ticket"], "shared", `${label}.by_size.S`),
+      M: enumField(sizes.M, ["shared", "per-ticket"], "per-ticket", `${label}.by_size.M`),
+      L: enumField(sizes.L, ["shared", "per-ticket"], "per-ticket", `${label}.by_size.L`),
+      XL: enumField(sizes.XL, ["shared", "per-ticket"], "per-ticket", `${label}.by_size.XL`),
+    },
+  };
+}
+
+function normalizeReview(value: unknown, label: string): TicketBuildSetupConfig["review"] {
+  const raw = objectOrEmpty(value, label);
+  const titleStyle = enumField(raw.title_style, ["ticket-title", "conventional", "none", "custom"], DEFAULT_TICKET_SETUP.build.review.title_style, `${label}.title_style`);
+  const titleTemplate = nullableString(raw.title_template);
+  if (titleStyle === "custom" && !titleTemplate) throw new Error(`${label}.title_template: required for custom title style`);
+  return {
+    title_style: titleStyle,
+    title_template: titleTemplate,
+    description_sections: stringArray(raw.description_sections, DEFAULT_TICKET_SETUP.build.review.description_sections, `${label}.description_sections`),
   };
 }
 
@@ -476,6 +583,12 @@ function nullablePositiveInteger(value: unknown, fallback: number | null, label:
   throw new Error(`${label}: expected a positive integer or null`);
 }
 
+function stringArray(value: unknown, fallback: string[], label: string): string[] {
+  if (value === undefined) return [...fallback];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim())) throw new Error(`${label}: expected non-empty strings`);
+  return [...new Set(value.map((item) => String(item).trim()))];
+}
+
 function normalizeTargets(value: unknown): HarnessTarget[] {
   if (!Array.isArray(value)) return [];
   const out: HarnessTarget[] = [];
@@ -488,8 +601,14 @@ function normalizeTargets(value: unknown): HarnessTarget[] {
 function cloneTicketSetup(setup: TicketsSetupConfig): TicketsSetupConfig {
   return {
     sources: setup.sources.map((source) => ({ ...source, ...(source.type === "local" ? { paths: [...source.paths] } : {}) }) as TicketSourceConfig),
+    limits: { ...setup.limits },
     populate: { ...setup.populate },
-    build: { ...setup.build },
+    build: {
+      ...setup.build,
+      branch_policy: { ...setup.build.branch_policy, by_size: { ...setup.build.branch_policy.by_size } },
+      review: { ...setup.build.review, description_sections: [...setup.build.review.description_sections] },
+      validation_checklist: [...setup.build.validation_checklist],
+    },
   };
 }
 

@@ -38,6 +38,8 @@ import {
 } from "../src/tickets/setupConfig.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import type { TicketState } from "../src/tickets/stateDb.js";
+import { formatTicketDetails, getTicketDetails } from "../src/tickets/details.js";
+import { previewTicketReset, resetTickets } from "../src/tickets/reset.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -100,6 +102,114 @@ function writeTrackerConfig(dir: string, config: Record<string, unknown>): void 
   mkdirSync(join(dir, ".tickets"), { recursive: true });
   writeFileSync(join(dir, ".tickets", "config.yaml"), stringify(config), "utf8");
 }
+
+test("ticket details retain unknown canonical fields and include complete state history", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Details", timezone: "UTC" });
+    const ticket = { ...makeDef("T123", 1000), custom_forward_field: { enabled: true } };
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [ticket] }), "utf8");
+    cmdUpdate(dir, "T123", { status: "in_progress", owner: "Rafi", evidence: "partial", validationResult: "not_run" });
+    const db = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    db.insertValidationSnapshot({ timestamp: "2026-01-01T00:00:00.000Z", scope: "T123", result: "passed", commands: "pnpm test", evidence: "ok", notes: null });
+    db.close();
+
+    const details = getTicketDetails(dir, "T123", new Date("2026-01-02T00:00:00.000Z"));
+    assert.deepEqual(details.definition.custom_forward_field, { enabled: true });
+    assert.equal(details.state.owner, "Rafi");
+    assert.equal(details.validation_history.length, 1);
+    assert.equal(details.events.length, 1);
+    const report = formatTicketDetails(details).join("\n");
+    assert.match(report, /custom_forward_field/);
+    assert.match(report, /Summary for T123/);
+    assert.match(report, /Active validation and evidence/);
+    assert.match(report, /History/);
+    assert.throws(() => getTicketDetails(dir, "missing"), /rafi tickets queue/);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("ticket reset clears every active field but preserves dependencies and audit history", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Reset", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [
+      makeDef("T001", 1000),
+      makeDef("T002", 2000, { depends_on: ["T001"] }),
+      makeDef("T003", 3000),
+    ] }), "utf8");
+    const db = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    db.upsertState("T002", {
+      status: "blocked", owner: "builder", current_step: "code", next_action: "test",
+      blocked_by_json: JSON.stringify(["external"]), blocker_type: "external", blocker_notes: "waiting",
+      first_blocked_at: "2026-01-01", last_checked_at: "2026-01-02", last_worked_at: "2026-01-02",
+      completed_at: "2026-01-02", attempt_count: 4, last_error: "bad", evidence: "old",
+      validation_result: "failed", validation_commands: "pnpm test", validation_notes: "failed", updated_by: "builder",
+    }, "2026-01-02T00:00:00.000Z");
+    db.insertValidationSnapshot({ timestamp: "2026-01-02T00:00:00.000Z", scope: "T002", result: "failed", commands: "pnpm test", evidence: "old", notes: "failed" });
+    db.close();
+
+    const preview = previewTicketReset(dir, "T002");
+    assert.deepEqual(preview.tickets[0]?.cleared.sort(), ["active validation/evidence", "attempt count", "last error", "owner", "status", "steps", "temporary blockers", "work timestamps"].sort());
+    const resetId = "00000000-0000-4000-8000-000000000001";
+    const result = resetTickets(dir, "T002", "tester", new Date("2026-01-03T00:00:00.000Z"), { resetId });
+    assert.deepEqual(result.tickets, ["T002"]);
+    assert.deepEqual(resetTickets(dir, "T002", "tester", new Date("2026-01-03T00:00:01.000Z"), { resetId }), result);
+    const details = getTicketDetails(dir, "T002");
+    assert.equal(details.state.status, "planned");
+    assert.equal(details.state.owner, null);
+    assert.equal(details.state.attempt_count, 0);
+    assert.equal(details.state.evidence, null);
+    assert.deepEqual(details.definition.depends_on, ["T001"]);
+    assert.deepEqual(details.effective_blockers, ["T001"]);
+    assert.equal(details.validation_history.length, 1);
+    assert.equal(details.events.at(-1)?.event_type, "ticket_reset");
+    assert.equal(details.events.filter((event) => event.event_type === "ticket_reset").length, 1);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("ticket reset publication failure restores state, audit events, recent-completed context, and rendered output", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Reset rollback", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [makeDef("T001", 1000)] }), "utf8");
+    const db = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    db.upsertState("T001", { status: "done", owner: "builder", evidence: "original evidence" }, "2026-01-01T00:00:00.000Z");
+    db.upsertRecentCompleted({ ticket_id: "T001", why_it_remains_here: "recent", pinned_until: null, updated_at: "2026-01-01T00:00:00.000Z" });
+    db.close();
+    cmdRender(dir);
+    const progressPath = join(dir, "docs", "ticket-progress.md");
+    const progressBefore = readFileSync(progressPath, "utf8");
+
+    assert.throws(
+      () => resetTickets(dir, "T001", "tester", new Date("2026-01-03T00:00:00.000Z"), { beforePublish: () => { throw new Error("injected publication failure"); } }),
+      /injected publication failure/,
+    );
+
+    const rolledBack = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    assert.equal(rolledBack.getState("T001")?.status, "done");
+    assert.equal(rolledBack.getState("T001")?.owner, "builder");
+    assert.equal(rolledBack.getState("T001")?.evidence, "original evidence");
+    assert.equal(rolledBack.getTicketEvents("T001").some((event) => event.event_type === "ticket_reset"), false);
+    assert.deepEqual(rolledBack.getRecentCompleted().map((row) => row.ticket_id), ["T001"]);
+    rolledBack.close();
+    assert.equal(readFileSync(progressPath, "utf8"), progressBefore);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("bulk reset scopes match the agreed terminal-state rules", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Scopes", timezone: "UTC" });
+    const defs = ["planned", "next", "in_progress", "blocked", "done", "canceled", "obsolete"].map((status, index) => makeDef(`T00${index + 1}`, (index + 1) * 1000, { title: status }));
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: defs }), "utf8");
+    const db = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    defs.forEach((ticket, index) => db.upsertState(ticket.id, { status: ["planned", "next", "in_progress", "blocked", "done", "canceled", "obsolete"][index] as TicketState["status"] }, "2026-01-01T00:00:00.000Z"));
+    db.close();
+    assert.equal(previewTicketReset(dir, "all").tickets.length, 7);
+    assert.deepEqual(previewTicketReset(dir, "completed-and-unfinished").tickets.map((row) => row.status), ["planned", "next", "in_progress", "blocked", "done"]);
+    assert.deepEqual(previewTicketReset(dir, "unfinished").tickets.map((row) => row.status), ["planned", "next", "in_progress", "blocked"]);
+  } finally { rmSync(dir, { recursive: true }); }
+});
 
 // ── populate instruction ─────────────────────────────────────────────────────
 
@@ -238,7 +348,13 @@ test("ticket setup config round-trips through rafi-config.yaml", () => {
     saveTicketSetupConfig(dir, {
       ...DEFAULT_TICKET_SETUP,
       sources: [{ type: "local", paths: ["docs/plan.md"] }],
-      build: { ...DEFAULT_TICKET_SETUP.build, completion: "auto-merge", provider: "github", pr_ready: true },
+      limits: { implementation: 321, view: 12_345 },
+      build: {
+        ...DEFAULT_TICKET_SETUP.build, completion: "auto-merge", provider: "github", pr_ready: true, base_branch: "trunk",
+        branch_policy: { mode: "size", global_strategy: "batch", by_size: { XS: "shared", S: "per-ticket", M: "shared", L: "per-ticket", XL: "per-ticket" } },
+        review: { title_style: "custom", title_template: "[{id}] {title}", description_sections: ["Summary", "Security review"] },
+        validation_checklist: ["custom check", "evidence attached"],
+      },
     }, { appName: "Config Test", docsRoot: "docs-rafi", targets: ["codex"] });
 
     const raw = parse(readFileSync(join(dir, "rafi-config.yaml"), "utf8")) as Record<string, unknown>;
@@ -249,6 +365,11 @@ test("ticket setup config round-trips through rafi-config.yaml", () => {
     assert.deepEqual(loaded?.sources, [{ type: "local", paths: ["docs/plan.md"] }]);
     assert.equal(loaded?.build.completion, "auto-merge");
     assert.equal(loaded?.populate.import_cap, 500);
+    assert.deepEqual(loaded?.limits, { implementation: 321, view: 12_345 });
+    assert.equal(loaded?.build.base_branch, "trunk");
+    assert.deepEqual(loaded?.build.branch_policy.by_size, { XS: "shared", S: "per-ticket", M: "shared", L: "per-ticket", XL: "per-ticket" });
+    assert.deepEqual(loaded?.build.review, { title_style: "custom", title_template: "[{id}] {title}", description_sections: ["Summary", "Security review"] });
+    assert.deepEqual(loaded?.build.validation_checklist, ["custom check", "evidence attached"]);
   } finally {
     rmSync(dir, { recursive: true });
   }

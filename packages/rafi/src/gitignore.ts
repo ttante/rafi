@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readInstallManifest } from "./ownership.js";
+import { capturePreimage, finalizeOwnedWrite, readInstallManifest } from "./ownership.js";
 
 export type CreateGitignoreMode = "local-junk" | "all-rafi";
 export type CreateGitignoreSelection = CreateGitignoreMode | "none";
@@ -46,6 +46,7 @@ function ownedCreatedPaths(projectDir: string): string[] {
 
 function writeManagedBlock(projectDir: string, patterns: string[]): void {
   const path = join(projectDir, ".gitignore");
+  const ownership = capturePreimage(projectDir, ".gitignore", "managed-gitignore", "managed-gitignore");
   const current = existsSync(path) ? readFileSync(path, "utf8") : "";
   const block = [
     BLOCK_START,
@@ -58,6 +59,7 @@ function writeManagedBlock(projectDir: string, patterns: string[]): void {
     ? current.replace(pattern, block)
     : `${current}${current && !current.endsWith("\n") ? "\n" : ""}${current ? "\n" : ""}${block}`;
   if (next !== current) writeFileSync(path, next, "utf8");
+  finalizeOwnedWrite(projectDir, { ...ownership, mode: "managed-block", marker: `${BLOCK_START}..${BLOCK_END}`, category: "managed-gitignore" });
 }
 
 function normalizePattern(path: string): string {

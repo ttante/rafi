@@ -122,8 +122,10 @@ Use `rafi tickets init --app-name "My App"` for standalone tracker initializatio
 rafi start . --steps 10
 rafi status
 rafi build:resume .
+rafi build:start-over . --inspect
 rafi agents .
 rafi uninstall . --dry-run
+rafi uninstall:restore <recovery-id> --yes
 rafi doctor .
 ```
 
@@ -131,7 +133,7 @@ rafi doctor .
 
 `rafi start` reads the compiled role bundles and drives a builder through the requested work, with QA after each ticket by default. Branch strategy, completion settings, agent selection, QA overrides, and builder-session continuation are documented in the [start command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-start---help).
 
-QA is an independent, run-wide session and cannot edit protected project files. Interrupted implementation uses durable `.foreman/runs/*.json` checkpoints and resumes with `rafi build:resume`; setup/planning interviews continue with `rafi resume`. `rafi agents` stores per-role runtime/model/reasoning/fast intent, and `rafi uninstall` provides a category-by-category preview with drift checks and local rollback journaling.
+QA is an independent, run-wide session and cannot edit protected project files. Interrupted implementation uses durable `.foreman/runs/*.json` and WorkflowDb checkpoints: `rafi build:resume` preserves and continues work, while `rafi build:start-over` archives/reconciles an entire run. Setup/planning interviews continue with `rafi resume`. `rafi agents` stores per-role runtime/model/reasoning/fast intent. Uninstall is category-based, detects mixed user/Rafi edits, and retains project-local recovery bundles until explicit cleanup.
 
 ## What gets written
 

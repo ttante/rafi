@@ -61,6 +61,50 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
   }
 });
 
+test("build:resume selects a recoverable run directly by ticket", async () => {
+  const dir = initializedProject();
+  try {
+    const settings = {
+      role: "builder" as const,
+      source: "project" as const,
+      make: "codex" as const,
+      model: "default",
+      reasoning: "default",
+      fast: false,
+    };
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T004", "T006"], builder: settings });
+    run = persistBuildSession(dir, run, "builder", "session-ticket");
+    run = releaseBuildLease(dir, run, "recoverable");
+    let invoked: string[] | undefined;
+    const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; } });
+
+    await command.parseAsync([dir, "--ticket", "T006", "--yes"], { from: "user" });
+
+    assert.equal(invoked?.includes(run.runId), true);
+    assert.equal(invoked?.join(" ").includes("--steps 1"), true);
+    assert.equal(invoked?.join(" ").includes("--ticket T006"), true);
+    assert.deepEqual(invoked?.slice(-4), ["--resume", "session-ticket", "--agent", "codex"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("build:resume reports an unmatched ticket instead of opening the picker", async () => {
+  const dir = initializedProject();
+  try {
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T005"] });
+    run = releaseBuildLease(dir, run, "recoverable");
+    const command = buildBuildResumeCommand({ executeStart: () => 0 });
+
+    await assert.rejects(
+      command.parseAsync([dir, "--ticket", "T999", "--yes"], { from: "user" }),
+      /no recoverable build run found for ticket T999; recoverable tickets: T005/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("build:resume supports explicit fresh-session recovery", async () => {
   const dir = initializedProject();
   try {

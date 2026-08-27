@@ -106,8 +106,8 @@ test("branch-plan metadata records names after shared and stack transformations"
   const shared = applySharedDeliveryBranch(plan([node("A", 1000), node("B", 2000)]), "shared unit", ["A", "B"]);
   const sharedMetadata = branchPlanLogMetadata(shared, presentBranchPlan(shared));
   assert.deepEqual(sharedMetadata.branches, [
-    { ticket: "A", branch: "rafi/shared-unit", base: "main" },
-    { ticket: "B", branch: "rafi/shared-unit", base: "main" },
+    { ticket: "A", branch: "feature/shared-unit", base: "main" },
+    { ticket: "B", branch: "feature/shared-unit", base: "main" },
   ]);
   assert.equal(sharedMetadata.branchMode, "shared");
 

@@ -1,10 +1,10 @@
 import { Command } from "commander";
 import { resolve } from "node:path";
-import { buildRecoveryPreview, recoverableBuildRuns } from "ai-foreman/build-runs.js";
-import type { BuildRunRecordV1 } from "rafi-spec";
+import { formatBuildRecoveryProjection, projectBuildRecovery, recoverableBuildRuns } from "ai-foreman/build-runs.js";
+import type { BuildRunRecordV2 } from "rafi-spec";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 
-type RecoverableRun = BuildRunRecordV1 & { active: boolean };
+type RecoverableRun = BuildRunRecordV2 & { active: boolean };
 
 export interface BuildResumeCommandOptions {
   executeStart: (args: string[]) => Promise<number> | number;
@@ -31,23 +31,36 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         return;
       }
       let selected = selectByFlags(runs, opts);
+      if (!selected && opts.run) {
+        throw new Error(`no recoverable build run found for run ID or prefix ${String(opts.run)}`);
+      }
+      if (!selected && opts.ticket) {
+        const knownTickets = [...new Set(runs.flatMap((run) => run.tickets))].sort();
+        const suffix = knownTickets.length > 0
+          ? `; recoverable tickets: ${knownTickets.join(", ")}`
+          : "; the saved recovery records do not identify any tickets";
+        throw new Error(`no recoverable build run found for ticket ${String(opts.ticket)}${suffix}`);
+      }
       if (!selected) {
         if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("provide --run <id> or --ticket <id> when not running in a TTY");
         const { select, isCancel } = await import("@clack/prompts");
+        const projections = new Map(runs.map((run) => [run.runId, projectBuildRecovery(root, run)]));
         const answer = await select({
           message: "Which interrupted build should Rafi recover?",
           options: runs.map((run) => ({
             value: run.runId,
-            label: `${run.runId.slice(0, 8)} — ${run.currentTicket ?? run.tickets[0] ?? "unknown"} — ${run.checkpoint}`,
-            hint: `${run.active ? "active" : "interrupted"}; ${run.builder?.settings.make ?? "runtime unknown"}; ${run.repository.branch ?? "current branch"}; ${run.updatedAt}`,
+            label: `${run.runId.slice(0, 8)} — ${projections.get(run.runId)!.compactLabel}`,
+            hint: `${run.active ? "verified process active; " : ""}${projections.get(run.runId)!.compactHint}`,
           })),
         });
         if (isCancel(answer)) return;
         selected = runs.find((run) => run.runId === answer);
       }
       if (!selected) throw new Error("recoverable run not found");
+      if (opts.ticket) selected = { ...selected, currentTicket: String(opts.ticket) };
+      const selectedProjection = projectBuildRecovery(root, selected, new Date(), opts.ticket ? String(opts.ticket) : undefined);
       console.log("rafi build:resume preview:");
-      for (const line of buildRecoveryPreview(selected)) console.log(`  ${line}`);
+      for (const line of formatBuildRecoveryProjection(selectedProjection)) console.log(`  ${line}`);
       if (selected.active) {
         console.log("rafi build:resume: the original process is verified live; return to it or stop it before recovery. No mutation was performed.");
         return;
@@ -57,7 +70,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       let fresh = Boolean(opts.freshSession);
       if (!opts.yes && process.stdin.isTTY && process.stdout.isTTY) {
         const { select, isCancel } = await import("@clack/prompts");
-        const exact = Boolean(selected.builder?.sessionId);
+        const exact = Boolean(selectedProjection.exactSessionId);
         const choice = await select({ message: "How should Rafi continue?", options: [
           ...(exact ? [{ value: "exact", label: "Resume exact Builder session (Recommended)" }] : []),
           { value: "fresh", label: `${exact ? "Start" : "Use"} a fresh session (conversation continuity will be lost)` },
@@ -65,13 +78,14 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         ] });
         if (isCancel(choice) || choice === "cancel") return;
         fresh = choice === "fresh";
-      } else if (!fresh && !selected.builder?.sessionId) {
+      } else if (!fresh && !selectedProjection.exactSessionId) {
         throw new Error("this run has no captured session ID; rerun with --fresh-session");
       }
 
-      const args = ["start", root, "--steps", String(Math.max(1, selected.tickets.length)), "--yes", "--recover-run", selected.runId];
+      const args = ["start", root, "--steps", String(opts.ticket ? 1 : Math.max(1, selected.tickets.length)), "--yes", "--recover-run", selected.runId];
+      if (opts.ticket) args.push("--ticket", String(opts.ticket));
       if (selected.branchMode !== "current") args.push("--branch-per-ticket");
-      if (!fresh && selected.builder?.sessionId) args.push("--resume", selected.builder.sessionId);
+      if (!fresh && selectedProjection.exactSessionId) args.push("--resume", selectedProjection.exactSessionId);
       else if (selected.branchMode !== "current") args.push("--continue");
       if (fresh && opts.agent) args.push("--agent", String(opts.agent));
       else if (selected.builder?.settings.make) args.push("--agent", selected.builder.settings.make);
@@ -91,6 +105,14 @@ function selectByFlags(runs: RecoverableRun[], opts: Record<string, unknown>): R
     : opts.ticket
       ? runs.filter((run) => run.currentTicket === opts.ticket || run.tickets.includes(String(opts.ticket)))
       : [];
-  if (matches.length > 1) throw new Error("selection is ambiguous; provide a longer run ID");
+  if (matches.length > 1) {
+    if (opts.ticket) {
+      throw new Error(
+        `multiple recoverable build runs found for ticket ${String(opts.ticket)}; `
+        + `choose one with --run (${matches.map((run) => run.runId.slice(0, 8)).join(", ")})`,
+      );
+    }
+    throw new Error("selection is ambiguous; provide a longer run ID");
+  }
   return matches[0];
 }

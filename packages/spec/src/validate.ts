@@ -6,6 +6,8 @@ import {
   agentManifestSchema,
   projectConfigSchema,
   agentDefaultsSchema,
+  buildRunRecordSchema,
+  installManifestSchema,
 } from "./schemas.js";
 import type {
   RulePackFrontmatter,
@@ -38,12 +40,16 @@ const vSkill = ajv.compile(skillManifestSchema);
 const vAgent = ajv.compile(agentManifestSchema);
 const vProject = ajv.compile(projectConfigSchema);
 const vAgentDefaults = ajv.compile(agentDefaultsSchema);
+const vBuildRun = ajv.compile(buildRunRecordSchema);
+const vInstallManifest = ajv.compile(installManifestSchema);
 
 export const validateRulePack = (d: unknown): ValidationResult => run(vRulePack, d);
 export const validateSkillManifest = (d: unknown): ValidationResult => run(vSkill, d);
 export const validateAgentManifest = (d: unknown): ValidationResult => run(vAgent, d);
 export const validateProjectConfig = (d: unknown): ValidationResult => run(vProject, d);
 export const validateAgentDefaults = (d: unknown): ValidationResult => run(vAgentDefaults, d);
+export const validateBuildRunRecord = (d: unknown): ValidationResult => run(vBuildRun, d);
+export const validateInstallManifest = (d: unknown): ValidationResult => run(vInstallManifest, d);
 
 /** Validate and narrow, throwing on failure. */
 export function assertRulePack(d: unknown): asserts d is RulePackFrontmatter {

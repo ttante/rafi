@@ -31,7 +31,7 @@ test("delivery progress resumes unfinished groups and waits on dependencies", ()
 
 test("partial shared delivery uses one branch and defers final completion", () => {
   const plan = buildBranchPlan(tickets, new Map(), { steps: 1, baseRef: "main", branchPrefix: "rafi", maxBranchDepth: 2, ticketIds: ["A"] });
-  const shared = applySharedDeliveryBranch(plan, "group-one", ["A", "B"]);
+  const shared = applySharedDeliveryBranch(plan, "group-one", ["A", "B"], "rafi");
   assert.equal(shared.nodes[0]!.branch, "rafi/group-one");
   assert.equal(shared.nodes[0]!.deliveryUnitFinal, false);
 });

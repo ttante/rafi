@@ -7,7 +7,7 @@ import { stringify } from "yaml";
 
 import { Foreman } from "../src/foreman.js";
 import { Log } from "../src/log.js";
-import { cmdInit } from "../src/tickets/commands.js";
+import { cmdInit, cmdUpdate } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
 import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/types.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
@@ -70,10 +70,14 @@ test("runBatch completes ticket only after QA passes", async () => {
       'checked\nSTEP_STATUS: qa_pass | summary="tests passed"',
     ]);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir);
+    const startedTickets: string[] = [];
 
-    const result = await foreman.runBatch(1);
+    const result = await foreman.runBatch(1, undefined, (ticketId) => {
+      startedTickets.push(ticketId);
+    });
     assert.equal(result.outcome, "all-done");
     assert.equal(result.completed, 1);
+    assert.deepEqual(startedTickets, ["T001"]);
 
     const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
     try {
@@ -111,6 +115,38 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
       const state = db.getState("T001");
       assert.equal(state?.status, "in_progress");
       assert.equal(state?.validation_result, null);
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("runBatch pins recovery to the requested in-progress ticket", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [
+      { ...makeDef("T001"), order: 1000 },
+      { ...makeDef("T002"), order: 2000 },
+    ] }));
+    cmdUpdate(dir, "T001", { status: "next", actor: "test" });
+    cmdUpdate(dir, "T002", { status: "in_progress", actor: "test" });
+
+    const builder = new FakeBuilder([
+      'continued T002\nSTEP_STATUS: done | ticket="T002" summary="finished recovery"',
+      'checked T002\nSTEP_STATUS: qa_pass | summary="tests passed"',
+    ]);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir);
+
+    const result = await foreman.runBatch(1, undefined, undefined, "T002");
+
+    assert.equal(result.outcome, "all-done");
+    const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try {
+      assert.equal(db.getState("T001")?.status, "next");
+      assert.equal(db.getState("T002")?.status, "done");
     } finally {
       db.close();
     }

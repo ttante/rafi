@@ -141,6 +141,15 @@ const ticketsSetupConfig = {
   type: "object",
   additionalProperties: false,
   properties: {
+    limits: {
+      type: "object",
+      additionalProperties: false,
+      required: ["implementation", "view"],
+      properties: {
+        implementation: { type: "integer", minimum: 1 },
+        view: { type: "integer", minimum: 1 },
+      },
+    },
     sources: {
       type: "array",
       items: ticketSetupSource,
@@ -169,6 +178,33 @@ const ticketsSetupConfig = {
         cleanup: { type: "boolean" },
         auto_merge_wait: { type: "boolean" },
         auto_merge_timeout_minutes: { type: ["integer", "null"], minimum: 1 },
+        base_branch: { type: "string", minLength: 1 },
+        branch_policy: {
+          type: "object",
+          additionalProperties: false,
+          required: ["mode", "global_strategy", "by_size"],
+          properties: {
+            mode: { enum: ["global", "size"] },
+            global_strategy: { enum: ["current", "batch", "branch-per-ticket"] },
+            by_size: {
+              type: "object",
+              additionalProperties: false,
+              required: ["XS", "S", "M", "L", "XL"],
+              properties: Object.fromEntries(["XS", "S", "M", "L", "XL"].map((size) => [size, { enum: ["shared", "per-ticket"] }])),
+            },
+          },
+        },
+        review: {
+          type: "object",
+          additionalProperties: false,
+          required: ["title_style", "description_sections"],
+          properties: {
+            title_style: { enum: ["ticket-title", "conventional", "none", "custom"] },
+            title_template: { type: ["string", "null"] },
+            description_sections: { type: "array", items: { type: "string", minLength: 1 }, uniqueItems: true },
+          },
+        },
+        validation_checklist: { type: "array", items: { type: "string", minLength: 1 }, uniqueItems: true },
       },
     },
   },
@@ -283,4 +319,86 @@ export const projectConfigSchema = {
     agents: artifactPathMap,
     skills: artifactPathMap,
   },
+} as const;
+
+const buildRunBaseProperties = {
+  runId: { type: "string", minLength: 1 },
+  status: { enum: ["running", "interrupted", "recoverable", "blocked", "completed", "failed", "superseded"] },
+  tickets: { type: "array", items: { type: "string", minLength: 1 } },
+  branchMode: { enum: ["current", "per-ticket", "shared", "mixed"] },
+  checkpoint: { type: "string", minLength: 1 },
+  receipts: { type: "object", additionalProperties: { type: "object" } },
+  createdAt: { type: "string", minLength: 1 },
+  updatedAt: { type: "string", minLength: 1 },
+} as const;
+
+const buildRepositoryV1 = {
+  type: "object", additionalProperties: true, required: ["root", "worktree"],
+  properties: { root: { type: "string", minLength: 1 }, worktree: { type: "string", minLength: 1 } },
+} as const;
+
+const buildGitSnapshotV2 = {
+  type: "object", additionalProperties: false,
+  required: ["worktree", "statusPaths", "initialStatusPaths", "runOwnedPaths", "createdBranch", "createdWorktree"],
+  properties: {
+    baselineHead: { type: "string" }, baseRef: { type: "string" }, branch: { type: "string" }, startHead: { type: "string" },
+    worktree: { type: "string", minLength: 1 }, worktreeIdentity: { type: "string" }, upstream: { type: "string" },
+    statusPaths: { type: "array", items: { type: "string" } }, initialStatusPaths: { type: "array", items: { type: "string" } }, runOwnedPaths: { type: "array", items: { type: "string" } },
+    createdBranch: { type: "boolean" }, createdWorktree: { type: "boolean" },
+  },
+} as const;
+
+export const buildRunRecordSchema = {
+  $id: "rafi/buildRunRecord",
+  oneOf: [
+    {
+      type: "object", additionalProperties: true,
+      required: ["version", "runId", "status", "tickets", "branchMode", "checkpoint", "repository", "receipts", "createdAt", "updatedAt"],
+      properties: { version: { const: 1 }, ...buildRunBaseProperties, repository: buildRepositoryV1 },
+    },
+    {
+      type: "object", additionalProperties: true,
+      required: ["version", "runId", "status", "tickets", "branchMode", "checkpoint", "repository", "progress", "receipts", "createdAt", "updatedAt"],
+      properties: {
+        version: { const: 2 }, ...buildRunBaseProperties,
+        repository: { type: "object", additionalProperties: true, required: ["root", "worktree", "git", "baselineComplete"], properties: { root: { type: "string", minLength: 1 }, worktree: { type: "string", minLength: 1 }, git: buildGitSnapshotV2, baselineComplete: { type: "boolean" } } },
+        progress: { type: "object", additionalProperties: false, required: ["completedTickets", "completedOperations", "remainingTickets"], properties: {
+          completedTickets: { type: "array", items: { type: "string" } }, completedOperations: { type: "array", items: { type: "string" } }, remainingTickets: { type: "array", items: { type: "string" } },
+          currentStep: { type: "string" }, lastSuccessfulAction: { type: "string" }, nextAction: { type: "string" }, validation: { type: "object" },
+        } },
+      },
+    },
+  ],
+} as const;
+
+const installEntryV1 = {
+  type: "object", additionalProperties: false, required: ["path", "sha256", "mode", "origin"],
+  properties: {
+    path: { type: "string", minLength: 1 }, sha256: { type: ["string", "null"] },
+    mode: { enum: ["created", "managed-block", "modified", "generated", "runtime-produced"] }, origin: { type: "string", minLength: 1 },
+    marker: { type: "string" }, backup: { type: "string" },
+  },
+} as const;
+const installDependency = { type: "object", additionalProperties: false, required: ["manager", "package", "installed", "manifests"], properties: {
+  manager: { enum: ["npm", "pnpm", "yarn", "bun"] }, package: { type: "string", minLength: 1 }, previous: { type: ["string", "null"] }, installed: { type: "string", minLength: 1 }, manifests: { type: "array", items: { type: "string", minLength: 1 } },
+} } as const;
+
+export const installManifestSchema = {
+  $id: "rafi/installManifest",
+  oneOf: [
+    { type: "object", additionalProperties: false, required: ["version", "createdAt", "updatedAt", "files", "dependencies"], properties: {
+      version: { const: 1 }, createdAt: { type: "string" }, updatedAt: { type: "string" }, files: { type: "array", items: installEntryV1 }, dependencies: { type: "array", items: installDependency },
+    } },
+    { type: "object", additionalProperties: false, required: ["version", "createdAt", "updatedAt", "repository", "files", "dependencies"], properties: {
+      version: { const: 2 }, createdAt: { type: "string" }, updatedAt: { type: "string" },
+      repository: { type: "object", additionalProperties: false, required: ["rootIdentity", "dirtyChoice", "baselineComplete"], properties: {
+        rootIdentity: { type: "string", minLength: 1 }, preInstallHead: { type: "string" }, initialBranch: { type: "string" }, initialDirtyDigest: { type: "string" }, dirtyChoice: { enum: ["clean", "snapshot-and-continue", "stop-and-clean", "legacy-unknown"] }, baselineComplete: { type: "boolean" },
+      } },
+      files: { type: "array", items: { ...installEntryV1, required: [...installEntryV1.required, "category"], properties: { ...installEntryV1.properties,
+        category: { enum: ["tickets", "plans", "skills", "agents", "rules", "config", "documentation-created", "documentation-modified", "managed-gitignore", "runtime-state", "generated-other"] },
+        preimageSha256: { type: ["string", "null"] }, installedSha256: { type: ["string", "null"] }, lastRafiWriteAt: { type: "string" },
+      } } },
+      dependencies: { type: "array", items: installDependency },
+    } },
+  ],
 } as const;
