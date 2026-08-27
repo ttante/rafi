@@ -4,6 +4,21 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.9.6 / ai-foreman 1.7.6 / special-agents 0.8.4 / rafi-spec 0.8.4 - 2026-08-27
+
+### Added
+
+- Added complete ticket detail/JSON viewing, explicit eligible-ticket selection, transactional single/bulk tracker reset, rich build recovery previews, and whole-run `build:start-over` with archive/restart/revert safety paths.
+- Added versioned build/install recovery contracts, size-based XS/S branch sharing without delivery-stack synthesis, configurable base/review/validation standards, and setup limit synchronization.
+- Added manifest-backed uninstall categories, explicit mixed-edit handling, indefinite project-local recovery bundles, `uninstall:restore`, and explicit `uninstall:cleanup`.
+
+### Packages
+
+- Bumped `rafi-spec` to `0.8.4` for the versioned build-run and install-recovery contracts, validation schemas, and backward-compatible legacy readers.
+- Bumped `special-agents` to `0.8.4` for its exact `rafi-spec@0.8.4` dependency.
+- Bumped `ai-foreman` to `1.7.6` for ticket detail, selection, reset, delivery-policy, review-standard, and recovery behavior plus its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.9.6` for build start-over, ownership and uninstall recovery, setup interview controls, and its exact workspace dependencies.
+
 ## @rafi-ai/cli 0.9.5 / ai-foreman 1.7.5 / special-agents 0.8.3 / rafi-spec 0.8.3 - 2026-08-27
 
 ### Added
@@ -11,9 +26,6 @@ This project follows semantic versioning for published npm packages where practi
 - Added a shared live activity reporter across Rafi planning, ticket setup/population, building, QA, source fetching, runtime checks, compilation, and branch delivery. TTY output continuously redraws the active state and elapsed time; redirected and CI output receives timestamped 30-second heartbeats.
 - Added durable provider and RAFI retry notices plus a 60-second quiet-provider warning that keeps waiting without changing retry or timeout policy.
 - Added provider-native answered-question telemetry that fires only after a successful non-empty answer, allowing native and textual grill-me exchanges to share the same verification contract.
-- Added complete ticket detail/JSON viewing, explicit eligible-ticket selection, transactional single/bulk tracker reset, rich build recovery previews, and whole-run `build:start-over` with archive/restart/revert safety paths.
-- Added versioned build/install recovery contracts, size-based XS/S branch sharing without delivery-stack synthesis, configurable base/review/validation standards, and setup limit synchronization.
-- Added manifest-backed uninstall categories, explicit mixed-edit handling, indefinite project-local recovery bundles, `uninstall:restore`, and explicit `uninstall:cleanup`.
 
 ### Fixed
 
