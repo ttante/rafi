@@ -8,6 +8,7 @@ import { CodexAdapter } from "./adapters/codex.js";
 import { RecoveringAdapter } from "./adapters/recovering.js";
 import { Foreman, createPermissionHandler, type StepStatus } from "./foreman.js";
 import type { BuilderAdapter, BuilderAdapterOptions, EffortLevel, TurnResult } from "./adapters/types.js";
+import type { AnsweredProviderQuestion } from "./providerQuestions.js";
 import { printEvents } from "./cli/events.js";
 import { loadRoleBundle, type RoleBundle } from "./roles.js";
 import { ensureRuntimeReadyForCommand } from "./cli/runtimeAuthPrompt.js";
@@ -35,6 +36,10 @@ export interface RoleBuilderOptions {
   extraSkills?: string[];
   sandboxMode?: BuilderAdapterOptions["sandboxMode"];
   resumeSessionId?: string;
+  /** Observe successfully answered provider-native questions. */
+  onAnsweredQuestion?: (event: AnsweredProviderQuestion) => void;
+  /** Observe any provider-native question attempt, including denied prompts. */
+  onProviderQuestion?: (request: import("./adapters/types.js").PermissionRequest) => void;
 }
 
 export interface RoleBuilder {
@@ -172,7 +177,11 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
       runtimePhase: phaseForRole(opts.role),
       model,
       resumeSessionId,
-      permission: createPermissionHandler(policy, log, { interactive }),
+      permission: createPermissionHandler(policy, log, {
+        interactive,
+        onAnsweredQuestion: opts.onAnsweredQuestion,
+        onProviderQuestion: opts.onProviderQuestion,
+      }),
       effort,
       fast: opts.fast ?? saved?.fast,
       sandboxMode: opts.sandboxMode,

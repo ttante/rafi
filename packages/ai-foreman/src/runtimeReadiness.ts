@@ -3,6 +3,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, resolve } from "node:path";
 import type { RuntimeProbeCategory, RuntimeProbePhase, RuntimeProbeResult } from "rafi-spec";
 import type { AgentRuntime } from "./runtimeAuth.js";
+import { currentActivity, withActivityPhase } from "./activity.js";
 
 export const RUNTIME_PROBE_TIMEOUT_MS = 30_000;
 export const RUNTIME_DIAGNOSTIC_LIMIT = 8 * 1024;
@@ -72,6 +73,14 @@ export async function probeRuntime(
   runtime: AgentRuntime,
   opts: ProbeRuntimeOptions = {},
 ): Promise<RuntimeProbeResult> {
+  return withActivityPhase(`checking ${runtime} runtime`, () => probeRuntimeInternal(cwd, runtime, opts));
+}
+
+async function probeRuntimeInternal(
+  cwd: string,
+  runtime: AgentRuntime,
+  opts: ProbeRuntimeOptions,
+): Promise<RuntimeProbeResult> {
   const env = opts.env ?? process.env;
   const command = runtime === "claude" ? "claude" : "codex";
   const executable = resolveExecutablePath(command, env) ?? command;
@@ -89,6 +98,7 @@ export async function probeRuntime(
     const spawnOpts: SpawnOptions = { cwd, env, stdio: ["ignore", "pipe", "pipe"] };
     const child = spawn(executable, args, spawnOpts);
     const append = (chunk: Buffer | string): void => {
+      currentActivity()?.pulse(`${runtime} runtime responded`);
       if (output.length >= limit) return;
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       output = Buffer.concat([output, bytes.subarray(0, Math.max(0, limit - output.length))]);

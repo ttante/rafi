@@ -1,10 +1,11 @@
 import type { ProjectConfig } from "rafi-spec";
 import {
-  compile,
+  compileAsync,
   RuntimeUpdateError,
   type AgentRuntime,
   type CompileProjectOptions,
 } from "./compiler.js";
+import { currentActivity } from "ai-foreman/activity.js";
 
 export type RootUpdateRecoveryChoice = "retry" | "append" | "overwrite" | "switch";
 
@@ -17,7 +18,7 @@ export async function compileWithRootUpdateRecovery(
   let runConfig = config;
   while (true) {
     try {
-      compile(targetDir, runConfig, opts);
+      await compileAsync(targetDir, runConfig, opts);
       return runConfig;
     } catch (err) {
       if (!(err instanceof RuntimeUpdateError) || config.agent_files.mode !== "update") {
@@ -25,8 +26,10 @@ export async function compileWithRootUpdateRecovery(
       }
       const choice = await choose(err);
       if (choice === "retry") {
+        currentActivity()?.note(`rafi: retrying ${err.runtime} update for ${err.targetFile}`);
         runConfig = config;
       } else if (choice === "switch") {
+        currentActivity()?.note(`rafi: switching runtime after ${err.runtime} update failure; retrying with ${otherRuntime(err.runtime)}`);
         runConfig = {
           ...config,
           harness: {

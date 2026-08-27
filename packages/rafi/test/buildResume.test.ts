@@ -84,3 +84,43 @@ test("build:resume supports explicit fresh-session recovery", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("build:resume recovers shared and mixed modes with isolated-branch flags", async () => {
+  for (const branchMode of ["shared", "mixed"] as const) {
+    const dir = initializedProject();
+    try {
+      const settings = {
+        role: "builder" as const,
+        source: "project" as const,
+        make: "codex" as const,
+        model: "default",
+        reasoning: "default",
+        fast: false,
+      };
+      let run = createBuildRun({ repositoryRoot: dir, tickets: ["T003"], branchMode, builder: settings });
+      run = persistBuildSession(dir, run, "builder", `session-${branchMode}`);
+      run = releaseBuildLease(dir, run, "recoverable");
+      let invoked: string[] | undefined;
+      const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; } });
+
+      await command.parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" });
+
+      assert.deepEqual(invoked, [
+        "start",
+        resolve(dir),
+        "--steps",
+        "1",
+        "--yes",
+        "--recover-run",
+        run.runId,
+        "--branch-per-ticket",
+        "--resume",
+        `session-${branchMode}`,
+        "--agent",
+        "codex",
+      ], branchMode);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});

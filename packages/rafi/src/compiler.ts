@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { stringify } from "yaml";
 import {
   emitCodexAgents,
@@ -15,6 +16,9 @@ import type { AgentRole, HarnessTarget, ProjectConfig, ProjectFlags } from "rafi
 import { copyDocs, validateDocsRoot, type CopyDocsOptions } from "./docs.js";
 import { DEFAULT_DOCS_ROOT, RAFI_CONFIG_FILE } from "./project.js";
 import { capturePreimage, finalizeOwnedWrite, registerOwnedFile } from "./ownership.js";
+import { withActivityPhase } from "ai-foreman/activity.js";
+
+const execFileAsync = promisify(execFile);
 
 const RAFI_APPEND_START = "<!-- rafi:start -->";
 const RAFI_APPEND_END = "<!-- rafi:end -->";
@@ -30,6 +34,8 @@ export interface CompileProjectOptions extends CopyDocsOptions {
   skipNativeArtifacts?: boolean;
   /** Override agent_files.mode for this compile only. */
   rootFileMode?: ProjectConfig["agent_files"]["mode"];
+  /** Internal: root files were already handled by the async CLI compile path. */
+  skipRootFiles?: boolean;
 }
 
 export interface RuntimeUpdateErrorOptions {
@@ -93,10 +99,10 @@ export function compile(targetDir: string, config: ProjectConfig, opts: CompileP
   const rootFileMode = opts.rootFileMode ?? config.agent_files.mode;
 
   // Target-native root instruction files.
-  if (targets.includes("codex")) {
+  if (!opts.skipRootFiles && targets.includes("codex")) {
     writeInstructionFile(targetDir, config.agent_files.codex, renderAgentsMd({ defaults }), rootFileMode, "codex");
   }
-  if (targets.includes("claude")) {
+  if (!opts.skipRootFiles && targets.includes("claude")) {
     const claudeRoot = targets.includes("codex")
       ? renderClaudeMd({ defaults })
       : renderStandaloneClaudeMd({ defaults });
@@ -156,6 +162,23 @@ export function compile(targetDir: string, config: ProjectConfig, opts: CompileP
   }
 }
 
+/** CLI compile path: keeps the event loop live while an agent updates existing root instructions. */
+export async function compileAsync(targetDir: string, config: ProjectConfig, opts: CompileProjectOptions = {}): Promise<void> {
+  const docsRoot = validateDocsRoot(targetDir, config.docs?.root ?? DEFAULT_DOCS_ROOT);
+  const defaults = { ...projectConfigToDefaults(config), docsRoot };
+  const targets = runtimeTargets(config);
+  validateExistingArtifacts(targetDir, config, targets);
+  const rootFileMode = opts.rootFileMode ?? config.agent_files.mode;
+  if (targets.includes("codex")) {
+    await writeInstructionFileAsync(targetDir, config.agent_files.codex, renderAgentsMd({ defaults }), rootFileMode, "codex");
+  }
+  if (targets.includes("claude")) {
+    const claudeRoot = targets.includes("codex") ? renderClaudeMd({ defaults }) : renderStandaloneClaudeMd({ defaults });
+    await writeInstructionFileAsync(targetDir, config.agent_files.claude, claudeRoot, rootFileMode, "claude");
+  }
+  compile(targetDir, config, { ...opts, skipRootFiles: true });
+}
+
 /**
  * Write `rafi-config.yaml` to `<targetDir>/rafi-config.yaml`. Creates the directory
  * if it does not exist.
@@ -199,6 +222,30 @@ function writeInstructionFile(
     return;
   }
   updateInstructionFileWithAgent(targetDir, relPath, generated, runtime);
+  finalizeOwnedWrite(targetDir, ownership);
+}
+
+async function writeInstructionFileAsync(
+  targetDir: string,
+  relPath: string,
+  generated: string,
+  mode: ProjectConfig["agent_files"]["mode"],
+  runtime: AgentRuntime,
+): Promise<void> {
+  const path = join(targetDir, relPath);
+  mkdirSync(dirname(path), { recursive: true });
+  const ownership = capturePreimage(targetDir, relPath, `compile:root:${runtime}`);
+  if (!existsSync(path) || mode === "overwrite") {
+    writeFileSync(path, generated, "utf8");
+    finalizeOwnedWrite(targetDir, ownership);
+    return;
+  }
+  if (mode === "append") {
+    writeAppendInstructionFile(targetDir, relPath, generated, runtime);
+    finalizeOwnedWrite(targetDir, { ...ownership, mode: "managed-block", marker: `${RAFI_APPEND_START}..${RAFI_APPEND_END}` });
+    return;
+  }
+  await updateInstructionFileWithAgentAsync(targetDir, relPath, generated, runtime);
   finalizeOwnedWrite(targetDir, ownership);
 }
 
@@ -374,6 +421,38 @@ function updateInstructionFileWithAgent(
       runtime,
       targetFile: relPath,
       exitCode: failure.status,
+      stdout: outputToString(failure.stdout),
+      stderr: outputToString(failure.stderr),
+      cause: err,
+    });
+  }
+}
+
+async function updateInstructionFileWithAgentAsync(
+  targetDir: string,
+  relPath: string,
+  generated: string,
+  runtime: AgentRuntime,
+): Promise<void> {
+  const prompt =
+    `Update ${relPath} in this repository.\n\n` +
+    "Preserve useful existing project-specific guidance, remove stale or conflicting guidance, " +
+    "and incorporate the following Rafi-generated guidance. Edit the file directly and do not modify unrelated files.\n\n" +
+    "RAFI GENERATED GUIDANCE:\n\n" + generated;
+  try {
+    await withActivityPhase(`updating ${relPath} with ${runtime}`, async () => {
+      if (runtime === "codex") {
+        await execFileAsync("codex", ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "-C", targetDir, prompt], { cwd: targetDir, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 });
+      } else {
+        await execFileAsync("claude", ["-p", prompt], { cwd: targetDir, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 });
+      }
+    });
+  } catch (err) {
+    const failure = err as { code?: number | string | null; stdout?: string | Buffer; stderr?: string | Buffer };
+    throw new RuntimeUpdateError({
+      runtime,
+      targetFile: relPath,
+      exitCode: typeof failure.code === "number" ? failure.code : undefined,
       stdout: outputToString(failure.stdout),
       stderr: outputToString(failure.stderr),
       cause: err,

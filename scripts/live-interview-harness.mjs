@@ -118,6 +118,7 @@ export function createTicketPlanResponder(options) {
   let phase = "setup";
   let standardQuestions = 0;
   let grilledQuestions = 0;
+  let auditCompleted = false;
   let reviews = 0;
 
   function action(keys) {
@@ -130,6 +131,7 @@ export function createTicketPlanResponder(options) {
       if (!stream.append(chunk)) return [];
       const raw = stream.text();
       const visible = compactTerminalText(raw);
+      if (visible.includes(compactTerminalText("independent verification found"))) auditCompleted = true;
 
       if (phase === "setup") {
         const step = options.setupSteps[setupIndex];
@@ -140,16 +142,18 @@ export function createTicketPlanResponder(options) {
       }
 
       const isReview = visible.includes(compactTerminalText("Review this exact plan and ticket set:"));
+      const isInlineTextPrompt = raw.includes(CLACK_ACTIVE)
+        && visible.includes(compactTerminalText("Choices:"));
+      const isNativeSelectPrompt = raw.includes(CLACK_ACTIVE) && /[●○]/.test(raw);
       if (phase === "standard" && isReview) {
-        if (standardQuestions < 1) throw new Error("ticket-plan journey reached its first proposal without a standard interview question");
         reviews += 1;
         phase = "revision";
         return action("\u001B[B\r");
       }
-      if (phase === "standard" && activeTextPrompt(raw)) {
+      if (phase === "standard" && (activeTextPrompt(raw) || isInlineTextPrompt || isNativeSelectPrompt)) {
         standardQuestions += 1;
         if (standardQuestions > options.maxQuestionsPerPhase) throw new Error(`standard interview exceeded ${options.maxQuestionsPerPhase} questions`);
-        return action(`\u0015${options.standardAnswer}\r`);
+        return action(isNativeSelectPrompt && !isInlineTextPrompt ? "\r" : `\u0015${options.standardAnswer}\r`);
       }
 
       if (phase === "revision" && visible.includes(compactTerminalText("What should change?"))) {
@@ -158,15 +162,19 @@ export function createTicketPlanResponder(options) {
       }
 
       if (phase === "grilled" && isReview) {
-        if (grilledQuestions < 1) throw new Error("ticket-plan journey reached its revised proposal without a grilled interview question");
+        if (grilledQuestions < 1 && !auditCompleted) throw new Error("ticket-plan journey reached approval without a valid grill-me answer or completed independent audit");
         reviews += 1;
         phase = "start-offer";
         return action("\r");
       }
-      if (phase === "grilled" && activeTextPrompt(raw)) {
+      const hasGrillShape = visible.includes("recommended") && visible.includes(compactTerminalText("Stop questions and make the plan now"));
+      const isTextPrompt = activeTextPrompt(raw) || isInlineTextPrompt;
+      const isGrillPrompt = isTextPrompt || (raw.includes(CLACK_ACTIVE) && hasGrillShape);
+      if (phase === "grilled" && isGrillPrompt) {
+        if (!hasGrillShape) throw new Error("ticket-plan grilled question was not machine-recognizable");
         grilledQuestions += 1;
         if (grilledQuestions > options.maxQuestionsPerPhase) throw new Error(`grilled interview exceeded ${options.maxQuestionsPerPhase} questions`);
-        return action(`\u0015${options.grilledAnswer}\r`);
+        return action(isTextPrompt ? `\u0015${options.grilledAnswer}\r` : "\r");
       }
 
       if (phase === "start-offer" && visible.includes(compactTerminalText("Start the agreed next ticket or delivery group now?"))) {
@@ -182,7 +190,108 @@ export function createTicketPlanResponder(options) {
       if (phase !== "done") throw new Error(`ticket-plan TTY journey ended during ${phase}`);
       if (reviews !== 2) throw new Error(`ticket-plan journey expected two proposal reviews, saw ${reviews}`);
     },
-    snapshot() { return { phase, setupIndex, standardQuestions, grilledQuestions, reviews }; },
+    snapshot() { return { phase, setupIndex, standardQuestions, grilledQuestions, auditCompleted, reviews }; },
+  };
+}
+
+export function createCreateGrillMeResponder(options) {
+  const stream = promptStream();
+  let setupIndex = 0;
+  let ticketSetupIndex = 0;
+  let phase = "setup";
+  let grillQuestions = 0;
+  let validGrillAnswers = 0;
+  let auditCompleted = false;
+  let stopSelected = false;
+  let planApprovals = 0;
+
+  function action(keys) {
+    stream.acted();
+    return [keys];
+  }
+
+  function answerQuestion(raw, visible) {
+    const isText = activeTextPrompt(raw);
+    const hasStopOption = visible.includes(compactTerminalText(options.stopAnswer));
+    const activeStart = raw.lastIndexOf(CLACK_ACTIVE);
+    const activePrompt = activeStart >= 0 ? raw.slice(activeStart) : raw;
+    const isInlineText = !isText
+      && raw.includes(CLACK_ACTIVE)
+      && hasStopOption
+      && activePrompt.includes("|")
+      && !/[●○]/.test(activePrompt);
+    const isSelect = !isText && !isInlineText && raw.includes(CLACK_ACTIVE) && hasStopOption;
+    if (stopSelected) {
+      if (raw.includes(CLACK_ACTIVE)) {
+        throw new Error("create grill-me journey saw another planner question after selecting early stop");
+      }
+      return [];
+    }
+    if (!isText && !isInlineText && !isSelect) return [];
+    const hasRecommendation = visible.includes("recommended");
+    if (!hasStopOption || !hasRecommendation) throw new Error("create grill-me question was not machine-recognizable");
+    grillQuestions += 1;
+    validGrillAnswers += 1;
+    if (grillQuestions > options.maxQuestions) throw new Error(`create grill-me interview exceeded ${options.maxQuestions} questions`);
+    stopSelected = true;
+    const stopAt = raw.lastIndexOf(options.stopAnswer);
+    const questionStart = raw.lastIndexOf(CLACK_ACTIVE, stopAt);
+    const optionsBeforeStop = questionStart >= 0 && stopAt >= 0
+      ? Math.max(0, (raw.slice(questionStart, stopAt).match(/[●○]/g) ?? []).length - 1)
+      : 0;
+    if (isSelect && optionsBeforeStop < 1) throw new Error("create grill-me select prompt options could not be counted");
+    return action(isText || isInlineText
+      ? `\u0015${options.stopAnswer}\r`
+      : (options.nativeStopKeys ?? `${"\u001B[B".repeat(optionsBeforeStop)}\r`));
+  }
+
+  return {
+    handle(chunk) {
+      if (!stream.append(chunk)) return [];
+      const raw = stream.text();
+      const visible = compactTerminalText(raw);
+      if (visible.includes(compactTerminalText("independent verification found"))) auditCompleted = true;
+
+      if (phase === "setup") {
+        const step = options.setupSteps[setupIndex];
+        if (!step || !visible.includes(compactTerminalText(step.prompt))) return [];
+        setupIndex += 1;
+        if (setupIndex === options.setupSteps.length) phase = "grill";
+        return action(step.keys);
+      }
+
+      if (phase === "grill") {
+        if (visible.includes(compactTerminalText("Approve this structured plan?"))) {
+          if (validGrillAnswers < 1 && !auditCompleted) throw new Error("create grill-me journey reached approval without a valid grill-me answer or completed independent audit");
+          planApprovals += 1;
+          phase = "ticket-setup";
+          return action("\r");
+        }
+        return answerQuestion(raw, visible);
+      }
+
+      if (phase === "ticket-setup") {
+        const step = options.ticketSetupSteps[ticketSetupIndex];
+        if (!step || !visible.includes(compactTerminalText(step.prompt))) return [];
+        ticketSetupIndex += 1;
+        if (ticketSetupIndex === options.ticketSetupSteps.length) phase = "done";
+        return action(step.keys);
+      }
+      return [];
+    },
+    assertComplete() {
+      if (setupIndex !== options.setupSteps.length) {
+        throw new Error(`TTY journey ended before expected create prompt: ${options.setupSteps[setupIndex]?.prompt ?? "unknown"}`);
+      }
+      if (phase === "grill") throw new Error("create grill-me TTY journey ended during planner grill-me questions");
+      if (ticketSetupIndex !== options.ticketSetupSteps.length) {
+        throw new Error(`TTY journey ended before expected ticket setup prompt: ${options.ticketSetupSteps[ticketSetupIndex]?.prompt ?? "unknown"}`);
+      }
+      if (phase !== "done") throw new Error(`create grill-me TTY journey ended during ${phase}`);
+      if (validGrillAnswers < 1 && !auditCompleted) throw new Error("create grill-me journey completed without a valid grill-me answer or independent audit");
+      if (planApprovals !== 1) throw new Error(`create grill-me journey expected one plan approval, saw ${planApprovals}`);
+    },
+    snapshot() { return { phase, setupIndex, ticketSetupIndex, grillQuestions, validGrillAnswers, auditCompleted, stopSelected, planApprovals }; },
   };
 }
 

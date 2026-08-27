@@ -163,6 +163,33 @@ test("parseCodexLine: turn.started and turn.completed produce no events", () => 
   );
 });
 
+test("Codex app-server recoverable error emits retry instead of terminal error", async () => {
+  const a = adapter();
+  const iterator = a.events()[Symbol.asyncIterator]();
+  (a as unknown as { handle(message: unknown): void }).handle({
+    method: "error",
+    params: { error: { message: "Connection closed mid-response" }, willRetry: true },
+  });
+  assert.deepEqual((await iterator.next()).value, {
+    kind: "retry",
+    provider: "codex",
+    reason: "Connection closed mid-response",
+    managedBy: "provider",
+  });
+  await a.close();
+});
+
+test("Codex app-server non-recoverable error remains terminal", async () => {
+  const a = adapter();
+  const iterator = a.events()[Symbol.asyncIterator]();
+  (a as unknown as { handle(message: unknown): void }).handle({
+    method: "error",
+    params: { error: { message: "Authentication failed" }, willRetry: false },
+  });
+  assert.deepEqual((await iterator.next()).value, { kind: "error", message: "Authentication failed" });
+  await a.close();
+});
+
 test("CodexAdapter normalizes 401 process failures into repair guidance", async () => {
   const binDir = mkdtempSync(join(tmpdir(), "codex-auth-test-"));
   const projectDir = mkdtempSync(join(tmpdir(), "codex-auth-project-"));

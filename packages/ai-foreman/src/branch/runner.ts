@@ -1,7 +1,7 @@
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
 import type { SessionStrategy } from "rafi-spec";
 import { buildDurableQaFixHandoff, compactWithRetry, runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaStreamState } from "../qaReview.js";
-import { changeManifest } from "../qaSnapshot.js";
+import { changeManifestAsync } from "../qaSnapshot.js";
 import { Foreman, MARKER_SPEC, parseStepStatus } from "../foreman.js";
 import type { Log } from "../log.js";
 import { fireNotification } from "../notify.js";
@@ -26,6 +26,7 @@ import { checkGitLabMrMerged, createOrReuseMr, enableGitLabAutoMerge, pushBranch
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { WorkflowDb } from "../workflowDb.js";
+import { currentActivity, withActivityPhase } from "../activity.js";
 
 export interface DeliveryUnitSession { unitId: string; branch: string; worktreePath: string; sessionId: string; ticket: string; }
 export type BaseWorktreePolicy = "enforce" | "warn" | "skip";
@@ -239,6 +240,8 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           reviewProvider,
           prReady: opts.prReady,
           keepWorktrees: opts.keepWorktrees,
+          deliveryUnitId: node.deliveryUnitId,
+          deliveryUnitFinal: node.deliveryUnitFinal,
         });
         if (node.deliveryUnitId) {
           const path = deliverySessionPath(opts.projectDir, node.deliveryUnitId);
@@ -285,7 +288,11 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
             } else if (opts.builderSessionStrategy === "fresh") {
               await builder.close(); builder = await opts.createBuilder(worktreePath);
             }
-            const digest = changeManifest(worktreePath).diffDigest;
+            const digest = (await withActivityPhase("recording QA fix changes", () => changeManifestAsync(
+              worktreePath,
+              (state, detail) => currentActivity()?.update(state, detail),
+              "recording QA fix changes",
+            ))).diffDigest;
             const fixed = await builder.sendTurn(buildDurableQaFixHandoff(node.ticket, issues, worktreePath, result.text, digest));
             const fixedStatus = parseStepStatus(fixed.text);
             builderStreamSession = opts.builderSessionStrategy === "compact" ? builder.sessionId() : undefined;
@@ -339,9 +346,12 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         workflowCheckpoint(opts.projectDir, opts.runId, "push-before", node.ticket.id, { branch: node.branch, sha: commit });
         const pushOperation = `${opts.runId}:push:${node.branch}`;
         planJournal(opts.projectDir, opts.runId, pushOperation, "push", { branch: node.branch, sha: commit, remote: "origin" });
-        const push = reviewProvider === "gitlab"
-          ? pushBranchForMr(worktreePath, node.branch)
-          : pushBranchForPr(worktreePath, node.branch);
+        const push = await withActivityPhase(`pushing ${node.branch}`, async () => {
+          currentActivity()?.update(`pushing ${node.branch}`, `publishing ${node.ticket.id}`);
+          return reviewProvider === "gitlab"
+            ? pushBranchForMr(worktreePath, node.branch)
+            : pushBranchForPr(worktreePath, node.branch);
+        });
         if (push.ok) {
           confirmJournal(opts.projectDir, pushOperation, node.branch, { sha: commit });
           opts.log.write("branch-push", { ticket: node.ticket.id, branch: node.branch, status: "pushed" });
@@ -378,24 +388,27 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         workflowCheckpoint(opts.projectDir, opts.runId, "review-creation-before", node.ticket.id, { provider: reviewProvider, head: node.branch, base: node.baseBranch });
         const reviewOperation = `${opts.runId}:${reviewProvider === "gitlab" ? "mr" : "pr"}:${node.branch}:${node.baseBranch}`;
         planJournal(opts.projectDir, opts.runId, reviewOperation, reviewProvider === "gitlab" ? "mr-create" : "pr-create", { head: node.branch, base: node.baseBranch, sha: commit });
-        const pr = reviewProvider === "gitlab"
-          ? createOrReuseMr(opts.projectDir, {
-            node,
-            ready: opts.prReady || completionMode === "auto-merge",
-            runId: opts.runId,
-            qaEvidence: qaSummary,
-            commit,
-            autoMerge: false,
-            cleanup: opts.cleanupBranches ?? true,
-            mergeMethod: opts.mergeMethod ?? "squash",
-          })
-          : createOrReusePr(opts.projectDir, {
-            node,
-            ready: opts.prReady || completionMode === "auto-merge",
-            runId: opts.runId,
-            qaEvidence: qaSummary,
-            commit,
-          });
+        const pr = await withActivityPhase(`creating ${reviewProvider === "gitlab" ? "merge request" : "pull request"}`, async () => {
+          currentActivity()?.update(`creating ${reviewProvider === "gitlab" ? "merge request" : "pull request"}`, node.ticket.id);
+          return reviewProvider === "gitlab"
+            ? createOrReuseMr(opts.projectDir, {
+              node,
+              ready: opts.prReady || completionMode === "auto-merge",
+              runId: opts.runId,
+              qaEvidence: qaSummary,
+              commit,
+              autoMerge: false,
+              cleanup: opts.cleanupBranches ?? true,
+              mergeMethod: opts.mergeMethod ?? "squash",
+            })
+            : createOrReusePr(opts.projectDir, {
+              node,
+              ready: opts.prReady || completionMode === "auto-merge",
+              runId: opts.runId,
+              qaEvidence: qaSummary,
+              commit,
+            });
+        });
         summary.pr = pr;
         if (pr.status === "created" || pr.status === "existing") { confirmJournal(opts.projectDir, reviewOperation, pr.url, { head: node.branch, base: node.baseBranch, url: pr.url }); workflowCheckpoint(opts.projectDir, opts.runId, "review-creation-after", node.ticket.id, { provider: reviewProvider, head: node.branch, base: node.baseBranch, url: pr.url }); }
         else if (pr.status === "failed") failJournal(opts.projectDir, reviewOperation, pr.message ?? pr.error ?? "review creation failed", pr.code === "network_or_timeout");
@@ -415,7 +428,10 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           continue;
         }
         if (completionMode === "auto-merge" && reviewProvider === "github") {
-          const autoMerge = enableGitHubAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true, opts.mergeMethod ?? "squash");
+          const autoMerge = await withActivityPhase("enabling GitHub auto-merge", async () => {
+            currentActivity()?.update("enabling GitHub auto-merge", node.branch);
+            return enableGitHubAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true, opts.mergeMethod ?? "squash");
+          });
           summary.pr = autoMerge.status === "failed" ? autoMerge : { ...pr, status: "auto_merge_enabled", url: autoMerge.url ?? pr.url };
           if (autoMerge.status === "failed") {
             opts.log.write("pr-auto-merge-failed", failureLogFields(node, autoMerge));
@@ -432,7 +448,10 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           }
           opts.log.write("pr-auto-merge-enabled", { ticket: node.ticket.id, branch: node.branch, url: summary.pr.url });
         } else if (completionMode === "auto-merge" && reviewProvider === "gitlab") {
-          const autoMerge = enableGitLabAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true, opts.mergeMethod ?? "squash");
+          const autoMerge = await withActivityPhase("enabling GitLab auto-merge", async () => {
+            currentActivity()?.update("enabling GitLab auto-merge", node.branch);
+            return enableGitLabAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true, opts.mergeMethod ?? "squash");
+          });
           summary.pr = autoMerge.status === "failed" ? autoMerge : { ...pr, status: "auto_merge_enabled", url: autoMerge.url ?? pr.url };
           if (autoMerge.status === "failed") {
             opts.log.write("mr-auto-merge-failed", failureLogFields(node, autoMerge));
@@ -553,6 +572,14 @@ async function waitForAutoMergeDependencies(
   node: BranchPlanNode,
   provider: ReviewProvider,
 ): Promise<AutoMergeDependencyResult> {
+  return withActivityPhase("checking dependency merges", () => waitForAutoMergeDependenciesInternal(opts, node, provider));
+}
+
+async function waitForAutoMergeDependenciesInternal(
+  opts: BranchRunnerOptions,
+  node: BranchPlanNode,
+  provider: ReviewProvider,
+): Promise<AutoMergeDependencyResult> {
   const dependencyNodes = node.dependencies
     .map((dep) => opts.plan.nodes.find((candidate) => candidate.ticket.id === dep))
     .filter((dep): dep is BranchPlanNode => Boolean(dep));
@@ -584,6 +611,7 @@ async function waitForAutoMergeDependencies(
     if (pending.length === 0) return { ok: true };
 
     const message = `auto-merge dependency ${pending.join(", ")} has not merged into the root base yet`;
+    currentActivity()?.update("waiting for dependency merge", pending.join(", "));
     if (!opts.autoMergeWait) {
       return {
         ok: false,

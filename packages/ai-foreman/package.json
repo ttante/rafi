@@ -17,6 +17,10 @@
     "ai-foreman": "dist/index.js"
   },
   "exports": {
+    "./activity.js": {
+      "types": "./dist/activity.d.ts",
+      "default": "./dist/activity.js"
+    },
     "./agent-run.js": {
       "types": "./dist/agentRun.d.ts",
       "default": "./dist/agentRun.js"
@@ -24,6 +28,10 @@
     "./interviews.js": {
       "types": "./dist/interviews.d.ts",
       "default": "./dist/interviews.js"
+    },
+    "./provider-questions.js": {
+      "types": "./dist/providerQuestions.d.ts",
+      "default": "./dist/providerQuestions.js"
     },
     "./runtime-readiness.js": {
       "types": "./dist/runtimeReadiness.d.ts",

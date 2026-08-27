@@ -8,7 +8,7 @@ import type {
   TurnResult,
 } from "./adapters/types.js";
 import type { PermissionPolicy } from "./permissions/policy.js";
-import { countProviderQuestions, handleProviderQuestionTool } from "./providerQuestions.js";
+import { countProviderQuestions, handleProviderQuestionTool, type AnsweredProviderQuestion } from "./providerQuestions.js";
 import type { Log } from "./log.js";
 import { fireNotification } from "./notify.js";
 import { isTicketsInitialized, loadTicketsConfig } from "./tickets/config.js";
@@ -210,11 +210,17 @@ export function buildPlanningTurn(n: number, ticketsContent?: string): string {
 export function createPermissionHandler(
   policy: PermissionPolicy,
   log: Log,
-  opts: { interactive?: boolean } = {},
+  opts: {
+    interactive?: boolean;
+    onAnsweredQuestion?: (event: AnsweredProviderQuestion) => void;
+    onProviderQuestion?: (request: PermissionRequest) => void;
+  } = {},
 ): PermissionHandler {
   return async (req: PermissionRequest): Promise<PermissionDecision> => {
+    if (req.toolName === "AskUserQuestion") opts.onProviderQuestion?.(req);
     const providerQuestion = await handleProviderQuestionTool(req, {
       interactive: opts.interactive ?? true,
+      onAnsweredQuestion: opts.onAnsweredQuestion,
     });
     if (providerQuestion) {
       log.write("permission", {

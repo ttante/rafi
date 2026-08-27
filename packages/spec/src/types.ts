@@ -409,7 +409,7 @@ export interface BuildRunRecordV1 {
   status: BuildRunStatus;
   tickets: string[];
   deliveryUnit?: string;
-  branchMode: "current" | "per-ticket" | "shared";
+  branchMode: "current" | "per-ticket" | "shared" | "mixed";
   checkpoint: string;
   currentTicket?: string;
   builder?: { settings: ResolvedAgentSettings; sessionId?: string };

@@ -6,6 +6,7 @@ import {
   runtimeCommandLabel,
   runtimeRepairCommands,
 } from "./compiler.js";
+import { currentActivity } from "ai-foreman/activity.js";
 
 export type RuntimeReadinessChoice = "retry" | "switch" | "cancel";
 
@@ -73,8 +74,12 @@ export async function ensureAgentRuntimesReady(
           : new RuntimeReadinessError({ runtime, cause: err });
         const fallbackRuntime = otherRuntime(runtime);
         const choice = await choose(failure, fallbackRuntime);
-        if (choice === "retry") continue;
+        if (choice === "retry") {
+          currentActivity()?.note(`rafi: retrying ${runtime} readiness check`);
+          continue;
+        }
         if (choice === "switch") {
+          currentActivity()?.note(`rafi: checking fallback runtime ${fallbackRuntime}`);
           await check(targetDir, fallbackRuntime);
           return [fallbackRuntime];
         }

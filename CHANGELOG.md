@@ -4,6 +4,19 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## Unreleased
+
+### Added
+
+- Added a shared live activity reporter across Rafi planning, ticket setup/population, building, QA, source fetching, runtime checks, compilation, and branch delivery. TTY output continuously redraws the active state and elapsed time; redirected and CI output receives timestamped 30-second heartbeats.
+- Added durable provider and RAFI retry notices plus a 60-second quiet-provider warning that keeps waiting without changing retry or timeout policy.
+
+### Fixed
+
+- Made isolated branch-run banners, confirmations, recovery records, branch-plan logs, and GitHub/GitLab review footers describe the final shared, per-ticket, mixed, or stacked branch allocation instead of assuming one branch per ticket.
+- Preserved Codex app-server `willRetry` semantics so recoverable connection closures are shown as retries instead of misleading terminal turn errors.
+- Surfaced Claude SDK API retry attempts and delays immediately, and moved agent-assisted root-file compilation and authenticated source CLI captures to asynchronous subprocesses so the activity timer remains responsive.
+
 ## @rafi-ai/cli 0.9.1 / ai-foreman 1.7.1 / special-agents 0.8.1 / rafi-spec 0.8.1 - 2026-08-24
 
 ### Fixed
@@ -103,6 +116,8 @@ This project follows semantic versioning for published npm packages where practi
 
 ### Changed
 
+- Exhaustive `rafi plan` and `rafi tickets plan` no longer imply a fixed minimum question count. When no valid grill-me answer was collected, Rafi runs one independent read-only audit before approval; missing user judgments are asked one at a time with recommendations, custom input, and a bounded early-stop path, while `--yes` pauses instead of answering for the user.
+- Provider-native answered-question telemetry now fires only after a successful non-empty answer, allowing native and textual grill-me exchanges to share the same verification contract. Audit state, answers, interruption recovery, and planner continuity metadata are checkpointed for resume.
 - `rafi plan` is initialization-only and defaults to standard planning; `rafi tickets plan` is the fully initialized later-work workflow.
 - Runtime/provider switches during recovery are explicit fresh sessions and report lost conversational continuity.
 - Builder and QA settings/session IDs are resolved and persisted independently.

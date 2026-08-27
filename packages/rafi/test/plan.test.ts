@@ -27,6 +27,7 @@ import {
   PLAN_PROPOSAL_START,
   type StructuredPlanProposalV1,
 } from "../src/structuredPlan.js";
+import { GRILL_AUDIT_END, GRILL_AUDIT_START } from "../src/grillAudit.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "rafi-plan-test-"));
@@ -452,7 +453,7 @@ test("plan workflow handles grill-me needs_input through Rafi and resumes the sa
         index += 1;
         if (index === 1) {
           return {
-            text: 'Before planning, pick a path.\nSTEP_STATUS: needs_input | question="Which path?" choices="Recommended path|Alternative|Stop questions and make the plan now"',
+            text: 'Before planning, pick a path.\nSTEP_STATUS: needs_input | question="Which path?" choices="Recommended path (Recommended)|Alternative|Stop questions and make the plan now"',
             isError: false,
             numTurns: 1,
             costUsd: 0,
@@ -500,6 +501,71 @@ test("plan workflow handles grill-me needs_input through Rafi and resumes the sa
   } finally {
     rmSync(dir, { recursive: true });
   }
+});
+
+test("exhaustive plan with zero valid answers runs one independent complete audit before publishing", async () => {
+  const dir = tempDir();
+  installRafiConfig(dir);
+  let audits = 0;
+  const createAuditor: PlanWorkflowOptions["createAuditor"] = async (options) => {
+    audits += 1;
+    assert.deepEqual(options.extraSkills, ["grill-me"]);
+    assert.equal(options.sandboxMode, "read-only");
+    assert.equal(options.resumeSessionId, undefined);
+    return {
+      runtime: "codex", model: "test-model", roleBundle: {} as never, skills: ["grill-me"], log: { write() {} } as never,
+      builder: {
+        agent: "codex", async sendTurn(text: string) {
+          assert.match(text, /exactly one turn/i);
+          return { text: `${GRILL_AUDIT_START}\n{"status":"complete","evidence":"The brief fixes scope and the repository fixes implementation constraints."}\n${GRILL_AUDIT_END}`, isError: false, numTurns: 1, costUsd: 0 };
+        },
+        sessionId: () => "audit-session", async *events() {}, async close() {},
+      },
+    };
+  };
+  try {
+    const outcome = await runPlanWorkflow({
+      project: dir, brief: "Add labels.", yes: true, grillMe: true, rawArgs: ["--grill-me"],
+      runInstruction: async () => fakePlanRun(planCompleteOutput(validStructuredProposal()), "planner-session"),
+      createAuditor,
+    });
+    assert.equal(outcome.status, "completed");
+    assert.equal(audits, 1);
+    assert.equal(existsSync(join(dir, "docs", "rafi-plan.json")), true);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("generic implementation prompt does not count and --yes fails closed when audit needs user input", async () => {
+  const dir = tempDir();
+  installRafiConfig(dir);
+  let turn = 0;
+  const createPlanner: PlanWorkflowOptions["createPlanner"] = async () => ({
+    runtime: "codex", model: "test-model", roleBundle: {} as never, skills: ["grill-me"], log: { write() {} } as never,
+    builder: {
+      agent: "codex", async sendTurn() {
+        turn += 1;
+        if (turn === 1) return { text: 'STEP_STATUS: needs_input | question="Do you want to implement?" choices="Yes|No"', isError: false, numTurns: 1, costUsd: 0 };
+        return { text: planCompleteOutput(validStructuredProposal()), isError: false, numTurns: 1, costUsd: 0 };
+      },
+      sessionId: () => "planner-session", async *events() {}, async close() {},
+    },
+  });
+  const createAuditor: PlanWorkflowOptions["createAuditor"] = async () => ({
+    runtime: "codex", model: "test-model", roleBundle: {} as never, skills: ["grill-me"], log: { write() {} } as never,
+    builder: {
+      agent: "codex", async sendTurn() { return { text: `${GRILL_AUDIT_START}\n${JSON.stringify({ status: "needs_user_input", questions: [{ id: "scope", question: "Include migration?", recommendation: "Include it", rationale: "Existing data needs continuity", alternatives: ["Defer it"] }] })}\n${GRILL_AUDIT_END}`, isError: false, numTurns: 1, costUsd: 0 }; },
+      sessionId: () => "audit-session", async *events() {}, async close() {},
+    },
+  });
+  try {
+    const outcome = await runPlanWorkflow({
+      project: dir, brief: "Add labels.", yes: true, grillMe: true, rawArgs: ["--grill-me"], createPlanner, createAuditor,
+      handleInput: async (input) => ({ registry: input.registry, snapshots: [], answer: "Yes", continuation: "Yes", cancelled: false }),
+    });
+    assert.equal(outcome.status, "blocked");
+    assert.match(outcome.diagnostic ?? "", /resume.*interactively/i);
+    assert.equal(existsSync(join(dir, "docs", "rafi-plan.json")), false);
+  } finally { rmSync(dir, { recursive: true }); }
 });
 
 test("plan workflow stops after three unsuccessful structured proposal repairs", async () => {

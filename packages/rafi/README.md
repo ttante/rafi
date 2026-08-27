@@ -79,13 +79,21 @@ rafi resume . --discard 1234abcd
 
 With no ID, `rafi resume` offers an interactive picker. Completed records are retained for 30 days; incompatible records remain until explicitly discarded. When an agent session ID is available, Rafi requests continuation with that runtime; otherwise it explains that exact continuity is unavailable and resumes from the preserved brief, answers, and checkpoint. Before writing a shared artifact, Rafi fingerprints it and stops for review if another interview changed it.
 
+## Live activity and retries
+
+Long-running Rafi commands show one continuously updated line with the current phase and elapsed time. Provider work reports states such as planning, reasoning, running tools, QA, and ticket population. If Codex or Claude reports a recoverable API failure, Rafi prints a permanent `retrying` line and keeps the live timer running; a terminal provider failure remains an error.
+
+After 60 seconds without a provider signal, Rafi warns that the provider is quiet but keeps waiting. In redirected output and CI, the live line becomes timestamped heartbeat lines every 30 seconds with no ANSI cursor controls. The indicator is cleared while Rafi is waiting for user input.
+
 ## Plan a feature
 
 ```sh
 rafi plan .
 ```
 
-`rafi plan` runs the read-only `planner` role in standard mode by default. `--grill-me` selects an exhaustive, one-question-at-a-time interview; `--no-grill-me` selects standard mode explicitly. It turns a brief and repository inspection into a validated Markdown plan with scope, decisions, risks, rollback notes, assessment, and ticket-maker guidance.
+`rafi plan` runs the read-only `planner` role in standard mode by default. `--grill-me` selects an exhaustive, one-question-at-a-time interview; `--no-grill-me` selects standard mode explicitly. It turns a brief and repository inspection into a validated Markdown plan with scope, decisions, risks, rollback notes, and ticket-maker guidance.
+
+Exhaustive mode has no arbitrary minimum question count. When no valid grill-me answer was collected, Rafi performs one independent, fresh-session, read-only audit before approval or automatic publication. If the audit finds missing judgments, Rafi—not the auditor—asks up to five questions one at a time, always offers a recommendation, custom input, and `Stop questions and make the plan now`, and persists each answer for resume. `--yes` never answers on the user's behalf and pauses when input is required.
 
 | Path | Purpose |
 | --- | --- |
@@ -102,7 +110,7 @@ rafi tickets plan
 rafi tickets validate
 ```
 
-`tickets plan` runs a read-only guided planning conversation and applies only the exact validated proposal you approve. `tickets setup:init` / `setup:update` appends local, public URL, Linear, or Jira Cloud sources to the shared registry and saves populate/build defaults. Linear uses `LINEAR_API_KEY`; Jira Cloud uses `JIRA_EMAIL` and `JIRA_API_TOKEN`; only those environment-variable names are persisted.
+`tickets plan` runs a read-only guided planning conversation and applies only the exact validated proposal you approve. It uses the same one-time exhaustive verification and bounded early-stop fallback as `rafi plan`, including after a mid-session upgrade to `grill-me`. `tickets setup:init` / `setup:update` appends local, public URL, Linear, or Jira Cloud sources to the shared registry and saves populate/build defaults. Linear uses `LINEAR_API_KEY`; Jira Cloud uses `JIRA_EMAIL` and `JIRA_API_TOKEN`; only those environment-variable names are persisted.
 
 `tickets populate` uses explicit sources first, then saved ticket sources, then the latest Rafi plan when available. It runs the `ticket-maker` role, writes canonical tickets to `.tickets/tickets.yaml`, renders tracker docs, and validates the tracker. Source overrides, external-import setup, agent/model controls, review, queue, render, archive, and manual ticket maintenance are in the [ticket command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-tickets---help).
 

@@ -24,6 +24,7 @@ import { collectBaseWorktreeDirtyPaths, currentGitRef, ensureCleanBaseWorktree, 
 import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
+import { branchPlanLogMetadata, presentBranchPlan } from "../branch/presentation.js";
 import { checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
 import type { BuildRunRecordV1, ResolvedAgentSettings } from "rafi-spec";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
@@ -37,6 +38,7 @@ import type { BranchPlan, BranchPlanNode, CompletionMode, MergeMethod, ReviewPro
 import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig.js";
 import { loadDeliveryConfig, selectDeliveryUnitForRun, selectStacksForRun, updateStackDeliveryState, type DeliveryConfig, type DeliveryStack, type DeliveryUnitProgress } from "../tickets/delivery.js";
 import { AgentStatusReporter } from "../statusReporter.js";
+import { currentActivity, withActivityPhase } from "../activity.js";
 import { WorkflowDb } from "../workflowDb.js";
 import { makeLogPath as makeRoleLogPath, readOnlyPermissionConfig, runRoleInstruction } from "../agentRun.js";
 import type { QaNonconvergenceContext, QaNonconvergenceDecision } from "../qaReview.js";
@@ -231,7 +233,10 @@ function branchContinueTicketHelp(cwd: string, flag = "--continue"): string {
 
 async function ensureGitHubReadyForCreatePr(cwd: string, log: Log, yes: boolean): Promise<void> {
   while (true) {
-    const result = preflightGh(cwd);
+    const result = await withActivityPhase("checking GitHub readiness", async () => {
+      currentActivity()?.update("checking GitHub readiness", "remote, authentication, and repository access");
+      return preflightGh(cwd);
+    });
     if (result.ok) return;
 
     log.write("github-readiness-failed", {
@@ -259,6 +264,7 @@ async function ensureGitHubReadyForCreatePr(cwd: string, log: Log, yes: boolean)
       console.log("ai-foreman: cancelled");
       process.exit(0);
     }
+    currentActivity()?.note("rafi: retrying GitHub readiness check");
   }
 }
 
@@ -268,7 +274,10 @@ async function ensureReviewProviderReady(cwd: string, provider: ReviewProvider, 
     return;
   }
   while (true) {
-    const result = preflightGlab(cwd);
+    const result = await withActivityPhase("checking GitLab readiness", async () => {
+      currentActivity()?.update("checking GitLab readiness", "remote, authentication, and repository access");
+      return preflightGlab(cwd);
+    });
     if (result.ok) return;
 
     log.write("gitlab-readiness-failed", {
@@ -296,6 +305,7 @@ async function ensureReviewProviderReady(cwd: string, provider: ReviewProvider, 
       console.log("ai-foreman: cancelled");
       process.exit(0);
     }
+    currentActivity()?.note("rafi: retrying GitLab readiness check");
   }
 }
 
@@ -449,7 +459,7 @@ export function buildStartCommand(): Command {
         fail("--max-branch-depth must be a positive integer");
       }
       if (!branchMode && continueTickets.length > 0) {
-        fail("--ticket is only supported with --branch-per-ticket --continue or --branch-per-ticket --resume");
+        fail("--ticket is only supported when continuing or resuming an isolated branch run");
       }
       if (branchMode) {
         if (opts.resume && continueTickets.length > 1) {
@@ -461,8 +471,8 @@ export function buildStartCommand(): Command {
         if (continueTickets.length > 0 && !(opts.resume || opts.continue)) {
           fail("--ticket in branch mode requires --continue or --resume <sessionId>");
         }
-        if (opts.tickets) fail("--tickets is not supported with --branch-per-ticket; initialize and use .tickets/tickets.yaml");
-        if (!isTicketsInitialized(cwd)) fail("--branch-per-ticket requires initialized .tickets/ (run ai-foreman tickets init)");
+        if (opts.tickets) fail("--tickets is not supported with an isolated branch run; initialize and use .tickets/tickets.yaml");
+        if (!isTicketsInitialized(cwd)) fail("isolated branch runs require initialized .tickets/ (run ai-foreman tickets init)");
         if (branchDefaults.createReview && !branchDefaults.reviewProvider) {
           fail("PR/MR completion is enabled but no GitHub or GitLab origin remote was detected; pass --provider github|gitlab or --completion none");
         }
@@ -605,6 +615,7 @@ export function buildStartCommand(): Command {
 
         const ticketById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
         const resumeSessionByTicket = new Map<string, { worktreePath: string; sessionId: string }>();
+        let auditDependencyCount: number | undefined;
         let plan: BranchPlan;
         if (continueTickets.length > 0) {
           const sessions = findResumableBranchSessions(join(cwd, ".foreman"));
@@ -630,6 +641,8 @@ export function buildStartCommand(): Command {
               dependencies: [],
               depth: 1,
               worktreePath: session.worktreePath,
+              deliveryUnitId: session.deliveryUnitId,
+              deliveryUnitFinal: session.deliveryUnitFinal,
             });
           }
           plan = {
@@ -637,13 +650,6 @@ export function buildStartCommand(): Command {
             nodes,
             issues: [],
           };
-          log.write("branch-plan", {
-            baseRef: plan.baseRef,
-            tickets: plan.nodes.map((node) => node.ticket.id),
-            branches: plan.nodes.map((node) => ({ ticket: node.ticket.id, branch: node.branch, base: node.baseBranch })),
-            issues: plan.issues,
-            resume: true,
-          });
         } else {
           plan = buildBranchPlan(tickets, states, {
             steps,
@@ -671,13 +677,7 @@ export function buildStartCommand(): Command {
               rootBaseBranches: branchDefaults.rootBaseBranches,
               ticketIds: selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
             });
-            log.write("branch-plan", {
-              baseRef: plan.baseRef,
-              tickets: plan.nodes.map((node) => node.ticket.id),
-              branches: plan.nodes.map((node) => ({ ticket: node.ticket.id, branch: node.branch, base: node.baseBranch })),
-              issues: plan.issues,
-              auditDependencyCount: auditDependencies.length,
-            });
+            auditDependencyCount = auditDependencies.length;
           } finally {
             await auditBuilder?.close().catch(() => {});
             await auditViewer?.catch(() => {});
@@ -699,7 +699,17 @@ export function buildStartCommand(): Command {
           }
         }
 
-        console.log(`foreman: ${continueTickets.length > 0 ? "resuming branch-per-ticket mode" : "branch-per-ticket mode"} for ${plan.nodes.length} ticket(s)`);
+        const branchPresentation = presentBranchPlan(plan, {
+          stacked: selectedStacks.length > 0,
+          resumed: continueTickets.length > 0 || Boolean(recoveryRecord),
+        });
+        log.write("branch-plan", {
+          ...branchPlanLogMetadata(plan, branchPresentation),
+          ...(auditDependencyCount === undefined ? {} : { auditDependencyCount }),
+          ...(continueTickets.length > 0 || recoveryRecord ? { resume: true } : {}),
+        });
+
+        console.log(branchPresentation.banner);
         console.log(`foreman: project ${cwd}`);
         console.log(`foreman: base ${plan.baseRef}`);
         console.log(`foreman: log ${logPath}\n`);
@@ -718,7 +728,7 @@ export function buildStartCommand(): Command {
 
         if (!opts.yes && plan.issues.every((issue) => !issue.blocking)) {
           const action = await select({
-            message: "Proceed with branch-per-ticket run?",
+            message: branchPresentation.prompt,
             options: [
               { value: "proceed", label: "Proceed" },
               { value: "cancel", label: "Cancel" },
@@ -741,7 +751,7 @@ export function buildStartCommand(): Command {
         };
         let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: opts.resume ? String(opts.resume) : null }) : createBuildRun({
           tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
-          repositoryRoot: cwd, branchMode: "per-ticket", builder: capturedBranchBuilder, qa: capturedBranchQa,
+          repositoryRoot: cwd, branchMode: branchPresentation.allocationMode, builder: capturedBranchBuilder, qa: capturedBranchQa,
         });
         const branchHeartbeat = setInterval(() => { masterRun = heartbeatBuildRun(cwd, masterRun); }, 10_000); branchHeartbeat.unref();
         const summaries = await runBranchPlan({
@@ -870,7 +880,9 @@ export function buildStartCommand(): Command {
         reasoning: capturedBuilder.reasoning, fast: capturedBuilder.fast, step: 1, total: steps,
         phase: "builder work session", sessionTransition: resumeSessionId ? "resumed exact session" : "initial session", adapter: () => foreman.builderAdapter(),
       }, (line, snapshot) => {
-        console.log(line); log.write("agent-status", { ...snapshot });
+        const activity = currentActivity();
+        if (activity) activity.writePersistent(line); else console.log(line);
+        log.write("agent-status", { ...snapshot });
         const db = new WorkflowDb(cwd); try { db.recordTelemetry(buildRun.runId, snapshot); } finally { db.close(); }
       });
       statusReporter.start();

@@ -80,6 +80,8 @@ rafi build:resume .  # resumes a build that stopped
 
 The complete scripting and maintenance command reference—including non-interactive modes and advanced overrides—is generated in [docs/cli.md](./docs/cli.md). It is intentionally separate from this guided workflow introduction.
 
+Long-running commands keep one live terminal line updated with the current phase and elapsed time. Recoverable provider failures print a permanent `retrying` line; after 60 seconds without a provider signal, Rafi says the provider is quiet and continues waiting. CI and redirected output receive timestamped heartbeats every 30 seconds instead of terminal animation.
+
 ### One conversation, from rough idea to approved tickets
 
 The interview begins with one open question. You can answer however is natural:
@@ -104,7 +106,9 @@ After hearing the initial request, Rafi explains two interview styles:
 
 You can begin with the standard interview and upgrade to `grill-me` later without losing the proposal already under discussion.
 
-Questions are conversational. Rafi gives a recommended answer and alternatives, but you can always respond in your own words. Depending on the work, the conversation may cover scope, source interpretation, ticket size, dependencies, estimates, validation expectations, branching, pull requests, merge behavior, and whether several tickets should travel together as one delivery unit. These are decisions made with you, not a wall of command-line switches you need to understand in advance.
+`grill-me` does not promise an arbitrary minimum number of questions. If exhaustive planning reaches a valid candidate without one recognizable answered grill-me question, Rafi runs one fresh, read-only completeness audit before approval. A complete audit may confirm that the brief and repository already resolve every material judgment. If it finds gaps, Rafi asks at most five questions one at a time; the recommendation is shown first, custom answers remain available, and `Stop questions and make the plan now` always ends the fallback early. Rafi never selects a recommendation for you, including under `--yes`.
+
+Questions are conversational. Rafi gives a recommended answer and alternatives, but you can always respond in your own words. Depending on the work, the conversation may cover scope, source interpretation, ticket size, dependencies, estimates, validation expectations, branching, pull requests, merge behavior, and whether several tickets should travel together as one delivery unit. These are decisions made with you, not by the planning agent or its independent auditor.
 
 If only one configured runtime is available, Rafi uses it. If both Claude and Codex are configured, it asks which one should plan the session. It shows the effective model and reasoning defaults and lets you make session-only changes conversationally.
 

@@ -9,6 +9,7 @@ import {
 import { resolveExecutablePath } from "../runtimeReadiness.js";
 import type { RuntimeProbeResult } from "rafi-spec";
 import { otherRuntime, runtimeDisplayName } from "./runtimeSelection.js";
+import { currentActivity } from "../activity.js";
 
 export type RuntimeCommandRecoveryChoice = "retry" | "switch" | "cancel";
 
@@ -76,8 +77,12 @@ export async function ensureRuntimeReadyForCommand(
         ? await opts.choose(failure, { otherRuntime: fallbackRuntime, allowSwitch })
         : await promptRuntimeRecovery(failure, opts.label, fallbackRuntime, allowSwitch);
 
-      if (choice === "retry") continue;
+      if (choice === "retry") {
+        currentActivity()?.note(`rafi: retrying ${runtime} readiness check`);
+        continue;
+      }
       if (choice === "switch" && allowSwitch) {
+        currentActivity()?.note(`rafi: checking fallback runtime ${fallbackRuntime}`);
         try {
           const probe = await check(projectDir, fallbackRuntime);
           if (fallbackRuntime === "claude") {

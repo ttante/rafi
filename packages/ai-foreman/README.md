@@ -15,6 +15,9 @@ Loop Claude Code or Codex through tickets.
 - **Rich ticket system** — tickets carry acceptance criteria, required tests, dependencies, priority, size, and risk level. The agent reads the full context before starting each step.
 - **Future work tracking** — when the builder discovers out-of-scope work during a run, `ai-foreman tickets discover` captures it without derailing the current ticket. Discovered items live in a separate inbox until you promote them.
 - **QA that actually gates** — QA runs after every completed ticket and checks code quality, test passing, and regression protection. The ticket only closes after QA passes. QA turns do not count against `--steps`.
+- **Visible long-running work** — one elapsed-time activity line identifies provider, phase, tools, retries, and quiet periods; redirected output receives timestamped heartbeats instead of ANSI animation.
+
+Provider-managed retries are reported immediately as durable lines. A quiet-provider warning appears after 60 seconds without a signal, but Foreman does not add retries, abort the provider, or change provider retry limits. Non-TTY output receives a heartbeat every 30 seconds while work remains pending.
 
 ## Install
 
@@ -522,6 +525,8 @@ STEP_STATUS: blocked | ticket="T001" reason="missing DATABASE_URL"
 STEP_STATUS: plan_complete | ticket="T001" summary="all requested work is complete"
 STEP_STATUS: needs_input | question="Which storage backend?" choices="SQLite|Postgres"
 ```
+
+Provider-native `AskUserQuestion` prompts preserve their existing input/output behavior. Hosts may also observe a question only after the user successfully supplies a non-empty answer; cancelled, denied, malformed, and empty prompts do not emit answered-question telemetry. Rafi uses this boundary to recognize machine-shaped exhaustive-planning exchanges without treating generic questions as grill-me coverage.
 
 When QA is enabled, Foreman asks the builder to review its own work:
 

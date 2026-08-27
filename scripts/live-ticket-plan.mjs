@@ -92,10 +92,19 @@ function assertSameProtectedTree(before, after) {
 }
 
 function localSourcePaths(config) {
-  const tickets = config.tickets;
-  const sources = tickets && typeof tickets === "object" ? tickets.sources : undefined;
-  if (!Array.isArray(sources)) return [];
-  return sources
+  const entries = config.sources && typeof config.sources === "object"
+    ? config.sources.entries
+    : undefined;
+  if (Array.isArray(entries)) {
+    return entries
+      .filter((source) => source?.type === "local" && typeof source.locator?.path === "string")
+      .map((source) => source.locator.path);
+  }
+  const legacySources = config.tickets && typeof config.tickets === "object"
+    ? config.tickets.sources
+    : undefined;
+  if (!Array.isArray(legacySources)) return [];
+  return legacySources
     .filter((source) => source?.type === "local" && Array.isArray(source.paths))
     .flatMap((source) => source.paths.map(String));
 }
@@ -143,7 +152,7 @@ try {
   run("node", [cli, "tickets", "validate", "--project", repo]);
   const protectedBefore = protectedTreeSnapshot(repo);
 
-  const brief = `Plan every item in the external requirements file ${requirements}`;
+  const brief = requirements;
   const runtimeKeys = selectedRuntime === "codex" ? "\u001B[B\r" : "\r";
   const responder = createTicketPlanResponder({
     maxQuestionsPerPhase: 6,
@@ -153,19 +162,21 @@ try {
       { prompt: "Which should this session use?", keys: "\u0015Use the remembered baseline and the external requirements from my description; reconcile every named item.\r" },
       { prompt: "Future-work ideas:", keys: "\u0015Fold item 1 into LIVE-SAVED-VIEWS and mark it merged.\r" },
       { prompt: "Existing next tickets:", keys: "\u0015Retain LIVE-CSV-EXPORT and add both new tickets as next work.\r" },
+      { prompt: "Default ticket work mode:", keys: "\r" },
+      { prompt: "Use these compact/fresh defaults?", keys: "\r" },
       { prompt: "Interview depth:", keys: "\r" },
       { prompt: "Both runtimes are configured", keys: runtimeKeys },
       { prompt: "Keep defaults, or enter a session override", keys: "\r" },
     ],
     standardAnswer: "Require authentication and make shared views read-only. Use the recommended defaults for anything else and prepare the first exact proposal.",
-    revision: "Upgrade to grill-me. Change LIVE-SHARED-VIEWS so shared links expire after 30 days. Ask at least one focused question about expiration semantics before revising, and preserve every other agreed decision.",
+    revision: "Upgrade to grill-me. Change LIVE-SHARED-VIEWS so shared links expire after 30 days. Resolve any useful judgment questions, and preserve every other agreed decision.",
     grilledAnswer: "Expired links show a clear expired state and owners can generate a replacement. Use recommended defaults for anything else and prepare the revised exact proposal.",
   });
   const command = `stty cols 120 rows 40; exec timeout 30m node ${JSON.stringify(cli)} tickets plan`;
   await runTtyJourney({ command, cwd: join(repo, "web"), transcript, responder });
 
   const responseState = responder.snapshot();
-  invariant(responseState.standardQuestions >= 1 && responseState.grilledQuestions >= 1, "both interview phases must ask a question");
+  invariant(responseState.grilledQuestions >= 1 || responseState.auditCompleted, "exhaustive approval requires a valid grill-me answer or completed audit");
   invariant(responseState.reviews === 2, "the journey must review exactly two proposals");
 
   const ticketFile = parseYaml(readFileSync(join(repo, ".tickets", "tickets.yaml"), "utf8"));

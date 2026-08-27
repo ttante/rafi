@@ -19,6 +19,8 @@ export interface BranchResumeSession {
   reviewProvider?: string;
   prReady?: boolean;
   keepWorktrees?: boolean;
+  deliveryUnitId?: string;
+  deliveryUnitFinal?: boolean;
   ts?: string;
 }
 
@@ -66,6 +68,8 @@ export function findResumableBranchSessions(foremanDir: string): BranchResumeSes
           reviewProvider: stringField(record.reviewProvider),
           prReady: booleanField(record.prReady),
           keepWorktrees: booleanField(record.keepWorktrees),
+          deliveryUnitId: stringField(record.deliveryUnitId),
+          deliveryUnitFinal: booleanField(record.deliveryUnitFinal),
           ts: stringField(record.ts),
         });
       } else if (record.event === "branch-complete") {

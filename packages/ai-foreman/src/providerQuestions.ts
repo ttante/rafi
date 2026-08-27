@@ -4,13 +4,13 @@ import type { PermissionDecision, PermissionRequest } from "./adapters/types.js"
 const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
 const CUSTOM_VALUE = "__rafi_custom_response__";
 
-interface PromptOption {
+export interface PromptOption {
   label: string;
   description?: string;
   preview?: string;
 }
 
-interface ProviderQuestion {
+export interface ProviderQuestion {
   question: string;
   header?: string;
   options: PromptOption[];
@@ -27,7 +27,19 @@ export interface ProviderQuestionPromptDeps {
 export interface ProviderQuestionOptions {
   interactive: boolean;
   prompts?: ProviderQuestionPromptDeps;
+  /** Called only after a non-empty answer has been successfully collected. */
+  onAnsweredQuestion?: (event: AnsweredProviderQuestion) => void;
 }
+
+export interface AnsweredProviderQuestion {
+  toolName: "AskUserQuestion";
+  question: ProviderQuestion;
+  /** Number of readable questions presented by this provider tool call. */
+  questionCount: number;
+  answer: string;
+}
+
+export const GRILL_ME_STOP_CHOICE = "Stop questions and make the plan now";
 
 export async function handleProviderQuestionTool(
   req: PermissionRequest,
@@ -66,6 +78,14 @@ export async function handleProviderQuestionTool(
     }
     answers[question.question] = answered.answer;
     if (answered.annotation) annotations[question.question] = answered.annotation;
+    if (answered.answer.trim()) {
+      opts.onAnsweredQuestion?.({
+        toolName: ASK_USER_QUESTION_TOOL,
+        question,
+        questionCount: questions.length,
+        answer: answered.answer,
+      });
+    }
   }
 
   const updatedInput: Record<string, unknown> = {
@@ -75,6 +95,18 @@ export async function handleProviderQuestionTool(
   if (Object.keys(annotations).length > 0) updatedInput.annotations = annotations;
 
   return { behavior: "allow", updatedInput };
+}
+
+/** Machine-recognizable native grill-me question shape. */
+export function isGrillMeProviderQuestion(event: AnsweredProviderQuestion): boolean {
+  const { question } = event;
+  if (event.questionCount !== 1 || question.multiSelect) return false;
+  if (!/^grill-me\b/i.test(question.header ?? "")) return false;
+  const labels = question.options.map((option) => option.label.trim());
+  if (labels.length < 3 || !labels[0]?.endsWith("(Recommended)")) return false;
+  const stopIndex = labels.indexOf(GRILL_ME_STOP_CHOICE);
+  if (stopIndex < 0) return false;
+  return labels.some((label, index) => index > 0 && index !== stopIndex && label.length > 0);
 }
 
 export function countProviderQuestions(input: Record<string, unknown>): number {

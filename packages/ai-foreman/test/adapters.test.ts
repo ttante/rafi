@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildClaudeQueryOptions, permissionDecisionToClaudeResult, requireClaudeSDK } from "../src/adapters/claude.js";
+import { buildClaudeQueryOptions, claudeApiRetryEvent, permissionDecisionToClaudeResult, requireClaudeSDK } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import type { BuilderAdapterOptions } from "../src/adapters/types.js";
 
@@ -78,6 +78,23 @@ test("permissionDecisionToClaudeResult preserves updatedInput and interrupt", ()
     message: "cancelled",
     interrupt: true,
     toolUseID: "toolu_456",
+  });
+});
+
+test("Claude API retry messages normalize into immediate retry events", () => {
+  assert.deepEqual(claudeApiRetryEvent({
+    error: "Connection closed mid-response",
+    attempt: 2,
+    max_retries: 4,
+    retry_delay_ms: 1500,
+  }), {
+    kind: "retry",
+    provider: "claude",
+    reason: "Connection closed mid-response",
+    attempt: 2,
+    maximum: 4,
+    delayMs: 1500,
+    managedBy: "provider",
   });
 });
 

@@ -60,6 +60,8 @@ export interface TurnResult {
 export type BuilderEvent =
   | { kind: "text"; text: string }
   | { kind: "tool"; name: string; input: unknown }
+  | { kind: "activity"; state: string; detail?: string; provider?: "claude" | "codex"; model?: string; transient?: boolean }
+  | { kind: "retry"; provider: "claude" | "codex"; reason: string; attempt?: number; maximum?: number; delayMs?: number; managedBy: "provider" | "rafi" }
   | { kind: "turn-complete"; result: TurnResult }
   | { kind: "session-transition"; transition: "started" | "resumed" | "compacting" | "compacted" | "fresh-fallback"; detail?: string }
   | { kind: "context-usage"; used: number; maximum?: number; percentage?: number }

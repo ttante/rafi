@@ -13,6 +13,7 @@ import { buildStatusCommand } from "../src/cli/status.js";
 import { Log } from "../src/log.js";
 import { buildBranchPlan, parseAuditDependencies } from "../src/branch/planner.js";
 import { checkGitHubReadiness, createOrReusePr, pushBranchForPr } from "../src/branch/github.js";
+import { createOrReuseMr } from "../src/branch/gitlab.js";
 import {
   findResumableBranchSessions,
   formatBranchContinueCommand,
@@ -696,6 +697,41 @@ test("createOrReusePr defaults to draft and omits draft when ready", () => {
   }
 });
 
+test("generated GitHub PR and GitLab MR bodies describe each node's branch behavior", () => {
+  const dir = mkdtempSync(join(tmpdir(), "foreman-review-footer-test-"));
+  const oldPath = process.env.PATH;
+  try {
+    writeExecutable(join(dir, "gh"), [
+      "#!/usr/bin/env bash",
+      "if [ \"$1 $2\" = \"pr list\" ]; then exit 0; fi",
+      "if [ \"$1 $2\" = \"pr create\" ]; then echo 'https://example.test/pr/1'; exit 0; fi",
+      "exit 1",
+    ]);
+    writeExecutable(join(dir, "glab"), [
+      "#!/usr/bin/env bash",
+      "if [ \"$1 $2\" = \"mr list\" ]; then echo '[]'; exit 0; fi",
+      "if [ \"$1 $2\" = \"mr create\" ]; then echo 'https://example.test/mr/1'; exit 0; fi",
+      "exit 1",
+    ]);
+    process.env.PATH = `${dir}:${oldPath}`;
+
+    const perTicket = makeNode(makeDef("T001", 1000));
+    const shared = { ...makeNode(makeDef("T002", 2000)), deliveryUnitId: "shared-unit", deliveryUnitFinal: true };
+    assert.equal(createOrReusePr(dir, { node: perTicket, ready: false, runId: "github-per" }).status, "created");
+    assert.equal(createOrReusePr(dir, { node: shared, ready: false, runId: "github-shared" }).status, "created");
+    assert.equal(createOrReuseMr(dir, { node: perTicket, ready: false, runId: "gitlab-per" }).status, "created");
+    assert.equal(createOrReuseMr(dir, { node: shared, ready: false, runId: "gitlab-shared" }).status, "created");
+
+    assert.match(readFileSync(join(dir, ".foreman", "pr-bodies", "github-per", "T001.md"), "utf8"), /for a per-ticket branch\./);
+    assert.match(readFileSync(join(dir, ".foreman", "pr-bodies", "github-shared", "T002.md"), "utf8"), /for a shared delivery branch\./);
+    assert.match(readFileSync(join(dir, ".foreman", "mr-bodies", "gitlab-per", "T001.md"), "utf8"), /for a per-ticket branch\./);
+    assert.match(readFileSync(join(dir, ".foreman", "mr-bodies", "gitlab-shared", "T002.md"), "utf8"), /for a shared delivery branch\./);
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runBranchPlan blocks the ticket when branch push fails", async () => {
   const { root, project, ticket, allowedBaseDirtyPaths } = initTicketGitRepo("foreman-push-fail-test-");
   const node = makeNode(ticket);
@@ -1042,6 +1078,8 @@ test("findResumableBranchSessions returns unfinished ticket sessions and command
         createPr: true,
         prReady: true,
         keepWorktrees: true,
+        deliveryUnitId: "shared-unit",
+        deliveryUnitFinal: false,
       }),
       JSON.stringify({
         ts: "2026-07-09T00:00:01.000Z",
@@ -1065,6 +1103,8 @@ test("findResumableBranchSessions returns unfinished ticket sessions and command
     const sessions = findResumableBranchSessions(foremanDir);
     assert.deepEqual(sessions.map((session) => session.ticket), ["T001"]);
     assert.equal(sessions[0]?.sessionId, "sess-1");
+    assert.equal(sessions[0]?.deliveryUnitId, "shared-unit");
+    assert.equal(sessions[0]?.deliveryUnitFinal, false);
     const command = formatBranchContinueCommand(dir, sessions[0]!);
     assert.match(command, /ai-foreman start .* --steps 1 --create-pr --continue --ticket T001/);
     assert.match(command, /--agent codex/);

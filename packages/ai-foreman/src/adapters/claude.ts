@@ -18,6 +18,7 @@ export async function requireClaudeSDK() {
   }
 }
 import { AsyncQueue } from "../util/asyncQueue.js";
+import { BuilderEventQueue, withActivityPhase } from "../activity.js";
 import { normalizeRuntimeErrorText } from "../runtimeAuth.js";
 import {
   classifyClaudeSdkFailure,
@@ -83,6 +84,23 @@ export function permissionDecisionToClaudeResult(
   };
 }
 
+export function claudeApiRetryEvent(message: {
+  error: string;
+  attempt: number;
+  max_retries: number;
+  retry_delay_ms: number;
+}): BuilderEvent {
+  return {
+    kind: "retry",
+    provider: "claude",
+    reason: message.error,
+    attempt: message.attempt,
+    maximum: message.max_retries,
+    delayMs: message.retry_delay_ms,
+    managedBy: "provider",
+  };
+}
+
 /**
  * Drives Claude Code through the Claude Agent SDK in streaming-input mode:
  * one persistent session, follow-up turns pushed as user messages, permission
@@ -92,7 +110,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   readonly agent = "claude" as const;
 
   private readonly inbox = new AsyncQueue<SDKUserMessage>();
-  private readonly eventQueue = new AsyncQueue<BuilderEvent>();
+  private readonly eventQueue = new BuilderEventQueue();
   private readonly query: Query;
   private readonly abort = new AbortController();
   private readonly pumpDone: Promise<void>;
@@ -220,6 +238,16 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.structuredError = msg.error;
       this.apiErrorStatus = msg.error_status;
       this.turnSignals.push(`API retry ${msg.attempt}/${msg.max_retries}: ${msg.error}${msg.error_status === null ? "" : ` (HTTP ${msg.error_status})`}`);
+      this.eventQueue.push(claudeApiRetryEvent(msg));
+    } else if (msg.type === "tool_progress") {
+      this.eventQueue.push({ kind: "activity", provider: "claude", state: "running tool", detail: `${msg.tool_name} (${Math.floor(msg.elapsed_time_seconds)}s)`, transient: true });
+    } else if (msg.type === "system") {
+      const system = msg as unknown as Record<string, unknown>;
+      if (system.subtype === "task_started" || system.subtype === "task_progress" || system.subtype === "task_updated") {
+        this.eventQueue.push({ kind: "activity", provider: "claude", state: "working on task", detail: typeof system.summary === "string" ? system.summary : undefined, transient: system.subtype === "task_progress" });
+      } else if (system.subtype === "session_state_changed") {
+        this.eventQueue.push({ kind: "activity", provider: "claude", state: "provider working", detail: typeof system.state === "string" ? system.state : undefined });
+      }
     } else if (msg.type === "result") {
       if ("api_error_status" in msg) this.apiErrorStatus = msg.api_error_status;
       const text =
@@ -259,11 +287,16 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   sendTurn(text: string): Promise<TurnResult> {
+    return withActivityPhase(`Claude ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(text));
+  }
+
+  private sendTurnInternal(text: string): Promise<TurnResult> {
     if (this.closed) return Promise.reject(new Error("builder is closed"));
     if (this.pending) {
       return Promise.reject(new Error("a turn is already in progress"));
     }
     return new Promise<TurnResult>((resolve, reject) => {
+      this.eventQueue.push({ kind: "activity", state: "starting Claude turn", provider: "claude", model: this.opts.model });
       this.turnSignals = [];
       this.structuredError = undefined;
       this.apiErrorStatus = undefined;
@@ -325,6 +358,14 @@ export class ClaudeAdapter implements BuilderAdapter {
     this.abort.abort();
     await this.pumpDone.catch(() => {});
   }
+}
+
+function activityPhase(phase: BuilderAdapterOptions["runtimePhase"]): string {
+  if (phase === "planning") return "planning";
+  if (phase === "ticket-population") return "populating tickets";
+  if (phase === "qa") return "reviewing with QA";
+  if (phase === "uninstaller") return "planning uninstall";
+  return "building";
 }
 
 function formatClaudeFailure(failure: NonNullable<TurnResult["failure"]>): string {

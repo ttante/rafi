@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { readdirSync } from "node:fs";
 import { parse as parseHtml } from "parse5";
+import { currentActivity, withActivityPhase } from "../activity.js";
 
 interface HtmlNode { nodeName?: string; value?: string; childNodes?: HtmlNode[]; }
 
@@ -36,6 +37,15 @@ export async function fetchAndSnapshotUrl(
   projectDir: string,
   input: string,
   limits: Partial<SourceFetchLimits> = {},
+): Promise<FetchedSource> {
+  const label = (() => { try { return `fetching source ${new URL(input).hostname}`; } catch { return "fetching URL source"; } })();
+  return withActivityPhase(label, () => fetchAndSnapshotUrlInternal(projectDir, input, limits));
+}
+
+async function fetchAndSnapshotUrlInternal(
+  projectDir: string,
+  input: string,
+  limits: Partial<SourceFetchLimits>,
 ): Promise<FetchedSource> {
   const effective = { ...DEFAULT_SOURCE_FETCH_LIMITS, ...limits };
   const requested = normalizePublicHttpUrl(input);
@@ -139,6 +149,7 @@ async function readLimitedBody(response: Response, maxBytes: number): Promise<Ui
     const { done, value } = await reader.read();
     if (done) break;
     total += value.length;
+    currentActivity()?.pulse(`downloaded ${formatBytes(total)}`);
     if (total > maxBytes) { await reader.cancel(); throw new Error(`URL content exceeds ${maxBytes} byte limit`); }
     chunks.push(value);
   }
@@ -176,6 +187,7 @@ async function extractSourceText(kind: FetchedSource["contentType"], bytes: Uint
     const document = await pdfjs.getDocument({ data: bytes, useWorkerFetch: false, isEvalSupported: false }).promise;
     const pages: string[] = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber++) {
+      currentActivity()?.update("extracting PDF source", `page ${pageNumber}/${document.numPages}`);
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
       pages.push(content.items.map((item) => "str" in item ? item.str : "").join(" "));
@@ -186,6 +198,12 @@ async function extractSourceText(kind: FetchedSource["contentType"], bytes: Uint
   }
   const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   return kind === "html" ? htmlToText(decoded) : decoded;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 export function htmlToText(html: string): string {

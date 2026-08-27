@@ -5,6 +5,8 @@ import { createPermissionHandler } from "../src/foreman.js";
 import { PermissionPolicy } from "../src/permissions/policy.js";
 import {
   handleProviderQuestionTool,
+  isGrillMeProviderQuestion,
+  type AnsweredProviderQuestion,
   type ProviderQuestionPromptDeps,
 } from "../src/providerQuestions.js";
 
@@ -51,6 +53,7 @@ test("AskUserQuestion single-select returns updatedInput answers keyed by questi
 });
 
 test("AskUserQuestion custom response records free text as the answer and annotation notes", async () => {
+  const observed: AnsweredProviderQuestion[] = [];
   const decision = await handleProviderQuestionTool({
     toolName: "AskUserQuestion",
     input: askInput([{
@@ -65,6 +68,7 @@ test("AskUserQuestion custom response records free text as the answer and annota
   }, {
     interactive: true,
     prompts: promptDeps({ select: ["__rafi_custom_response__"], text: ["Prompt once, then repair"] }),
+    onAnsweredQuestion: (event) => observed.push(event),
   });
 
   assert.equal(decision?.behavior, "allow");
@@ -74,6 +78,52 @@ test("AskUserQuestion custom response records free text as the answer and annota
   assert.deepEqual(decision?.updatedInput?.annotations, {
     "How should setup behave?": { notes: "Prompt once, then repair" },
   });
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0]?.answer, "Prompt once, then repair");
+});
+
+test("native grill-me qualification requires one single-select question with recognizable header, recommendation, alternative, and stop", async () => {
+  const base: AnsweredProviderQuestion = {
+    toolName: "AskUserQuestion",
+    questionCount: 1,
+    answer: "Use SQLite (Recommended)",
+    question: {
+      question: "Which storage contract should the plan use?",
+      header: "Grill-me: storage",
+      multiSelect: false,
+      options: [
+        { label: "Use SQLite (Recommended)" },
+        { label: "Use Postgres" },
+        { label: "Stop questions and make the plan now" },
+      ],
+    },
+  };
+  assert.equal(isGrillMeProviderQuestion(base), true);
+  assert.equal(isGrillMeProviderQuestion({ ...base, questionCount: 2 }), false);
+  assert.equal(isGrillMeProviderQuestion({ ...base, question: { ...base.question, multiSelect: true } }), false);
+  assert.equal(isGrillMeProviderQuestion({ ...base, question: { ...base.question, header: "Storage" } }), false);
+  assert.equal(isGrillMeProviderQuestion({ ...base, question: { ...base.question, options: base.question.options.slice(0, 2) } }), false);
+});
+
+test("answered-question observer does not fire for cancellation or empty custom answers", async () => {
+  const observed: AnsweredProviderQuestion[] = [];
+  const input = askInput([{
+    question: "Choose?", header: "Grill-me", multiSelect: false,
+    options: [{ label: "A (Recommended)" }, { label: "B" }, { label: "Stop questions and make the plan now" }],
+  }]);
+  await handleProviderQuestionTool({ toolName: "AskUserQuestion", input }, {
+    interactive: true,
+    prompts: promptDeps({ select: [CANCEL] }),
+    onAnsweredQuestion: (event) => observed.push(event),
+  });
+  const empty = await handleProviderQuestionTool({ toolName: "AskUserQuestion", input }, {
+    interactive: true,
+    prompts: promptDeps({ select: ["__rafi_custom_response__"], text: [""] }),
+    onAnsweredQuestion: (event) => observed.push(event),
+  });
+  assert.equal(empty?.behavior, "allow");
+  assert.deepEqual(empty?.updatedInput?.answers, { "Choose?": "" });
+  assert.equal(observed.length, 0);
 });
 
 test("AskUserQuestion multi-select supports selected options plus a custom response", async () => {

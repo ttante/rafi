@@ -65,6 +65,14 @@ test("structured requests and URL answers preserve commas and plus signs", () =>
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("prose ending in a file path remains a description", () => {
+  const dir = temp();
+  try {
+    const answer = "Plan every item in the external requirements file /tmp/requirements.md";
+    assert.deepEqual(sourceRequestFromAnswer(answer, dir), { description: answer });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("local directories and globs resolve as one source answer without whitespace splitting", async () => {
   const dir = temp();
   try {
@@ -82,7 +90,9 @@ test("external absolute paths are snapshotted without persisting the absolute lo
   const dir = temp(); const outside = temp();
   try {
     const file = join(outside, "outside notes.md"); writeFileSync(file, "private\n");
-    const result = await registerSourceRequests(dir, { version: 1, snapshot_storage: "local", entries: [] }, [{ type: "local", locator: { path: file } }]);
+    const request = sourceRequestFromAnswer(file, dir);
+    assert.equal(request.locator?.path, file);
+    const result = await registerSourceRequests(dir, { version: 1, snapshot_storage: "local", entries: [] }, [request]);
     const serialized = JSON.stringify(result.registry);
     assert.equal(serialized.includes(outside), false);
     assert.equal(existsSync(join(dir, result.registry.entries[0]!.versions[0]!.snapshot_path)), true);

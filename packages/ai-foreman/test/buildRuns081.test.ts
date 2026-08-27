@@ -29,3 +29,14 @@ test("released build leases become recoverable without deleting partial state", 
     assert.equal(readBuildRuns(dir)[0]?.checkpoint, "created");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("build records persist shared and mixed branch allocation modes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-build-run-modes-"));
+  try {
+    const shared = createBuildRun({ tickets: ["T020"], repositoryRoot: dir, branchMode: "shared" });
+    releaseBuildLease(dir, shared, "recoverable");
+    const mixed = createBuildRun({ tickets: ["T021", "T022"], repositoryRoot: dir, branchMode: "mixed" });
+    releaseBuildLease(dir, mixed, "recoverable");
+    assert.deepEqual(readBuildRuns(dir).map((run) => run.branchMode).sort(), ["mixed", "shared"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

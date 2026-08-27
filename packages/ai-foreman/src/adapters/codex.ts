@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { loadSkill } from "special-agents";
-import { AsyncQueue } from "../util/asyncQueue.js";
+import { BuilderEventQueue, withActivityPhase } from "../activity.js";
 import { normalizeRuntimeErrorText } from "../runtimeAuth.js";
 import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, CompactResult, ContextUsage, ProviderSettingSwitch, TurnResult } from "./types.js";
 
@@ -28,7 +28,7 @@ type Waiter = { predicate: (params: Record<string, unknown>) => boolean; resolve
 /** Persistent JSON-RPC controller for one live Codex thread. */
 export class CodexAdapter implements BuilderAdapter {
   readonly agent = "codex" as const;
-  private readonly eventQueue = new AsyncQueue<BuilderEvent>();
+  private readonly eventQueue = new BuilderEventQueue();
   private process?: ChildProcessWithoutNullStreams;
   private nextId = 1;
   private pending = new Map<number | string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
@@ -59,7 +59,12 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   async sendTurn(instruction: string): Promise<TurnResult> {
+    return withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction));
+  }
+
+  private async sendTurnInternal(instruction: string): Promise<TurnResult> {
     if (this.closed) throw new Error("builder is closed");
+    this.eventQueue.push({ kind: "activity", state: "starting Codex turn", provider: "codex", model: this.opts.model });
     try {
       await this.ensureThread();
       this.activeText = [];
@@ -180,10 +185,24 @@ export class CodexAdapter implements BuilderAdapter {
     }
     if (!message.method) return;
     const params = message.params ?? {};
-    if (message.method === "item/completed") {
+    if (message.method === "item/started") {
+      const item = params.item as Record<string, unknown> | undefined;
+      const activity = codexItemActivity(item);
+      if (activity) this.eventQueue.push({ kind: "activity", provider: "codex", ...activity });
+    } else if (message.method === "item/completed") {
       const item = params.item as Record<string, unknown> | undefined;
       if (item?.type === "agentMessage" && typeof item.text === "string") { this.activeText.push(item.text); this.eventQueue.push({ kind: "text", text: item.text }); }
       else if (item?.type === "commandExecution") this.eventQueue.push({ kind: "tool", name: "command_execution", input: { command: item.command } });
+      else {
+        const activity = codexItemActivity(item, true);
+        if (activity) this.eventQueue.push({ kind: "activity", provider: "codex", ...activity });
+      }
+    } else if (message.method === "turn/plan/updated") {
+      const plan = params.plan as Array<Record<string, unknown>> | undefined;
+      const active = plan?.find((step) => step.status === "inProgress") ?? plan?.at(-1);
+      this.eventQueue.push({ kind: "activity", provider: "codex", state: "following plan", detail: typeof active?.step === "string" ? active.step : undefined });
+    } else if (message.method.includes("reasoning") || message.method === "thread/status/changed") {
+      this.eventQueue.push({ kind: "activity", provider: "codex", state: message.method.includes("reasoning") ? "reasoning" : "provider working", transient: message.method.includes("Delta") });
     } else if (message.method === "thread/tokenUsage/updated") {
       const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
       const total = tokenUsage?.total as Record<string, unknown> | undefined;
@@ -191,7 +210,12 @@ export class CodexAdapter implements BuilderAdapter {
       const maximum = Number(tokenUsage?.modelContextWindow ?? 0) || undefined;
       this.usage = { used, maximum, ...(maximum ? { percentage: used / maximum * 100 } : {}) };
       this.eventQueue.push({ kind: "context-usage", ...this.usage });
-    } else if (message.method === "error") this.eventQueue.push({ kind: "error", message: String(params.message ?? "Codex app-server error") });
+    } else if (message.method === "error") {
+      const error = params.error as Record<string, unknown> | undefined;
+      const reason = String(error?.message ?? params.message ?? "Codex app-server error");
+      if (params.willRetry === true) this.eventQueue.push({ kind: "retry", provider: "codex", reason, managedBy: "provider" });
+      else this.eventQueue.push({ kind: "error", message: reason });
+    }
     const waiters = this.notificationWaiters.get(message.method) ?? [];
     const remaining: Waiter[] = [];
     for (const waiter of waiters) waiter.predicate(params) ? waiter.resolve(params) : remaining.push(waiter);
@@ -217,6 +241,27 @@ export class CodexAdapter implements BuilderAdapter {
     const blocks = this.opts.skills.map((skill) => loadSkillMarkdown(this.opts.cwd, skill)).filter((block): block is string => Boolean(block));
     return blocks.length ? ["# Preloaded Skills", "Use the following skills for this run.", ...blocks].join("\n\n") : undefined;
   }
+}
+
+function activityPhase(phase: BuilderAdapterOptions["runtimePhase"]): string {
+  if (phase === "planning") return "planning";
+  if (phase === "ticket-population") return "populating tickets";
+  if (phase === "qa") return "reviewing with QA";
+  if (phase === "uninstaller") return "planning uninstall";
+  return "building";
+}
+
+function codexItemActivity(item: Record<string, unknown> | undefined, completed = false): { state: string; detail?: string } | undefined {
+  if (!item) return undefined;
+  const state = completed ? "completed" : "running";
+  if (item.type === "commandExecution") return { state: `${state} command`, detail: typeof item.command === "string" ? item.command : undefined };
+  if (item.type === "fileChange") return { state: `${state} file changes` };
+  if (item.type === "mcpToolCall") return { state: `${state} MCP tool`, detail: String(item.tool ?? item.name ?? "") || undefined };
+  if (item.type === "dynamicToolCall") return { state: `${state} tool`, detail: String(item.tool ?? item.name ?? "") || undefined };
+  if (item.type === "webSearch") return { state: `${state} web search`, detail: typeof item.query === "string" ? item.query : undefined };
+  if (item.type === "contextCompaction") return { state: completed ? "context compacted" : "compacting context" };
+  if (item.type === "agentMessage") return { state: completed ? "received response" : "writing response" };
+  return undefined;
 }
 
 function loadSkillMarkdown(cwd: string, skill: string): string | undefined {

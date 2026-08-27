@@ -65,6 +65,8 @@ test("recovering adapter retries the failed turn with the same runtime and sessi
   assert.deepEqual(recreated, [{ runtime: "claude", session: "session-1" }]);
   assert.deepEqual(first.prompts, ["plan"]);
   assert.deepEqual(second.prompts, ["plan"]);
+  const event = await adapter.events()[Symbol.asyncIterator]().next();
+  assert.deepEqual(event.value, { kind: "retry", provider: "claude", reason: "planning failed", managedBy: "rafi" });
   await adapter.close();
 });
 

@@ -36,6 +36,7 @@ import {
   findInterviewRecord,
   fingerprintOutputs,
   outputsChanged,
+  readInterviewRecords,
   type InterviewRecord,
 } from "ai-foreman/interviews.js";
 import { WorkflowDb, type ProjectLease } from "ai-foreman/workflow-db.js";
@@ -62,6 +63,20 @@ import {
   SOURCE_REQUEST_START,
 } from "ai-foreman/sources/source-registry.js";
 import { chooseStagedSourceDisposition, handlePlanningInput, parseSourceStorage, promptSourceStorage } from "./planningDriver.js";
+import type { AnsweredProviderQuestion } from "ai-foreman/provider-questions.js";
+import {
+  buildAuditAnswersContinuation,
+  collectGrillAuditAnswers,
+  decisionsWithGrillState,
+  defaultGrillVerificationState,
+  needsIndependentGrillAudit,
+  readGrillVerificationState,
+  recordNativeGrillAnswer,
+  recordTextGrillAnswer,
+  runIndependentGrillAudit,
+  type AuditQuestionPrompt,
+  type GrillVerificationState,
+} from "./grillAudit.js";
 
 export const REQUIRED_PLAN_SECTIONS = [
   "Goal",
@@ -110,7 +125,7 @@ export function buildPlanInstruction(opts: PlanInstructionOptions): string {
 
   const mode = opts.planningMode ?? "standard";
   const conversation = mode === "exhaustive"
-    ? `- Use the complete grill-me skill instructions in this same session. Explore material decision branches one question at a time. Each question must present a recommended choice, meaningful alternatives, a free-text path, and "Stop questions and make the plan now".\n- If your runtime provides a native AskUserQuestion-style question tool, you may use it for grill-me questions; Rafi will collect the user's structured choice or custom response and return it to this same session. If no native question tool is available, ask by ending the turn with \`STEP_STATUS: needs_input | question="..." choices="recommended option|alternative|free-text|Stop questions and make the plan now"\`.\n- Zero questions are valid only if the final assessment supplies evidence that every material branch is resolved or inapplicable.`
+    ? `- Use the complete grill-me skill instructions in this same session. Explore material decision branches one question at a time. There is no arbitrary minimum question count.\n- Every grill-me question must use a machine-recognizable shape: exactly one single-select question; the first choice ends with \`(Recommended)\`; at least one meaningful alternative follows; and the exact final choice is \`Stop questions and make the plan now\`. Custom answers remain available.\n- If your runtime provides a native AskUserQuestion-style question tool, use a header beginning with \`Grill-me\`. If no native question tool is available, end the turn with \`STEP_STATUS: needs_input | question="..." choices="recommended option (Recommended)|meaningful alternative|Stop questions and make the plan now"\`.\n- If no useful user-judgment question exists, return the candidate normally. Rafi will independently verify it before approval.`
     : "- Use a standard focused planning conversation. Do not invoke, advertise, or claim use of grill-me.";
 
   return `You are being run by Rafi to create a ticket-maker-ready implementation plan.
@@ -152,8 +167,8 @@ Permissions and file rules:
 - Do not edit source files, docs, .tickets, generated artifacts, or configuration.
 - Return a structured proposal only. Rafi assigns plan, slice, and stack identities and deterministically renders Markdown at ${opts.latestPlanPath} with immutable paired history under ${opts.historyDirPath}.
 
-Inspect the repository enough to make the plan concrete. Prefer facts from files over assumptions. If a decision is genuinely blocked, ask one focused question with:
-STEP_STATUS: needs_input | question="..." choices="recommended option|alternative"
+Inspect the repository enough to make the plan concrete. Prefer facts from files over assumptions.${mode === "standard" ? ` If a decision is genuinely blocked, ask one focused question with:
+STEP_STATUS: needs_input | question="..." choices="recommended option|alternative"` : " In exhaustive mode, use only the machine-recognizable grill-me question shape above."}
 
 Output contract:
 - Cover the planning concepts Goal, Problem Statement, Repo Findings, Locked Decisions, Open Questions, Scope, Out Of Scope, Risks, Rollback Notes, and Ticket-Maker Guidance in the corresponding structured fields. Include a branch/batch strategy for repeated component-library work when relevant.
@@ -178,6 +193,7 @@ export function buildPlanAgentRunOptions(opts: {
   instruction: string;
   logPath?: string;
   planningMode?: PlanningMode;
+  onAnsweredQuestion?: (event: AnsweredProviderQuestion) => void;
 }): RoleInstructionRunOptions {
   return {
     projectDir: opts.projectDir,
@@ -195,6 +211,7 @@ export function buildPlanAgentRunOptions(opts: {
     permissionConfig: readOnlyPermissionConfig(),
     sandboxMode: "read-only",
     logEvent: "rafi-plan",
+    onAnsweredQuestion: opts.onAnsweredQuestion,
   };
 }
 
@@ -283,19 +300,6 @@ export function validatePlanMarkdown(planMarkdown: string, planningMode: Plannin
     }
   }
 
-  if (planningMode === "exhaustive") {
-    const assessment = findSection(markdown, "Planning Assessment");
-    if (!assessment) missing.push("section: Planning Assessment");
-    else {
-      for (const area of ["scope", "dependencies", "failure/edge cases", "compatibility/rollout", "verification"]) {
-        if (!assessment.content.toLowerCase().includes(area)) missing.push(`Planning Assessment: ${area}`);
-      }
-      for (const field of ["finding", "basis", "resolution", "user judgment"]) {
-        if (!assessment.content.toLowerCase().includes(field)) missing.push(`Planning Assessment field: ${field}`);
-      }
-    }
-  }
-
   return missing;
 }
 
@@ -360,7 +364,10 @@ export interface PlanWorkflowOptions {
   rawArgs?: string[];
   runInstruction?: (options: RoleInstructionRunOptions) => Promise<RoleInstructionRunResult>;
   createPlanner?: (options: Parameters<typeof createRoleBuilder>[0]) => Promise<RoleBuilder>;
+  createAuditor?: (options: Parameters<typeof createRoleBuilder>[0]) => Promise<RoleBuilder>;
   handleInput?: typeof handlePlanningInput;
+  promptAuditQuestion?: AuditQuestionPrompt;
+  promptAuditRecovery?: () => Promise<"retry" | "cancel">;
 }
 
 class PlanCancelled extends Error {
@@ -411,13 +418,26 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
   let brief = "";
   let currentPlanningMode: PlanningMode = "standard";
   let directPlanner: RoleBuilder | undefined;
+  let grillState = defaultGrillVerificationState(false);
   try {
     assertLifecycleForCommand(projectDir, "plan");
     const argv = opts.rawArgs ?? [];
     if (argv.includes("--grill-me") && argv.includes("--no-grill-me")) throw new Error("choose either --grill-me or --no-grill-me, not both");
     const interactiveInterview = !opts.yes && process.stdin.isTTY && process.stdout.isTTY;
-    let planningMode: PlanningMode = opts.grillMe === true ? "exhaustive" : "standard";
-    if (interactiveInterview && !argv.includes("--grill-me") && !argv.includes("--no-grill-me")) {
+    const resumedInterview = opts.resumeSession
+      ? readInterviewRecords(projectDir).records.find((record) => record.workflow === "plan" && record.status !== "completed" && (record.runtime.sessionId === opts.resumeSession || Object.values(record.sessionIds).includes(opts.resumeSession!)))
+      : undefined;
+    if (resumedInterview) {
+      opts.brief ??= typeof resumedInterview.answers.brief === "string" ? resumedInterview.answers.brief : undefined;
+      opts.agent ??= resumedInterview.runtime.runtime;
+      opts.model ??= resumedInterview.runtime.model;
+      const savedEffort = resumedInterview.invocation.effort;
+      opts.effort ??= typeof savedEffort === "string" ? savedEffort : undefined;
+    } else if (opts.resumeSession) {
+      console.warn("rafi plan: no durable interview record matched this session; continuing without creating a duplicate resume record");
+    }
+    let planningMode: PlanningMode = resumedInterview?.planningMode ?? (opts.grillMe === true ? "exhaustive" : "standard");
+    if (!resumedInterview && interactiveInterview && !argv.includes("--grill-me") && !argv.includes("--no-grill-me")) {
       const { select, isCancel } = await import("@clack/prompts");
       const selected = await select({ message: "Planning depth (exhaustive may take substantially longer):", options: [
         { value: "standard", label: "Standard (Recommended)" },
@@ -427,7 +447,9 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       planningMode = selected as PlanningMode;
     }
     currentPlanningMode = planningMode;
-    if (interactiveInterview) {
+    if (resumedInterview) {
+      interview = resumedInterview;
+    } else if (!opts.resumeSession && (interactiveInterview || planningMode === "exhaustive")) {
       interview = createInterviewRecord({
         workflow: "plan",
         invocation: { projectDir, agent: opts.agent, model: opts.model, effort: opts.effort, fast: Boolean(opts.fast), label: opts.invocationLabel },
@@ -444,6 +466,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
         }
       }
     }
+    grillState = readGrillVerificationState(interview?.decisions, planningMode === "exhaustive");
     if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "planning-brief" });
     if (!existsSync(projectDir)) throw new Error(`project directory not found: ${projectDir}`);
     assertEffortLevel(opts.effort);
@@ -529,20 +552,63 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
     console.log(`rafi plan: role planner; mode ${planningMode}`);
     console.log(`rafi plan: log ${logPath}\n`);
 
-    let nextInstruction = instruction;
-    let resumeSessionId = opts.resumeSession;
+    const rebuildingLostContinuity = Boolean(interview?.continuityLost || interview?.runtime.continuityLost);
+    if (rebuildingLostContinuity) {
+      console.warn("rafi plan: planner-session continuity was lost; rebuilding from the saved brief and grill-me decisions without repeating completed verification");
+    }
+    let nextInstruction = rebuildingLostContinuity && grillState.answers.length
+      ? `${instruction}\n\n${buildAuditAnswersContinuation(grillState)}`
+      : instruction;
+    let resumeSessionId = rebuildingLostContinuity ? undefined : opts.resumeSession;
     let run: RoleInstructionRunResult;
     let plan: StructuredPlanV1;
     let repairAttempts = 0;
     const runInstruction = opts.runInstruction;
     const createPlanner = opts.createPlanner ?? createRoleBuilder;
     const inputHandler = opts.handleInput ?? handlePlanningInput;
+    const rememberPlannerAnswer = (question: string | undefined, answer: string | undefined, source: "native" | "text"): void => {
+      if (!interview || !question?.trim() || !answer?.trim()) return;
+      const prior = Array.isArray(interview.answers.plannerQuestionAnswers)
+        ? interview.answers.plannerQuestionAnswers
+        : [];
+      interview = checkpointInterview(projectDir, interview, {
+        answers: {
+          ...interview.answers,
+          plannerQuestionAnswers: [...prior, { question: question.trim(), answer: answer.trim(), source }],
+        },
+      });
+    };
+    const persistGrillState = (next: GrillVerificationState, event: string, questionId?: string): void => {
+      grillState = next;
+      if (interview) interview = checkpointInterview(projectDir, interview, {
+        decisions: decisionsWithGrillState(interview.decisions, next),
+        planningMode,
+      });
+      workflow?.transition(workflowRunId!, {
+        checkpoint: `grill-${next.auditStatus}`,
+        state: { grillVerification: next },
+        event,
+      });
+      plannerLog(logPath).write(event as never, {
+        mode: planningMode,
+        validAnsweredQuestionCount: next.validAnsweredQuestionCount,
+        auditStatus: next.auditStatus,
+        runtime: run?.runtime,
+        questionId,
+      });
+    };
+    const observeNativeQuestion = (event: Parameters<typeof recordNativeGrillAnswer>[1]): void => {
+      rememberPlannerAnswer(event.question.question, event.answer, "native");
+      const observed = recordNativeGrillAnswer(grillState, event);
+      persistGrillState(observed.state, observed.qualified ? "grill_answer_collected" : "provider_question_nonqualifying");
+    };
     while (true) {
       if (runInstruction) {
         run = await runInstruction(buildPlanAgentRunOptions({
           projectDir, agent: opts.agent, model: opts.model,
           effort: opts.effort as EffortLevel | undefined, fast: opts.fast,
           yes: Boolean(opts.yes), resumeSessionId, instruction: nextInstruction, logPath, planningMode,
+          onAnsweredQuestion: observeNativeQuestion,
         }));
       } else {
         if (!directPlanner) {
@@ -550,6 +616,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
             projectDir, agent: opts.agent, model: opts.model,
             effort: opts.effort as EffortLevel | undefined, fast: opts.fast,
             yes: Boolean(opts.yes), resumeSessionId, instruction: nextInstruction, logPath, planningMode,
+            onAnsweredQuestion: observeNativeQuestion,
           });
           directPlanner = await createPlanner({
             ...builderOptions,
@@ -592,6 +659,13 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
         return { status: "blocked", diagnostic, resumeCommand: planResumeCommand(projectDir, brief, run.sessionId, planningMode) };
       }
       if (turn.status.kind === "needs_input") {
+        if (!turn.status.question?.trim()) {
+          resumeSessionId = run.sessionId;
+          nextInstruction = planningMode === "exhaustive"
+            ? `Your needs_input marker omitted its question. Return the same single user-judgment question again using exactly: STEP_STATUS: needs_input | question="..." choices="recommended option (Recommended)|meaningful alternative|Stop questions and make the plan now". Do not inspect the repository again and do not return a proposal yet.`
+            : `Your needs_input marker omitted its question. Return the same focused question again using exactly: STEP_STATUS: needs_input | question="..." choices="recommended option|alternative". Do not inspect the repository again.`;
+          continue;
+        }
         const input = await inputHandler({ projectDir, output: turn.result.text, question: turn.status.question, choices: turn.status.choices, registry: stagedSources, storage: selectedStorage, interactive: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY) });
         stagedSources = input.registry;
         if (input.cancelled) {
@@ -601,6 +675,13 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
           console.log("rafi plan: cancelled; no plan changes were written");
           return { status: "cancelled", diagnostic: "planner input cancelled", resumeCommand: planResumeCommand(projectDir, brief, run.sessionId, planningMode) };
         }
+        const observed = recordTextGrillAnswer(grillState, {
+          question: turn.status.question,
+          choices: turn.status.choices,
+          answer: input.answer,
+        });
+        rememberPlannerAnswer(turn.status.question, input.answer, "text");
+        persistGrillState(observed.state, observed.qualified ? "grill_answer_collected" : "provider_question_nonqualifying");
         resumeSessionId = run.sessionId;
         nextInstruction = input.continuation!;
         continue;
@@ -624,6 +705,77 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
         continue;
       }
       plan = candidate.plan;
+      let retryInterruptedAudit = false;
+      if (grillState.auditStatus === "interrupted") {
+        if (grillState.recoveryRetryUsed) {
+          const diagnostic = `grill-me verification was interrupted after its one allowed recovery retry: ${grillState.failure ?? "no diagnostic"}; no plan was published`;
+          return failPlanOutcome(projectDir, workflow, workflowRunId, workflowLease, interview, diagnostic, run.sessionId, brief, planningMode);
+        }
+        if (opts.yes || !interactiveInterview) {
+          const diagnostic = "the prior grill-me verification was interrupted; resume interactively to choose whether to retry the one-time check or cancel";
+          finishPlanWorkflow(workflow, workflowRunId, workflowLease, "paused", "grill-audit-interrupted", { grillVerification: grillState });
+          workflow = undefined;
+          return { status: "blocked", diagnostic, resumeCommand: planResumeCommand(projectDir, brief, run.sessionId, planningMode) };
+        }
+        const recovery = await (opts.promptAuditRecovery ?? promptGrillAuditRecovery)();
+        if (recovery === "cancel") {
+          finishPlanWorkflow(workflow, workflowRunId, workflowLease, "cancelled", "grill-audit-retry-cancelled", { grillVerification: grillState });
+          workflow = undefined;
+          return { status: "cancelled", diagnostic: "interrupted grill-me verification retry cancelled" };
+        }
+        retryInterruptedAudit = true;
+      }
+      if (grillState.auditStatus === "failed") {
+        const diagnostic = `grill-me verification previously failed: ${grillState.failure ?? "no diagnostic"}; no plan was published`;
+        return failPlanOutcome(projectDir, workflow, workflowRunId, workflowLease, interview, diagnostic, run.sessionId, brief, planningMode);
+      }
+      if (needsIndependentGrillAudit(grillState) || retryInterruptedAudit) {
+        console.log("rafi plan: no valid grill-me answer was collected; running the one-time independent read-only verification");
+        const audited = await runIndependentGrillAudit({
+          projectDir,
+          originalRequest: brief,
+          knownDecisions: interview?.answers ?? {},
+          repositoryContext: { sources: sourceHints, ticketSetup: readTicketSetupSummary(projectDir) },
+          candidate: plan,
+          runtime: run.runtime,
+          model: run.model,
+          effort: run.effort,
+          createAuditor: opts.createAuditor,
+          initialState: grillState,
+          allowRecoveryRetry: retryInterruptedAudit,
+          onState: persistGrillState,
+        });
+        grillState = audited.state;
+        if (grillState.auditStatus === "failed" || grillState.auditStatus === "interrupted") {
+          const diagnostic = `grill-me verification ${grillState.auditStatus}: ${grillState.failure ?? "no diagnostic"}; no plan was published`;
+          return failPlanOutcome(projectDir, workflow, workflowRunId, workflowLease, interview, diagnostic, run.sessionId, brief, planningMode);
+        }
+        if (audited.verdict?.status === "complete") {
+          console.log("rafi plan: independent verification found no missing user decisions");
+        } else if (grillState.auditStatus === "needs_user_input") {
+          console.log(`rafi plan: independent verification found ${grillState.pendingQuestions.length} missing user decision(s)`);
+        }
+      }
+      if (grillState.auditStatus === "needs_user_input") {
+        if (opts.yes || !interactiveInterview) {
+          const diagnostic = "grill-me verification found missing user decisions; resume this plan interactively to answer them (recommendations will not be selected automatically)";
+          finishPlanWorkflow(workflow, workflowRunId, workflowLease, "paused", "grill-needs-user-input", { grillVerification: grillState });
+          workflow = undefined;
+          return { status: "blocked", diagnostic, resumeCommand: planResumeCommand(projectDir, brief, run.sessionId, planningMode) };
+        }
+        grillState = await collectGrillAuditAnswers(
+          grillState,
+          opts.promptAuditQuestion ?? promptGrillAuditQuestion,
+          persistGrillState,
+        );
+        if (grillState.auditStatus === "interrupted") {
+          const diagnostic = "grill-me verification questions were interrupted; no plan was published";
+          return failPlanOutcome(projectDir, workflow, workflowRunId, workflowLease, interview, diagnostic, run.sessionId, brief, planningMode);
+        }
+        resumeSessionId = run.sessionId;
+        nextInstruction = buildAuditAnswersContinuation(grillState);
+        continue;
+      }
       if (opts.yes) break;
       console.log(`\n${renderStructuredPlanMarkdown(plan)}`);
       const { select, text, isCancel } = await import("@clack/prompts");
@@ -884,6 +1036,36 @@ function planResumeCommand(projectDir: string, brief: string, sessionId: string 
   const modeFlag = planningMode === "exhaustive" ? "--grill-me" : "--no-grill-me";
   const briefArg = brief ? ` --brief ${shellQuote(brief)}` : "";
   return `rafi plan ${shellQuote(projectDir)}${briefArg} --resume-session ${shellQuote(sessionId)} ${modeFlag}`;
+}
+
+async function promptGrillAuditQuestion(question: Parameters<AuditQuestionPrompt>[0], choices: string[]): Promise<string | undefined> {
+  const { select, text, isCancel, log } = await import("@clack/prompts");
+  log.info(question.rationale);
+  const custom = "__rafi_grill_audit_custom__";
+  const selected = await select<string>({
+    message: question.question,
+    options: [
+      ...choices.map((choice) => ({ value: choice, label: choice })),
+      { value: custom, label: "Custom response" },
+    ],
+  });
+  if (isCancel(selected)) return undefined;
+  if (selected !== custom) return String(selected);
+  const answer = await text({ message: "Custom response:" });
+  if (isCancel(answer)) return undefined;
+  return String(answer);
+}
+
+async function promptGrillAuditRecovery(): Promise<"retry" | "cancel"> {
+  const { select, isCancel } = await import("@clack/prompts");
+  const answer = await select<"retry" | "cancel">({
+    message: "The independent grill-me verification was interrupted. What should Rafi do?",
+    options: [
+      { value: "retry", label: "Retry the check once (Recommended)" },
+      { value: "cancel", label: "Cancel without publishing" },
+    ],
+  });
+  return isCancel(answer) ? "cancel" : answer;
 }
 
 

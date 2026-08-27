@@ -8,6 +8,7 @@ import { nowTimestamp } from "./events.js";
 import { loadTicketsConfig, resolveTicketPaths } from "./config.js";
 import type { TicketSourceConfig } from "./setupConfig.js";
 import { insertXlSplitRecommendations } from "./recommendations.js";
+import { currentActivity, withActivityPhase } from "../activity.js";
 
 export function importFromMarkdown(_progressDocPath: string): never {
   throw new Error(
@@ -70,9 +71,9 @@ export async function importExternalSources(
 ): Promise<ExternalImportResult[]> {
   const results: ExternalImportResult[] = [];
   for (const source of sources) {
-    const items = source.type === "linear"
-      ? await fetchLinearIssues(source, opts)
-      : await fetchJiraIssues(source, opts);
+    const items = await withActivityPhase(`importing ${source.type} tickets`, () => source.type === "linear"
+      ? fetchLinearIssues(source, opts)
+      : fetchJiraIssues(source, opts));
     const snapshotPath = writeImportSnapshot(projectDir, source.type, {
       source: redactSource(source),
       fetched_at: new Date().toISOString(),
@@ -93,11 +94,13 @@ export async function importExternalSources(
 }
 
 export async function validateExternalSourceAccess(source: Extract<TicketSourceConfig, { type: "linear" | "jira" }>): Promise<void> {
-  if (source.type === "linear") {
-    await fetchLinearIssues(source, { importCap: 1, commentLimit: 0 });
-    return;
-  }
-  await fetchJiraIssues(source, { importCap: 1, commentLimit: 0 });
+  await withActivityPhase(`checking ${source.type} access`, async () => {
+    if (source.type === "linear") {
+      await fetchLinearIssues(source, { importCap: 1, commentLimit: 0 });
+      return;
+    }
+    await fetchJiraIssues(source, { importCap: 1, commentLimit: 0 });
+  });
 }
 
 export async function fetchLinearIssues(
@@ -138,6 +141,7 @@ export async function fetchLinearIssues(
       items.push(linearIssueToImportedItem(node, opts.commentLimit));
       if (items.length >= opts.importCap) break;
     }
+    currentActivity()?.update("importing Linear tickets", `fetched ${items.length}`);
     if (!issues?.pageInfo?.hasNextPage || !issues.pageInfo.endCursor || nodes.length === 0) break;
     after = issues.pageInfo.endCursor;
   }
@@ -192,6 +196,7 @@ export async function fetchJiraIssues(
       items.push(jiraIssueToImportedItem(source.site, issue, opts.commentLimit));
       if (items.length >= opts.importCap) break;
     }
+    currentActivity()?.update("importing Jira tickets", `fetched ${items.length}`);
     nextPageToken = typeof json.nextPageToken === "string" ? json.nextPageToken : undefined;
     if (!nextPageToken || issues.length === 0 || json.isLast === true) break;
   }

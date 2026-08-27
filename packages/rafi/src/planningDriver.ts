@@ -32,7 +32,8 @@ export async function handlePlanningInput(options: {
     ? await registerSourceRequests(options.projectDir, options.registry, requests, { storage: options.storage })
     : { registry: options.registry, snapshots: [] };
   if (!options.interactive) throw new Error(`planner needs input: ${options.question ?? "additional guidance required"}`);
-  const { text, isCancel } = await import("@clack/prompts");
+  const { text, isCancel, log } = await import("@clack/prompts");
+  if (options.choices?.length) log.info(`Choices: ${options.choices.join(" | ")}`);
   const value = await text({ message: options.question ?? "Planner needs input:", placeholder: options.choices?.join(" | ") });
   if (isCancel(value)) return { registry: received.registry, snapshots: received.snapshots, cancelled: true };
   const answer = String(value);

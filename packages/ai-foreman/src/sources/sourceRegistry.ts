@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -15,6 +16,9 @@ import type {
 } from "rafi-spec";
 import { fetchAndSnapshotUrl, normalizePublicHttpUrl, snapshotExternalLocalFile } from "../tickets/sourceFetch.js";
 import { fetchJiraIssues, fetchLinearIssues } from "../tickets/importer.js";
+import { withActivityPhase } from "../activity.js";
+
+const execFileAsync = promisify(execFile);
 
 export const SOURCE_REQUEST_START = "RAFI_SOURCE_REQUEST_START";
 export const SOURCE_REQUEST_END = "RAFI_SOURCE_REQUEST_END";
@@ -166,8 +170,12 @@ export function sourceRequestFromAnswer(answer: string, projectDir: string): Str
   const value = answer.trim();
   if (/^https?:\/\/\S+$/i.test(value)) return requestFromUrl(value);
   const candidate = resolve(projectDir, value);
-  if (value && existsSync(candidate)) return { type: "local", label: basename(candidate), locator: { path: normalizeLocalPath(projectDir, candidate) } };
-  if (hasGlobMagic(value) || /^(?:\.{0,2}\/|\/)/.test(value) || /[\\/][^\\/]+\.[A-Za-z0-9]{1,12}$/.test(value)) return { type: "local", label: basename(value), locator: { path: value } };
+  if (value && existsSync(candidate)) {
+    const rel = relative(resolve(projectDir), candidate);
+    const path = !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel) ? rel || "." : candidate;
+    return { type: "local", label: basename(candidate), locator: { path } };
+  }
+  if (hasGlobMagic(value) || /^(?:\.{0,2}\/|\/)/.test(value) || /^[^\s]+[\\/][^\\/]+\.[A-Za-z0-9]{1,12}$/.test(value)) return { type: "local", label: basename(value), locator: { path: value } };
   if (/^(?:open\s+)?issues\s+for\s+(?:this|the)\s+repo(?:sitory)?$/i.test(value)) return { type: inferOriginProvider(projectDir), label: "Open repository issues", locator: { repository: inferOriginRepository(projectDir), mode: "issues", filters: { state: "open" } } };
   return { description: value };
 }
@@ -278,7 +286,7 @@ async function captureUrl(projectDir: string, entry: ProjectSourceEntry, storage
   return version;
 }
 
-function captureCliProvider(projectDir: string, entry: ProjectSourceEntry, storage: SourceSnapshotStorage): ProjectSourceVersion {
+async function captureCliProvider(projectDir: string, entry: ProjectSourceEntry, storage: SourceSnapshotStorage): Promise<ProjectSourceVersion> {
   const repository = entry.locator.repository || inferOriginRepository(projectDir);
   const mode = entry.locator.mode ?? "issues";
   let command: string; let args: string[];
@@ -309,7 +317,10 @@ function captureCliProvider(projectDir: string, entry: ProjectSourceEntry, stora
     }
   }
   let text: string;
-  try { text = execFileSync(command, args, { cwd: projectDir, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }); }
+  try {
+    const result = await withActivityPhase(`fetching ${entry.type} source`, () => execFileAsync(command, args, { cwd: projectDir, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }));
+    text = result.stdout;
+  }
   catch (error) { throw new Error(`${entry.type} source ${entry.label} could not be retrieved with authenticated ${command}: ${error instanceof Error ? error.message : String(error)}`); }
   return writeCapture(projectDir, entry, storage, text, "application/json", countProviderItems(text));
 }

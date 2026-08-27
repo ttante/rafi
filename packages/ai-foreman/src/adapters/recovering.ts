@@ -1,6 +1,7 @@
 import { isCancel, log, select } from "@clack/prompts";
 import type { AgentRuntime } from "../runtimeAuth.js";
 import { AsyncQueue } from "../util/asyncQueue.js";
+import { pauseActivityForInput, reportBuilderEvent } from "../activity.js";
 import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, TurnResult } from "./types.js";
 
 export type TurnRecoveryChoice = "retry" | "switch" | "cancel";
@@ -42,9 +43,15 @@ export class RecoveringAdapter implements BuilderAdapter {
       const otherRuntime = this.runtime === "claude" ? "codex" : "claude";
       const choice = this.opts.choose
         ? await this.opts.choose(result, this.runtime, otherRuntime)
-        : await promptTurnRecovery(result, this.opts.label, this.runtime, otherRuntime, this.opts.allowSwitch);
+        : await pauseActivityForInput(() => promptTurnRecovery(result, this.opts.label, this.runtime, otherRuntime, this.opts.allowSwitch));
       if (choice === "cancel") return result;
       if (choice === "switch" && !this.opts.allowSwitch) return result;
+
+      const recoveryEvent: BuilderEvent = choice === "retry"
+        ? { kind: "retry", provider: this.runtime, reason: `${this.opts.label} failed`, managedBy: "rafi" }
+        : { kind: "activity", provider: otherRuntime, state: `switching to ${otherRuntime}`, detail: "starting a fresh provider session" };
+      this.eventQueue.push(recoveryEvent);
+      reportBuilderEvent(recoveryEvent);
 
       const nextRuntime = choice === "switch" ? otherRuntime : this.runtime;
       const resumeSessionId = choice === "retry" ? this.adapter.sessionId() : undefined;

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { ProjectConfig, TicketBuildBranchStrategy } from "rafi-spec";
 import {
-  compile,
+  compileAsync,
   formatRuntimeUpdateFailure,
   isRootFileMode,
   rootFileModeValues,
@@ -42,6 +42,7 @@ import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
 import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { runStatus } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
+import { withActivityContext } from "ai-foreman/activity.js";
 import { buildPlanCommand, runPlanWorkflow } from "./plan.js";
 import { buildTicketPlanCommand } from "./ticketPlan.js";
 import { buildSourcesCommand } from "./sources.js";
@@ -79,7 +80,7 @@ program
   .argument("<project>", "path to the target repo")
   .option("--force", "overwrite existing doc files")
   .option("--root-file-mode <mode>", "override root instruction file handling for this run (append | overwrite | update)")
-  .action((project: string, opts) => {
+  .action(async (project: string, opts) => {
     const targetDir = resolve(project);
     const rootFileMode = parseRootFileMode(opts.rootFileMode);
     const loaded = loadRafiConfig(targetDir);
@@ -91,7 +92,7 @@ program
       writeRafiConfigYaml(targetDir, loaded.config);
       console.log(`rafi: migrated ${LEGACY_PROJECT_CONFIG_FILE} to ${RAFI_CONFIG_FILE}; you can delete ${LEGACY_PROJECT_CONFIG_FILE}.`);
     }
-    compile(targetDir, loaded.config, {
+    await compileAsync(targetDir, loaded.config, {
       force: opts.force as boolean | undefined,
       rootFileMode,
     });
@@ -972,7 +973,8 @@ program.addCommand(buildDoctorCommand());
 configureHelpWidth(program, 100);
 
 export async function runRafiCli(argv = process.argv): Promise<void> {
-  await program.parseAsync(argv);
+  const command = argv.slice(2).filter((arg) => !arg.startsWith("-")).slice(0, 3).join(" ") || "rafi";
+  await withActivityContext(command, () => program.parseAsync(argv));
 }
 
 if (isDirectCliEntrypoint()) {
