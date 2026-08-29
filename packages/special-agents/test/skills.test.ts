@@ -19,6 +19,7 @@ import { validateSkillManifest } from "rafi-spec";
 const EXPECTED = [
   "better-sqlite3-rebuild",
   "grill-me",
+  "handoff",
   "improve-codebase-architecture",
   "prd-to-issues",
   "tdd",

@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { StructuredPlanV1 } from "rafi-spec";
+import type { DeletedTicketResetPolicy, RequestedTicketResetTarget, StructuredPlanV1, TicketGroupId } from "rafi-spec";
 import { select, text, confirm, isCancel, multiselect } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
@@ -70,11 +70,13 @@ import {
   failInterview,
   type InterviewRecord,
 } from "../interviews.js";
-import { applyTicketPopulation, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
+import { applyTicketPopulation, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, recoverTicketPublications, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
 import { loadTickets } from "../tickets/ticketLoader.js";
 import { resolveTicketPaths } from "../tickets/config.js";
 import { formatTicketDetails, getTicketDetails } from "../tickets/details.js";
-import { previewTicketReset, recoverTicketResetPublications, resetTickets, type TicketResetScope } from "../tickets/reset.js";
+import { applyResolvedTicketReset, previewTicketReset, recoverTicketResetPublications, resetTickets, resolveTicketResetSelection, TicketResetDependencyConflictError, type TicketResetScope } from "../tickets/reset.js";
+import { validateBranchPrefix } from "../branch/prefix.js";
+import { listTicketGroups, previewTicketGroupRepair, repairTicketGroups } from "../tickets/groups.js";
 
 let nestedTicketCommandDepth = 0;
 class TicketInterviewCancelled extends Error {}
@@ -240,6 +242,7 @@ interface SetupCommandOptions {
   jiraJql?: string;
   urlSource?: string[];
   branchStrategy?: string;
+  branchPrefix?: string;
   completion?: string;
   provider?: string;
   autoMergeWait?: boolean;
@@ -419,6 +422,7 @@ async function collectTicketSetupPatch(
 
   if (opts.agentPreference) populatePatch.agent_preference = parseAgentPreference(opts.agentPreference);
   if (opts.branchStrategy) buildPatch.branch_strategy = parseBranchStrategy(opts.branchStrategy);
+  if (opts.branchPrefix) buildPatch.branch_prefix = validateBranchPrefix(opts.branchPrefix);
   if (opts.completion) buildPatch.completion = parseCompletionMode(opts.completion);
   if (opts.provider) buildPatch.provider = parseProvider(opts.provider);
   if (opts.autoMergeWait !== undefined) buildPatch.auto_merge_wait = Boolean(opts.autoMergeWait);
@@ -508,6 +512,11 @@ async function collectTicketSetupPatch(
     const base = await text({ message: "Base branch:", initialValue: current.build.base_branch || detectDefaultBranch(dir), defaultValue: detectDefaultBranch(dir) });
     if (isCancel(base)) cancelTicketInterview();
     buildPatch.base_branch = String(base).trim();
+    const prefix = await text({ message: "Branch prefix:", initialValue: current.build.branch_prefix, defaultValue: current.build.branch_prefix, validate: (value) => {
+      try { validateBranchPrefix(String(value)); return undefined; } catch (error) { return error instanceof Error ? error.message : String(error); }
+    } });
+    if (isCancel(prefix)) cancelTicketInterview();
+    buildPatch.branch_prefix = validateBranchPrefix(String(prefix));
     const policyMode = await select({ message: "Use one global branch strategy or choose by inferred ticket size?", initialValue: current.build.branch_policy.mode, options: [
       { value: "size", label: "Size-based: XS/S shared, M/L/XL per ticket (Recommended)" },
       { value: "global", label: "One global strategy" },
@@ -834,6 +843,22 @@ function parseAgentPreference(value: string): TicketsSetupConfig["populate"]["ag
 function parseResetScope(value: string): TicketResetScope {
   if (["all", "completed-and-unfinished", "unfinished"].includes(value)) return value as TicketResetScope;
   throw new Error("--scope must be all, completed-and-unfinished, or unfinished");
+}
+
+function parsePositiveInteger(value: string, label: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isInteger(parsed) && parsed > 0 && String(parsed) === value.trim()) return parsed;
+  throw new Error(`${label} must be a positive integer`);
+}
+
+function parseTicketGroupId(value: string): TicketGroupId {
+  if (!/^TG-[1-9]\d*$/.test(value)) throw new Error("--group must use a stable ID such as TG-1");
+  return value as TicketGroupId;
+}
+
+function parseDeletedTicketPolicy(value: string): DeletedTicketResetPolicy {
+  if (value === "ignore" || value === "restore") return value;
+  throw new Error("--deleted-tickets must be ignore or restore");
 }
 
 function parseOptionalPositiveInteger(value: string, label: string): number | null {
@@ -1165,6 +1190,74 @@ function ticketOwnershipReceipts(projectDir: string, commandName: string, _after
   }
   return unique(candidates).filter((path) => existsSync(join(projectDir, path))).map((path) => ({ path, category: "tickets", origin: `tickets:${commandName}` }));
 }
+
+async function runGroupResetCli(projectDir: string, opts: Record<string, unknown>): Promise<void> {
+  const requested: RequestedTicketResetTarget = opts.allGroups
+    ? { kind: "all-groups" }
+    : opts.recentGroups !== undefined
+      ? { kind: "recent-groups", count: parsePositiveInteger(String(opts.recentGroups), "--recent-groups") }
+      : opts.group !== undefined
+        ? { kind: "group", groupId: parseTicketGroupId(String(opts.group)) }
+        : { kind: "group-index", position: parsePositiveInteger(String(opts.groupIndex), "--group-index") };
+  const explicitPolicy = opts.deletedTickets === undefined ? undefined : parseDeletedTicketPolicy(String(opts.deletedTickets));
+  const initial = resolveTicketResetSelection(projectDir, requested, { deletedTickets: "ignore" });
+  const missing = initial.previewRows.filter((row) => row.definitionMissing);
+  if (missing.length && !explicitPolicy && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+    throw new Error("group reset includes deleted ticket definitions; automation must pass --deleted-tickets ignore|restore");
+  }
+  let policy = explicitPolicy;
+  const perTicket: Record<string, DeletedTicketResetPolicy> = {};
+  const restoreDependencies: string[] = [];
+  if (missing.length && !policy) {
+    const answer = await select({ message: `${missing.length} group member definition(s) are missing. What should reset do?`, options: [
+      { value: "ignore", label: "Ignore all missing definitions (Recommended)" },
+      { value: "restore", label: "Restore all from Rafi snapshots" },
+      { value: "each", label: "Decide each one" },
+    ] });
+    if (isCancel(answer)) { console.log("foreman tickets: reset cancelled; nothing changed"); return; }
+    if (answer === "each") {
+      for (const row of missing) {
+        const decision = await select({ message: `${row.ticketId}: ${row.title}`, options: [
+          { value: "ignore", label: "Ignore missing definition (Recommended)" }, { value: "restore", label: "Restore definition" },
+        ] });
+        if (isCancel(decision)) { console.log("foreman tickets: reset cancelled; nothing changed"); return; }
+        perTicket[row.ticketId] = decision as DeletedTicketResetPolicy;
+      }
+      policy = "ignore";
+    } else policy = answer as DeletedTicketResetPolicy;
+  }
+  let selection: ReturnType<typeof resolveTicketResetSelection>;
+  while (true) {
+    try {
+      selection = resolveTicketResetSelection(projectDir, requested, { deletedTickets: policy ?? "ignore", perTicket, restoreDependencies });
+      break;
+    } catch (error) {
+      if (!(error instanceof TicketResetDependencyConflictError) || !process.stdin.isTTY || !process.stdout.isTTY) throw error;
+      for (const conflict of error.conflicts) {
+        const decision = await select({ message: `${conflict.ticketId} depends on deleted definition ${conflict.dependencyId}.`, options: [
+          { value: "dependency", label: `Restore ${conflict.dependencyId} without resetting it (Recommended)` },
+          { value: "skip", label: `Skip restoring ${conflict.ticketId}` },
+          { value: "cancel", label: "Cancel reset" },
+        ] });
+        if (isCancel(decision) || decision === "cancel") { console.log("foreman tickets: reset cancelled; nothing changed"); return; }
+        if (decision === "dependency") restoreDependencies.push(conflict.dependencyId);
+        else perTicket[conflict.ticketId] = "ignore";
+      }
+    }
+  }
+  console.log(`foreman tickets reset preview (${selection.groups.map((group) => group.id).join(", ") || requested.kind}):`);
+  for (const row of selection.previewRows) console.log(`  ${row.ticketId}: ${row.title} [${row.status}]${row.definitionMissing ? row.restoreDefinition ? " — restore definition and reset" : " — missing definition, skip" : " — reset active state"}`);
+  for (const dependency of selection.definitionRestorations.filter((item) => item.dependencyOnly)) console.log(`  dependency ${dependency.ticketId}: restore definition only (do not reset)`);
+  if (!selection.previewRows.length) return;
+  if (!opts.yes) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("confirmation requires a TTY or --yes");
+    const approved = await confirm({ message: `Apply this frozen ${selection.previewRows.length}-member reset selection?`, initialValue: false });
+    if (isCancel(approved) || !approved) { console.log("foreman tickets: reset cancelled; nothing changed"); return; }
+  }
+  const result = applyResolvedTicketReset(projectDir, selection, String(opts.actor ?? "user"));
+  console.log(`foreman tickets: reset ${result.tickets.length} ticket(s), restored ${result.restored.length}, ignored ${result.ignoredMissing.length} missing (audit ${result.resetId})`);
+}
+
 export function buildTicketsCommand(options: {
   prepareOwnership?: (projectDir: string, receipts: TicketOwnershipReceipt[]) => void;
   recordOwnership?: (projectDir: string, receipts: TicketOwnershipReceipt[]) => void;
@@ -1175,6 +1268,7 @@ export function buildTicketsCommand(options: {
   tickets.hook("preAction", (_thisCommand, actionCommand) => {
     const commandOptions = actionCommand.opts() as { project?: string };
     const projectDir = cwd(commandOptions);
+    recoverTicketPublications(projectDir);
     recoverTicketResetPublications(projectDir);
     if (options.prepareOwnership && !["show", "validate", "queue"].includes(actionCommand.name())) {
       options.prepareOwnership(projectDir, ticketOwnershipReceipts(projectDir, actionCommand.name(), false));
@@ -1207,6 +1301,7 @@ export function buildTicketsCommand(options: {
     .option("--url-source <urls...>", "add public HTTP(S) source URLs")
     .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
     .option("--branch-strategy <strategy>", "build branch strategy default (current | batch | branch-per-ticket)")
+    .option("--branch-prefix <prefix>", "prefix for Rafi-generated branches (for example team/feature)")
     .option("--completion <mode>", "build completion default (pr | auto-merge | direct-merge | none)")
     .option("--provider <provider>", "PR/MR provider default (auto | github | gitlab | local)")
     .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
@@ -1239,6 +1334,7 @@ export function buildTicketsCommand(options: {
     .option("--url-source <urls...>", "replace saved sources with public HTTP(S) URLs")
     .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
     .option("--branch-strategy <strategy>", "build branch strategy default (current | batch | branch-per-ticket)")
+    .option("--branch-prefix <prefix>", "prefix for Rafi-generated branches (for example team/feature)")
     .option("--completion <mode>", "build completion default (pr | auto-merge | direct-merge | none)")
     .option("--provider <provider>", "PR/MR provider default (auto | github | gitlab | local)")
     .option("--auto-merge-wait", "wait for dependency PR/MRs to merge before starting dependent tickets")
@@ -1338,18 +1434,71 @@ export function buildTicketsCommand(options: {
       }
     });
 
+  const groups = tickets.command("groups").description("List and repair durable ticket creation groups.");
+  groups
+    .command("list")
+    .description("List immutable ticket creation groups newest first.")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("--json", "write the versioned stable JSON envelope")
+    .action((opts) => {
+      try {
+        const envelope = listTicketGroups(cwd(opts));
+        if (opts.json) { process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`); return; }
+        if (!envelope.groups.length) { console.log("foreman tickets groups: no creation groups"); return; }
+        for (const group of envelope.groups) {
+          const totals = Object.entries(group.statusTotals).map(([status, count]) => `${status}=${count}`).join(", ");
+          console.log(`${group.id}  index=${group.recencyPosition}  origin=${group.origin}  created=${group.createdAt}${group.legacy ? "  legacy" : ""}  ${totals}`);
+          for (const member of group.members) console.log(`  ${member.position}. ${member.ticketId} [${member.status}]${member.definitionMissing ? " — definition missing (recoverable)" : ""}`);
+          for (const run of group.recoverableRuns) console.log(`  recoverable run ${run.runId} [${run.status}] ${run.tickets.join(", ")}`);
+        }
+      } catch (error) { fail(String(error instanceof Error ? error.message : error)); }
+    });
+  groups
+    .command("repair")
+    .description("Preview and group tickets created outside Rafi after the legacy migration.")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("-y, --yes", "approve the exact preview")
+    .action(async (opts) => {
+      try {
+        const dir = cwd(opts);
+        const preview = previewTicketGroupRepair(dir);
+        console.log("foreman tickets groups repair preview:");
+        console.log(preview.ticketIds.length ? `  new repair group: ${preview.ticketIds.join(", ")}` : "  no ungrouped tickets");
+        if (!preview.ticketIds.length) return;
+        if (!opts.yes) {
+          if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("repair approval requires a TTY or --yes");
+          const approved = await confirm({ message: `Create one repair group for exactly ${preview.ticketIds.length} ticket(s)?`, initialValue: false });
+          if (isCancel(approved) || !approved) { console.log("foreman tickets groups: repair cancelled; nothing changed"); return; }
+        }
+        const group = repairTicketGroups(dir, preview.inputFingerprint);
+        console.log(group ? `foreman tickets groups: created ${group.id} for ${group.members.map((member) => member.ticketId).join(", ")}` : "foreman tickets groups: nothing to repair");
+      } catch (error) { fail(String(error instanceof Error ? error.message : error)); }
+    });
+
   tickets
     .command("reset [ticketId]")
     .description("Reset one ticket or an explicit ticket scope to pristine active state while retaining history.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--all", "open the interactive bulk reset scope chooser")
     .option("--scope <scope>", "bulk scope (all | completed-and-unfinished | unfinished)")
+    .option("--all-groups", "reset the exact membership of every durable creation group")
+    .option("--recent-groups <count>", "reset the exact membership of the newest N creation groups")
+    .option("--group <TG-N>", "reset one durable creation group by stable ID")
+    .option("--group-index <position>", "reset one creation group by current newest-first position")
+    .option("--deleted-tickets <policy>", "missing-definition policy for automation (ignore | restore)")
     .option("--actor <actor>", "who requested the reset", "user")
     .option("-y, --yes", "confirm an explicit ticket or --scope without prompting")
     .action(async (ticketId: string | undefined, opts) => {
       try {
+        const groupTargetCount = [opts.allGroups, opts.recentGroups, opts.group, opts.groupIndex].filter((value) => value !== undefined && value !== false).length;
+        if (groupTargetCount > 0) {
+          if (groupTargetCount !== 1) throw new Error("choose exactly one group reset target");
+          if (ticketId || opts.all || opts.scope) throw new Error("group reset targets cannot be combined with a ticket or scope target");
+          await runGroupResetCli(cwd(opts), opts);
+          return;
+        }
         if (ticketId && (opts.all || opts.scope)) throw new Error("provide a ticket ID or a bulk scope, not both");
-        if (!ticketId && !opts.all && !opts.scope) throw new Error("provide <ticketId>, --all, or --scope <scope>");
+        if (!ticketId && !opts.all && !opts.scope) throw new Error("provide <ticketId>, --all, --scope <scope>, or one group target");
         let target: string | TicketResetScope | undefined = ticketId;
         if (opts.scope) target = parseResetScope(String(opts.scope));
         if (opts.all && !opts.scope) {

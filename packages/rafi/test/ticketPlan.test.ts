@@ -24,7 +24,7 @@ test("guided ticket plan instruction is read-only, conversational, and exact-app
   assert.match(instruction, /proposal_ready/);
 });
 
-test("ticket plan work-mode default fills missing build defaults without overriding explicit planner choice", () => {
+test("ticket plan work mode is host-owned and overrides contradictory planner output", () => {
   const proposal: TicketPlanProposal = {
     version: 1,
     title: "Plan",
@@ -45,5 +45,5 @@ test("ticket plan work-mode default fills missing build defaults without overrid
     ...proposal,
     build_defaults: { branch_strategy: "batch" },
   }, "current");
-  assert.equal(explicit.build_defaults?.branch_strategy, "batch");
+  assert.equal(explicit.build_defaults?.branch_strategy, "current");
 });

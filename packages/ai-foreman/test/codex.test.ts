@@ -190,6 +190,69 @@ test("Codex app-server non-recoverable error remains terminal", async () => {
   await a.close();
 });
 
+test("Codex token usage keeps live context and cumulative provider totals separate", async () => {
+  const a = adapter();
+  (a as unknown as { handle(message: unknown): void }).handle({
+    method: "thread/tokenUsage/updated",
+    params: {
+      threadId: "session-1",
+      tokenUsage: {
+        total: { totalTokens: 72, inputTokens: 50, outputTokens: 22 },
+        last: { totalTokens: 12, inputTokens: 9, outputTokens: 3 },
+        modelContextWindow: 100,
+      },
+    },
+  });
+  assert.deepEqual(await a.contextUsage(), {
+    used: 72, maximum: 100, percentage: 72, observedAt: (await a.contextUsage())?.observedAt, source: "provider-event",
+  });
+  assert.deepEqual(await a.sessionUsage(), {
+    inputTokens: 50, outputTokens: 22, totalTokens: 72,
+    observedAt: (await a.sessionUsage())?.observedAt, source: "provider",
+  });
+  await a.close();
+});
+
+test("Codex native compaction requires explicit completion and a fresh post-compact usage sample", async () => {
+  const a = adapter({ resumeSessionId: "session-1" });
+  const internal = a as unknown as {
+    ensureThread(): Promise<void>;
+    request(method: string): Promise<unknown>;
+    handle(message: unknown): void;
+  };
+  internal.ensureThread = async () => {};
+  internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 80, inputTokens: 60, outputTokens: 20 }, last: { totalTokens: 10, inputTokens: 8, outputTokens: 2 }, modelContextWindow: 100 } } });
+  internal.request = async () => {
+    queueMicrotask(() => {
+      internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { type: "contextCompaction" } } });
+      internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 24, inputTokens: 18, outputTokens: 6 }, last: { totalTokens: 4, inputTokens: 3, outputTokens: 1 }, modelContextWindow: 100 } } });
+    });
+    return {};
+  };
+  assert.deepEqual(await a.compact(), { ok: true });
+  assert.equal((await a.contextUsage())?.percentage, 24);
+  await a.close();
+});
+
+test("Codex native compaction rejects completion without authoritative post-compact usage", async () => {
+  const a = adapter({ resumeSessionId: "session-1" });
+  const internal = a as unknown as {
+    ensureThread(): Promise<void>;
+    request(method: string): Promise<unknown>;
+    waitFor(method: string): Promise<Record<string, unknown>>;
+  };
+  internal.ensureThread = async () => {};
+  internal.request = async () => ({});
+  internal.waitFor = async (method) => {
+    if (method === "item/completed") return { threadId: "session-1", item: { type: "contextCompaction" } };
+    throw new Error("fresh usage unavailable");
+  };
+  const result = await a.compact();
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /fresh usage unavailable/);
+  await a.close();
+});
+
 test("CodexAdapter normalizes 401 process failures into repair guidance", async () => {
   const binDir = mkdtempSync(join(tmpdir(), "codex-auth-test-"));
   const projectDir = mkdtempSync(join(tmpdir(), "codex-auth-project-"));

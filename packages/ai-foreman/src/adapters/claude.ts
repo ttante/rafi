@@ -1,6 +1,7 @@
 import type {
   Query,
   SDKMessage,
+  SDKSessionInfo,
   SDKUserMessage,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -33,8 +34,12 @@ import type {
   ContextUsage,
   PermissionDecision,
   ProviderSettingSwitch,
+  ProviderSessionUsage,
   TurnResult,
 } from "./types.js";
+import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
+import { createProviderSessionRef, validateProviderSessionScope, canonicalSessionPath } from "../sessionIdentity.js";
+import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
 
 /**
  * Pure function: build the `options` object passed to `query()`.
@@ -49,7 +54,7 @@ export function buildClaudeQueryOptions(
     pathToClaudeCodeExecutable: opts.runtimeExecutable,
     env: { ...process.env },
     model: opts.model,
-    resume: opts.resumeSessionId,
+    resume: opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId,
     permissionMode: "acceptEdits",
     effort: opts.effort,
     extraArgs: opts.fast ? { fast: null } : undefined,
@@ -62,6 +67,46 @@ export function buildClaudeQueryOptions(
     base.skills = opts.skills;
   }
   return base;
+}
+
+export async function probeClaudeSession(
+  ref: ProviderSessionRefV1,
+  input: {
+    cwd: string;
+    configRoot?: string;
+    workspaceIdentity?: string;
+    role?: ProviderSessionRefV1["role"];
+    stream?: string;
+    ticketId?: string;
+    deliveryUnitId?: string;
+    getSessionInfo?: (sessionId: string, options?: { dir?: string }) => Promise<SDKSessionInfo | undefined>;
+    now?: Date;
+  },
+): Promise<SessionAvailabilityV1> {
+  const now = input.now ?? new Date();
+  const local = validateProviderSessionScope(ref, {
+    provider: "claude",
+    cwd: input.cwd,
+    configRoot: input.configRoot ?? input.cwd,
+    role: input.role ?? ref.role,
+    stream: input.stream ?? ref.stream,
+    workspaceIdentity: input.workspaceIdentity,
+    ticketId: input.ticketId ?? ref.ticketId,
+    deliveryUnitId: input.deliveryUnitId ?? ref.deliveryUnitId,
+  }, now);
+  if (local.status !== "available") return local;
+  try {
+    const getSessionInfo = input.getSessionInfo ?? (await requireClaudeSDK()).getSessionInfo;
+    const info = await getSessionInfo(ref.sessionId, { dir: ref.cwd });
+    if (!info) return { version: 1, status: "unavailable", checkedAt: now.toISOString(), reason: "not-found", detail: `Claude has no conversation ${ref.sessionId} in ${ref.cwd}`, sessionRef: ref };
+    if (info.sessionId !== ref.sessionId) return { version: 1, status: "unavailable", checkedAt: now.toISOString(), reason: "not-found", detail: "Claude returned metadata for a different session", sessionRef: ref };
+    if (!info.cwd) return { version: 1, status: "unknown", checkedAt: now.toISOString(), reason: "probe-failed", detail: "Claude session metadata did not include cwd", sessionRef: ref };
+    const observedCwd = canonicalSessionPath(info.cwd);
+    if (observedCwd !== canonicalSessionPath(ref.cwd)) return { version: 1, status: "unavailable", checkedAt: now.toISOString(), reason: "cwd-mismatch", detail: `Claude metadata cwd ${observedCwd} does not match ${ref.cwd}`, observedCwd, sessionRef: ref };
+    return { ...local, checkedAt: now.toISOString(), observedCwd, sessionRef: { ...local.sessionRef!, validatedAt: now.toISOString() } };
+  } catch (error) {
+    return { version: 1, status: "unknown", checkedAt: now.toISOString(), reason: "probe-failed", detail: sanitizeDiagnostics(error instanceof Error ? error.message : String(error)), sessionRef: ref };
+  }
 }
 
 export function permissionDecisionToClaudeResult(
@@ -81,6 +126,44 @@ export function permissionDecisionToClaudeResult(
     message: decision.message,
     interrupt: decision.interrupt,
     toolUseID,
+  };
+}
+
+/** Project one cumulative SDK result without inventing or double-counting counters. */
+export function mergeClaudeProviderSessionUsage(
+  prior: ProviderSessionUsage,
+  rawResult: Record<string, unknown>,
+  observedAt = new Date().toISOString(),
+): { sample: ProviderSessionUsage; inputTokens?: number; outputTokens?: number } {
+  const rawUsage = rawResult.usage && typeof rawResult.usage === "object" ? rawResult.usage as Record<string, unknown> : {};
+  const directInputTokens = finiteNumber(rawUsage.input_tokens);
+  const cacheCreationInputTokens = finiteNumber(rawUsage.cache_creation_input_tokens);
+  const cacheReadInputTokens = finiteNumber(rawUsage.cache_read_input_tokens);
+  const inputTokens = [directInputTokens, cacheCreationInputTokens, cacheReadInputTokens].some((value) => value !== undefined)
+    ? (directInputTokens ?? 0) + (cacheCreationInputTokens ?? 0) + (cacheReadInputTokens ?? 0)
+    : undefined;
+  const outputTokens = finiteNumber(rawUsage.output_tokens);
+  const authoritativeCostUsd = finiteNumber(rawResult.total_cost_usd);
+  // SDK result usage and total_cost_usd are cumulative for this query
+  // conversation. Preserve the latest authoritative absolute counters;
+  // summing successive result messages would double-count prior turns.
+  const cumulativeInput = inputTokens ?? prior.inputTokens;
+  const cumulativeOutput = outputTokens ?? prior.outputTokens;
+  const cumulativeTotal = inputTokens === undefined && outputTokens === undefined
+    ? prior.totalTokens
+    : (inputTokens ?? 0) + (outputTokens ?? 0);
+  const cumulativeCost = authoritativeCostUsd ?? prior.authoritativeCostUsd;
+  return {
+    sample: {
+      ...(cumulativeInput !== undefined ? { inputTokens: cumulativeInput } : {}),
+      ...(cumulativeOutput !== undefined ? { outputTokens: cumulativeOutput } : {}),
+      ...(cumulativeTotal !== undefined ? { totalTokens: cumulativeTotal } : {}),
+      ...(cumulativeCost !== undefined ? { authoritativeCostUsd: cumulativeCost } : {}),
+      observedAt,
+      source: "provider",
+    },
+    inputTokens,
+    outputTokens,
   };
 }
 
@@ -115,15 +198,19 @@ export class ClaudeAdapter implements BuilderAdapter {
   private readonly abort = new AbortController();
   private readonly pumpDone: Promise<void>;
   private _sessionId?: string;
+  private _sessionRef?: ProviderSessionRefV1;
   private readonly stderrChunks: string[] = [];
   private turnSignals: string[] = [];
   private structuredError?: string;
   private apiErrorStatus?: number | null;
   private compactResult?: CompactResult;
+  private cumulativeUsage: ProviderSessionUsage = { observedAt: new Date(0).toISOString(), source: "provider" };
   private pending?: {
     resolve: (r: TurnResult) => void;
     reject: (e: Error) => void;
   };
+  private terminalResult?: TurnResult;
+  private streamEnded = false;
   private closed = false;
 
   static async create(opts: BuilderAdapterOptions): Promise<ClaudeAdapter> {
@@ -132,9 +219,31 @@ export class ClaudeAdapter implements BuilderAdapter {
       if (!runtimeExecutable) {
         throw new Error("Claude Code executable not found on PATH. Install your organization-approved Claude Code CLI, then retry.");
       }
-      const { query } = await requireClaudeSDK();
-      return new ClaudeAdapter({ ...opts, runtimeExecutable }, query);
+      const sdk = await requireClaudeSDK();
+      let validatedOpts = { ...opts, runtimeExecutable };
+      if (opts.resumeSessionRef) {
+        const availability = await probeClaudeSession(opts.resumeSessionRef, {
+          cwd: opts.cwd,
+          configRoot: opts.configRoot,
+          workspaceIdentity: opts.workspaceIdentity,
+          role: opts.sessionRole,
+          stream: opts.sessionStream,
+          ticketId: opts.ticketId,
+          deliveryUnitId: opts.deliveryUnitId,
+          getSessionInfo: sdk.getSessionInfo,
+        });
+        if (availability.status !== "available" || !availability.sessionRef) {
+          throw new SessionUnavailableError({
+            runtime: "claude", phase: "preflight", dispatchState: "not-sent", executable: runtimeExecutable,
+            cwd: opts.cwd, diagnostics: availability.detail ?? `Claude session ${opts.resumeSessionRef.sessionId} is ${availability.status}`,
+            availability,
+          });
+        }
+        validatedOpts = { ...validatedOpts, resumeSessionId: availability.sessionRef.sessionId, resumeSessionRef: availability.sessionRef };
+      }
+      return new ClaudeAdapter(validatedOpts, sdk.query);
     } catch (err) {
+      if (err instanceof SessionUnavailableError) throw err;
       const message = err instanceof Error ? err.message : String(err);
       throw new Error(normalizeRuntimeErrorText("claude", message, null, "adapter startup"), { cause: err });
     }
@@ -142,6 +251,8 @@ export class ClaudeAdapter implements BuilderAdapter {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private constructor(private readonly opts: BuilderAdapterOptions, query: (o: any) => Query) {
+    this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
+    this._sessionRef = opts.resumeSessionRef;
     this.query = query({
       prompt: this.inbox,
       options: {
@@ -195,10 +306,19 @@ export class ClaudeAdapter implements BuilderAdapter {
         const rawMessage = err instanceof Error ? err.message : String(err);
         const message = normalizeRuntimeErrorText("claude", rawMessage, null, "builder stream");
         this.eventQueue.push({ kind: "error", message });
-        this.pending?.reject(new Error(message));
-        this.pending = undefined;
+        const result = this.streamFailureResult(message, isMissingClaudeSession(rawMessage));
+        this.terminalResult = result;
+        this.settlePending(result);
       }
     } finally {
+      this.streamEnded = true;
+      if (!this.closed && this.pending) {
+        const result = this.streamFailureResult("Claude stream ended without a result", Boolean(this.opts.resumeSessionRef ?? this.opts.resumeSessionId));
+        this.terminalResult = result;
+        this.eventQueue.push({ kind: "error", message: result.text });
+        this.settlePending(result);
+      }
+      if (!this.closed && !this.terminalResult) this.terminalResult = this.streamFailureResult("Claude stream ended without a result", Boolean(this.opts.resumeSessionRef ?? this.opts.resumeSessionId));
       this.eventQueue.close();
     }
   }
@@ -206,6 +326,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   private handle(msg: SDKMessage): void {
     if ("session_id" in msg && typeof msg.session_id === "string") {
       this._sessionId = msg.session_id;
+      this.observeSession(msg.session_id);
     }
     if (msg.type === "assistant") {
       if (msg.error) {
@@ -261,24 +382,42 @@ export class ClaudeAdapter implements BuilderAdapter {
         ...this.turnSignals,
         ...this.stderrChunks,
       ].filter(Boolean).join("\n"));
-      const failure = msg.is_error ? {
-        runtime: "claude" as const,
-        phase: this.opts.runtimePhase ?? "builder",
-        category: classifyClaudeSdkFailure(this.structuredError, this.apiErrorStatus, rawDiagnostics),
-        executable: this.opts.runtimeExecutable ?? "claude",
-        cwd: this.opts.cwd,
-        diagnostics: rawDiagnostics,
-      } : undefined;
+      const missingResumedSession = msg.is_error
+        && Boolean(this.opts.resumeSessionRef ?? this.opts.resumeSessionId)
+        && isMissingClaudeSession(rawDiagnostics);
+      const failure = msg.is_error ? missingResumedSession
+        ? new SessionUnavailableError({
+          runtime: "claude", phase: "turn", dispatchState: "unknown",
+          executable: this.opts.runtimeExecutable ?? "claude", cwd: this.opts.cwd,
+          diagnostics: rawDiagnostics,
+          availability: {
+            version: 1, status: "unavailable", checkedAt: new Date().toISOString(), reason: "not-found",
+            detail: rawDiagnostics, ...(this._sessionRef ? { sessionRef: this._sessionRef } : {}),
+          },
+        }).failure
+        : {
+          runtime: "claude" as const,
+          phase: this.opts.runtimePhase ?? "builder",
+          category: classifyClaudeSdkFailure(this.structuredError, this.apiErrorStatus, rawDiagnostics),
+          executable: this.opts.runtimeExecutable ?? "claude",
+          cwd: this.opts.cwd,
+          diagnostics: rawDiagnostics,
+        } : undefined;
       const result: TurnResult = {
         text: failure ? formatClaudeFailure(failure) : text,
         isError: msg.is_error,
         numTurns: msg.num_turns,
         costUsd: msg.total_cost_usd,
+        costAuthoritative: Number.isFinite(msg.total_cost_usd),
         failure,
       };
+      const rawResult = msg as unknown as Record<string, unknown>;
+      const mergedUsage = mergeClaudeProviderSessionUsage(this.cumulativeUsage, rawResult);
+      result.inputTokens = mergedUsage.inputTokens;
+      result.outputTokens = mergedUsage.outputTokens;
+      this.cumulativeUsage = mergedUsage.sample;
       this.eventQueue.push({ kind: "turn-complete", result });
-      this.pending?.resolve(result);
-      this.pending = undefined;
+      this.settlePending(result, false);
       this.turnSignals = [];
       this.structuredError = undefined;
       this.apiErrorStatus = undefined;
@@ -292,6 +431,7 @@ export class ClaudeAdapter implements BuilderAdapter {
 
   private sendTurnInternal(text: string): Promise<TurnResult> {
     if (this.closed) return Promise.reject(new Error("builder is closed"));
+    if (this.terminalResult || this.streamEnded) return Promise.resolve(this.terminalResult ?? this.streamFailureResult("Claude stream is no longer available", Boolean(this.opts.resumeSessionRef ?? this.opts.resumeSessionId)));
     if (this.pending) {
       return Promise.reject(new Error("a turn is already in progress"));
     }
@@ -318,9 +458,31 @@ export class ClaudeAdapter implements BuilderAdapter {
     return this._sessionId;
   }
 
+  sessionRef(): ProviderSessionRefV1 | undefined { return this._sessionRef; }
+  adoptSessionRef(ref: ProviderSessionRefV1): void {
+    if (ref.provider !== "claude" || ref.sessionId !== this._sessionId) throw new Error("cannot adopt a session reference for a different Claude conversation");
+    this._sessionRef = ref;
+  }
+
+  async validateSession(): Promise<SessionAvailabilityV1> {
+    if (!this._sessionRef) return { version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped", detail: "Claude adapter was constructed from an unscoped raw session ID" };
+    return probeClaudeSession(this._sessionRef, {
+      cwd: this.opts.cwd,
+      configRoot: this.opts.configRoot,
+      workspaceIdentity: this.opts.workspaceIdentity,
+      role: this.opts.sessionRole,
+      stream: this.opts.sessionStream,
+      ticketId: this.opts.ticketId,
+      deliveryUnitId: this.opts.deliveryUnitId,
+    });
+  }
+
   async compact(): Promise<CompactResult> {
     this.compactResult = undefined;
     const result = await this.sendTurn("/compact");
+    if (result.failure?.category === "session-unavailable") {
+      return { ok: false, error: result.text || result.failure.diagnostics, failure: result.failure };
+    }
     if (this.compactResult) return this.compactResult;
     return { ok: false, error: sanitizeDiagnostics(result.text || "Claude did not emit an explicit compact status") };
   }
@@ -328,17 +490,21 @@ export class ClaudeAdapter implements BuilderAdapter {
   async contextUsage(): Promise<ContextUsage | undefined> {
     try {
       const usage = await this.query.getContextUsage();
-      const result = { used: usage.totalTokens, maximum: usage.maxTokens, percentage: usage.percentage };
+      const result = { used: usage.totalTokens, maximum: usage.maxTokens, percentage: usage.percentage, observedAt: new Date().toISOString(), source: "provider-query" as const };
       this.eventQueue.push({ kind: "context-usage", ...result });
       return result;
     } catch { return undefined; }
+  }
+
+  async sessionUsage(): Promise<ProviderSessionUsage | undefined> {
+    return this.cumulativeUsage.observedAt === new Date(0).toISOString() ? undefined : { ...this.cumulativeUsage };
   }
 
   async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
     if (settings.effort !== this.opts.effort || settings.fast !== this.opts.fast) return { ok: false, error: "Claude SDK cannot change reasoning/fast controls on an existing transport" };
     if (settings.model === this.opts.model) return { ok: true };
     const result = await this.sendTurn(`/model ${settings.model ?? "default"}`);
-    if (result.isError) return { ok: false, error: result.text };
+    if (result.isError) return { ok: false, error: result.text, ...(result.failure ? { failure: result.failure } : {}) };
     this.opts.model = settings.model; return { ok: true };
   }
 
@@ -358,6 +524,47 @@ export class ClaudeAdapter implements BuilderAdapter {
     this.abort.abort();
     await this.pumpDone.catch(() => {});
   }
+
+  private observeSession(sessionId: string): void {
+    if (this._sessionRef?.sessionId === sessionId) return;
+    this._sessionRef = createProviderSessionRef({
+      provider: "claude", sessionId, cwd: this.opts.cwd, configRoot: this.opts.configRoot ?? this.opts.cwd,
+      role: this.opts.sessionRole, stream: this.opts.sessionStream, generation: this.opts.sessionGeneration,
+      workspaceIdentity: this.opts.workspaceIdentity, ticketId: this.opts.ticketId, deliveryUnitId: this.opts.deliveryUnitId,
+      source: "observed",
+    });
+  }
+
+  private settlePending(result: TurnResult, emit = true): void {
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = undefined;
+    if (emit) this.eventQueue.push({ kind: "turn-complete", result });
+    pending.resolve(result);
+  }
+
+  private streamFailureResult(message: string, sessionUnavailable: boolean): TurnResult {
+    if (sessionUnavailable) {
+      const availability: SessionAvailabilityV1 = {
+        version: 1, status: "unavailable", checkedAt: new Date().toISOString(), reason: "not-found",
+        detail: message, ...(this._sessionRef ? { sessionRef: this._sessionRef } : {}),
+      };
+      return sessionUnavailableResult(new SessionUnavailableError({
+        runtime: "claude", phase: "turn", dispatchState: "unknown", executable: this.opts.runtimeExecutable ?? "claude",
+        cwd: this.opts.cwd, diagnostics: message, availability,
+      }));
+    }
+    return {
+      text: message, isError: true, numTurns: 0, costUsd: 0, costAuthoritative: false,
+      failure: { runtime: "claude", phase: this.opts.runtimePhase ?? "builder", category: "agent-stream", executable: this.opts.runtimeExecutable ?? "claude", cwd: this.opts.cwd, diagnostics: message, dispatchState: "unknown" },
+    };
+  }
+}
+
+function finiteNumber(value: unknown): number | undefined { const parsed = Number(value); return value !== null && value !== undefined && value !== "" && Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined; }
+
+function isMissingClaudeSession(message: string): boolean {
+  return /no conversation found with session id|session .* not found|conversation .* not found/i.test(message);
 }
 
 function activityPhase(phase: BuilderAdapterOptions["runtimePhase"]): string {

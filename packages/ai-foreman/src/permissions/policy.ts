@@ -29,6 +29,7 @@ export class PermissionPolicy {
   constructor(
     private readonly config: PermissionConfig,
     private readonly cwd: string,
+    private readonly options: { currentBranchWorkflow?: boolean } = {},
   ) {}
 
   classify(req: PermissionRequest): Classification {
@@ -44,6 +45,9 @@ export class PermissionPolicy {
 
     if (FILE_TOOLS.has(toolName)) {
       const target = this.filePath(input);
+      if (this.options.currentBranchWorkflow && target && this.isGitMetadata(target)) {
+        return { decision: "escalate", reason: "current-branch workflow forbids direct writes to Git metadata" };
+      }
       if (target && !this.insideCwd(target)) {
         return {
           decision: "escalate",
@@ -63,6 +67,9 @@ export class PermissionPolicy {
   }
 
   private classifyBash(command: string): Classification {
+    if (this.options.currentBranchWorkflow && isCurrentWorkflowGitMutation(command)) {
+      return { decision: "escalate", reason: "current-branch workflow leaves all Git lifecycle and review operations to the user" };
+    }
     // Always-escalate list is checked first against the full command string —
     // a dangerous pattern anywhere in a chained command escalates the whole call.
     const hitEscalate = this.config.escalateBash.find((p) => command.includes(p));
@@ -111,4 +118,36 @@ export class PermissionPolicy {
     const root = resolve(this.cwd);
     return abs === root || abs.startsWith(root + "/");
   }
+
+  private isGitMetadata(target: string): boolean {
+    const abs = isAbsolute(target) ? resolve(target) : resolve(this.cwd, target);
+    const root = resolve(this.cwd);
+    const relative = abs === root ? "" : abs.startsWith(root + "/") ? abs.slice(root.length + 1) : "";
+    return relative === ".git" || relative.startsWith(".git/");
+  }
+}
+
+function isCurrentWorkflowGitMutation(command: string): boolean {
+  const segments = command.split(SHELL_SPLIT).map((part) => part.trim()).filter(Boolean);
+  for (const segment of segments) {
+    if (/^(?:gh|glab)(?:\s|$)/.test(segment)) return true;
+    const invocation = /(?:^|\s)git\s+([\s\S]+)$/i.exec(segment);
+    if (!invocation) continue;
+    let remainder = invocation[1]!.trim();
+    const globalOption = /^(?:(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path)\s+(?:"[^"]+"|'[^']+'|\S+)|--(?:git-dir|work-tree|namespace|exec-path)=\S+|--(?:no-pager|paginate|no-replace-objects|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs|bare))(?:\s+|$)/i;
+    while (globalOption.test(remainder)) remainder = remainder.replace(globalOption, "").trimStart();
+    const match = /^([a-z][a-z-]*)([\s\S]*)$/i.exec(remainder);
+    if (!match) continue;
+    const subcommand = match[1]!.toLowerCase();
+    const args = match[2]!.trim();
+    if (["add", "am", "apply", "checkout", "cherry-pick", "clean", "commit", "fetch", "merge", "mv", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash", "switch", "tag", "worktree"].includes(subcommand)) return true;
+    if (subcommand === "branch" && args && !/^(?:--show-current|-a|--all|-r|--remotes|-v|-vv|--verbose)(?:\s|$)/.test(args)) return true;
+    if (subcommand === "branch") continue;
+    if (subcommand === "remote" && /^(?:$|-v|--verbose|get-url(?:\s|$)|show(?:\s|$))/.test(args)) continue;
+    if (["annotate", "blame", "cat-file", "describe", "diff", "diff-tree", "for-each-ref", "grep", "log", "ls-files", "ls-remote", "ls-tree", "merge-base", "name-rev", "rev-list", "rev-parse", "shortlog", "show", "show-ref", "status", "symbolic-ref", "version", "whatchanged"].includes(subcommand)) continue;
+    // Configured aliases and unfamiliar porcelain can mutate refs or the
+    // index; current mode permits only an explicit read-only subset.
+    return true;
+  }
+  return false;
 }

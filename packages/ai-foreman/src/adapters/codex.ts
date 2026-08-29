@@ -5,7 +5,10 @@ import { createInterface } from "node:readline";
 import { loadSkill } from "special-agents";
 import { BuilderEventQueue, withActivityPhase } from "../activity.js";
 import { normalizeRuntimeErrorText } from "../runtimeAuth.js";
-import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, CompactResult, ContextUsage, ProviderSettingSwitch, TurnResult } from "./types.js";
+import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, CompactResult, ContextUsage, ProviderSessionUsage, ProviderSettingSwitch, TurnResult } from "./types.js";
+import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
+import { canonicalSessionPath, createProviderSessionRef, validateProviderSessionScope } from "../sessionIdentity.js";
+import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
 
 export interface CodexLineResult { events: BuilderEvent[]; sessionId?: string; text?: string }
 
@@ -34,13 +37,21 @@ export class CodexAdapter implements BuilderAdapter {
   private pending = new Map<number | string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private notificationWaiters = new Map<string, Waiter[]>();
   private _sessionId?: string;
+  private _sessionRef?: ProviderSessionRefV1;
+  private sessionAvailability?: SessionAvailabilityV1;
   private initialized = false;
   private closed = false;
   private activeText: string[] = [];
   private usage?: ContextUsage;
+  private usageRevision = 0;
+  private providerSessionUsage?: ProviderSessionUsage;
+  private lastTurnTokens?: { inputTokens?: number; outputTokens?: number };
   private stderr = "";
 
-  constructor(private readonly opts: BuilderAdapterOptions) { this._sessionId = opts.resumeSessionId; }
+  constructor(private readonly opts: BuilderAdapterOptions) {
+    this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
+    this._sessionRef = opts.resumeSessionRef;
+  }
 
   buildInstruction(instruction: string): string {
     return [this.opts.systemPromptAppend, this.buildSkillsAppendix(), instruction]
@@ -65,10 +76,13 @@ export class CodexAdapter implements BuilderAdapter {
   private async sendTurnInternal(instruction: string): Promise<TurnResult> {
     if (this.closed) throw new Error("builder is closed");
     this.eventQueue.push({ kind: "activity", state: "starting Codex turn", provider: "codex", model: this.opts.model });
+    let turnStartDispatched = false;
     try {
       await this.ensureThread();
       this.activeText = [];
+      this.lastTurnTokens = undefined;
       const completion = this.waitFor("turn/completed", (params) => params.threadId === this._sessionId);
+      turnStartDispatched = true;
       await this.request("turn/start", {
         threadId: this._sessionId,
         input: [{ type: "text", text: this.buildInstruction(instruction), text_elements: [] }],
@@ -81,14 +95,31 @@ export class CodexAdapter implements BuilderAdapter {
       const failed = turn?.status === "failed";
       const error = turn?.error as Record<string, unknown> | null | undefined;
       const text = this.activeText.join("\n");
-      const result: TurnResult = { text: failed ? normalizeRuntimeErrorText("codex", String(error?.message ?? text), null, "app-server turn") : text, isError: failed, numTurns: 1, costUsd: 0 };
+      const result: TurnResult = {
+        text: failed ? normalizeRuntimeErrorText("codex", String(error?.message ?? text), null, "app-server turn") : text,
+        isError: failed, numTurns: 1, costUsd: 0, costAuthoritative: false,
+        ...(this.lastTurnTokens ?? {}),
+      };
       this.eventQueue.push({ kind: "turn-complete", result });
       return result;
     } catch (error) {
+      if (error instanceof SessionUnavailableError) {
+        const result = sessionUnavailableResult(error);
+        this.eventQueue.push({ kind: "error", message: result.text });
+        this.eventQueue.push({ kind: "turn-complete", result });
+        return result;
+      }
       const detail = [error instanceof Error ? error.message : String(error), this.stderr].filter(Boolean).join("\n");
       const text = normalizeRuntimeErrorText("codex", detail, this.process?.exitCode ?? null, "builder turn");
       this.disconnect(new Error(text));
-      const result = { text, isError: true, numTurns: 1, costUsd: 0 };
+      const resumed = Boolean(this.opts.resumeSessionRef);
+      const result: TurnResult = resumed
+        ? sessionUnavailableResult(new SessionUnavailableError({
+          runtime: "codex", phase: turnStartDispatched ? "turn" : "attach", dispatchState: turnStartDispatched ? "unknown" : "not-sent",
+          executable: this.opts.runtimeExecutable ?? "codex", cwd: this.opts.cwd, diagnostics: text,
+          availability: { version: 1, status: turnStartDispatched ? "unknown" : "unavailable", checkedAt: new Date().toISOString(), reason: turnStartDispatched ? "probe-failed" : "attach-failed", detail: text, sessionRef: this.opts.resumeSessionRef },
+        }))
+        : { text, isError: true, numTurns: 1, costUsd: 0, costAuthoritative: false };
       this.eventQueue.push({ kind: "error", message: text });
       this.eventQueue.push({ kind: "turn-complete", result });
       return result;
@@ -99,24 +130,57 @@ export class CodexAdapter implements BuilderAdapter {
     try {
       await this.ensureThread();
       this.eventQueue.push({ kind: "session-transition", transition: "compacting" });
+      const usageRevision = this.usageRevision;
+      // A pre-compaction observation must never be mistaken for proof that the
+      // provider reduced the live context. The app server emits a fresh token
+      // usage notification for the compacted thread; require it alongside the
+      // explicit contextCompaction completion item.
+      this.usage = undefined;
       const done = this.waitFor("item/completed", (params) => {
         const item = params.item as Record<string, unknown> | undefined;
         return params.threadId === this._sessionId && item?.type === "contextCompaction";
-      });
-      await this.request("thread/compact/start", { threadId: this._sessionId });
-      await done;
-      this.usage = undefined;
+      }, 30_000);
+      const postCompactUsage = this.waitFor("thread/tokenUsage/updated", (params) => {
+        return (params.threadId === undefined || params.threadId === this._sessionId)
+          && this.usageRevision > usageRevision
+          && this.usage !== undefined;
+      }, 30_000);
+      await Promise.all([
+        this.request("thread/compact/start", { threadId: this._sessionId }),
+        done,
+        postCompactUsage,
+      ]);
       this.eventQueue.push({ kind: "session-transition", transition: "compacted" });
       return { ok: true };
-    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+    } catch (error) {
+      if (error instanceof SessionUnavailableError) return { ok: false, error: error.message, failure: error.failure };
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async contextUsage(): Promise<ContextUsage | undefined> { return this.usage; }
+  async sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.providerSessionUsage ? { ...this.providerSessionUsage } : undefined; }
   async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
     this.opts.model = settings.model; this.opts.effort = settings.effort; this.opts.fast = settings.fast;
     return { ok: true };
   }
   sessionId(): string | undefined { return this._sessionId; }
+  sessionRef(): ProviderSessionRefV1 | undefined { return this._sessionRef; }
+  adoptSessionRef(ref: ProviderSessionRefV1): void {
+    if (ref.provider !== "codex" || ref.sessionId !== this._sessionId) throw new Error("cannot adopt a session reference for a different Codex thread");
+    this._sessionRef = ref;
+  }
+  async validateSession(): Promise<SessionAvailabilityV1> {
+    const checkedAt = new Date().toISOString();
+    if (!this._sessionRef) return { version: 1, status: "unknown", checkedAt, reason: "legacy-unscoped", detail: "Codex raw thread IDs cannot be declared exact without a stored location scope" };
+    try {
+      await this.ensureThread();
+      return this.sessionAvailability ?? { version: 1, status: "available", checkedAt, observedCwd: canonicalSessionPath(this.opts.cwd), sessionRef: this._sessionRef };
+    } catch (error) {
+      if (error instanceof SessionUnavailableError && error.failure.availability) return error.failure.availability;
+      return { version: 1, status: "unknown", checkedAt, reason: "probe-failed", detail: error instanceof Error ? error.message : String(error), sessionRef: this._sessionRef };
+    }
+  }
   events(): AsyncIterable<BuilderEvent> { return this.eventQueue; }
 
   async close(): Promise<void> {
@@ -127,18 +191,89 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   private async ensureThread(): Promise<void> {
+    if (this._sessionRef && !this.threadAttached) {
+      if (this._sessionRef.source === "legacy-inferred") {
+        const availability: SessionAvailabilityV1 = { version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped", detail: "legacy Codex thread IDs cannot be proven exact without an observed scoped binding", sessionRef: this._sessionRef };
+        this.sessionAvailability = availability;
+        throw new SessionUnavailableError({ runtime: "codex", phase: "preflight", dispatchState: "not-sent", executable: this.opts.runtimeExecutable ?? "codex", cwd: this.opts.cwd, diagnostics: availability.detail!, availability });
+      }
+      const scoped = validateProviderSessionScope(this._sessionRef, {
+        provider: "codex", cwd: this.opts.cwd, configRoot: this.opts.configRoot ?? this.opts.cwd,
+        role: this.opts.sessionRole ?? this._sessionRef.role, stream: this.opts.sessionStream ?? this._sessionRef.stream,
+        workspaceIdentity: this.opts.workspaceIdentity, ticketId: this.opts.ticketId, deliveryUnitId: this.opts.deliveryUnitId,
+      });
+      if (scoped.status !== "available" || !scoped.sessionRef) {
+        this.sessionAvailability = scoped;
+        throw new SessionUnavailableError({
+          runtime: "codex", phase: "preflight", dispatchState: "not-sent", executable: this.opts.runtimeExecutable ?? "codex",
+          cwd: this.opts.cwd, diagnostics: scoped.detail ?? `Codex session ${this._sessionRef.sessionId} is ${scoped.status}`, availability: scoped,
+        });
+      }
+      this._sessionRef = scoped.sessionRef;
+    }
     await this.ensureConnection();
     if (this._sessionId && this.initialized === true && this.threadAttached) return;
     const method = this._sessionId ? "thread/resume" : "thread/start";
-    const result = await this.request(method, {
-      ...(this._sessionId ? { threadId: this._sessionId } : {}), cwd: this.opts.cwd,
-      model: this.opts.model ?? null, approvalPolicy: "never",
-      sandbox: this.opts.sandboxMode === "read-only" ? "read-only" : "workspace-write",
-      developerInstructions: this.opts.systemPromptAppend ?? null,
-    }) as Record<string, unknown>;
+    let result: Record<string, unknown>;
+    try {
+      result = await this.request(method, {
+        ...(this._sessionId ? { threadId: this._sessionId } : {}), cwd: this.opts.cwd,
+        model: this.opts.model ?? null, approvalPolicy: "never",
+        sandbox: this.opts.sandboxMode === "read-only" ? "read-only" : "workspace-write",
+        developerInstructions: this.opts.systemPromptAppend ?? null,
+      }) as Record<string, unknown>;
+    } catch (error) {
+      if (this._sessionRef) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const availability: SessionAvailabilityV1 = {
+          version: 1, status: "unavailable", checkedAt: new Date().toISOString(),
+          reason: /not found|unknown thread|no thread/i.test(detail) ? "not-found" : "attach-failed", detail, sessionRef: this._sessionRef,
+        };
+        this.sessionAvailability = availability;
+        throw new SessionUnavailableError({ runtime: "codex", phase: "attach", dispatchState: "not-sent", executable: this.opts.runtimeExecutable ?? "codex", cwd: this.opts.cwd, diagnostics: detail, availability, cause: error });
+      }
+      throw error;
+    }
     const thread = result.thread as Record<string, unknown> | undefined;
-    this._sessionId = String(thread?.id ?? this._sessionId ?? "") || undefined;
+    const returnedSessionId = String(thread?.id ?? this._sessionId ?? "") || undefined;
+    if (this._sessionRef && returnedSessionId !== this._sessionRef.sessionId) {
+      const availability: SessionAvailabilityV1 = {
+        version: 1,
+        status: "unavailable",
+        checkedAt: new Date().toISOString(),
+        reason: "attach-failed",
+        detail: `Codex resumed thread ${returnedSessionId ?? "without an ID"} instead of requested thread ${this._sessionRef.sessionId}`,
+        sessionRef: this._sessionRef,
+      };
+      this.sessionAvailability = availability;
+      throw new SessionUnavailableError({
+        runtime: "codex",
+        phase: "attach",
+        dispatchState: "not-sent",
+        executable: this.opts.runtimeExecutable ?? "codex",
+        cwd: this.opts.cwd,
+        diagnostics: availability.detail!,
+        availability,
+      });
+    }
+    this._sessionId = returnedSessionId;
     if (!this._sessionId) throw new Error(`${method} did not return a thread ID`);
+    const providerCwd = typeof thread?.cwd === "string" ? canonicalSessionPath(thread.cwd) : undefined;
+    if (this._sessionRef && providerCwd && providerCwd !== canonicalSessionPath(this._sessionRef.cwd)) {
+      const availability: SessionAvailabilityV1 = { version: 1, status: "unavailable", checkedAt: new Date().toISOString(), reason: "cwd-mismatch", observedCwd: providerCwd, detail: `Codex thread cwd ${providerCwd} does not match ${this._sessionRef.cwd}`, sessionRef: this._sessionRef };
+      this.sessionAvailability = availability;
+      throw new SessionUnavailableError({ runtime: "codex", phase: "attach", dispatchState: "not-sent", executable: this.opts.runtimeExecutable ?? "codex", cwd: this.opts.cwd, diagnostics: availability.detail!, availability });
+    }
+    if (!this._sessionRef) {
+      this._sessionRef = createProviderSessionRef({
+        provider: "codex", sessionId: this._sessionId, cwd: providerCwd ?? this.opts.cwd, configRoot: this.opts.configRoot ?? this.opts.cwd,
+        role: this.opts.sessionRole, stream: this.opts.sessionStream, generation: this.opts.sessionGeneration,
+        workspaceIdentity: this.opts.workspaceIdentity, ticketId: this.opts.ticketId, deliveryUnitId: this.opts.deliveryUnitId,
+      });
+    } else {
+      this._sessionRef = { ...this._sessionRef, validatedAt: new Date().toISOString() };
+    }
+    this.sessionAvailability = { version: 1, status: "available", checkedAt: new Date().toISOString(), observedCwd: providerCwd ?? canonicalSessionPath(this.opts.cwd), sessionRef: this._sessionRef };
     this.threadAttached = true;
     this.eventQueue.push({ kind: "session-transition", transition: method === "thread/resume" ? "resumed" : "started" });
   }
@@ -206,10 +341,25 @@ export class CodexAdapter implements BuilderAdapter {
     } else if (message.method === "thread/tokenUsage/updated") {
       const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
       const total = tokenUsage?.total as Record<string, unknown> | undefined;
-      const used = Number(total?.totalTokens ?? 0);
-      const maximum = Number(tokenUsage?.modelContextWindow ?? 0) || undefined;
-      this.usage = { used, maximum, ...(maximum ? { percentage: used / maximum * 100 } : {}) };
-      this.eventQueue.push({ kind: "context-usage", ...this.usage });
+      const last = tokenUsage?.last as Record<string, unknown> | undefined;
+      const used = Number(total?.totalTokens);
+      const maximum = Number(tokenUsage?.modelContextWindow);
+      const observedAt = new Date().toISOString();
+      const totalInput = optionalNonNegative(total?.inputTokens);
+      const totalOutput = optionalNonNegative(total?.outputTokens);
+      const sessionTotal = optionalNonNegative(total?.totalTokens);
+      if (totalInput !== undefined || totalOutput !== undefined || sessionTotal !== undefined) {
+        this.providerSessionUsage = { inputTokens: totalInput, outputTokens: totalOutput, totalTokens: sessionTotal, observedAt, source: "provider" };
+      }
+      this.lastTurnTokens = {
+        inputTokens: optionalNonNegative(last?.inputTokens),
+        outputTokens: optionalNonNegative(last?.outputTokens),
+      };
+      if (Number.isFinite(used) && used >= 0 && Number.isFinite(maximum) && maximum > 0) {
+        this.usage = { used, maximum, percentage: used / maximum * 100, observedAt, source: "provider-event" };
+        this.usageRevision += 1;
+        this.eventQueue.push({ kind: "context-usage", ...this.usage });
+      }
     } else if (message.method === "error") {
       const error = params.error as Record<string, unknown> | undefined;
       const reason = String(error?.message ?? params.message ?? "Codex app-server error");
@@ -222,8 +372,25 @@ export class CodexAdapter implements BuilderAdapter {
     this.notificationWaiters.set(message.method, remaining);
   }
 
-  private waitFor(method: string, predicate: Waiter["predicate"]): Promise<Record<string, unknown>> {
-    return new Promise((resolve, reject) => { const waiters = this.notificationWaiters.get(method) ?? []; waiters.push({ predicate, resolve, reject }); this.notificationWaiters.set(method, waiters); });
+  private waitFor(method: string, predicate: Waiter["predicate"], timeoutMs?: number): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const waiter: Waiter = {
+        predicate,
+        resolve: (params) => { if (timeout) clearTimeout(timeout); resolve(params); },
+        reject: (error) => { if (timeout) clearTimeout(timeout); reject(error); },
+      };
+      const waiters = this.notificationWaiters.get(method) ?? [];
+      waiters.push(waiter);
+      this.notificationWaiters.set(method, waiters);
+      if (timeoutMs !== undefined) {
+        timeout = setTimeout(() => {
+          const active = this.notificationWaiters.get(method) ?? [];
+          this.notificationWaiters.set(method, active.filter((candidate) => candidate !== waiter));
+          reject(new Error(`Timed out waiting for Codex app-server notification ${method}`));
+        }, timeoutMs);
+      }
+    });
   }
 
   private disconnect(error: Error): void {
@@ -241,6 +408,11 @@ export class CodexAdapter implements BuilderAdapter {
     const blocks = this.opts.skills.map((skill) => loadSkillMarkdown(this.opts.cwd, skill)).filter((block): block is string => Boolean(block));
     return blocks.length ? ["# Preloaded Skills", "Use the following skills for this run.", ...blocks].join("\n\n") : undefined;
   }
+}
+
+function optionalNonNegative(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : undefined;
 }
 
 function activityPhase(phase: BuilderAdapterOptions["runtimePhase"]): string {

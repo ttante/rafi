@@ -1,6 +1,6 @@
 {
   "name": "ai-foreman",
-  "version": "1.7.6",
+  "version": "1.7.7",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
   "license": "Apache-2.0",
   "type": "module",
@@ -53,9 +53,29 @@
       "types": "./dist/workflowDb.d.ts",
       "default": "./dist/workflowDb.js"
     },
+    "./continuity.js": {
+      "types": "./dist/continuity.d.ts",
+      "default": "./dist/continuity.js"
+    },
+    "./handoffs.js": {
+      "types": "./dist/handoffs.d.ts",
+      "default": "./dist/handoffs.js"
+    },
     "./session-lifecycle.js": {
       "types": "./dist/sessionLifecycle.d.ts",
       "default": "./dist/sessionLifecycle.js"
+    },
+    "./session-identity.js": {
+      "types": "./dist/sessionIdentity.d.ts",
+      "default": "./dist/sessionIdentity.js"
+    },
+    "./session-availability.js": {
+      "types": "./dist/sessionAvailability.d.ts",
+      "default": "./dist/sessionAvailability.js"
+    },
+    "./branch-prefix.js": {
+      "types": "./dist/branch/prefix.d.ts",
+      "default": "./dist/branch/prefix.js"
     },
     "./operation-recovery.js": {
       "types": "./dist/operationRecovery.d.ts",
@@ -77,6 +97,10 @@
       "types": "./dist/tickets/reset.d.ts",
       "default": "./dist/tickets/reset.js"
     },
+    "./ticket-groups.js": {
+      "types": "./dist/tickets/groups.d.ts",
+      "default": "./dist/tickets/groups.js"
+    },
     "./sources/source-registry.js": {
       "types": "./dist/sources/sourceRegistry.d.ts",
       "default": "./dist/sources/sourceRegistry.js"
@@ -96,6 +120,10 @@
     "./cli/doctor.js": {
       "types": "./dist/cli/doctor.d.ts",
       "default": "./dist/cli/doctor.js"
+    },
+    "./cli/handoffs.js": {
+      "types": "./dist/cli/handoffs.d.ts",
+      "default": "./dist/cli/handoffs.js"
     }
   },
   "files": [
@@ -130,8 +158,8 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.148"
   },
   "dependencies": {
-    "special-agents": "0.8.4",
-    "rafi-spec": "0.8.4",
+    "special-agents": "0.8.5",
+    "rafi-spec": "0.8.5",
     "@clack/prompts": "^1.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",

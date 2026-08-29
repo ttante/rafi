@@ -6,6 +6,7 @@ import { PermissionPolicy } from "./permissions/policy.js";
 import { ClaudeAdapter } from "./adapters/claude.js";
 import { CodexAdapter } from "./adapters/codex.js";
 import { RecoveringAdapter } from "./adapters/recovering.js";
+import { SessionUnavailableError } from "./adapters/sessionFailure.js";
 import { Foreman, createPermissionHandler, type StepStatus } from "./foreman.js";
 import type { BuilderAdapter, BuilderAdapterOptions, EffortLevel, TurnResult } from "./adapters/types.js";
 import type { AnsweredProviderQuestion } from "./providerQuestions.js";
@@ -15,7 +16,9 @@ import { ensureRuntimeReadyForCommand } from "./cli/runtimeAuthPrompt.js";
 import { resolveAgentForProject } from "./cli/runtimeSelection.js";
 import type { AgentRuntime } from "./runtimeAuth.js";
 import { parse as parseYaml } from "yaml";
-import type { AgentDefaultsV1, AgentRoleDefaultsV1, ConfigurableAgentRole } from "rafi-spec";
+import type { AgentDefaultsV1, AgentRoleDefaultsV1, ConfigurableAgentRole, ProviderSessionRefV1 } from "rafi-spec";
+import { captureWorkspaceIdentity, createProviderSessionRef, resolveUniqueSessionBinding } from "./sessionIdentity.js";
+import { WorkflowDb } from "./workflowDb.js";
 
 export type { EffortLevel } from "./adapters/types.js";
 
@@ -36,6 +39,8 @@ export interface RoleBuilderOptions {
   extraSkills?: string[];
   sandboxMode?: BuilderAdapterOptions["sandboxMode"];
   resumeSessionId?: string;
+  /** Location-scoped exact session. Raw IDs are resolved through durable project bindings or treated as legacy candidates. */
+  resumeSessionRef?: ProviderSessionRefV1;
   /** Observe successfully answered provider-native questions. */
   onAnsweredQuestion?: (event: AnsweredProviderQuestion) => void;
   /** Observe any provider-native question attempt, including denied prompts. */
@@ -64,6 +69,7 @@ export interface RoleInstructionRunResult {
   model?: string;
   effort?: EffortLevel;
   sessionId?: string;
+  sessionRef?: ProviderSessionRefV1;
   logPath: string;
   roleBundle: RoleBundle;
   skills: string[];
@@ -147,11 +153,26 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
     throw new Error(`project directory not found: ${opts.projectDir}`);
   }
   const saved = readRoleDefaultsForExecution(opts.projectDir, opts.role);
+  if (opts.resumeSessionRef && opts.resumeSessionId && opts.resumeSessionRef.sessionId !== opts.resumeSessionId) {
+    throw new Error("resume session ID does not match the supplied location-scoped reference");
+  }
+  let requestedResumeRef = opts.resumeSessionRef;
+  if (!requestedResumeRef && opts.resumeSessionId) {
+    const bindingDb = new WorkflowDb(opts.projectDir);
+    try { requestedResumeRef = resolveUniqueSessionBinding(bindingDb.providerSessionBindings(opts.resumeSessionId), opts.resumeSessionId); }
+    finally { bindingDb.close(); }
+  }
   const configuredEffort = saved?.reasoning && saved.reasoning !== "default" ? saved.reasoning : undefined;
   const effectiveEffort = opts.effort ?? (VALID_EFFORT.includes(configuredEffort as EffortLevel) ? configuredEffort as EffortLevel : undefined);
   assertEffortLevel(effectiveEffort);
 
-  let runtime = resolveAgentForProject(opts.projectDir, opts.agent ?? saved?.make);
+  let runtime = resolveAgentForProject(opts.projectDir, opts.agent ?? requestedResumeRef?.provider ?? saved?.make);
+  if (requestedResumeRef && requestedResumeRef.provider !== runtime) {
+    throw new Error(`session ${requestedResumeRef.sessionId} belongs to ${requestedResumeRef.provider}, but ${runtime} was selected`);
+  }
+  if (requestedResumeRef && requestedResumeRef.role !== configurableRole(opts.role)) {
+    throw new Error(`session ${requestedResumeRef.sessionId} belongs to role ${requestedResumeRef.role}, not ${configurableRole(opts.role)}`);
+  }
   const config = loadConfig(join(opts.projectDir, "foreman.yaml"));
   const log = opts.log ?? new Log(makeLogPath(opts.projectDir, opts.label.replace(/\s+/g, "-")));
   const roleBundle = loadRoleBundle(opts.role, { projectDir: opts.projectDir });
@@ -160,7 +181,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
   const ready = await ensureRuntimeReadyForCommand(opts.projectDir, runtime, {
     label: opts.label,
     yes: Boolean(opts.yes),
-    allowSwitch: opts.allowSwitch,
+    allowSwitch: requestedResumeRef || opts.resumeSessionId ? false : opts.allowSwitch,
     model: initialModel,
   });
   runtime = ready.runtime;
@@ -170,13 +191,38 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
   const policy = new PermissionPolicy(opts.permissionConfig ?? config.permissions, opts.projectDir);
   const skills = mergeSkills(roleBundle.skills, opts.extraSkills);
   const interactive = !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const makeAdapter = async (nextRuntime: AgentRuntime, resumeSessionId?: string): Promise<BuilderAdapter> => {
+  const makeAdapter = async (nextRuntime: AgentRuntime, resumeSessionId?: string, resumeSessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
+    let scopedRef = resumeSessionRef;
+    if (!scopedRef && resumeSessionId) {
+      const bindingDb = new WorkflowDb(opts.projectDir);
+      try { scopedRef = resolveUniqueSessionBinding(bindingDb.providerSessionBindings(resumeSessionId), resumeSessionId); }
+      finally { bindingDb.close(); }
+      scopedRef ??= createProviderSessionRef({
+        provider: nextRuntime,
+        sessionId: resumeSessionId,
+        role: configurableRole(opts.role),
+        stream: opts.role,
+        generation: 0,
+        cwd: opts.projectDir,
+        configRoot: opts.projectDir,
+        workspaceIdentity: captureWorkspaceIdentity(opts.projectDir),
+        source: "legacy-inferred",
+      });
+    }
+    if (scopedRef && scopedRef.provider !== nextRuntime) {
+      throw new Error(`session ${scopedRef.sessionId} belongs to ${scopedRef.provider}, but ${nextRuntime} was selected`);
+    }
     const adapterOpts: BuilderAdapterOptions = {
       cwd: opts.projectDir,
+      configRoot: opts.projectDir,
       runtimeExecutable,
       runtimePhase: phaseForRole(opts.role),
       model,
-      resumeSessionId,
+      ...(scopedRef ? { resumeSessionRef: scopedRef } : {}),
+      sessionRole: configurableRole(opts.role),
+      sessionStream: opts.role,
+      sessionGeneration: scopedRef?.generation ?? 0,
+      workspaceIdentity: captureWorkspaceIdentity(opts.projectDir),
       permission: createPermissionHandler(policy, log, {
         interactive,
         onAnsweredQuestion: opts.onAnsweredQuestion,
@@ -188,18 +234,41 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
       systemPromptAppend: roleBundle.system || undefined,
       skills: skills.length > 0 ? skills : undefined,
     };
-    return nextRuntime === "codex"
+    const adapter = nextRuntime === "codex"
       ? new CodexAdapter(adapterOpts)
       : await ClaudeAdapter.create(adapterOpts);
+    if (scopedRef && adapter.agent === "codex") {
+      const availability = await adapter.validateSession!();
+      if (availability.status !== "available") {
+        await adapter.close().catch(() => {});
+        throw new SessionUnavailableError({
+          runtime: "codex",
+          phase: "preflight",
+          dispatchState: "not-sent",
+          executable: runtimeExecutable,
+          cwd: opts.projectDir,
+          diagnostics: availability.detail ?? `Codex session ${scopedRef.sessionId} is ${availability.status}`,
+          availability,
+        });
+      }
+    }
+    return adapter;
   };
-  const initial = await makeAdapter(runtime, opts.resumeSessionId);
+  const initial = await makeAdapter(runtime, opts.resumeSessionId, requestedResumeRef);
+  const persistSessionRef = (ref: ProviderSessionRefV1): void => {
+    const bindingDb = new WorkflowDb(opts.projectDir);
+    try { bindingDb.recordProviderSessionBinding(ref); }
+    finally { bindingDb.close(); }
+  };
+  const initialRef = initial.sessionRef?.();
+  if (initialRef) persistSessionRef(initialRef);
   const builder: BuilderAdapter = new RecoveringAdapter({
     initial,
     runtime,
     label: opts.label,
     enabled: interactive,
-    allowSwitch: opts.allowSwitch !== false && !opts.resumeSessionId,
-    recreate: async (nextRuntime, resumeSessionId) => {
+    allowSwitch: opts.allowSwitch !== false && !opts.resumeSessionId && !requestedResumeRef,
+    recreate: async (nextRuntime, resumeSessionId, resumeSessionRef) => {
       const nextReady = await ensureRuntimeReadyForCommand(opts.projectDir, nextRuntime, {
         label: opts.label,
         allowSwitch: false,
@@ -208,8 +277,9 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
       runtime = nextReady.runtime;
       model = nextReady.model;
       runtimeExecutable = nextReady.executable;
-      return makeAdapter(runtime, resumeSessionId);
+      return makeAdapter(runtime, resumeSessionId, resumeSessionRef);
     },
+    onSessionRef: persistSessionRef,
   });
 
   return { builder, runtime, model, effort, roleBundle, skills, log };
@@ -281,6 +351,7 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
         model: builder.agent === roleBuilder.runtime ? roleBuilder.model : undefined,
         effort,
         sessionId: builder.sessionId(),
+        sessionRef: builder.sessionRef?.(),
         statusKind: turn.status.kind,
         summary: turn.status.summary,
         reason: turn.status.reason,
@@ -295,6 +366,7 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
       model: builder.agent === roleBuilder.runtime ? roleBuilder.model : undefined,
       effort,
       sessionId: builder.sessionId(),
+      sessionRef: builder.sessionRef?.(),
       logPath,
       roleBundle,
       skills,
@@ -305,4 +377,10 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
     log.write("error", { message: String(err) });
     throw err;
   }
+}
+
+function configurableRole(role: string): ConfigurableAgentRole {
+  return ["builder", "qa", "planner", "ticket-maker", "uninstaller"].includes(role)
+    ? role as ConfigurableAgentRole
+    : "builder";
 }

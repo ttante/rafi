@@ -2,6 +2,7 @@ import { select, isCancel } from "@clack/prompts";
 import { MARKER_SPEC, QA_MARKER_SPEC } from "./markers.js";
 import type {
   BuilderAdapter,
+  CompactResult,
   PermissionDecision,
   PermissionHandler,
   PermissionRequest,
@@ -20,6 +21,7 @@ import type { SessionStrategy } from "rafi-spec";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { SessionUnavailableError, sessionUnavailableErrorFromFailure } from "./adapters/sessionFailure.js";
 
 /** Parsed STEP_STATUS marker from a builder's turn. */
 export interface StepStatus {
@@ -287,6 +289,9 @@ export class Foreman {
     private readonly builderFactory?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>,
     private readonly builderSessionStrategy: SessionStrategy = "compact",
     private readonly qaNonconvergence?: (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision>,
+    private readonly beforeBuilderTurn?: (adapter: BuilderAdapter, frozenAction: string) => Promise<BuilderAdapter>,
+    private readonly builderSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy) => Promise<BuilderAdapter>,
+    private readonly qaSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>,
   ) {
     this.ticketsEnabled = !!(projectDir && isTicketsInitialized(projectDir));
   }
@@ -301,8 +306,13 @@ export class Foreman {
     return this.doTurnWith(this.builder, instruction);
   }
 
-  private async prepareBuilderBoundary(): Promise<void> {
+  private async prepareBuilderBoundary(frozenAction: string): Promise<void> {
     if (!this.builderFactory || !this.projectDir) return;
+    if (this.builderSessionBoundary) {
+      this.builder = await this.builderSessionBoundary(this.builder, frozenAction, this.builderSessionStrategy);
+      this.log.write("branch-session", { role: "builder", transition: this.builderSessionStrategy === "fresh" ? "validated-handoff" : "accounted-compaction", workSession: this.builderWorkSessions + 1, sessionId: this.builder.sessionId() });
+      return;
+    }
     if (this.builderSessionStrategy === "fresh") {
       await this.builder.close(); this.builder = await this.builderFactory(this.projectDir);
       this.log.write("branch-session", { role: "builder", transition: "fresh", workSession: this.builderWorkSessions + 1 });
@@ -312,7 +322,13 @@ export class Foreman {
     if (priorSession && this.builder.compact) {
       let error = "";
       for (let attempt = 1; attempt <= 2; attempt++) {
-        const result = await this.builder.compact().catch((cause) => ({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
+        let result: CompactResult;
+        try { result = await this.builder.compact(); }
+        catch (cause) {
+          if (cause instanceof SessionUnavailableError) throw cause;
+          result = { ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+        }
+        if (result.failure?.category === "session-unavailable") throw sessionUnavailableErrorFromFailure(result.failure);
         if (result.ok) { this.log.write("branch-session", { role: "builder", transition: attempt === 1 ? "compacted" : "compaction-retry-succeeded", workSession: this.builderWorkSessions + 1, sessionId: priorSession }); return; }
         error = result.error ?? "native compaction failed";
         if (attempt === 1) this.log.write("branch-session", { role: "builder", transition: "compaction-retry", detail: error });
@@ -329,8 +345,13 @@ export class Foreman {
     adapter: BuilderAdapter,
     instruction: string,
   ): Promise<{ result: TurnResult; status: StepStatus }> {
+    if (adapter === this.builder && this.beforeBuilderTurn) {
+      this.builder = await this.beforeBuilderTurn(this.builder, instruction);
+      adapter = this.builder;
+    }
     let result = await adapter.sendTurn(instruction);
     let status = parseStepStatus(result.text);
+    if (result.failure?.category === "session-unavailable") return { result, status };
     if (status.kind === "unknown") {
       if (!status.error && looksLikeQuestion(result.text)) {
         status = { kind: "needs_input", question: lastLine(result.text), choices: ["Continue", "Cancel"] };
@@ -379,6 +400,7 @@ export class Foreman {
   /** Send a planning turn and return the builder's response text. Does not count toward steps. */
   async runPreflight(n: number, ticketsContent?: string, preferredTicketId?: string): Promise<string> {
     const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId);
+    if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, instruction);
     const result = await this.builder.sendTurn(instruction);
     this.log.write("preflight", {
       ticketsProvided: ticketsContent !== undefined,
@@ -391,6 +413,7 @@ export class Foreman {
 
   /** Send user feedback on the plan; builder responds with a revised list. Does not count toward steps. */
   async sendPreflightFeedback(feedback: string): Promise<void> {
+    if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, feedback);
     const result = await this.builder.sendTurn(feedback);
     this.log.write("preflight", { feedback: true, costUsd: result.costUsd, isError: result.isError });
     if (result.isError) throw new Error(result.text);
@@ -421,10 +444,12 @@ export class Foreman {
         qaStrategy: this.qaSessionStrategy,
         state: this.qaStream,
         createQa: this.qaFactory,
+        sessionBoundary: this.qaSessionBoundary,
         maxCycles: this.qaMaxCycles,
         fix: async (issues) => {
-          await this.prepareBuilderBoundary(); this.builderWorkSessions += 1;
-          const fix = await this.doTurn(buildQaFixInstruction(issues));
+          const instruction = buildQaFixInstruction(issues);
+          await this.prepareBuilderBoundary(instruction); this.builderWorkSessions += 1;
+          const fix = await this.doTurn(instruction);
           this.log.write("qa-fix", { stepIndex, statusKind: fix.status.kind, costUsd: fix.result.costUsd, isError: fix.result.isError });
           return fix.result.isError || fix.status.kind !== "done"
             ? { ok: false, detail: fix.status.reason ?? fix.status.error ?? fix.result.text.slice(0, 200) }
@@ -511,6 +536,7 @@ export class Foreman {
   }
 
   qaSessionId(): string | undefined { return this.qaStream.sessionId ?? this.qaReviewer?.sessionId(); }
+  qaSessionRef(): import("rafi-spec").ProviderSessionRefV1 | undefined { return this.qaStream.sessionRef ?? this.qaReviewer?.sessionRef?.(); }
   builderSessionId(): string | undefined { return this.builder.sessionId(); }
   builderAdapter(): BuilderAdapter { return this.builder; }
   async close(): Promise<void> { await this.builder.close(); }
@@ -580,7 +606,7 @@ export class Foreman {
       const instruction = i === 1
         ? buildPrimer(n, trackerPath, this.ticketsEnabled, preferredTicketId)
         : buildNextStepInstruction(i, n);
-      if (i > 1) await this.prepareBuilderBoundary();
+      if (i > 1) await this.prepareBuilderBoundary(instruction);
       this.builderWorkSessions += 1;
       const { result, status } = await this.doTurn(instruction);
 

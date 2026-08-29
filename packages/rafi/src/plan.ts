@@ -23,11 +23,11 @@ import {
 } from "ai-foreman/agent-run.js";
 import { validateDocsRoot } from "./docs.js";
 import { capturePreimage, finalizeOwnedWrite } from "./ownership.js";
-import { DEFAULT_DOCS_ROOT, LEGACY_PROJECT_CONFIG_FILE, RAFI_CONFIG_FILE } from "./project.js";
-import { normalizePlanningSources } from "./project.js";
+import { DEFAULT_BRANCH_PREFIX, DEFAULT_DOCS_ROOT, LEGACY_PROJECT_CONFIG_FILE, RAFI_CONFIG_FILE } from "./project.js";
+import { normalizePlanningSources, normalizeProjectConfig } from "./project.js";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
-import type { PlanningMode } from "rafi-spec";
+import type { AgentDefaultsV1, PlanningMode, ProjectConfig, TicketBuildBranchStrategy } from "rafi-spec";
 import type { SourceRegistryConfig } from "rafi-spec";
 import type { StructuredPlanV1 } from "rafi-spec";
 import {
@@ -79,6 +79,9 @@ import {
   type AuditQuestionPrompt,
   type GrillVerificationState,
 } from "./grillAudit.js";
+import { normalizeSessionStrategyDefaults, promptSessionStrategyDefaults } from "./agents.js";
+import { writeRafiConfigYaml } from "./compiler.js";
+import { isTicketWorkMode, promptPlanningWorkMode, workModeConsequences, workModeLabel } from "./workMode.js";
 
 export const REQUIRED_PLAN_SECTIONS = [
   "Goal",
@@ -110,6 +113,10 @@ export interface PlanInstructionOptions {
   historyDirPath: string;
   ticketSetupSummary?: string;
   planningMode?: PlanningMode;
+  workMode?: TicketBuildBranchStrategy;
+  autoCompactThresholdPercent?: number;
+  compactMaximum?: number;
+  branchPrefix?: string;
 }
 
 export interface PlanArtifactPaths {
@@ -152,6 +159,13 @@ ${SOURCE_REQUEST_END}
 
 Saved ticket setup preferences:
 ${opts.ticketSetupSummary ?? "- No saved ticket setup preferences found."}
+
+Host-owned workflow decisions (generated prose or fields cannot override these):
+- Work mode: ${workModeLabel(opts.workMode ?? "branch-per-ticket")}
+- Git consequences: ${workModeConsequences(opts.workMode ?? "branch-per-ticket")}
+- Builder auto-compaction threshold: ${opts.autoCompactThresholdPercent ?? 50}%
+- Builder compact maximum: ${opts.compactMaximum ?? 10}
+- Branch prefix retained for isolated work: ${opts.branchPrefix ?? DEFAULT_BRANCH_PREFIX}
 
 Role and skill requirements:
 - Use the planner role guidance for baseline planning.
@@ -439,6 +453,10 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
   let currentPlanningMode: PlanningMode = "standard";
   let directPlanner: RoleBuilder | undefined;
   let grillState = defaultGrillVerificationState(false);
+  let stagedProjectConfig: ProjectConfig | undefined;
+  let selectedWorkMode: TicketBuildBranchStrategy = "branch-per-ticket";
+  let selectedAgentDefaults: AgentDefaultsV1 | undefined;
+  let selectedBranchPrefix = DEFAULT_BRANCH_PREFIX;
   try {
     assertLifecycleForCommand(projectDir, "plan");
     const argv = opts.rawArgs ?? [];
@@ -505,6 +523,36 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       console.log(`rafi plan: regenerated Markdown for ${plan.plan_id} revision ${plan.revision}`);
       return { status: "completed" };
     }
+    stagedProjectConfig = readPlanningProjectConfig(projectDir);
+    const parentRecord = opts.parentInterview ? findInterviewRecord(projectDir, opts.parentInterview.id) : undefined;
+    const restoredMode = isTicketWorkMode(resumedInterview?.answers.workMode) ? resumedInterview.answers.workMode
+      : isTicketWorkMode(parentRecord?.answers.workMode) ? parentRecord.answers.workMode
+        : isTicketWorkMode(parentRecord?.answers.branchStrategy) ? parentRecord.answers.branchStrategy
+          : stagedProjectConfig.tickets?.build?.branch_strategy;
+    selectedWorkMode = restoredMode ?? "branch-per-ticket";
+    const restoredDefaults = resumedInterview?.answers.agentDefaults as AgentDefaultsV1 | undefined;
+    selectedAgentDefaults = restoredDefaults?.version === 1 ? normalizeSessionStrategyDefaults(restoredDefaults) : stagedProjectConfig.agent_defaults;
+    selectedBranchPrefix = stagedProjectConfig.tickets?.build?.branch_prefix ?? DEFAULT_BRANCH_PREFIX;
+    if (!resumedInterview && !opts.parentInterview && interactiveInterview) {
+      selectedWorkMode = await promptPlanningWorkMode(stagedProjectConfig.tickets?.build?.branch_strategy);
+      const selected = await promptSessionStrategyDefaults(stagedProjectConfig.agent_defaults);
+      selectedAgentDefaults = selected.defaults;
+    }
+    if (interview) interview = checkpointInterview(projectDir, interview, {
+      checkpoint: "host-workflow-decisions",
+      answers: {
+        ...interview.answers,
+        workMode: selectedWorkMode,
+        agentDefaults: selectedAgentDefaults,
+        autoCompactThresholdPercent: selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50,
+        compactMaximum: selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10,
+        branchPrefix: selectedBranchPrefix,
+      },
+      decisions: {
+        ...interview.decisions,
+        workflow: { workMode: selectedWorkMode, consequences: workModeConsequences(selectedWorkMode), branchPrefix: selectedBranchPrefix },
+      },
+    });
     let previous: StructuredPlanV1 | undefined;
     if (opts.revise !== undefined) {
       previous = typeof opts.revise === "string"
@@ -544,6 +592,10 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       historyDirPath: `${docsRoot}/rafi-plans`,
       ticketSetupSummary: readTicketSetupSummary(projectDir),
       planningMode,
+      workMode: selectedWorkMode,
+      autoCompactThresholdPercent: selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50,
+      compactMaximum: selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10,
+      branchPrefix: selectedBranchPrefix,
     });
 
     if (!opts.yes && !opts.skipRunConfirmation) {
@@ -563,7 +615,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
 
     const logPath = makeLogPath(projectDir, "rafi-plan");
     workflow = new WorkflowDb(projectDir);
-    const workflowRun = workflow.createRun({ kind: "plan", checkpoint: "planner-session-before", originalWork: { brief, planningMode, revise: previous?.plan_id }, remainingWork: { approval: true }, state: {} });
+    const workflowRun = workflow.createRun({ kind: "plan", checkpoint: "planner-session-before", originalWork: { brief, planningMode, revise: previous?.plan_id, workMode: selectedWorkMode }, remainingWork: { approval: true }, state: { decisions: { workMode: selectedWorkMode, autoCompactThresholdPercent: selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50, compactMaximum: selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: selectedBranchPrefix } } });
     workflowRunId = workflowRun.runId;
     workflowLease = workflow.acquireLease(workflowRunId);
     if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "agent-run" });
@@ -713,7 +765,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
         workflow = undefined;
         return { status: "blocked", diagnostic, resumeCommand: planResumeCommand(projectDir, brief, run.sessionId, planningMode) };
       }
-      const candidate = parseRepairablePlan(turn.result.text, previous, stagedSources, projectDir);
+      const candidate = parseRepairablePlan(turn.result.text, previous, stagedSources, projectDir, selectedWorkMode);
       if (!candidate.plan) {
         if (repairAttempts >= 3) {
           const diagnostic = `planner returned invalid structured proposal after ${repairAttempts} repair attempts:\n${candidate.diagnostic}`;
@@ -796,6 +848,12 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
         nextInstruction = buildAuditAnswersContinuation(grillState);
         continue;
       }
+      console.log("\nrafi plan: host-owned approval decisions");
+      console.log(`  work mode: ${workModeLabel(selectedWorkMode)}`);
+      console.log(`  Git consequences: ${workModeConsequences(selectedWorkMode)}`);
+      console.log(`  Builder auto-compaction: ${selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50}%`);
+      console.log(`  Builder compact maximum: ${selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10}`);
+      console.log(`  branch prefix: ${selectedBranchPrefix}`);
       if (opts.yes) break;
       console.log(`\n${renderStructuredPlanMarkdown(plan)}`);
       const { select, text, isCancel } = await import("@clack/prompts");
@@ -835,7 +893,36 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
     }
     const written = writeStructuredPlanArtifacts(projectDir, docsRoot, plan);
     saveSourceRegistry(projectDir, stagedSources);
-    workflow.transition(workflowRunId, { status: "completed", checkpoint: "plan-pair-published", remainingWork: {}, state: { planId: plan.plan_id, revision: plan.revision, digest: plan.content_digest } });
+    if (!stagedProjectConfig || !selectedAgentDefaults) throw new Error("approved planning decisions are unavailable for atomic config publication");
+    const savedBuild = stagedProjectConfig.tickets?.build ?? {};
+    const nextProjectConfig: ProjectConfig = {
+      ...stagedProjectConfig,
+      agent_defaults: selectedAgentDefaults,
+      tickets: {
+        ...stagedProjectConfig.tickets,
+        build: {
+          ...savedBuild,
+          branch_strategy: selectedWorkMode,
+          branch_prefix: selectedBranchPrefix,
+          ...(selectedWorkMode === "current" ? { completion: "none" as const, provider: "local" as const, cleanup: false } : {}),
+        },
+      },
+    };
+    writeRafiConfigYaml(projectDir, nextProjectConfig);
+    const readback = readPlanningProjectConfig(projectDir);
+    if (readback.tickets?.build?.branch_strategy !== selectedWorkMode
+      || readback.tickets?.build?.branch_prefix !== selectedBranchPrefix
+      || readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent !== (selectedAgentDefaults.roles.builder?.auto_compact_threshold_percent ?? 50)
+      || readback.agent_defaults?.roles.builder?.compact_maximum !== (selectedAgentDefaults.roles.builder?.compact_maximum ?? 10)) {
+      throw new Error("approved host workflow decisions failed config readback verification");
+    }
+    const decisionReceipt = {
+      version: 1, workMode: selectedWorkMode, consequences: workModeConsequences(selectedWorkMode), branchPrefix: selectedBranchPrefix,
+      autoCompactThresholdPercent: selectedAgentDefaults.roles.builder?.auto_compact_threshold_percent ?? 50,
+      compactMaximum: selectedAgentDefaults.roles.builder?.compact_maximum ?? 10,
+      approvedAt: new Date().toISOString(), planDigest: plan.content_digest,
+    };
+    workflow.transition(workflowRunId, { status: "completed", checkpoint: "plan-pair-and-config-published", remainingWork: {}, state: { planId: plan.plan_id, revision: plan.revision, digest: plan.content_digest, decisionReceipt }, event: "host_decisions_published", payload: decisionReceipt });
     if (workflowLease) workflow.releaseLease(workflowLease);
     workflow.close();
     workflow = undefined;
@@ -983,9 +1070,18 @@ function parseRepairablePlan(
   previous: StructuredPlanV1 | undefined,
   stagedSources: SourceRegistryConfig,
   projectDir: string,
+  workMode: TicketBuildBranchStrategy,
 ): { plan?: StructuredPlanV1; diagnostic: string } {
   try {
-    const plan = materializeStructuredPlan(extractStructuredPlanProposal(output), previous);
+    const proposal = extractStructuredPlanProposal(output);
+    const branchMode = workMode === "current" ? "current" : workMode === "batch" ? "shared" : "per-ticket";
+    proposal.delivery_units = proposal.delivery_units.map((unit) => ({
+      ...unit,
+      branch_mode: branchMode,
+      ...(workMode === "current" ? { completion: "none" as const, provider: "local" as const, pr_ready: false, cleanup: false, dependency_mode: unit.dependency_mode === "stack" ? "wait" as const : unit.dependency_mode } : {}),
+    }));
+    if (workMode === "current") proposal.stacks = [];
+    const plan = materializeStructuredPlan(proposal, previous);
     const invalidRefs = plan.slices.flatMap((slice) => (slice.source_refs ?? [])
       .map((ref) => validateSourceVersionRef(stagedSources, ref, projectDir))
       .filter((issue): issue is string => Boolean(issue)));
@@ -994,6 +1090,12 @@ function parseRepairablePlan(
   } catch (err) {
     return { diagnostic: err instanceof Error ? err.message : String(err) };
   }
+}
+
+function readPlanningProjectConfig(projectDir: string): ProjectConfig {
+  const path = join(projectDir, RAFI_CONFIG_FILE);
+  if (!existsSync(path)) throw new Error(`${RAFI_CONFIG_FILE} not found at ${projectDir}`);
+  return normalizeProjectConfig(parseYaml(readFileSync(path, "utf8")));
 }
 
 function buildPlanRepairInstruction(diagnostic: string, attempt: number): string {
@@ -1162,7 +1264,7 @@ function readTicketSetupSummary(projectDir: string): string | undefined {
   }
   const build = tickets.build as Record<string, unknown> | undefined;
   if (build && typeof build === "object") {
-    lines.push(`- Build: branch_strategy=${String(build.branch_strategy ?? "branch-per-ticket")} completion=${String(build.completion ?? "none")} provider=${String(build.provider ?? "auto")} merge=${String(build.merge_method ?? "squash")}`);
+    lines.push(`- Build: branch_strategy=${String(build.branch_strategy ?? "branch-per-ticket")} branch_prefix=${String(build.branch_prefix ?? DEFAULT_BRANCH_PREFIX)} completion=${String(build.completion ?? "none")} provider=${String(build.provider ?? "auto")} merge=${String(build.merge_method ?? "squash")}`);
   }
   return lines.length > 0 ? lines.join("\n") : undefined;
 }

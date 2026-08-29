@@ -4,6 +4,7 @@ import { loadTicketsConfig, resolveTicketPaths } from "./config.js";
 import { StateDb, type ReviewRecommendation, type ReviewRecommendationStatus } from "./stateDb.js";
 import { nowTimestamp } from "./events.js";
 import { renderAndWrite } from "./renderMarkdown.js";
+import { createHash } from "node:crypto";
 
 export interface TicketRecommendationPatch {
   add?: TicketDef[];
@@ -70,18 +71,36 @@ export function cmdReviewRecommendations(projectDir: string, opts: ReviewCommand
 
     const now = nowTimestamp(config.timezone);
     if (opts.action === "accept") {
-      let tickets = loadTickets(paths.tickets);
+      const before = loadTickets(paths.tickets);
+      db.ensureSyntheticLegacyGroup(before as Array<TicketDef & Record<string, unknown>>);
+      let tickets = before;
+      const requestedAdditions = new Set<string>();
       for (const rec of selected) {
-        tickets = applyRecommendationPatch(tickets, parseRecommendationPatch(rec));
+        const patch = parseRecommendationPatch(rec);
+        for (const ticket of patch.add ?? []) requestedAdditions.add(ticket.id);
+        tickets = applyRecommendationPatch(tickets, patch);
       }
       const issues = validateTicketDefs(tickets);
       if (issues.length > 0) {
         throw new Error(`accepted recommendation produced invalid tickets:\n${issues.map((issue) => `- ${issue.path}: ${issue.message}`).join("\n")}`);
       }
-      saveTickets(paths.tickets, tickets);
-      db.transaction(() => {
-        for (const rec of selected) db.updateReviewRecommendationStatus(rec.id!, "accepted", now);
-      });
+      let definitionsPublished = false;
+      try {
+        db.transaction(() => {
+          const additions = tickets.filter((ticket) => requestedAdditions.has(ticket.id) && !db.getTicketGroupForTicket(ticket.id));
+          if (additions.length) {
+            const operationDigest = createHash("sha256").update(JSON.stringify(selected.map((rec) => rec.id).sort())).digest("hex");
+            db.createTicketGroup({ origin: "production", operationId: `recommendations:${operationDigest}`, createdAt: now, members: additions.map((ticket) => ({ ticketId: ticket.id, definition: ticket, validatedAt: now })) });
+          }
+          saveTickets(paths.tickets, tickets);
+          definitionsPublished = true;
+          for (const ticket of tickets) if (db.getTicketGroupForTicket(ticket.id)) db.updateTicketDefinitionSnapshot(ticket.id, ticket, now);
+          for (const rec of selected) db.updateReviewRecommendationStatus(rec.id!, "accepted", now);
+        });
+      } catch (error) {
+        if (definitionsPublished) saveTickets(paths.tickets, before);
+        throw error;
+      }
       const states = db.getAllStates();
       renderAndWrite({ config, projectDir, ticketDefs: tickets, states, db });
     } else {

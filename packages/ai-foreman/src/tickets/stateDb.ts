@@ -1,6 +1,8 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { createHash } from "node:crypto";
+import type { SavedTicketDefinitionSnapshot, TicketGroup, TicketGroupId, TicketGroupOrigin } from "rafi-spec";
 
 export type TicketStatus = "planned" | "next" | "in_progress" | "blocked" | "done" | "canceled" | "obsolete";
 export type ValidationResult = "passed" | "failed" | "not_run" | "not_applicable";
@@ -101,6 +103,13 @@ export interface OperationReceipt {
   run_id: string;
   completed_at: string;
   payload_json: string;
+}
+
+export interface TicketGroupValidationIssue {
+  code: "missing-membership" | "multiple-membership" | "unknown-member" | "empty-group" | "sequence-corruption" | "reused-id" | "snapshot-corruption" | "receipt-without-group";
+  message: string;
+  groupId?: TicketGroupId;
+  ticketId?: string;
 }
 
 /** The only valid initial/fully-reset active state for a ticket. */
@@ -233,6 +242,38 @@ CREATE TABLE IF NOT EXISTS operation_receipts (
   payload_json TEXT NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS ticket_groups (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  origin TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  legacy INTEGER NOT NULL DEFAULT 0,
+  operation_id TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS ticket_group_members (
+  group_sequence INTEGER NOT NULL REFERENCES ticket_groups(sequence) ON DELETE RESTRICT,
+  ticket_id TEXT NOT NULL UNIQUE,
+  position INTEGER NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  snapshot_digest TEXT NOT NULL,
+  snapshot_validated_at TEXT NOT NULL,
+  PRIMARY KEY(group_sequence, ticket_id),
+  UNIQUE(group_sequence, position),
+  CHECK(position >= 1)
+);
+
+CREATE TABLE IF NOT EXISTS ticket_group_receipts (
+  operation_id TEXT PRIMARY KEY,
+  group_sequence INTEGER NOT NULL UNIQUE REFERENCES ticket_groups(sequence) ON DELETE RESTRICT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ticket_group_sequence_ledger (
+  sequence INTEGER PRIMARY KEY,
+  operation_id TEXT NOT NULL UNIQUE,
+  allocated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_ticket_state_status ON ticket_state(status);
 CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket_id ON ticket_events(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ticket_events_timestamp ON ticket_events(timestamp);
@@ -240,6 +281,7 @@ CREATE INDEX IF NOT EXISTS idx_validation_snapshots_timestamp ON validation_snap
 CREATE INDEX IF NOT EXISTS idx_future_work_disposition ON future_work(disposition);
 CREATE INDEX IF NOT EXISTS idx_review_recommendations_status ON review_recommendations(status);
 CREATE INDEX IF NOT EXISTS idx_operation_receipts_run ON operation_receipts(run_id);
+CREATE INDEX IF NOT EXISTS idx_ticket_group_members_group ON ticket_group_members(group_sequence, position);
 `;
 
 export class StateDb {
@@ -250,6 +292,8 @@ export class StateDb {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(INIT_SQL);
+    this.db.prepare(`INSERT OR IGNORE INTO ticket_group_sequence_ledger(sequence,operation_id,allocated_at)
+      SELECT sequence,operation_id,created_at FROM ticket_groups`).run();
     this.migrateObsoleteStatus();
   }
 
@@ -511,9 +555,172 @@ export class StateDb {
     return result.changes === 1;
   }
 
+  // ── immutable ticket creation groups ─────────────────────────────────────
+
+  createTicketGroup(input: {
+    origin: TicketGroupOrigin;
+    operationId: string;
+    members: Array<{ ticketId: string; definition: unknown; validatedAt?: string }>;
+    legacy?: boolean;
+    createdAt?: string;
+  }): TicketGroup {
+    const existing = this.getTicketGroupByOperation(input.operationId);
+    if (existing) {
+      const requestedIds = input.members.map((member) => member.ticketId);
+      const existingIds = existing.members.map((member) => member.ticketId);
+      if (existing.origin !== input.origin || JSON.stringify(existingIds) !== JSON.stringify(requestedIds)) throw new Error(`ticket group operation ${input.operationId} was retried with different immutable membership`);
+      return existing;
+    }
+    if (!input.operationId.trim()) throw new Error("ticket group operation ID must not be empty");
+    if (input.members.length === 0) throw new Error("ticket creation updates/no-ops must not create an empty group");
+    const ids = input.members.map((member) => member.ticketId);
+    if (new Set(ids).size !== ids.length) throw new Error("ticket group members must be unique");
+    const createdAt = input.createdAt ?? new Date().toISOString();
+    return this.transaction(() => {
+      const result = this.db.prepare("INSERT INTO ticket_groups(origin,created_at,legacy,operation_id) VALUES(?,?,?,?)")
+        .run(input.origin, createdAt, input.legacy ? 1 : 0, input.operationId);
+      const sequence = Number(result.lastInsertRowid);
+      this.db.prepare("INSERT INTO ticket_group_sequence_ledger(sequence,operation_id,allocated_at) VALUES(?,?,?)").run(sequence, input.operationId, createdAt);
+      const insert = this.db.prepare(`INSERT INTO ticket_group_members(group_sequence,ticket_id,position,snapshot_json,snapshot_digest,snapshot_validated_at)
+        VALUES(?,?,?,?,?,?)`);
+      input.members.forEach((member, index) => {
+        const snapshot = makeDefinitionSnapshot(member.ticketId, member.definition, member.validatedAt ?? createdAt);
+        insert.run(sequence, member.ticketId, index + 1, JSON.stringify(snapshot.definition), snapshot.digest, snapshot.validatedAt);
+        // The creation receipt, immutable membership, recoverable definition,
+        // and initial active state are one SQLite publication. Existing state
+        // is preserved on replay or when importing an externally completed
+        // ticket.
+        if (!this.getState(member.ticketId)) {
+          this.upsertState(member.ticketId, pristineTicketState(member.ticketId, createdAt, "rafi ticket publication"), createdAt);
+        }
+      });
+      this.db.prepare("INSERT INTO ticket_group_receipts(operation_id,group_sequence,created_at) VALUES(?,?,?)").run(input.operationId, sequence, createdAt);
+      return this.getTicketGroupBySequence(sequence)!;
+    });
+  }
+
+  /** Update only the recoverable definition; membership and order never change. */
+  updateTicketDefinitionSnapshot(ticketId: string, definition: unknown, validatedAt = new Date().toISOString()): SavedTicketDefinitionSnapshot {
+    const snapshot = makeDefinitionSnapshot(ticketId, definition, validatedAt);
+    const result = this.db.prepare(`UPDATE ticket_group_members SET snapshot_json=?,snapshot_digest=?,snapshot_validated_at=? WHERE ticket_id=?`)
+      .run(JSON.stringify(snapshot.definition), snapshot.digest, snapshot.validatedAt, ticketId);
+    if (result.changes !== 1) throw new Error(`ticket ${ticketId} has no creation-group membership`);
+    return snapshot;
+  }
+
+  getTicketGroupByOperation(operationId: string): TicketGroup | undefined {
+    const row = this.db.prepare("SELECT sequence FROM ticket_groups WHERE operation_id=?").get(operationId) as { sequence: number } | undefined;
+    return row ? this.getTicketGroupBySequence(row.sequence) : undefined;
+  }
+
+  getTicketGroup(groupId: string): TicketGroup | undefined {
+    const match = /^TG-([1-9]\d*)$/.exec(groupId);
+    return match ? this.getTicketGroupBySequence(Number(match[1])) : undefined;
+  }
+
+  getTicketGroupForTicket(ticketId: string): TicketGroup | undefined {
+    const row = this.db.prepare("SELECT group_sequence AS sequence FROM ticket_group_members WHERE ticket_id=?").get(ticketId) as { sequence: number } | undefined;
+    return row ? this.getTicketGroupBySequence(row.sequence) : undefined;
+  }
+
+  listTicketGroups(): TicketGroup[] {
+    const rows = this.db.prepare("SELECT sequence FROM ticket_groups ORDER BY sequence DESC").all() as Array<{ sequence: number }>;
+    return rows.map((row) => this.getTicketGroupBySequence(row.sequence)!);
+  }
+
+  /** One-time migration for repositories whose complete ticket set predates groups. */
+  ensureSyntheticLegacyGroup(definitions: Array<{ id: string } & Record<string, unknown>>, now = new Date()): TicketGroup | undefined {
+    if (definitions.length === 0 || this.listTicketGroups().length > 0) return undefined;
+    return this.createTicketGroup({
+      origin: "legacy",
+      operationId: "ticket-groups:synthetic-legacy:v1",
+      legacy: true,
+      createdAt: now.toISOString(),
+      members: definitions.map((definition) => ({ ticketId: definition.id, definition, validatedAt: now.toISOString() })),
+    });
+  }
+
+  ungroupedTicketIds(ticketIds: readonly string[]): string[] {
+    const grouped = new Set((this.db.prepare("SELECT ticket_id FROM ticket_group_members").all() as Array<{ ticket_id: string }>).map((row) => row.ticket_id));
+    return ticketIds.filter((ticketId) => !grouped.has(ticketId));
+  }
+
+  repairTicketGroups(definitions: Array<{ id: string } & Record<string, unknown>>, operationId: string, now = new Date()): TicketGroup | undefined {
+    const ungrouped = new Set(this.ungroupedTicketIds(definitions.map((definition) => definition.id)));
+    if (ungrouped.size === 0) return undefined;
+    return this.createTicketGroup({
+      origin: "repair", operationId, createdAt: now.toISOString(),
+      members: definitions.filter((definition) => ungrouped.has(definition.id)).map((definition) => ({ ticketId: definition.id, definition })),
+    });
+  }
+
+  validateTicketGroups(knownTicketIds: readonly string[] = []): TicketGroupValidationIssue[] {
+    const issues: TicketGroupValidationIssue[] = [];
+    const groups = this.listTicketGroups();
+    const known = new Set(knownTicketIds);
+    for (const group of groups) {
+      if (group.members.length === 0) issues.push({ code: "empty-group", groupId: group.id, message: `${group.id} has no members` });
+      for (const member of group.members) {
+        if (known.size > 0 && !known.has(member.ticketId)) issues.push({ code: "unknown-member", groupId: group.id, ticketId: member.ticketId, message: `${group.id} references unknown ticket ${member.ticketId}` });
+        if (definitionDigest(member.snapshot.definition) !== member.snapshot.digest) issues.push({ code: "snapshot-corruption", groupId: group.id, ticketId: member.ticketId, message: `${group.id} snapshot for ${member.ticketId} does not match its digest` });
+      }
+    }
+    for (const ticketId of known) if (!this.getTicketGroupForTicket(ticketId)) issues.push({ code: "missing-membership", ticketId, message: `ticket ${ticketId} has no creation-group membership` });
+    const duplicates = this.db.prepare("SELECT ticket_id,COUNT(*) AS count FROM ticket_group_members GROUP BY ticket_id HAVING COUNT(*)<>1").all() as Array<{ ticket_id: string; count: number }>;
+    for (const row of duplicates) issues.push({ code: "multiple-membership", ticketId: row.ticket_id, message: `ticket ${row.ticket_id} belongs to ${row.count} creation groups` });
+    const maximum = groups.reduce((value, group) => Math.max(value, group.sequence), 0);
+    const sequence = this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='ticket_groups'").get() as { seq: number } | undefined;
+    if (maximum > 0 && (!sequence || sequence.seq < maximum)) issues.push({ code: "sequence-corruption", message: `ticket group sequence is ${sequence?.seq ?? "missing"}, below allocated ${maximum}` });
+    const missingLedger = this.db.prepare("SELECT sequence FROM ticket_groups WHERE sequence NOT IN (SELECT sequence FROM ticket_group_sequence_ledger)").all() as Array<{ sequence: number }>;
+    for (const row of missingLedger) issues.push({ code: "sequence-corruption", groupId: `TG-${row.sequence}` as TicketGroupId, message: `TG-${row.sequence} has no immutable allocation ledger entry` });
+    const reused = this.db.prepare(`SELECT g.sequence FROM ticket_groups g JOIN ticket_group_sequence_ledger l ON l.sequence=g.sequence WHERE g.operation_id<>l.operation_id`).all() as Array<{ sequence: number }>;
+    for (const row of reused) issues.push({ code: "reused-id", groupId: `TG-${row.sequence}` as TicketGroupId, message: `TG-${row.sequence} was reused for a different creation operation` });
+    const deletedAllocations = this.db.prepare("SELECT sequence FROM ticket_group_sequence_ledger WHERE sequence NOT IN (SELECT sequence FROM ticket_groups)").all() as Array<{ sequence: number }>;
+    for (const row of deletedAllocations) issues.push({ code: "sequence-corruption", groupId: `TG-${row.sequence}` as TicketGroupId, message: `allocated TG-${row.sequence} is missing; group IDs must never be deleted or reused` });
+    const orphanReceipts = this.db.prepare("SELECT operation_id FROM ticket_group_receipts WHERE group_sequence NOT IN (SELECT sequence FROM ticket_groups)").all() as Array<{ operation_id: string }>;
+    for (const row of orphanReceipts) issues.push({ code: "receipt-without-group", message: `creation receipt ${row.operation_id} has no group` });
+    return issues;
+  }
+
+  private getTicketGroupBySequence(sequence: number): TicketGroup | undefined {
+    const row = this.db.prepare("SELECT * FROM ticket_groups WHERE sequence=?").get(sequence) as { sequence: number; origin: TicketGroupOrigin; created_at: string; legacy: number; operation_id: string } | undefined;
+    if (!row) return undefined;
+    const members = this.db.prepare("SELECT * FROM ticket_group_members WHERE group_sequence=? ORDER BY position").all(sequence) as Array<{ ticket_id: string; position: number; snapshot_json: string; snapshot_digest: string; snapshot_validated_at: string }>;
+    return {
+      id: `TG-${row.sequence}` as TicketGroupId,
+      sequence: row.sequence,
+      origin: row.origin,
+      createdAt: row.created_at,
+      legacy: Boolean(row.legacy),
+      operationId: row.operation_id,
+      members: members.map((member) => ({
+        groupId: `TG-${row.sequence}` as TicketGroupId,
+        ticketId: member.ticket_id,
+        position: member.position,
+        snapshot: { version: 1, ticketId: member.ticket_id, definition: parseSnapshot(member.snapshot_json), digest: member.snapshot_digest, validatedAt: member.snapshot_validated_at },
+      })),
+    };
+  }
+
   // ── transactions ──────────────────────────────────────────────────────────
 
   transaction<T>(fn: () => T): T {
     return (this.db.transaction(fn) as () => T)();
   }
 }
+
+function makeDefinitionSnapshot(ticketId: string, definition: unknown, validatedAt: string): SavedTicketDefinitionSnapshot {
+  const cloned = JSON.parse(JSON.stringify(definition)) as unknown;
+  if (cloned && typeof cloned === "object" && !Array.isArray(cloned)) {
+    const definitionId = (cloned as Record<string, unknown>).id;
+    if (definitionId !== undefined && definitionId !== ticketId) throw new Error(`ticket definition snapshot ID ${String(definitionId)} does not match group member ${ticketId}`);
+  }
+  return { version: 1, ticketId, definition: cloned, digest: definitionDigest(cloned), validatedAt };
+}
+function definitionDigest(value: unknown): string { return createHash("sha256").update(stableJson(value)).digest("hex"); }
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+  return JSON.stringify(value) ?? "null";
+}
+function parseSnapshot(value: string): unknown { try { return JSON.parse(value); } catch { return { __rafi_corrupt_snapshot: true, raw: value }; } }

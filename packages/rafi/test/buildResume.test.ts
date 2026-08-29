@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stringify } from "yaml";
 
-import { createBuildRun, persistBuildSession, releaseBuildLease } from "ai-foreman/build-runs.js";
+import { createBuildRun, persistBuildSession, projectBuildRecovery, releaseBuildLease } from "ai-foreman/build-runs.js";
+import { createProviderSessionRef } from "ai-foreman/session-identity.js";
+import type { BuildRunRecordV2 } from "rafi-spec";
 import { buildBuildResumeCommand } from "../src/buildResume.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 
@@ -17,6 +19,30 @@ function initializedProject(): string {
   writeFileSync(join(dir, ".tickets/tickets.yaml"), "tickets: []\n", "utf8");
   writeFileSync(join(dir, ".tickets/ticket-state.sqlite"), Buffer.from("SQLite format 3\0"));
   return dir;
+}
+
+function scopedSession(dir: string, sessionId: string, provider: "claude" | "codex" = "codex") {
+  return createProviderSessionRef({
+    provider,
+    sessionId,
+    role: "builder",
+    stream: "builder",
+    cwd: dir,
+    configRoot: dir,
+    source: "observed",
+  });
+}
+
+async function availableProjection(projectDir: string, run: BuildRunRecordV2, now = new Date(), ticket?: string) {
+  const frozen = projectBuildRecovery(projectDir, run, now, ticket);
+  const ref = frozen.sessionCandidateRef;
+  return projectBuildRecovery(projectDir, run, now, ticket, ref ? {
+    version: 1,
+    status: "available",
+    checkedAt: now.toISOString(),
+    observedCwd: ref.cwd,
+    sessionRef: { ...ref, validatedAt: now.toISOString() },
+  } : undefined);
 }
 
 test("build:resume converts a recoverable run into an exact-session start", async () => {
@@ -31,10 +57,10 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
       fast: true,
     };
     let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"], builder: settings });
-    run = persistBuildSession(dir, run, "builder", "session-123");
+    run = persistBuildSession(dir, run, "builder", scopedSession(dir, "session-123"));
     run = releaseBuildLease(dir, run, "recoverable");
     let invoked: string[] | undefined;
-    const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; } });
+    const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; }, resolveProjection: availableProjection });
 
     await command.parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" });
 
@@ -46,6 +72,8 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
       "--yes",
       "--recover-run",
       run.runId,
+      "--recovery-mode",
+      "exact-session",
       "--resume",
       "session-123",
       "--agent",
@@ -73,10 +101,10 @@ test("build:resume selects a recoverable run directly by ticket", async () => {
       fast: false,
     };
     let run = createBuildRun({ repositoryRoot: dir, tickets: ["T004", "T006"], builder: settings });
-    run = persistBuildSession(dir, run, "builder", "session-ticket");
+    run = persistBuildSession(dir, run, "builder", scopedSession(dir, "session-ticket"));
     run = releaseBuildLease(dir, run, "recoverable");
     let invoked: string[] | undefined;
-    const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; } });
+    const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; }, resolveProjection: availableProjection });
 
     await command.parseAsync([dir, "--ticket", "T006", "--yes"], { from: "user" });
 
@@ -123,7 +151,10 @@ test("build:resume supports explicit fresh-session recovery", async () => {
 
     await command.parseAsync([dir, "--run", run.runId, "--yes", "--fresh-session"], { from: "user" });
 
-    assert.deepEqual(invoked, ["start", resolve(dir), "--steps", "1", "--yes", "--recover-run", run.runId, "--agent", "claude"]);
+    assert.deepEqual(invoked, [
+      "start", resolve(dir), "--steps", "1", "--yes", "--recover-run", run.runId,
+      "--recovery-mode", "fresh-recovery-only", "--agent", "claude",
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -142,10 +173,10 @@ test("build:resume recovers shared and mixed modes with isolated-branch flags", 
         fast: false,
       };
       let run = createBuildRun({ repositoryRoot: dir, tickets: ["T003"], branchMode, builder: settings });
-      run = persistBuildSession(dir, run, "builder", `session-${branchMode}`);
+      run = persistBuildSession(dir, run, "builder", scopedSession(dir, `session-${branchMode}`));
       run = releaseBuildLease(dir, run, "recoverable");
       let invoked: string[] | undefined;
-      const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; } });
+      const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; }, resolveProjection: availableProjection });
 
       await command.parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" });
 
@@ -157,6 +188,8 @@ test("build:resume recovers shared and mixed modes with isolated-branch flags", 
         "--yes",
         "--recover-run",
         run.runId,
+        "--recovery-mode",
+        "exact-session",
         "--branch-per-ticket",
         "--resume",
         `session-${branchMode}`,

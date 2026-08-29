@@ -141,7 +141,20 @@ rafi start . --steps 3
 
 Each step is one ticket. The builder receives the project-specific role guidance, and QA reviews each completed ticket by default. The delivery choices approved during `rafi tickets plan` carry into execution: work can stay on the current branch, use a branch per ticket, or share an isolated branch and pull request across a related group.
 
+The explicit current-branch choice is shown as **Current branch — Rafi works here; you manage Git**. In that mode Rafi may edit, test, run QA, and update tracker/recovery state, but it never creates or switches branches/worktrees, commits, pushes, merges, rebases, or manages reviews. Rafi pauses if the active worktree or ref changes unexpectedly. Isolated-workflow run flags are visible overrides and are captured in the run record.
+
 If a grouped delivery contains more tickets than the current run allows, Rafi completes the requested number of tickets, preserves the group’s branch and session, and waits to open its pull request until the group is complete. Unfinished or blocked groups remain available to resume, while dependency-safe unrelated work can continue.
+
+Every Rafi-created ticket batch also receives an immutable repository-local ID such as `TG-1`. Use `rafi tickets groups list` to see stable membership, missing definitions, status totals, and related recoverable runs. Group reset resolves and fingerprints an exact preview before approval:
+
+```sh
+rafi tickets reset --recent-groups 2
+rafi tickets reset --group TG-4 --deleted-tickets restore --yes
+```
+
+Deleted definitions are restored only from Rafi’s latest validated snapshot and only when explicitly selected. A missing dependency is never stripped or silently restored; interactive runs ask what to do, while automation fails atomically unless the conflict is fully specified.
+
+During active Builder and QA work, the bottom terminal line reports the role, provider, activity, truthful context occupancy, compaction count, and handoff generation. Redirected output receives timestamped snapshots. Session cost display is independent from occupancy and is off by default; when enabled, Rafi shows provider-authoritative cost or trustworthy cumulative tokens, never a bundled price estimate. Builder auto-compaction defaults to 50% with at most 10 successful compactions per provider session. Configure persistent values with `rafi agents`, or override only the initial run threshold with `rafi start --auto-compact-threshold`.
 
 To see the most recent run, use:
 
@@ -151,7 +164,9 @@ rafi status
 
 Like ticket planning, status finds the nearest Rafi project when run from a nested directory and identifies the project before showing its latest run.
 
-If implementation is interrupted, use `rafi build:resume .`. It first shows compact candidates, then a complete selected-run preview with ticket title, failure/checkpoint, completed and remaining work, QA state, preserved worktree changes, session availability, and the exact next action. Expected worktree changes are informational; unexpected base/conflicting changes warn but do not block recovery.
+If implementation is interrupted, use `rafi build:resume .`. It first shows compact candidates, then a complete selected-run preview with ticket title, failure/checkpoint, completed and remaining work, QA state, preserved worktree changes, session availability, and the exact next action. Expected worktree changes are informational; unexpected base/conflicting changes warn but do not block recovery. Recovery dispatches exactly one selected mode: exact session, fresh with a validated cumulative handoff, explicit compatibility fresh recovery, or interactive guided recovery for a degraded checkpoint. `--ticket` narrows mutation scope without discarding run-wide dependency and QA context.
+
+Builder and QA turns continuously publish bounded cumulative checkpoints. Exact provider sessions are bound to their canonical worktree and durable workspace identity; a raw ID, changed/recreated worktree, or provider-location mismatch cannot authorize resume. Every disposable QA snapshot starts a fresh QA conversation and accepts cumulative state through the durable handoff stream. Automatic fresh transitions validate a versioned handoff before moving the role lease to a genuinely new provider session. Inspect durable history with `rafi handoffs inspect --run <id>`; disposable cache copies can be pruned separately, while durable history is deleted only by an explicit command after the run is no longer active or recoverable.
 
 Use `rafi build:start-over .` when the whole run—not just tracker state—must restart. Local unmerged work is committed to a reported `archive/...` branch before the original branch returns to its recorded baseline. Pushed/open-review work is left untouched and restarts on a collision-safe `-restart-N` branch. Merged work offers current-base restart, a separate reviewable revert branch, manual guidance, or cancel. The command never force-pushes, deletes a remote branch, closes a review, or edits the base branch directly. `rafi tickets reset` only clears active tracker progress and ownership while preserving ticket definitions, dependencies, validation history, and audit events.
 

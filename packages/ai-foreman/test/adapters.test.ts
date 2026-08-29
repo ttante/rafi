@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildClaudeQueryOptions, claudeApiRetryEvent, permissionDecisionToClaudeResult, requireClaudeSDK } from "../src/adapters/claude.js";
+import { buildClaudeQueryOptions, claudeApiRetryEvent, mergeClaudeProviderSessionUsage, permissionDecisionToClaudeResult, requireClaudeSDK } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import type { BuilderAdapterOptions } from "../src/adapters/types.js";
 
@@ -56,6 +56,31 @@ test("buildClaudeQueryOptions forwards cwd, model, effort, and resumeSessionId u
   assert.equal(opts.model, "claude-opus-4-8");
   assert.equal(opts.effort, "high");
   assert.equal(opts.resume, "sess-abc");
+});
+
+test("Claude cumulative usage replaces absolute SDK totals and never fabricates zero usage", () => {
+  const empty = mergeClaudeProviderSessionUsage(
+    { observedAt: new Date(0).toISOString(), source: "provider" },
+    { type: "result", usage: {}, total_cost_usd: undefined },
+    "2026-01-01T00:00:00.000Z",
+  );
+  assert.deepEqual(empty.sample, { observedAt: "2026-01-01T00:00:00.000Z", source: "provider" });
+
+  const first = mergeClaudeProviderSessionUsage(empty.sample, {
+    usage: { input_tokens: 10, cache_creation_input_tokens: 20, cache_read_input_tokens: 30, output_tokens: 5 },
+    total_cost_usd: 0.25,
+  }, "2026-01-01T00:00:01.000Z");
+  assert.deepEqual(first.sample, {
+    inputTokens: 60, outputTokens: 5, totalTokens: 65, authoritativeCostUsd: 0.25,
+    observedAt: "2026-01-01T00:00:01.000Z", source: "provider",
+  });
+
+  const second = mergeClaudeProviderSessionUsage(first.sample, {
+    usage: { input_tokens: 12, cache_creation_input_tokens: 20, cache_read_input_tokens: 40, output_tokens: 8 },
+    total_cost_usd: 0.4,
+  }, "2026-01-01T00:00:02.000Z");
+  assert.equal(second.sample.totalTokens, 80);
+  assert.equal(second.sample.authoritativeCostUsd, 0.4);
 });
 
 test("permissionDecisionToClaudeResult preserves updatedInput and interrupt", () => {

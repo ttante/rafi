@@ -31,7 +31,7 @@ test("workflow DB updates snapshots and append-only events in the same lifecycle
 
 test("live settings attempt same-provider continuation and fall back fresh on a rejected switch", async () => {
   const created: FakeAdapter[] = []; let generation = 0;
-  const settings = { role: "builder" as const, make: "codex" as const, model: "old", reasoning: "high", fast: false, session_strategy: "compact" as const, settings_revision: 1, source: "project" as const };
+  const settings = { role: "builder" as const, make: "codex" as const, model: "old", reasoning: "high", fast: false, session_strategy: "compact" as const, display_session_cost: false, auto_compact_threshold_percent: 50, compact_maximum: 10, settings_revision: 1, source: "project" as const };
   const controller = new RoleSessionController({ role: "builder", settings, create: async () => {
     const adapter = new FakeAdapter(`s${++generation}`, [{ ok: true }], generation === 1 ? { ok: false, error: "unsupported model transition" } : { ok: true }); created.push(adapter); return adapter;
   } });
@@ -43,7 +43,7 @@ test("live settings attempt same-provider continuation and fall back fresh on a 
 
 test("compact strategy skips the first boundary, compacts later, and falls back fresh after two failures", async () => {
   const created: FakeAdapter[] = []; let generation = 0;
-  const controller = new RoleSessionController({ role: "builder", settings: { role: "builder", make: "codex", model: "x", reasoning: "high", fast: false, session_strategy: "compact", settings_revision: 1, source: "project" }, create: async () => {
+  const controller = new RoleSessionController({ role: "builder", settings: { role: "builder", make: "codex", model: "x", reasoning: "high", fast: false, session_strategy: "compact", display_session_cost: false, auto_compact_threshold_percent: 50, compact_maximum: 10, settings_revision: 1, source: "project" }, create: async () => {
     const adapter = new FakeAdapter(`s${++generation}`, generation === 1 ? [{ ok: false, error: "one" }, { ok: false, error: "two" }] : [{ ok: true }]); created.push(adapter); return adapter;
   } });
   assert.equal((await controller.next("one")).transition.kind, "initial");

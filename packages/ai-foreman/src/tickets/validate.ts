@@ -21,6 +21,7 @@ export function runAllValidation(
   db: StateDb,
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  db.ensureSyntheticLegacyGroup(ticketDefs as Array<TicketDef & Record<string, unknown>>);
 
   // Pass 1: schema and source
   for (const err of validateTicketDefs(ticketDefs)) {
@@ -28,6 +29,9 @@ export function runAllValidation(
   }
   for (const cycle of detectCycles(ticketDefs)) {
     issues.push({ pass: 1, severity: "error", message: `[cycle] dependency cycle: ${cycle}` });
+  }
+  for (const issue of db.validateTicketGroups(ticketDefs.map((ticket) => ticket.id))) {
+    issues.push({ pass: 1, severity: "error", message: `[ticket-group:${issue.code}] ${issue.message}` });
   }
   try {
     const delivery = loadDeliveryConfig(projectDir);

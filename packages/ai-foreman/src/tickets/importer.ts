@@ -9,6 +9,7 @@ import { loadTicketsConfig, resolveTicketPaths } from "./config.js";
 import type { TicketSourceConfig } from "./setupConfig.js";
 import { insertXlSplitRecommendations } from "./recommendations.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
+import { createHash } from "node:crypto";
 
 export function importFromMarkdown(_progressDocPath: string): never {
   throw new Error(
@@ -215,6 +216,9 @@ export function applyImportedItems(
   const db = new StateDb(paths.stateDb);
   let created = 0;
   let updated = 0;
+  const createdTickets: TicketDef[] = [];
+  const statePatches: Array<{ ticketId: string; patch: Parameters<StateDb["upsertState"]>[1] }> = [];
+  let definitionsPublished = false;
 
   try {
     let nextNumber = nextTicketNumber(tickets);
@@ -229,7 +233,9 @@ export function applyImportedItems(
         const id = `T${String(nextNumber++).padStart(3, "0")}`;
         const order = nextOrder;
         nextOrder += 1000;
-        tickets.push(importedItemToTicket(item, id, order));
+        const createdTicket = importedItemToTicket(item, id, order);
+        tickets.push(createdTicket);
+        createdTickets.push(createdTicket);
         created++;
       }
       const ticket = matchIndex >= 0 ? tickets[matchIndex]! : tickets[tickets.length - 1]!;
@@ -244,7 +250,7 @@ export function applyImportedItems(
           patch.validation_result = "not_applicable";
           patch.validation_notes = "External tracker marked this item complete before import.";
         }
-        db.upsertState(ticket.id, patch, now);
+        statePatches.push({ ticketId: ticket.id, patch });
       }
     }
 
@@ -253,8 +259,21 @@ export function applyImportedItems(
       throw new Error(`import produced invalid tickets:\n${errors.map((err) => `- ${err.path}: ${err.message}`).join("\n")}`);
     }
 
-    saveTickets(paths.tickets, tickets);
+    db.transaction(() => {
+      for (const { ticketId, patch } of statePatches) db.upsertState(ticketId, patch, now);
+      db.ensureSyntheticLegacyGroup(existing as Array<TicketDef & Record<string, unknown>>);
+      if (createdTickets.length) {
+        const operationDigest = createHash("sha256").update(JSON.stringify(items.map((item) => [item.provider, item.providerId]))).digest("hex");
+        db.createTicketGroup({ origin: "import", operationId: `ticket-import:${operationDigest}`, createdAt: now, members: createdTickets.map((ticket) => ({ ticketId: ticket.id, definition: ticket, validatedAt: now })) });
+      }
+      saveTickets(paths.tickets, tickets);
+      definitionsPublished = true;
+      for (const ticket of tickets) if (db.getTicketGroupForTicket(ticket.id)) db.updateTicketDefinitionSnapshot(ticket.id, ticket, now);
+    });
     return { created, updated, tickets };
+  } catch (error) {
+    if (definitionsPublished) saveTickets(paths.tickets, existing);
+    throw error;
   } finally {
     db.close();
   }

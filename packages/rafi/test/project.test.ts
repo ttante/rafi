@@ -24,11 +24,11 @@ test("--defaults produces a config that validates against ProjectConfig schema",
   const config = buildProjectConfig(defaultAnswers());
   assert.ok(validateProjectConfig(config).valid, "default config failed schema validation");
   assert.deepEqual(config.agent_defaults?.roles, {
-    builder: { session_strategy: "compact" },
-    qa: { session_strategy: "compact" },
-    "ticket-maker": { session_strategy: "compact" },
-    planner: { session_strategy: "fresh" },
-    uninstaller: { session_strategy: "fresh" },
+    builder: { session_strategy: "compact", display_session_cost: false, auto_compact_threshold_percent: 50, compact_maximum: 10 },
+    qa: { session_strategy: "compact", display_session_cost: false },
+    "ticket-maker": { session_strategy: "compact", display_session_cost: false },
+    planner: { session_strategy: "fresh", display_session_cost: false },
+    uninstaller: { session_strategy: "fresh", display_session_cost: false },
   });
 });
 

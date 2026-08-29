@@ -8,7 +8,13 @@ import { validateAgentDefaults } from "rafi-spec";
 import { AGENT_ROLE_REGISTRY } from "ai-foreman/roles.js";
 import { probeRuntime } from "ai-foreman/runtime-readiness.js";
 import { assertLifecycleForCommand } from "./lifecycle.js";
-import { normalizeProjectConfig, RAFI_CONFIG_FILE } from "./project.js";
+import {
+  DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+  DEFAULT_COMPACT_MAXIMUM,
+  normalizeProjectAgentDefaults,
+  normalizeProjectConfig,
+  RAFI_CONFIG_FILE,
+} from "./project.js";
 import { compile } from "./compiler.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 
@@ -21,6 +27,9 @@ export interface AgentCliOverrides {
   reasoning?: string;
   fast?: boolean;
   session_strategy?: SessionStrategy;
+  display_session_cost?: boolean;
+  auto_compact_threshold_percent?: number;
+  compact_maximum?: number;
 }
 
 export const DEFAULT_SESSION_STRATEGY: Readonly<Record<ConfigurableAgentRole, SessionStrategy>> = {
@@ -32,25 +41,11 @@ export const DEFAULT_SESSION_STRATEGY: Readonly<Record<ConfigurableAgentRole, Se
 };
 
 export function defaultAgentDefaults(): AgentDefaultsV1 {
-  return {
-    version: 1,
-    revision: 0,
-    roles: Object.fromEntries(CONFIGURABLE_ROLES.map((role) => [role, { session_strategy: DEFAULT_SESSION_STRATEGY[role] }])) as AgentDefaultsV1["roles"],
-  };
+  return normalizeProjectAgentDefaults();
 }
 
 export function normalizeSessionStrategyDefaults(defaults?: AgentDefaultsV1): AgentDefaultsV1 {
-  const base = structuredClone(defaults ?? defaultAgentDefaults());
-  base.version = 1;
-  base.revision ??= 0;
-  base.roles ??= {};
-  for (const role of CONFIGURABLE_ROLES) {
-    base.roles[role] = {
-      ...base.roles[role],
-      session_strategy: base.roles[role]?.session_strategy ?? DEFAULT_SESSION_STRATEGY[role],
-    };
-  }
-  return base;
+  return normalizeProjectAgentDefaults(defaults);
 }
 
 export function formatSessionStrategyDefaults(defaults?: AgentDefaultsV1): string {
@@ -62,31 +57,66 @@ export function formatSessionStrategyDefaults(defaults?: AgentDefaultsV1): strin
 
 export async function promptSessionStrategyDefaults(defaults?: AgentDefaultsV1): Promise<{ defaults: AgentDefaultsV1; customized: boolean }> {
   const current = normalizeSessionStrategyDefaults(defaults);
-  const { confirm, select, isCancel, log } = await import("@clack/prompts");
+  const { confirm, select, text, isCancel, log } = await import("@clack/prompts");
   log.info(`Agent session defaults: ${formatSessionStrategyDefaults(current)}`);
   const useDefaults = await confirm({
     message: "Use these compact/fresh defaults?",
     initialValue: true,
   });
-  if (isCancel(useDefaults) || useDefaults) return { defaults: current, customized: false };
+  if (isCancel(useDefaults)) return { defaults: current, customized: false };
 
   const next = structuredClone(current);
-  for (const role of CONFIGURABLE_ROLES) {
-    const answer = await select({
-      message: `${role} session continuity:`,
-      initialValue: next.roles[role]?.session_strategy ?? DEFAULT_SESSION_STRATEGY[role],
-      options: [
-        { value: "compact", label: "Compact and continue" },
-        { value: "fresh", label: "Fresh conversation" },
-      ],
-    });
-    if (isCancel(answer)) return { defaults: current, customized: false };
-    next.roles[role] = { ...next.roles[role], session_strategy: answer as SessionStrategy };
+  let customized = false;
+  if (!useDefaults) {
+    for (const role of CONFIGURABLE_ROLES) {
+      const answer = await select({
+        message: `${role} session continuity:`,
+        initialValue: next.roles[role]?.session_strategy ?? DEFAULT_SESSION_STRATEGY[role],
+        options: [
+          { value: "compact", label: "Compact and continue" },
+          { value: "fresh", label: "Fresh conversation" },
+        ],
+      });
+      if (isCancel(answer)) return { defaults: current, customized: false };
+      next.roles[role] = { ...next.roles[role], session_strategy: answer as SessionStrategy };
+    }
+    customized = true;
   }
-  next.revision = (current.revision ?? 0) + 1;
+
+  const thresholdCurrent = next.roles.builder?.auto_compact_threshold_percent ?? DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
+  const thresholdChoice = await select({ message: "Automatically compact Builder context at:", options: [
+    { value: "saved", label: `${thresholdCurrent}% (Recommended)` },
+    { value: "custom", label: "Custom percentage" },
+  ] });
+  if (isCancel(thresholdChoice)) return { defaults: current, customized: false };
+  let threshold = thresholdCurrent;
+  if (thresholdChoice === "custom") {
+    const answer = await text({ message: "Builder automatic compaction threshold (1-99):", defaultValue: String(thresholdCurrent), validate: (value) => {
+      const parsed = Number(value); return Number.isInteger(parsed) && parsed >= 1 && parsed <= 99 ? undefined : "Enter an integer from 1 to 99";
+    } });
+    if (isCancel(answer)) return { defaults: current, customized: false };
+    threshold = Number(answer); customized ||= threshold !== thresholdCurrent;
+  }
+
+  const maximumCurrent = next.roles.builder?.compact_maximum ?? DEFAULT_COMPACT_MAXIMUM;
+  const maximumChoice = await select({ message: "Maximum successful compactions per Builder provider session:", options: [
+    { value: "saved", label: `${maximumCurrent} (Recommended)` },
+    { value: "custom", label: "Custom maximum" },
+  ] });
+  if (isCancel(maximumChoice)) return { defaults: current, customized: false };
+  let maximum = maximumCurrent;
+  if (maximumChoice === "custom") {
+    const answer = await text({ message: "Builder compact maximum:", defaultValue: String(maximumCurrent), validate: (value) => {
+      const parsed = Number(value); return Number.isSafeInteger(parsed) && parsed > 0 ? undefined : "Enter a positive safe integer";
+    } });
+    if (isCancel(answer)) return { defaults: current, customized: false };
+    maximum = Number(answer); customized ||= maximum !== maximumCurrent;
+  }
+  next.roles.builder = { ...next.roles.builder, auto_compact_threshold_percent: threshold, compact_maximum: maximum };
+  next.revision = customized ? (current.revision ?? 0) + 1 : current.revision;
   const validation = validateAgentDefaults(next);
   if (!validation.valid) throw new Error(validation.errors.join("; "));
-  return { defaults: next, customized: true };
+  return { defaults: next, customized };
 }
 
 export function saveAgentDefaults(root: string, config: ProjectConfig, defaults: AgentDefaultsV1): ProjectConfig {
@@ -126,6 +156,9 @@ export function resolveAgentSettings(input: {
     reasoning: pick("reasoning") ?? input.manifest?.effort ?? "default",
     fast: pick("fast") ?? false,
     session_strategy: pick("session_strategy") ?? DEFAULT_SESSION_STRATEGY[input.role],
+    display_session_cost: pick("display_session_cost") ?? false,
+    auto_compact_threshold_percent: pick("auto_compact_threshold_percent") ?? DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+    compact_maximum: pick("compact_maximum") ?? DEFAULT_COMPACT_MAXIMUM,
     settings_revision: input.project?.revision ?? 0,
   };
 }
@@ -140,7 +173,7 @@ export function missingAgentFlags(opts: Record<string, unknown>): string[] {
 
 function missingAgentUpdateFlags(opts: Record<string, unknown>): string[] {
   if (typeof opts.agentType !== "string" || !opts.agentType.trim()) return ["--agent-type"];
-  const settings = ["agentMake", "model", "reasoning", "fast", "sessionStrategy"];
+  const settings = ["agentMake", "model", "reasoning", "fast", "sessionStrategy", "showSessionCost", "autoCompactThreshold", "compactMaximum"];
   return settings.some((key) => opts[key] !== undefined) ? [] : ["one setting flag"];
 }
 
@@ -155,10 +188,14 @@ export function buildAgentsCommand(): Command {
     .option("--fast", "enable provider fast/speed capability")
     .option("--no-fast", "disable provider fast/speed capability")
     .option("--session-strategy <strategy>", "compact | fresh")
+    .option("--show-session-cost", "show authoritative provider cost or cumulative session tokens")
+    .option("--no-show-session-cost", "hide session cost/token usage")
+    .option("--auto-compact-threshold <percent>", "Builder context threshold (1-99 percent)")
+    .option("--compact-maximum <count>", "Builder successful compactions allowed per provider session")
     .action(async (project: string, opts: Record<string, unknown>) => {
       const root = resolve(project);
       const lifecycle = assertLifecycleForCommand(root, "agents");
-      const anyFlags = ["agentType", "agentMake", "model", "reasoning", "fast", "sessionStrategy"].some((key) => opts[key] !== undefined);
+      const anyFlags = ["agentType", "agentMake", "model", "reasoning", "fast", "sessionStrategy", "showSessionCost", "autoCompactThreshold", "compactMaximum"].some((key) => opts[key] !== undefined);
       let selected: ConfigurableAgentRole[];
       let settings: AgentRoleDefaultsV1;
       if (anyFlags) {
@@ -166,6 +203,12 @@ export function buildAgentsCommand(): Command {
         if (missing.length) throw new Error(`partial agent configuration; missing: ${missing.join(", ")}`);
         selected = parseRoles(String(opts.agentType));
         settings = parseSettings(opts);
+        if ((settings.auto_compact_threshold_percent !== undefined || settings.compact_maximum !== undefined) && (selected.length !== 1 || selected[0] !== "builder")) {
+          throw new Error("--auto-compact-threshold and --compact-maximum require --agent-type builder");
+        }
+        if (settings.display_session_cost !== undefined && selected.some((role) => role !== "builder" && role !== "qa")) {
+          throw new Error("session-cost display is configurable only for builder and qa");
+        }
       } else {
         if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("noninteractive use requires --agent-type and at least one setting flag");
         ({ selected, settings } = await promptAgentSettings(root));
@@ -182,10 +225,51 @@ export function buildAgentsCommand(): Command {
       if (!validation.valid) throw new Error(validation.errors.join("; "));
       saveAgentDefaults(root, config, defaults);
       console.log(`rafi agents: saved revision ${defaults.revision} for ${selected.join(", ")}`);
+      const liveReport = await waitForLiveSettingsAcknowledgments(root, defaults.revision ?? 0, selected);
+      for (const row of liveReport) {
+        console.log(`rafi agents: run ${row.runId} ${row.role}${row.providerSessionId ? ` session ${row.providerSessionId}` : ""} — ${row.acknowledged ? `acknowledged revision ${row.revision}` : `did not acknowledge revision ${row.revision} within one heartbeat plus grace`}`);
+      }
       if (settings.make && lifecycle.state !== "initialized") {
         console.log("rafi agents: runtime changes are saved but pending until initialization completes; explicit --agent flags still apply immediately.");
       }
     });
+}
+
+export interface LiveSettingsReportRow {
+  runId: string;
+  role: "builder" | "qa";
+  providerSessionId?: string;
+  revision: number;
+  acknowledged: boolean;
+}
+
+/** Wait at most one 10-second build heartbeat plus five seconds of grace. */
+export async function waitForLiveSettingsAcknowledgments(
+  root: string,
+  revision: number,
+  selected: readonly ConfigurableAgentRole[],
+  options: { waitMs?: number; pollMs?: number } = {},
+): Promise<LiveSettingsReportRow[]> {
+  const roles = selected.filter((role): role is "builder" | "qa" => role === "builder" || role === "qa");
+  if (!roles.length) return [];
+  const initialDb = new WorkflowDb(root);
+  const active = initialDb.activeRuns().filter((run) => run.kind === "build");
+  initialDb.close();
+  if (!active.length) return [];
+  const deadline = Date.now() + (options.waitMs ?? 15_000);
+  let acknowledgments = new Map<string, ReturnType<WorkflowDb["settingsAcknowledgments"]>[number]>();
+  while (Date.now() < deadline) {
+    const db = new WorkflowDb(root);
+    const current = db.settingsAcknowledgments(revision);
+    db.close();
+    acknowledgments = new Map(current.map((ack) => [`${ack.runId}:${ack.role}`, ack]));
+    if (active.every((run) => roles.every((role) => acknowledgments.has(`${run.runId}:${role}`)))) break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(options.pollMs ?? 250, Math.max(0, deadline - Date.now()))));
+  }
+  return active.flatMap((run) => roles.map((role): LiveSettingsReportRow => {
+    const ack = acknowledgments.get(`${run.runId}:${role}`);
+    return { runId: run.runId, role, ...(ack?.providerSessionId ? { providerSessionId: ack.providerSessionId } : {}), revision, acknowledged: Boolean(ack) };
+  }));
 }
 
 async function promptAgentSettings(root: string): Promise<{ selected: ConfigurableAgentRole[]; settings: AgentRoleDefaultsV1 }> {
@@ -242,6 +326,17 @@ function parseSettings(opts: Record<string, unknown>): AgentRoleDefaultsV1 {
     const strategy = String(opts.sessionStrategy);
     if (strategy !== "compact" && strategy !== "fresh") throw new Error("--session-strategy must be compact or fresh");
     out.session_strategy = strategy;
+  }
+  if (opts.showSessionCost !== undefined) out.display_session_cost = Boolean(opts.showSessionCost);
+  if (opts.autoCompactThreshold !== undefined) {
+    const value = Number(opts.autoCompactThreshold);
+    if (!Number.isInteger(value) || value < 1 || value > 99) throw new Error("--auto-compact-threshold must be an integer from 1 to 99");
+    out.auto_compact_threshold_percent = value;
+  }
+  if (opts.compactMaximum !== undefined) {
+    const value = Number(opts.compactMaximum);
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error("--compact-maximum must be a positive safe integer");
+    out.compact_maximum = value;
   }
   return out;
 }

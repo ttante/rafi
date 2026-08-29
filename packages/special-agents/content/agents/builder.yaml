@@ -10,6 +10,7 @@ packs:
   - domain/robustness
   - templated/*
 skills:
+  - handoff
   - tdd
   - improve-codebase-architecture
 conditionalPacks:

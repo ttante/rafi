@@ -16,7 +16,7 @@ test("build records atomically retain sessions, receipts, and completed history"
     run = recordBuildReceipt(dir, run, "commit:T001", { externalId: "abc123" });
     const duplicate = recordBuildReceipt(dir, run, "commit:T001", { externalId: "wrong" });
     assert.equal(duplicate.receipts["commit:T001"]?.externalId, "abc123");
-    assert.match(buildRecoveryPreview(run).join("\n"), /exact Builder session available/);
+    assert.match(buildRecoveryPreview(run).join("\n"), /Builder session candidate requires validation/);
     run = completeBuildRun(dir, run);
     assert.equal(readBuildRuns(dir)[0]?.status, "completed");
   } finally { rmSync(dir, { recursive: true, force: true }); }

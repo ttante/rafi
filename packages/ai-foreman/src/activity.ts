@@ -41,6 +41,7 @@ export class ActivityReporter {
   private lastHeartbeatAt = 0;
   private lineVisible = false;
   private paused = 0;
+  private agentStatusLine?: string;
 
   constructor(readonly command: string, options: ActivityReporterOptions = {}) {
     this.output = options.output ?? {
@@ -107,6 +108,21 @@ export class ActivityReporter {
     this.render(true);
   }
 
+  /** Keep role/provider/context state in the single bottom-most TTY line. */
+  setAgentStatus(line: string | undefined): void {
+    this.agentStatusLine = line ? clean(line, 500) : undefined;
+    if (this.agentStatusLine && !this.timer) {
+      this.lastSignalAt = this.now();
+      this.lastHeartbeatAt = this.lastSignalAt;
+      this.startTimer();
+    }
+    if (!this.agentStatusLine && this.phases.size === 0) {
+      this.idle();
+      return;
+    }
+    this.render(true);
+  }
+
   pause(): () => void {
     this.paused++;
     this.clearLine();
@@ -121,6 +137,7 @@ export class ActivityReporter {
 
   dispose(): void {
     this.phases.clear();
+    this.agentStatusLine = undefined;
     this.idle();
   }
 
@@ -131,12 +148,21 @@ export class ActivityReporter {
   }
 
   private idle(): void {
+    if (this.agentStatusLine) {
+      this.clearLine();
+      this.detail = undefined;
+      this.provider = undefined;
+      this.model = undefined;
+      this.render(true);
+      return;
+    }
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.clearLine();
     this.detail = undefined;
     this.provider = undefined;
     this.model = undefined;
+    this.agentStatusLine = undefined;
   }
 
   private currentPhase(): ActivePhase | undefined {
@@ -145,19 +171,19 @@ export class ActivityReporter {
 
   private render(force: boolean): void {
     const phase = this.currentPhase();
-    if (!phase || this.paused > 0) return;
+    if ((!phase && !this.agentStatusLine) || this.paused > 0) return;
     const now = this.now();
-    const elapsed = now - phase.startedAt;
+    const elapsed = phase ? now - phase.startedAt : now - this.commandStartedAt;
     if (!force && elapsed < this.displayDelayMs) return;
     const quietFor = now - this.lastSignalAt;
-    if (quietFor >= this.quietWarningMs && !this.quietWarningPrinted) {
+    if (phase && quietFor >= this.quietWarningMs && !this.quietWarningPrinted) {
       this.quietWarningPrinted = true;
       this.note(`rafi: ${this.provider ?? "provider"} has been quiet for ${formatDuration(quietFor)}; RAFI is still responsive and will keep waiting`);
       return;
     }
     const provider = [this.provider, this.model].filter(Boolean).join("/");
     const quiet = quietFor >= this.quietWarningMs ? `provider quiet ${formatDuration(quietFor)}; RAFI is responsive` : this.detail;
-    const body = [phase.label, provider || undefined, quiet].filter(Boolean).join(" — ");
+    const body = [phase?.label, provider || undefined, phase ? quiet : undefined, this.agentStatusLine].filter(Boolean).join(" — ");
     if (this.output.isTTY) {
       const line = `${FRAMES[this.frame++ % FRAMES.length]} RAFI working: ${body} (${formatDuration(now - this.commandStartedAt)})`;
       this.output.write(`\r\x1b[2K${line}`);

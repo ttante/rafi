@@ -4,8 +4,11 @@ import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
-import type { BuildRunRecord, BuildRunRecordV1, BuildRunRecordV2, ResolvedAgentSettings } from "rafi-spec";
+import type { BuildRunRecord, BuildRunRecordV1, BuildRunRecordV2, ProviderSessionRefV1, ResolvedAgentSettings, SessionAvailabilityV1 } from "rafi-spec";
 import { WorkflowDb, type WorkflowRunStatus } from "./workflowDb.js";
+import { canonicalSessionPath, captureWorkspaceIdentity, createProviderSessionRef, latestSessionBinding, upsertSessionBinding } from "./sessionIdentity.js";
+import { resolveProviderSessionAvailability, type ResolveSessionAvailabilityOptions } from "./sessionAvailability.js";
+import { captureCurrentWorkflowSessionIdentity, currentWorkflowIdentityKey } from "./branch/currentGuard.js";
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
 import { loadTickets } from "./tickets/ticketLoader.js";
 
@@ -26,6 +29,7 @@ export interface CreateBuildRunInput {
   startHead?: string;
   builder?: LegacyResolvedAgentSettings;
   qa?: LegacyResolvedAgentSettings;
+  runDecisions?: BuildRunRecordV2["runDecisions"];
   now?: Date;
 }
 
@@ -55,6 +59,7 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
       baselineComplete: Boolean(snapshot.baselineHead && snapshot.startHead && snapshot.branch),
     },
     progress: { completedTickets: [], completedOperations: [], remainingTickets: [...input.tickets], nextAction: input.tickets[0] ? `Start ${input.tickets[0]}` : "Plan next work" },
+    runDecisions: input.runDecisions,
     receipts: {},
     lease: currentLease(now),
     createdAt: stamp,
@@ -66,23 +71,35 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
   return saved;
 }
 
-export function resumeBuildRun(projectDir: string, runId: string, patch: { builder?: LegacyResolvedAgentSettings; qa?: LegacyResolvedAgentSettings; builderSessionId?: string | null }, now = new Date()): BuildRunRecordV2 {
+export function resumeBuildRun(projectDir: string, runId: string, patch: { builder?: LegacyResolvedAgentSettings; qa?: LegacyResolvedAgentSettings; builderSessionId?: string | null; builderSessionRef?: ProviderSessionRefV1 | null }, now = new Date()): BuildRunRecordV2 {
   const existing = readBuildRuns(projectDir).find((run) => run.runId === runId);
   if (!existing) throw new Error(`recoverable build run not found: ${runId}`);
   if (existing.status === "completed") throw new Error(`build run ${runId} is already complete`);
   const workflow = new WorkflowDb(projectDir);
   try { workflow.acquireLease(runId, undefined, now, BUILD_LEASE_STALE_MS); } finally { workflow.close(); }
+  const clearBuilderSession = patch.builderSessionId === null && patch.builderSessionRef === null;
+  const builderSessionId = clearBuilderSession
+    ? undefined
+    : patch.builderSessionRef?.sessionId ?? patch.builderSessionId ?? existing.builder?.sessionId;
   return saveBuildRun(projectDir, {
     ...existing, status: "running", checkpoint: "recovery-resumed", completedAt: undefined,
-    builder: patch.builder ? { settings: normalizeCapturedSettings(patch.builder), ...(patch.builderSessionId === null ? {} : { sessionId: patch.builderSessionId ?? existing.builder?.sessionId }) } : existing.builder,
+    builder: patch.builder ? { settings: normalizeCapturedSettings(patch.builder), ...(builderSessionId ? { sessionId: builderSessionId } : {}) } : existing.builder,
     qa: patch.qa ? { settings: normalizeCapturedSettings(patch.qa), sessionId: existing.qa?.sessionId } : existing.qa,
+    sessionBindings: patch.builderSessionRef ? upsertSessionBinding(existing.sessionBindings, patch.builderSessionRef) : existing.sessionBindings,
     lease: currentLease(now),
   }, now);
 }
 
-type LegacyResolvedAgentSettings = Omit<ResolvedAgentSettings, "session_strategy" | "settings_revision"> & Partial<Pick<ResolvedAgentSettings, "session_strategy" | "settings_revision">>;
+type LegacyResolvedAgentSettings = Omit<ResolvedAgentSettings, "session_strategy" | "settings_revision" | "display_session_cost" | "auto_compact_threshold_percent" | "compact_maximum"> & Partial<Pick<ResolvedAgentSettings, "session_strategy" | "settings_revision" | "display_session_cost" | "auto_compact_threshold_percent" | "compact_maximum">>;
 function normalizeCapturedSettings(settings: LegacyResolvedAgentSettings): ResolvedAgentSettings {
-  return { ...settings, session_strategy: settings.session_strategy ?? (["builder", "qa", "ticket-maker"].includes(settings.role) ? "compact" : "fresh"), settings_revision: settings.settings_revision ?? 0 };
+  return {
+    ...settings,
+    session_strategy: settings.session_strategy ?? (["builder", "qa", "ticket-maker"].includes(settings.role) ? "compact" : "fresh"),
+    display_session_cost: settings.display_session_cost ?? false,
+    auto_compact_threshold_percent: settings.auto_compact_threshold_percent ?? 50,
+    compact_maximum: settings.compact_maximum ?? 10,
+    settings_revision: settings.settings_revision ?? 0,
+  };
 }
 
 export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = new Date()): BuildRunRecordV2 {
@@ -111,8 +128,8 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
       status: workflowStatus(next.status), checkpoint: next.checkpoint,
       remainingWork: { tickets: remainingTickets(next) }, state: next as unknown as Record<string, unknown>, event: "build_snapshot",
     }, now);
-    if (next.builder?.sessionId) workflow.recordSession(next.runId, "builder", "builder", next.builder.sessionId, "checkpoint", next.builder.settings, now);
-    if (next.qa?.sessionId) workflow.recordSession(next.runId, "qa", "qa", next.qa.sessionId, "checkpoint", next.qa.settings, now);
+    if (next.builder?.sessionId) workflow.recordSession(next.runId, "builder", "builder", latestSessionBinding(next.sessionBindings, "builder", next.builder.sessionId) ?? next.builder.sessionId, "checkpoint", next.builder.settings, now);
+    if (next.qa?.sessionId) workflow.recordSession(next.runId, "qa", "qa", latestSessionBinding(next.sessionBindings, "qa", next.qa.sessionId) ?? next.qa.sessionId, "checkpoint", next.qa.settings, now);
   } finally { workflow.close(); }
   return next;
 }
@@ -130,11 +147,38 @@ export function persistBuildSession(
   projectDir: string,
   run: BuildRunRecordV2,
   role: "builder" | "qa",
-  sessionId: string,
+  session: string | ProviderSessionRefV1,
 ): BuildRunRecordV2 {
   const current = run[role];
   if (!current) throw new Error(`${role} settings were not captured for run ${run.runId}`);
-  return checkpointBuildRun(projectDir, { ...run, [role]: { ...current, sessionId } }, `${role}-session-ready`);
+  const sessionId = typeof session === "string" ? session : session.sessionId;
+  const sessionBindings = typeof session === "string" ? run.sessionBindings : upsertSessionBinding(run.sessionBindings, session);
+  return checkpointBuildRun(projectDir, { ...run, sessionBindings, [role]: { ...current, sessionId } }, `${role}-session-ready`);
+}
+
+/** Latest scoped binding, with the narrow legacy Builder inference allowed by the recovery protocol. */
+export function buildRunSessionBinding(run: BuildRunRecordV2, role: "builder" | "qa", sessionId?: string): ProviderSessionRefV1 | undefined {
+  const bound = latestSessionBinding(run.sessionBindings, role, sessionId);
+  if (bound) return bound;
+  if (role === "qa") return undefined;
+  const raw = sessionId ?? run.builder?.sessionId;
+  if (!raw || !run.builder || !existsSync(run.repository.worktree)) return undefined;
+  return createProviderSessionRef({
+    provider: run.builder.settings.make,
+    sessionId: raw,
+    role: "builder",
+    stream: "builder",
+    generation: 0,
+    cwd: run.repository.worktree,
+    configRoot: run.repository.root,
+    workspaceIdentity: run.branchMode === "current" && run.repository.git.branch
+      ? currentWorkflowIdentityKey({ worktree: canonicalSessionPath(run.repository.worktree), ref: `branch:${run.repository.git.branch}` })
+      : run.repository.git.worktreeIdentity ?? captureWorkspaceIdentity(run.repository.worktree),
+    ticketId: run.currentTicket,
+    deliveryUnitId: run.deliveryUnit,
+    source: "legacy-inferred",
+    createdAt: run.createdAt,
+  });
 }
 
 export function recordBuildReceipt(
@@ -245,8 +289,8 @@ export function buildRecoveryPreview(run: BuildRunRecordV2): string[] {
     `baseline ${run.repository.baselineComplete ? `${run.repository.git.baseRef ?? "recorded"} @ ${run.repository.git.baselineHead}` : "incomplete legacy baseline"}`,
     `preserved paths ${run.repository.git.runOwnedPaths.join(", ") || run.repository.git.statusPaths.join(", ") || "none recorded"}`,
     `completed operations ${completed.length ? completed.join(", ") : "none"}`,
-    `session ${run.builder?.sessionId ? "exact Builder session available" : "fresh Builder session required"}`,
-    `QA session ${run.qa?.sessionId ? "exact QA session available" : "fresh QA session required"}`,
+    `session ${buildRunSessionBinding(run, "builder") ? "Builder session candidate requires validation" : "fresh Builder session required"}`,
+    `QA session ${buildRunSessionBinding(run, "qa") ? "QA session candidate requires validation" : "fresh QA session required"}`,
   ];
 }
 
@@ -267,9 +311,12 @@ export interface BuildRecoveryProjection {
   worktree: string;
   branch?: string;
   exactSessionId?: string;
+  exactSessionRef?: ProviderSessionRefV1;
+  sessionCandidateRef?: ProviderSessionRefV1;
+  sessionAvailability?: SessionAvailabilityV1;
 }
 
-export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, now = new Date(), ticketOverride?: string): BuildRecoveryProjection {
+export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, now = new Date(), ticketOverride?: string, sessionAvailability?: SessionAvailabilityV1): BuildRecoveryProjection {
   let operationNames: string[] = [];
   let issues: string[] = [];
   let workflowState: Record<string, unknown> = {};
@@ -312,6 +359,9 @@ export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, 
     ? `Resume ${ticketOverride} from ${run.checkpoint}`
     : run.progress.nextAction ?? (ticketId ? `Resume ${ticketId} from ${run.checkpoint}` : `Resume from ${run.checkpoint}`);
   const primary = ticketId ? `${ticketId}${ticketTitle ? `: ${ticketTitle}` : ""}` : "legacy run (ticket unavailable)";
+  const stateSessionId = typeof workflowState.sessionId === "string" ? workflowState.sessionId : undefined;
+  const sessionCandidateRef = buildRunSessionBinding(run, "builder", stateSessionId ?? run.builder?.sessionId);
+  const exactSessionRef = sessionAvailability?.status === "available" ? sessionAvailability.sessionRef ?? sessionCandidateRef : undefined;
   return {
     run, ticketId, ticketTitle,
     compactLabel: `${primary} — ${run.status}`,
@@ -325,8 +375,34 @@ export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, 
     nextAction,
     worktree: recoveryWorktree,
     branch: stateBranch ?? branchNow ?? run.repository.git.branch ?? run.repository.branch,
-    exactSessionId: typeof workflowState.sessionId === "string" ? workflowState.sessionId : run.builder?.sessionId,
+    ...(sessionCandidateRef ? { sessionCandidateRef } : {}),
+    ...(sessionAvailability ? { sessionAvailability } : {}),
+    ...(exactSessionRef ? { exactSessionRef, exactSessionId: exactSessionRef.sessionId } : {}),
   };
+}
+
+export async function resolveBuildRecoveryProjection(
+  projectDir: string,
+  run: BuildRunRecordV2,
+  now = new Date(),
+  ticketOverride?: string,
+  probe: ResolveSessionAvailabilityOptions = {},
+): Promise<BuildRecoveryProjection> {
+  const frozen = projectBuildRecovery(projectDir, run, now, ticketOverride);
+  const candidate = frozen.sessionCandidateRef;
+  if (!candidate) return frozen;
+  const availability = await resolveProviderSessionAvailability(candidate, {
+    ...probe,
+    cwd: frozen.worktree,
+    configRoot: run.repository.root,
+    workspaceIdentity: run.branchMode === "current" ? safeCurrentIdentity(frozen.worktree) : captureWorkspaceIdentity(frozen.worktree),
+    now,
+  });
+  return projectBuildRecovery(projectDir, run, now, ticketOverride, availability);
+}
+
+function safeCurrentIdentity(worktree: string): string | undefined {
+  try { return captureCurrentWorkflowSessionIdentity(worktree); } catch { return undefined; }
 }
 
 export function formatBuildRecoveryProjection(projection: BuildRecoveryProjection): string[] {
@@ -343,7 +419,7 @@ export function formatBuildRecoveryProjection(projection: BuildRecoveryProjectio
     `validation/QA ${projection.validation}`,
     `branch ${projection.branch ?? "current"}; worktree ${projection.worktree}`,
     `baseline ${run.repository.baselineComplete ? `${run.repository.git.baseRef ?? "recorded"} @ ${run.repository.git.baselineHead}` : "incomplete; automatic rollback is unavailable"}`,
-    `session ${projection.exactSessionId ? "exact Builder session available" : "fresh Builder session required"}`,
+    `session ${projection.exactSessionId ? "exact Builder session available (validated)" : projection.sessionCandidateRef ? `exact Builder session unavailable (${projection.sessionAvailability?.reason ?? "validation pending"})` : "fresh Builder session required"}`,
     `runtime ${run.builder?.settings.make ?? "unavailable"}; model ${run.builder?.settings.model ?? "unavailable"}`,
     `updated ${run.updatedAt}`,
     `preserved expected in-progress paths ${projection.expectedChanges.join(", ") || "none currently dirty"}`,
@@ -413,10 +489,7 @@ function captureGitSnapshot(worktree: string, input: CreateBuildRunInput): Build
 }
 
 function worktreeIdentity(worktree: string): string | undefined {
-  try {
-    const stat = statSync(resolve(worktree));
-    return createHash("sha256").update(`${stat.dev}:${stat.ino}`).digest("hex");
-  } catch { return undefined; }
+  return captureWorkspaceIdentity(worktree);
 }
 
 function gitValue(cwd: string, args: string[]): string | undefined {

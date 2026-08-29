@@ -16,6 +16,7 @@ import {
   cmdQueue,
   cmdImplementationQueue,
   cmdDiscover,
+  cmdAcceptFutureWork,
   cmdValidate,
   cmdRender,
 } from "../src/tickets/commands.js";
@@ -40,6 +41,8 @@ import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import type { TicketState } from "../src/tickets/stateDb.js";
 import { formatTicketDetails, getTicketDetails } from "../src/tickets/details.js";
 import { previewTicketReset, resetTickets } from "../src/tickets/reset.js";
+import { applyResolvedTicketReset, resolveTicketResetSelection, TicketResetDependencyConflictError } from "../src/tickets/groupReset.js";
+import { listTicketGroups } from "../src/tickets/groups.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -193,6 +196,57 @@ test("ticket reset publication failure restores state, audit events, recent-comp
     assert.deepEqual(rolledBack.getRecentCompleted().map((row) => row.ticket_id), ["T001"]);
     rolledBack.close();
     assert.equal(readFileSync(progressPath, "utf8"), progressBefore);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("group reset freezes its preview and restores deleted dependencies without resetting them", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Group reset", timezone: "UTC" });
+    const dependency = makeDef("T001", 1000);
+    const dependent = makeDef("T002", 2000, { depends_on: ["T001"] });
+    const unrelated = makeDef("T003", 3000);
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [dependency, dependent, unrelated] }), "utf8");
+    const db = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    db.upsertState("T001", { status: "done", evidence: "dependency evidence" }, "2026-01-01T00:00:00.000Z");
+    db.upsertState("T002", { status: "blocked", owner: "builder" }, "2026-01-01T00:00:00.000Z");
+    db.upsertState("T003", { status: "in_progress" }, "2026-01-01T00:00:00.000Z");
+    db.createTicketGroup({ origin: "ticket-plan", operationId: "group-dependency", members: [{ ticketId: "T001", definition: dependency }] });
+    db.createTicketGroup({ origin: "ticket-plan", operationId: "group-dependent", members: [{ ticketId: "T002", definition: dependent }] });
+    db.createTicketGroup({ origin: "ticket-plan", operationId: "group-unrelated", members: [{ ticketId: "T003", definition: unrelated }] });
+    db.close();
+
+    // Simulate manual deletion while retaining the last Rafi-validated snapshots.
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [unrelated] }), "utf8");
+    assert.throws(
+      () => resolveTicketResetSelection(dir, { kind: "group", groupId: "TG-2" }, { deletedTickets: "restore" }),
+      (error) => error instanceof TicketResetDependencyConflictError && error.conflicts[0]?.dependencyId === "T001",
+    );
+    const selection = resolveTicketResetSelection(dir, { kind: "group", groupId: "TG-2" }, { deletedTickets: "restore", restoreDependencies: ["T001"] });
+    assert.deepEqual(selection.ticketIds, ["T002"]);
+    assert.deepEqual(selection.definitionRestorations.map((item) => [item.ticketId, Boolean(item.dependencyOnly)]), [["T002", false], ["T001", true]]);
+    const applied = applyResolvedTicketReset(dir, selection, "tester", new Date("2026-01-02T00:00:00.000Z"));
+    assert.deepEqual(applied.tickets, ["T002"]);
+    assert.deepEqual(applied.restored, ["T002", "T001"]);
+    const restored = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    assert.equal(restored.getState("T002")?.status, "planned");
+    assert.equal(restored.getState("T001")?.status, "done", "dependency-only restoration must not reset the dependency");
+    restored.close();
+    const listed = listTicketGroups(dir);
+    assert.deepEqual(listed.groups.map((group) => [group.id, group.recencyPosition]), [["TG-3", 1], ["TG-2", 2], ["TG-1", 3]]);
+
+    const frozenBeforeNewGroup = resolveTicketResetSelection(dir, { kind: "group", groupId: "TG-3" });
+    const currentDefinitions = (parse(readFileSync(join(dir, ".tickets", "tickets.yaml"), "utf8")) as { tickets: TicketDef[] }).tickets;
+    const addedAfterPreview = makeDef("T004", 4000);
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [...currentDefinitions, addedAfterPreview] }), "utf8");
+    const changedCatalogDb = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    changedCatalogDb.createTicketGroup({ origin: "production", operationId: "new-group-after-preview", members: [{ ticketId: "T004", definition: addedAfterPreview }] });
+    changedCatalogDb.close();
+    assert.throws(() => applyResolvedTicketReset(dir, frozenBeforeNewGroup), /inputs changed after preview/);
+
+    const frozen = resolveTicketResetSelection(dir, { kind: "group", groupId: "TG-3" });
+    cmdUpdate(dir, "T003", { status: "blocked", summary: "changed after preview" });
+    assert.throws(() => applyResolvedTicketReset(dir, frozen), /inputs changed after preview/);
   } finally { rmSync(dir, { recursive: true }); }
 });
 
@@ -487,6 +541,14 @@ test("external import creates stable tickets and updates repeat imports by exter
     assert.equal(applied.tickets.length, 1);
     assert.equal(applied.tickets[0].id, "T001");
     assert.match(applied.tickets[0].title, /Build importer v2/);
+    const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try {
+      const groups = db.listTicketGroups();
+      assert.equal(groups.length, 1);
+      assert.equal(groups[0]?.origin, "import");
+      assert.deepEqual(groups[0]?.members.map((member) => member.ticketId), ["T001"]);
+      assert.match((groups[0]?.members[0]?.snapshot.definition as TicketDef).title, /Build importer v2/);
+    } finally { db.close(); }
   } finally {
     rmSync(dir, { recursive: true });
   }
@@ -505,6 +567,7 @@ test("review accept applies deterministic ticket patch and rerenders", () => {
         ticketIds: ["T001"],
         patch: {
           update: [{ id: "T001", set: { size: "L", notes: "Accepted split review." } }],
+          add: [makeDef("T002", 2000, { title: "Split follow-up" })],
         },
       });
     } finally {
@@ -519,7 +582,15 @@ test("review accept applies deterministic ticket patch and rerenders", () => {
 
     assert.equal(result.changed, 1);
     assert.equal(raw.tickets[0].size, "L");
+    assert.equal(raw.tickets[1]?.id, "T002");
     assert.match(doc, /No pending review recommendations/);
+    const groupDb = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try {
+      assert.deepEqual(groupDb.listTicketGroups().map((group) => [group.origin, group.members.map((member) => member.ticketId)]), [
+        ["production", ["T002"]],
+        ["legacy", ["T001"]],
+      ]);
+    } finally { groupDb.close(); }
   } finally {
     rmSync(dir, { recursive: true });
   }
@@ -954,6 +1025,24 @@ test("discover adds to future work inbox and appears in progress doc", () => {
   } finally {
     rmSync(dir, { recursive: true });
   }
+});
+
+test("accepted future work publishes a singleton immutable creation group", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    const futureWorkId = cmdDiscover(dir, { summary: "Add metrics endpoint", rationale: "Needed for monitoring" });
+    cmdAcceptFutureWork(dir, futureWorkId, { ticketId: "T001", order: 1000, actor: "test" });
+    const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try {
+      const groups = db.listTicketGroups();
+      assert.equal(groups.length, 1);
+      assert.equal(groups[0]?.origin, "future-work");
+      assert.deepEqual(groups[0]?.members.map((member) => member.ticketId), ["T001"]);
+      assert.equal(db.getState("T001")?.status, "planned");
+      assert.equal(db.getFutureWorkById(futureWorkId)?.disposition, "accepted");
+    } finally { db.close(); }
+  } finally { rmSync(dir, { recursive: true }); }
 });
 
 test("generated progress doc uses the implementation limit", () => {

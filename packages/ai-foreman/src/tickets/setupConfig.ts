@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { loadDefaults } from "special-agents";
 import { appendLegacyTicketSources, loadSourceRegistry } from "../sources/sourceRegistry.js";
+import { BUILTIN_BRANCH_PREFIX, validateBranchPrefix } from "../branch/prefix.js";
 
 export const RAFI_CONFIG_FILE = "rafi-config.yaml";
 
@@ -42,6 +44,7 @@ export interface TicketBuildSetupConfig {
   auto_merge_wait: boolean;
   auto_merge_timeout_minutes: number | null;
   base_branch: string;
+  branch_prefix: string;
   branch_policy: {
     mode: TicketBranchPolicyMode;
     global_strategy: TicketBuildBranchStrategy;
@@ -73,6 +76,7 @@ const AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker", "uninstaller"] 
 const SKILL_NAMES = [
   "better-sqlite3-rebuild",
   "grill-me",
+  "handoff",
   "improve-codebase-architecture",
   "prd-to-issues",
   "tdd",
@@ -100,6 +104,7 @@ export const DEFAULT_TICKET_SETUP: TicketsSetupConfig = {
     auto_merge_wait: false,
     auto_merge_timeout_minutes: null,
     base_branch: "main",
+    branch_prefix: BUILTIN_BRANCH_PREFIX,
     branch_policy: {
       mode: "global",
       global_strategy: "branch-per-ticket",
@@ -162,7 +167,10 @@ export function saveTicketSetupConfig(
   const planning = config.planning && typeof config.planning === "object" && !Array.isArray(config.planning) ? config.planning as Record<string, unknown> : undefined;
   if (planning) { delete planning.sources; if (Object.keys(planning).length === 0) delete config.planning; }
   mkdirSync(projectDir, { recursive: true });
-  writeFileSync(join(projectDir, RAFI_CONFIG_FILE), stringify(config, { lineWidth: 100 }), "utf8");
+  const target = join(projectDir, RAFI_CONFIG_FILE);
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, stringify(config, { lineWidth: 100 }), "utf8");
+  renameSync(temporary, target);
 }
 
 /** Synchronize pending setup limits into the tracker, once the tracker exists. */
@@ -486,6 +494,7 @@ function normalizeBuild(value: unknown, label: string): TicketBuildSetupConfig {
     auto_merge_wait: booleanField(raw.auto_merge_wait, DEFAULT_TICKET_SETUP.build.auto_merge_wait, `${label}.auto_merge_wait`),
     auto_merge_timeout_minutes: nullablePositiveInteger(raw.auto_merge_timeout_minutes, DEFAULT_TICKET_SETUP.build.auto_merge_timeout_minutes, `${label}.auto_merge_timeout_minutes`),
     base_branch: stringField(raw.base_branch, DEFAULT_TICKET_SETUP.build.base_branch),
+    branch_prefix: validateBranchPrefix(stringField(raw.branch_prefix, DEFAULT_TICKET_SETUP.build.branch_prefix)),
     branch_policy: normalizeBranchPolicy(raw.branch_policy, raw.branch_strategy, `${label}.branch_policy`),
     review: normalizeReview(raw.review, `${label}.review`),
     validation_checklist: stringArray(raw.validation_checklist, DEFAULT_TICKET_SETUP.build.validation_checklist, `${label}.validation_checklist`),

@@ -114,6 +114,8 @@ rafi tickets validate
 
 `tickets populate` uses explicit sources first, then saved ticket sources, then the latest Rafi plan when available. It runs the `ticket-maker` role, writes canonical tickets to `.tickets/tickets.yaml`, renders tracker docs, and validates the tracker. Source overrides, external-import setup, agent/model controls, review, queue, render, archive, and manual ticket maintenance are in the [ticket command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-tickets---help).
 
+Creation batches have immutable, monotonic IDs (`TG-1`, `TG-2`, …). `rafi tickets groups list` reports newest-first recency separately from the stable ID. Group resets approve a frozen selection, preserve immutable membership and history, and can explicitly restore a manually deleted definition from its last validated snapshot. Automation must choose `--deleted-tickets ignore|restore`; dependency conflicts stop atomically rather than changing the saved definition.
+
 Use `rafi tickets init --app-name "My App"` for standalone tracker initialization. It writes the ticket docs under `docs.root` when configured. `--implementation-limit` controls the selection/generated-doc window; `--view-limit` controls the default queue display; `--queue-limit` remains a deprecated alias for the former.
 
 ## Run the builder
@@ -133,7 +135,11 @@ rafi doctor .
 
 `rafi start` reads the compiled role bundles and drives a builder through the requested work, with QA after each ticket by default. Branch strategy, completion settings, agent selection, QA overrides, and builder-session continuation are documented in the [start command reference](https://github.com/ttante/rafi/blob/main/docs/cli.md#rafi-start---help).
 
-QA is an independent, run-wide session and cannot edit protected project files. Interrupted implementation uses durable `.foreman/runs/*.json` and WorkflowDb checkpoints: `rafi build:resume` preserves and continues work, while `rafi build:start-over` archives/reconciles an entire run. Setup/planning interviews continue with `rafi resume`. `rafi agents` stores per-role runtime/model/reasoning/fast intent. Uninstall is category-based, detects mixed user/Rafi edits, and retains project-local recovery bundles until explicit cleanup.
+**Current branch — Rafi works here; you manage Git** performs no Git lifecycle or review operation. The saved branch prefix remains available for later isolated runs and accepts safe internal slashes such as `team/feature`; update it with `rafi tickets setup:update --branch-prefix <prefix>`. Each run snapshots the effective prefix and source so resume/handoff never renames existing work.
+
+The active TTY line always includes role/provider/activity and truthful context state (`measuring`, measured/stale occupancy, or unavailable). `rafi start --show-session-cost` enables provider-authoritative cost or cumulative-token display for both roles for that run. Persistent Builder and QA display preferences stay independent. Builder threshold compaction defaults to 50% and the per-session maximum defaults to 10; update both live with `rafi agents . --agent-type builder --auto-compact-threshold <percent> --compact-maximum <count>`.
+
+QA is independent and cannot edit protected project files. Each disposable QA snapshot gets a fresh location-scoped provider session; cumulative QA state crosses snapshots only through validated durable handoffs. Every completed Builder/QA turn publishes a validated bounded continuity delta, and automatic fresh transitions require an accepted cumulative handoff before the sole role lease moves. Exact Builder resume additionally requires a stored scoped binding and successful provider/location probe—raw or cross-worktree IDs are never enough. Interrupted implementation uses durable `.foreman/runs/*.json` and WorkflowDb checkpoints. `rafi build:resume` dispatches exactly the selected `exact-session`, `fresh-with-handoff`, `fresh-recovery-only`, or conditional guided-recovery path; `rafi build:start-over` archives/reconciles an entire run. Inspect handoffs with `rafi handoffs inspect --run <id>` and prune only disposable cache copies with `rafi handoffs prune-cache`. Setup/planning interviews continue with `rafi resume`. `rafi agents` stores per-role runtime/model/reasoning/fast intent. Uninstall is category-based, detects mixed user/Rafi edits, and retains project-local recovery bundles until explicit cleanup.
 
 ## What gets written
 
@@ -150,6 +156,8 @@ QA is an independent, run-wide session and cannot edit protected project files. 
   .agents/skills/<name>/SKILL.md   Codex skills, when Codex is targeted
   .rafi/compiled/<role>/           Runtime role bundles
   .rafi/interviews/                Ignored local interactive recovery records
+  .rafi/recovery.sqlite3           Durable continuity, handoff, settings, and recovery history
+  .rafi/cache/handoffs/            Ignored disposable handoff inspection copies
   <docs.root>/                     Starter and ticket-tracker docs
   <docs.root>/rafi-plan.md         Latest Rafi plan
   <docs.root>/rafi-plans/*.md      Versioned Rafi plans

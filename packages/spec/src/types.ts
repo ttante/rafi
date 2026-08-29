@@ -269,7 +269,7 @@ export type RuntimeProbePhase =
 export type RuntimeProbeCategory =
   | "ready" | "missing-executable" | "sdk-load" | "authentication" | "authorization"
   | "configuration" | "rate-limit" | "network" | "timeout" | "malformed-protocol"
-  | "agent-stream" | "compiler-update" | "capability-discovery" | "unknown";
+  | "agent-stream" | "session-unavailable" | "compiler-update" | "capability-discovery" | "unknown";
 export interface RuntimeProbeResult {
   ok: boolean;
   runtime: "claude" | "codex";
@@ -294,6 +294,12 @@ export interface AgentRoleDefaultsV1 {
   reasoning?: string;
   fast?: boolean;
   session_strategy?: SessionStrategy;
+  /** Show authoritative provider cost or trustworthy cumulative tokens. */
+  display_session_cost?: boolean;
+  /** Builder-only live context threshold. Missing values normalize to 50. */
+  auto_compact_threshold_percent?: number;
+  /** Builder-only successful compactions allowed per provider session. */
+  compact_maximum?: number;
 }
 export interface AgentDefaultsV1 {
   version: 1;
@@ -308,6 +314,12 @@ export interface ResolvedAgentSettings {
   reasoning: string;
   fast: boolean;
   session_strategy: SessionStrategy;
+  /** Required after normalization; legacy on-disk omissions resolve to false. */
+  display_session_cost: boolean;
+  /** Required after normalization; legacy on-disk omissions resolve to 50. */
+  auto_compact_threshold_percent: number;
+  /** Required after normalization; legacy on-disk omissions resolve to 10. */
+  compact_maximum: number;
   settings_revision: number;
   source: "cli" | "resume" | "project" | "manifest" | "provider";
 }
@@ -379,7 +391,7 @@ export type WorkflowIssueCode =
   | "ticket_validation_failure" | "ticket_corruption"
   | "plan_pair_mismatch" | "slice_mapping_failure" | "retirement_authorization_failure"
   | "delivery_validation_failure" | "session_missing" | "session_compaction_failure"
-  | "session_model_switch_failure" | "recovery_failure" | "remote_action_denied"
+  | "session_model_switch_failure" | "session_unavailable" | "recovery_failure" | "remote_action_denied"
   | "remote_action_failed" | "remote_action_uncertain" | "user_cancelled"
   | "terminal_incompatibility" | "depth_exceeded";
 
@@ -462,6 +474,18 @@ export interface BuildRunRecordV2 extends Omit<BuildRunRecordV1, "version" | "re
   supersededBy?: string;
   /** True only when this V2 view was upgraded from a record with incomplete V1 metadata. */
   legacy?: boolean;
+  /** Frozen run-level workflow/Git decisions. Optional on old V2 records. */
+  runDecisions?: {
+    workMode: TicketBuildBranchStrategy;
+    workModeSource: "project" | "cli" | "resume";
+    branchPrefix: string;
+    branchPrefixSource: "project" | "cli" | "builtin" | "resume";
+    autoCompactThresholdPercent: number;
+    thresholdSource: "project" | "cli" | "live" | "resume";
+  };
+  recoveryDecision?: BuildRecoveryDecisionReceipt;
+  /** Canonical provider conversations observed for this run. Raw role sessionIds remain compatibility mirrors only. */
+  sessionBindings?: ProviderSessionRefV1[];
 }
 export type BuildRunRecord = BuildRunRecordV1 | BuildRunRecordV2;
 
@@ -605,6 +629,7 @@ export interface TicketBuildDefaultsConfig {
   auto_merge_wait?: boolean;
   auto_merge_timeout_minutes?: number | null;
   base_branch?: string;
+  branch_prefix?: string;
   branch_policy?: {
     mode: TicketBranchPolicyMode;
     global_strategy: TicketBuildBranchStrategy;
@@ -652,4 +677,266 @@ export interface ProjectConfig {
   agent_defaults?: AgentDefaultsV1;
   agents: Record<string, RuntimeArtifactConfig>;
   skills: Record<string, RuntimeArtifactConfig>;
+}
+
+// ───────────────────────── Ticket creation groups ─────────────────────────
+
+export type TicketGroupId = `TG-${number}`;
+export type TicketGroupOrigin =
+  | "ticket-plan" | "ticket-populate" | "import" | "future-work"
+  | "production" | "legacy" | "repair";
+
+export interface SavedTicketDefinitionSnapshot {
+  version: 1;
+  ticketId: string;
+  definition: unknown;
+  digest: string;
+  validatedAt: string;
+}
+
+export interface TicketGroupMember {
+  groupId: TicketGroupId;
+  ticketId: string;
+  position: number;
+  snapshot: SavedTicketDefinitionSnapshot;
+}
+
+export interface TicketGroup {
+  id: TicketGroupId;
+  sequence: number;
+  origin: TicketGroupOrigin;
+  createdAt: string;
+  legacy: boolean;
+  operationId: string;
+  members: TicketGroupMember[];
+}
+
+export type RequestedTicketResetTarget =
+  | { kind: "all-groups" }
+  | { kind: "recent-groups"; count: number }
+  | { kind: "group"; groupId: TicketGroupId }
+  | { kind: "group-index"; position: number }
+  | { kind: "ticket"; ticketId: string }
+  | { kind: "scope"; scope: "all" | "completed-and-unfinished" | "unfinished" }
+  | { kind: "run"; ticketIds: string[] };
+
+export type DeletedTicketResetPolicy = "ignore" | "restore";
+export interface ResolvedTicketResetSelection {
+  version: 1;
+  requested: RequestedTicketResetTarget;
+  resolvedAt: string;
+  groups: Array<{ id: TicketGroupId; sequence: number; memberTicketIds: string[] }>;
+  ticketIds: string[];
+  previewRows: Array<{ ticketId: string; title: string; status: string; definitionMissing: boolean; restoreDefinition: boolean }>;
+  definitionRestorations: Array<{ ticketId: string; digest: string; restore: boolean; dependencyOnly?: boolean }>;
+  relatedRuns: Array<{ runId: string; status: string; tickets: string[] }>;
+  inputFingerprint: string;
+}
+
+// ─────────────────────── Context/session observability ─────────────────────
+
+/** Location-scoped provider conversation identity. */
+export interface ProviderSessionRefV1 {
+  version: 1;
+  provider: "claude" | "codex";
+  sessionId: string;
+  role: ConfigurableAgentRole;
+  stream: string;
+  /** Zero-based conversation generation. Native compaction does not change it. */
+  generation: number;
+  /** Canonical provider working directory. */
+  cwd: string;
+  /** Canonical project root containing Rafi configuration and durable recovery state. */
+  configRoot: string;
+  workspaceIdentity?: string;
+  ticketId?: string;
+  deliveryUnitId?: string;
+  source: "observed" | "legacy-inferred";
+  createdAt: string;
+  validatedAt?: string;
+}
+
+export type SessionAvailabilityStatus = "available" | "unavailable" | "unknown";
+export type SessionAvailabilityReason =
+  | "not-found"
+  | "cwd-mismatch"
+  | "config-root-mismatch"
+  | "workspace-mismatch"
+  | "provider-mismatch"
+  | "role-mismatch"
+  | "stream-mismatch"
+  | "legacy-unscoped"
+  | "attach-failed"
+  | "probe-failed";
+
+/** Result of validating a scoped provider conversation. Only `available` authorizes exact resume. */
+export interface SessionAvailabilityV1 {
+  version: 1;
+  status: SessionAvailabilityStatus;
+  checkedAt: string;
+  reason?: SessionAvailabilityReason;
+  observedCwd?: string;
+  detail?: string;
+  sessionRef?: ProviderSessionRefV1;
+}
+
+export type ContextSampleSource = "provider-event" | "provider-query" | "post-compact";
+export type ContextSampleFreshness = "measuring" | "fresh" | "stale" | "unavailable";
+export interface ContextSample {
+  version: 1;
+  runId: string;
+  role: "builder" | "qa";
+  provider: "claude" | "codex";
+  providerSessionId?: string;
+  sessionRef?: ProviderSessionRefV1;
+  sessionKey?: string;
+  model: string;
+  observedAt: string;
+  source: ContextSampleSource;
+  freshness: ContextSampleFreshness;
+  used?: number;
+  maximum?: number;
+  percentage?: number;
+  settingsRevision: number;
+  compactionCount: number;
+  handoffGeneration: number;
+}
+
+export interface SessionUsageSample {
+  version: 1;
+  runId: string;
+  role: "builder" | "qa";
+  provider: "claude" | "codex";
+  providerSessionId?: string;
+  sessionRef?: ProviderSessionRefV1;
+  sessionKey?: string;
+  observedAt: string;
+  source: "provider" | "turn-aggregate" | "unavailable";
+  cumulativeInputTokens?: number;
+  cumulativeOutputTokens?: number;
+  cumulativeTotalTokens?: number;
+  authoritativeCostUsd?: number;
+}
+
+export interface LiveSettingsRevision {
+  revision: number;
+  publishedAt: string;
+  settings: AgentDefaultsV1;
+}
+export interface LiveSettingsAcknowledgment {
+  runId: string;
+  role: "builder" | "qa";
+  providerSessionId?: string;
+  sessionRef?: ProviderSessionRefV1;
+  sessionKey?: string;
+  revision: number;
+  acknowledgedAt: string;
+}
+
+// ───────────────────── Continuity, handoff, and recovery ───────────────────
+
+export type ContinuityHeadState = "current" | "degraded" | "stale" | "invalid";
+export interface ContinuityDelta {
+  version: 1;
+  decisions: string[];
+  constraints: string[];
+  discoveries: string[];
+  completedActions: string[];
+  evidence: string[];
+  failures: string[];
+  blockers: string[];
+  openWork: string[];
+  nextAction: string;
+}
+export interface ContinuityEvent {
+  sequence: number;
+  runId: string;
+  role: "builder" | "qa" | "host";
+  kind: string;
+  payload: unknown;
+  digest: string;
+  authoritativeStateRevision: number;
+  createdAt: string;
+  sessionRef?: ProviderSessionRefV1;
+  sessionKey?: string;
+}
+export interface ContinuityCheckpoint {
+  checkpointId: number;
+  runId: string;
+  role: "builder" | "qa";
+  sequence: number;
+  state: ContinuityHeadState;
+  delta: ContinuityDelta;
+  digest: string;
+  predecessorDigest?: string;
+  authoritativeStateRevision: number;
+  createdAt: string;
+  sessionRef?: ProviderSessionRefV1;
+  sessionKey?: string;
+}
+export interface ContinuityHead {
+  runId: string;
+  role: "builder" | "qa" | "run";
+  state: ContinuityHeadState;
+  sequence: number;
+  digest: string;
+  authoritativeStateRevision: number;
+  updatedAt: string;
+}
+
+export interface HandoffManifestV1 {
+  version: 1;
+  runId: string;
+  generation: number;
+  role: "builder" | "qa";
+  reason: string;
+  predecessorSessionId?: string;
+  successorSessionId?: string;
+  predecessorSessionRef?: ProviderSessionRefV1;
+  successorSessionRef?: ProviderSessionRefV1;
+  predecessorManifestDigest?: string;
+  continuityCheckpointDigest: string;
+  authoritativeStateDigest: string;
+  cumulative: ContinuityDelta;
+  roleState: Record<string, unknown>;
+  lineage: string[];
+  sessionUsage?: SessionUsageSample;
+  compactionCount: number;
+  compactMaximum: number;
+  resources: Array<{ label: string; digest: string; authoritative: boolean }>;
+  createdAt: string;
+}
+export interface HandoffLineage {
+  runId: string;
+  generation: number;
+  manifestDigest: string;
+  markdownDigest: string;
+  predecessorSessionId?: string;
+  successorSessionId?: string;
+  predecessorSessionRef?: ProviderSessionRefV1;
+  successorSessionRef?: ProviderSessionRefV1;
+  state: "staged" | "accepted" | "failed";
+  createdAt: string;
+  acceptedAt?: string;
+}
+
+export type BuildRecoveryMode = "exact-session" | "fresh-with-handoff" | "fresh-recovery-only" | "guided-recovery";
+export interface BuildRecoveryDecisionReceipt {
+  version: 1;
+  mode: BuildRecoveryMode;
+  runId: string;
+  tickets: string[];
+  role: "builder" | "qa";
+  checkpointDigest?: string;
+  handoffDigest?: string;
+  authoritativeStateDigest: string;
+  settings: ResolvedAgentSettings;
+  worktree: string;
+  branch?: string;
+  predecessorSessionId?: string;
+  predecessorSessionRef?: ProviderSessionRefV1;
+  successorSessionRef?: ProviderSessionRefV1;
+  sessionAvailability?: SessionAvailabilityV1;
+  requestedSuccessor?: { agent?: "claude" | "codex"; model?: string };
+  decidedAt: string;
 }

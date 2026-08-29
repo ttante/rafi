@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { parse, stringify } from "yaml";
 import { Ajv } from "ajv";
 import { TICKET_JSON_SCHEMA, type TicketDef } from "./ticketSchema.js";
@@ -14,7 +15,9 @@ export function loadTickets(ticketsPath: string): TicketDef[] {
 }
 
 export function saveTickets(ticketsPath: string, tickets: TicketDef[]): void {
-  writeFileSync(ticketsPath, stringify({ tickets }, { lineWidth: 120 }), "utf8");
+  const temporary = `${ticketsPath}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, stringify({ tickets }, { lineWidth: 120 }), "utf8");
+  renameSync(temporary, ticketsPath);
 }
 
 export interface ValidationError {

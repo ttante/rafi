@@ -105,7 +105,7 @@ What each part does:
 | `-y, --yes` | flag | off | Skips preflight confirmation. |
 | `--no-qa` | flag | QA on | Disables per-ticket QA review. |
 | `--continue` | flag | off | Resumes the most recent logged session. |
-| `-r, --resume <sessionId>` | session ID from `.foreman/` logs | none | Resumes a specific Claude/Codex session. |
+| `-r, --resume <sessionId>` | session ID with a stored scoped binding | none | Resumes only after provider, canonical worktree, and workspace identity validation. |
 | `--branch-per-ticket` | flag | off | Runs each selected structured ticket in its own git worktree and branch. Requires initialized `.tickets/`. |
 | `--create-pr` | flag | off | Pushes each successful ticket branch and creates a GitHub PR. Implies `--branch-per-ticket`. |
 | `--pr-ready` | flag | draft PRs | Creates ready-for-review PRs instead of draft PRs when used with `--create-pr`. |
@@ -114,6 +114,8 @@ What each part does:
 | `--base <ref>` | `main` / `origin/main` / `HEAD` | current branch or `HEAD` | Base ref for root ticket branches. |
 | `--branch-prefix <prefix>` | `feature` / `rafi` / another valid Git prefix | `feature` | Prefix for generated ticket branches. Explicit prefixes are preserved verbatim. |
 | `--max-branch-depth <n>` | positive integer | `5` | Maximum selected branch/PR stack depth (root PR is depth 1). |
+| `--show-session-cost` / `--hide-session-cost` | flags | saved role preferences | Show authoritative provider cost or trustworthy cumulative tokens for Builder and QA; does not change context occupancy display. |
+| `--auto-compact-threshold <percent>` | integer `1`–`99` | saved Builder value, then `50` | Initial run threshold override. A newer persistent settings revision wins at the next safe boundary. |
 
 Auto-detected tracker files:
 
@@ -124,6 +126,7 @@ Auto-detected tracker files:
 Resume rule:
 
 - Use either `--continue` or `--resume`.
+- Exact resume requires the original canonical worktree and its recorded identity. A deleted, recreated, cross-worktree, ambiguous, or unverifiable session is rejected with fresh/handoff recovery guidance.
 - Do not use both in the same command.
 - In branch mode, use `--continue --ticket <id>` to continue a ticket with its saved builder session.
 - For multiple branch tickets, repeat `--ticket` with `--continue`; do not reuse one explicit `--resume <sessionId>` across multiple tickets.
@@ -140,6 +143,10 @@ ai-foreman start ./my-project --steps 1 --branch-per-ticket --continue --ticket 
 ```
 
 Saved `tickets.build` defaults in `rafi-config.yaml` can enable branch-per-ticket and completion behavior automatically. Use `--completion pr|auto-merge|direct-merge|none`, `--no-branch-per-ticket`, `--no-create-pr`, or `--auto-merge-wait` / `--no-auto-merge-wait` to override saved defaults for one run.
+
+With the saved `current` strategy, Foreman works in the active branch while the user owns Git. It may edit, test, run QA, and update tracker/recovery state, but all branch/worktree, commit, push, merge, rebase, and review lifecycle commands are fenced. An unexpected active ref or worktree change pauses the run. Explicit isolated flags are reported as run overrides.
+
+The active terminal line always includes the current role/provider, activity, truthful context state, successful compaction count, and handoff generation. At the Builder threshold, Foreman settles the in-flight action, verifies native compaction plus a fresh provider usage sample, and resumes the frozen action. The configured maximum defaults to ten successful compactions per location-scoped provider session; the next crossing uses a validated fresh handoff instead of exceeding it. Disposable QA snapshots never reuse a prior QA conversation in a new `/tmp/rafi-qa-*` worktree; they transfer cumulative state through an accepted handoff.
 
 ### GitHub PR Failure Recovery
 
@@ -502,7 +509,13 @@ ai-foreman tickets accept-future-work 1 --project ./my-project --ticket-id T051 
 ai-foreman tickets cancel T001 --project ./my-project --summary "Superseded by T002"
 ai-foreman tickets reorder T051 --project ./my-project --after T050
 ai-foreman tickets archive --project ./my-project --older-than-days 30
+
+# Inspect immutable creation groups and reset an exact approved group
+ai-foreman tickets groups list --project ./my-project
+ai-foreman tickets reset --group TG-3 --project ./my-project
 ```
+
+Ticket creation groups use stable repository-local IDs (`TG-1`, `TG-2`, …); newest-first list position is separate and may change. Missing definitions remain immutable members with a validated recovery snapshot. Non-interactive group restoration requires an explicit deleted-ticket policy, and missing dependency definitions stop the reset atomically.
 
 ## How The Loop Works
 
@@ -513,6 +526,8 @@ Before implementation starts:
 - Passing `--yes` skips confirmation.
 
 Every implementation turn must end with exactly one marker.
+
+Builder and QA turns also publish a bounded cumulative continuity delta. Automatic fresh transitions stage a versioned JSON/Markdown handoff, require `HANDOFF_ACCEPTED` plus a valid successor checkpoint, and only then move the role lease. The all-in-one `rafi` CLI exposes durable handoff inspection and cache/history maintenance commands.
 
 Marker rules:
 

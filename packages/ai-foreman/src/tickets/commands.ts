@@ -516,20 +516,26 @@ export function cmdAcceptFutureWork(
       notes: fw.rationale ?? null,
     };
 
-    ctx.db.transaction(() => {
-      ctx.db.updateFutureWorkDisposition(futureWorkId, "accepted");
-      logEvent(ctx.db, {
-        timestamp: now,
-        actor: opts.actor ?? null,
-        ticketId: opts.ticketId,
-        eventType: "accept-future-work",
-        oldStatus: null,
-        newStatus: "planned",
-        summary: `Accepted future work ${futureWorkId} as ticket ${opts.ticketId}`,
-      });
-    });
-
+    ctx.db.ensureSyntheticLegacyGroup(ctx.tickets as Array<TicketDef & Record<string, unknown>>);
     saveTickets(ctx.paths.tickets, [...ctx.tickets, newTicket]);
+    try {
+      ctx.db.transaction(() => {
+        ctx.db.updateFutureWorkDisposition(futureWorkId, "accepted");
+        logEvent(ctx.db, {
+          timestamp: now,
+          actor: opts.actor ?? null,
+          ticketId: opts.ticketId,
+          eventType: "accept-future-work",
+          oldStatus: null,
+          newStatus: "planned",
+          summary: `Accepted future work ${futureWorkId} as ticket ${opts.ticketId}`,
+        });
+        ctx.db.createTicketGroup({ origin: "future-work", operationId: `future-work:${futureWorkId}`, members: [{ ticketId: newTicket.id, definition: newTicket, validatedAt: now }] });
+      });
+    } catch (error) {
+      saveTickets(ctx.paths.tickets, ctx.tickets);
+      throw error;
+    }
     // Re-open context to pick up new ticket list
     const newCtx = openContext(projectDir);
     try {

@@ -220,6 +220,7 @@ export function applyApprovedTicketPlan(projectDir: string, proposal: TicketPlan
     try {
       const now = new Date().toISOString();
       db.transaction(() => {
+        db.ensureSyntheticLegacyGroup(existing as Array<TicketDef & Record<string, unknown>>, opts.now ?? new Date());
         const existingNext = [...db.getAllStates().values()].filter((state) => state.status === "next").map((state) => state.ticket_id);
         if (proposal.next.replace_existing) for (const id of existingNext) db.upsertState(id, { status: "planned", updated_by: "rafi tickets plan" }, now);
         for (const link of proposal.supersessions) for (const id of link.replaced) {
@@ -237,12 +238,17 @@ export function applyApprovedTicketPlan(projectDir: string, proposal: TicketPlan
           if (!db.getFutureWorkById(disposition.id)) throw new Error(`future work item ${disposition.id} does not exist`);
           db.updateFutureWorkDisposition(disposition.id, disposition.disposition);
         }
+        if (proposal.additions.length) {
+          const operationDigest = createHash("sha256").update(JSON.stringify(proposal.additions)).digest("hex");
+          db.createTicketGroup({ origin: "ticket-plan", operationId: `ticket-plan:${operationDigest}`, createdAt: now, members: proposal.additions.map((ticket) => ({ ticketId: ticket.id, definition: ticket, validatedAt: now })) });
+        }
       });
       const states = db.getAllStates();
       renderAndWrite({ config, projectDir: root, ticketDefs: staged, states, db });
       const validation = runAllValidation(config, root, staged, states, db);
       const errors = validation.filter((issue) => issue.severity === "error");
       if (errors.length) throw new Error(`post-apply tracker validation failed:\n${errors.map((issue) => `- ${issue.message}`).join("\n")}`);
+      for (const ticket of staged) if (db.getTicketGroupForTicket(ticket.id)) db.updateTicketDefinitionSnapshot(ticket.id, ticket, now);
     } finally { db.close(); }
     writeFileSync(join(backupDir, "journal.json"), `${JSON.stringify({ status: "committed", committedAt: new Date().toISOString(), files: backedUp }, null, 2)}\n`, "utf8");
     return { added: proposal.additions.map((ticket) => ticket.id), edited: proposal.edits.map((edit) => edit.id), artifacts: [relative(root, latestPlan), relative(root, historyPlan)], backupDir: relative(root, backupDir) };

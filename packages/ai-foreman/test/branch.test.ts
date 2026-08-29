@@ -12,6 +12,7 @@ import { buildStartCommand } from "../src/cli/start.js";
 import { buildStatusCommand } from "../src/cli/status.js";
 import { Log } from "../src/log.js";
 import { applySizeBranchPolicy, buildBranchPlan, parseAuditDependencies } from "../src/branch/planner.js";
+import { validateBranchPrefix } from "../src/branch/prefix.js";
 import { checkGitHubReadiness, createOrReusePr, pushBranchForPr } from "../src/branch/github.js";
 import { createOrReuseMr } from "../src/branch/gitlab.js";
 import {
@@ -199,12 +200,23 @@ test("branch planner includes later tickets unblocked by earlier selected ticket
   assert.deepEqual(plan.issues, []);
 });
 
-test("automatic ticket branches use feature prefix while explicit rafi prefix survives", () => {
+test("automatic ticket branches use the resolved feature prefix, explicit prefixes survive, and empty prefixes are rejected", () => {
   const tickets = [makeDef("T123", 1000, { title: "Add password reset" })];
-  const automatic = buildBranchPlan(tickets, new Map(), { steps: 1, baseRef: "main", branchPrefix: "", maxBranchDepth: 5 });
+  const automatic = buildBranchPlan(tickets, new Map(), { steps: 1, baseRef: "main", branchPrefix: "feature", maxBranchDepth: 5 });
   const explicit = buildBranchPlan(tickets, new Map(), { steps: 1, baseRef: "main", branchPrefix: "rafi", maxBranchDepth: 5 });
   assert.equal(automatic.nodes[0]?.branch, "feature/t123-add-password-reset");
   assert.equal(explicit.nodes[0]?.branch, "rafi/t123-add-password-reset");
+  assert.throws(
+    () => buildBranchPlan(tickets, new Map(), { steps: 1, baseRef: "main", branchPrefix: "", maxBranchDepth: 5 }),
+    /must not be empty/,
+  );
+});
+
+test("branch prefix validation accepts useful Git ref paths and rejects unsafe forms", () => {
+  assert.equal(validateBranchPrefix("team/feature"), "team/feature");
+  for (const invalid of ["", "/feature", "feature/", "feature//team", "../feature", "team/../feature", "team/.hidden", "team/topic.lock", "topic@{1}", "topic name", "topic~1", "-topic"]) {
+    assert.throws(() => validateBranchPrefix(invalid), /branch prefix|invalid Git branch prefix/);
+  }
 });
 
 test("size policy creates one XS/S shared branch and an independent M branch without stack metadata", () => {

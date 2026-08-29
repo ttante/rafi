@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { resolve, join, relative } from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { select, text, isCancel } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
@@ -25,8 +26,8 @@ import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
 import { branchPlanLogMetadata, presentBranchPlan } from "../branch/presentation.js";
-import { checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
-import type { BuildRunRecordV2, ResolvedAgentSettings } from "rafi-spec";
+import { buildRunSessionBinding, checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
+import type { BuildRunRecordV2, ProviderSessionRefV1, ResolvedAgentSettings, SessionStrategy } from "rafi-spec";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
 import { parse as parseYaml } from "yaml";
 import {
@@ -34,15 +35,24 @@ import {
   formatBranchContinueCommand,
   formatBranchSummaryFollowupCommands,
 } from "../branch/resume.js";
+import type { BranchResumeSession } from "../branch/resume.js";
 import type { BranchPlan, BranchPlanNode, CompletionMode, MergeMethod, ReviewProvider } from "../branch/types.js";
 import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig.js";
 import { loadDeliveryConfig, selectDeliveryUnitForRun, selectStacksForRun, updateStackDeliveryState, type DeliveryConfig, type DeliveryStack, type DeliveryUnitProgress } from "../tickets/delivery.js";
-import { AgentStatusReporter } from "../statusReporter.js";
+import { AgentStatusReporter, RoleStatusAdapter } from "../statusReporter.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
 import { WorkflowDb, readCurrentWorkflowLease } from "../workflowDb.js";
 import { makeLogPath as makeRoleLogPath, readOnlyPermissionConfig, runRoleInstruction } from "../agentRun.js";
 import type { QaNonconvergenceContext, QaNonconvergenceDecision } from "../qaReview.js";
 import { eligibleTickets, evaluateTicketEligibility } from "../tickets/eligibility.js";
+import { BUILTIN_BRANCH_PREFIX, validateBranchPrefix } from "../branch/prefix.js";
+import { captureCurrentWorkflowSessionIdentity, CurrentWorkflowChangedError, CurrentWorkflowGuardAdapter } from "../branch/currentGuard.js";
+import { ContinuityAdapter, ContinuityRecoveryRequiredError, SessionUnavailableContinuityError } from "../continuity.js";
+import { ContextCapabilityError, RoleSessionController } from "../sessionLifecycle.js";
+import { HandoffLoopError, HandoffService, parseBuilderHandoffRequest } from "../handoffs.js";
+import { captureWorkspaceIdentity, createProviderSessionRef, resolveUniqueSessionBinding } from "../sessionIdentity.js";
+import { SessionUnavailableError } from "../adapters/sessionFailure.js";
+import { resolveProviderSessionAvailability } from "../sessionAvailability.js";
 
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
@@ -71,6 +81,15 @@ function collectTicket(value: string, previous: string[]): string[] {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function legacyBranchSessionRef(session: BranchResumeSession, configRoot: string, fallbackProvider: AgentRuntime): ProviderSessionRefV1 {
+  const provider = session.agent === "claude" || session.agent === "codex" ? session.agent : fallbackProvider;
+  return createProviderSessionRef({
+    provider, sessionId: session.sessionId, role: "builder", stream: "builder", generation: 0,
+    cwd: session.worktreePath, configRoot, workspaceIdentity: captureWorkspaceIdentity(session.worktreePath),
+    ticketId: session.ticket, deliveryUnitId: session.deliveryUnitId, source: "legacy-inferred", createdAt: session.ts,
+  });
 }
 
 export function formatStartResumeCommand(
@@ -150,13 +169,17 @@ function resolveStartBranchDefaults(
     ?? savedBuild?.completion
     ?? "none";
 
+  const explicitIsolation = branchFlagOn || createPrFlagOn || optionWasProvided(command, "completion") || Boolean(opts.stacks);
+  if (savedBuild?.branch_strategy === "current" && !explicitIsolation) completionMode = "none";
+
   if (createPrFlagProvided && opts.createPr === false) {
     completionMode = "none";
   }
 
   const savedBranchMode = savedBuild?.branch_strategy === "branch-per-ticket";
   let branchMode = Boolean(savedBranchMode || branchFlagOn || createPrFlagOn || completionMode !== "none");
-  if (!branchFlagProvided && !createPrFlagProvided && !optionWasProvided(command, "completion") && delivery) {
+  if (savedBuild?.branch_strategy === "current" && !explicitIsolation) branchMode = false;
+  if (savedBuild?.branch_strategy !== "current" && !branchFlagProvided && !createPrFlagProvided && !optionWasProvided(command, "completion") && delivery) {
     branchMode = delivery.unit.branch_mode !== "current";
   }
   if (branchFlagProvided && opts.branchPerTicket === false) {
@@ -183,6 +206,15 @@ function resolveStartBranchDefaults(
     autoMergeTimeoutMinutes,
     mergeMethod: typeof opts.mergeMethod === "string" ? parseMergeMethod(opts.mergeMethod) : delivery?.unit.merge_method ?? savedBuild?.merge_method ?? "squash",
   };
+}
+
+function resolveStartBranchPrefix(cwd: string, opts: Record<string, unknown>, recovery?: BuildRunRecordV2): { value: string; source: "project" | "cli" | "builtin" | "resume" } {
+  const resumed = recovery?.runDecisions?.branchPrefix;
+  if (resumed) return { value: validateBranchPrefix(resumed), source: "resume" };
+  if (typeof opts.branchPrefix === "string") return { value: validateBranchPrefix(opts.branchPrefix), source: "cli" };
+  const saved = loadTicketSetupConfig(cwd)?.build.branch_prefix;
+  if (saved) return { value: validateBranchPrefix(saved), source: "project" };
+  return { value: BUILTIN_BRANCH_PREFIX, source: "builtin" };
 }
 
 function parseMergeMethod(value: string): MergeMethod {
@@ -320,6 +352,9 @@ export function buildStartCommand(): Command {
     .option("-m, --model <model>", "override the builder's model")
     .option("-r, --resume <sessionId>", "resume a prior builder session")
     .option("--recover-run <id>", "continue an existing master recovery run ID")
+    .option("--recovery-mode <mode>", "frozen build:resume mode (internal recovery receipt)")
+    .option("--accept-handoff <generation>", "accept a pre-staged cumulative handoff generation")
+    .option("--accept-handoff-role <role>", "role owning the pre-staged handoff (builder | qa)", "builder")
     .option("--continue", "resume the most recent logged session for this project")
     .option("-t, --tickets <path>", "path to ticket file (.md, .txt, .yaml, …) — passed to the builder as context")
     .option("-y, --yes", "skip pre-flight confirmation prompt")
@@ -337,7 +372,10 @@ export function buildStartCommand(): Command {
     .option("--no-auto-merge-wait", "do not wait for dependency PR/MRs before dependent tickets")
     .option("--auto-merge-timeout-minutes <n>", "auto-merge dependency wait timeout in minutes (blank means no timeout)")
     .option("--base <ref>", "base ref for root ticket branches (default: current branch or HEAD)")
-    .option("--branch-prefix <prefix>", "branch name prefix for ticket branches", "feature")
+    .option("--branch-prefix <prefix>", "branch name prefix for ticket branches")
+    .option("--show-session-cost", "show authoritative cost or trustworthy cumulative session tokens for Builder and QA")
+    .option("--hide-session-cost", "hide session cost/token usage for Builder and QA")
+    .option("--auto-compact-threshold <percent>", "initial Builder context compaction threshold (1-99)")
     .option("--max-branch-depth <n>", "maximum selected branch stack depth", "5")
     .option("--pr-ready", "create ready-for-review PRs instead of draft PRs")
     .option("--keep-worktrees", "keep successful ticket worktrees for inspection")
@@ -376,6 +414,16 @@ export function buildStartCommand(): Command {
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
       const recoveryRecord = opts.recoverRun ? readBuildRuns(cwd).find((run) => run.runId === opts.recoverRun) : undefined;
       if (opts.recoverRun && !recoveryRecord) fail(`recoverable build run not found: ${opts.recoverRun}`);
+      if (opts.recoveryMode) {
+        const allowed = ["exact-session", "fresh-with-handoff", "fresh-recovery-only", "guided-recovery"];
+        if (!allowed.includes(String(opts.recoveryMode))) fail(`unknown frozen recovery mode ${String(opts.recoveryMode)}`);
+        if (!recoveryRecord?.recoveryDecision || recoveryRecord.recoveryDecision.mode !== opts.recoveryMode) fail("recovery mode no longer matches the persisted decision receipt; Rafi will not substitute a path");
+      }
+      if (opts.acceptHandoff && !recoveryRecord) fail("--accept-handoff requires --recover-run");
+      let pendingHandoffGeneration = opts.acceptHandoff === undefined ? undefined : Number(opts.acceptHandoff);
+      if (pendingHandoffGeneration !== undefined && (!Number.isSafeInteger(pendingHandoffGeneration) || pendingHandoffGeneration < 1)) fail("--accept-handoff must be a positive generation");
+      const pendingHandoffRole = String(opts.acceptHandoffRole ?? "builder");
+      if (pendingHandoffRole !== "builder" && pendingHandoffRole !== "qa") fail("--accept-handoff-role must be builder or qa");
       const roleDefaults = readAgentDefaults(cwd);
       let deliveryRun: DeliveryUnitProgress | undefined;
       let deliveryConfig: DeliveryConfig | undefined;
@@ -410,6 +458,12 @@ export function buildStartCommand(): Command {
       }
       if (stackCount !== undefined && selectedStacks.length !== stackCount) fail("--stacks requires explicit eligible stacks in .tickets/delivery.yaml");
       const branchDefaults = resolveStartBranchDefaults(cwd, opts as Record<string, unknown>, command, deliveryRun);
+      const resolvedPrefix = resolveStartBranchPrefix(cwd, opts as Record<string, unknown>, recoveryRecord);
+      const branchPrefix = resolvedPrefix.value;
+      if (opts.showSessionCost && opts.hideSessionCost) fail("choose either --show-session-cost or --hide-session-cost");
+      const sessionCostOverride = opts.showSessionCost ? true : opts.hideSessionCost ? false : undefined;
+      const thresholdOverride = opts.autoCompactThreshold === undefined ? undefined : Number(opts.autoCompactThreshold);
+      if (thresholdOverride !== undefined && (!Number.isInteger(thresholdOverride) || thresholdOverride < 1 || thresholdOverride > 99)) fail("--auto-compact-threshold must be an integer from 1 to 99");
       let agent: AgentRuntime;
       try {
         agent = resolveAgentForProject(cwd, (opts.agent as string | undefined) ?? roleDefaults.builder?.make);
@@ -459,7 +513,18 @@ export function buildStartCommand(): Command {
       }
 
       const branchMode = branchDefaults.branchMode;
-      const continueTickets = recoveryIntent ? requestedTicketIds : [];
+      const savedWorkMode = loadTicketSetupConfig(cwd)?.build.branch_strategy ?? "current";
+      const workModeSource = recoveryRecord?.runDecisions ? "resume" as const : branchMode && savedWorkMode === "current" ? "cli" as const : "project" as const;
+      if (!recoveryRecord && branchMode && savedWorkMode === "current") {
+        console.log(`foreman: run override — project uses Current branch — Rafi works here; you manage Git; this run explicitly uses an isolated workflow`);
+      }
+      const continueTickets = recoveryIntent
+        ? requestedTicketIds.length > 0
+          ? requestedTicketIds
+          : branchDefaults.branchMode && recoveryRecord
+            ? [...recoveryRecord.tickets]
+            : []
+        : [];
       let selectedNewTicket = !recoveryIntent ? requestedTicketIds[0] : undefined;
       const maxBranchDepth = Number.parseInt(opts.maxBranchDepth, 10);
       if (!Number.isInteger(maxBranchDepth) || maxBranchDepth < 1) {
@@ -487,6 +552,16 @@ export function buildStartCommand(): Command {
         (!branchMode && opts.continue ? findLastSessionId(join(cwd, ".foreman")) : undefined);
       if (!branchMode && opts.continue && !resumeSessionId) {
         fail(`no previous session id found under ${join(cwd, ".foreman")}`);
+      }
+      let resumeSessionRef: ProviderSessionRefV1 | undefined;
+      if (!branchMode && resumeSessionId) {
+        if (recoveryRecord) resumeSessionRef = buildRunSessionBinding(recoveryRecord, "builder", resumeSessionId);
+        if (!resumeSessionRef) {
+          try {
+            resumeSessionRef = resolveUniqueSessionBinding(readBuildRuns(cwd).flatMap((run) => run.sessionBindings ?? []), resumeSessionId);
+          } catch (error) { fail(error instanceof Error ? error.message : String(error)); }
+        }
+        if (!resumeSessionRef) fail(`session ${resumeSessionId} has no stored location-scoped binding; choose fresh recovery with a validated handoff instead of an unverifiable exact resume`);
       }
       if (selectedNewTicket) {
         if (!isTicketsInitialized(cwd)) fail("--ticket requires initialized .tickets/ (run `rafi tickets init`)");
@@ -540,35 +615,158 @@ export function buildStartCommand(): Command {
 
       const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
 
-      const createRawBuilder = async (builderCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
-        const builderPolicy = new PermissionPolicy(config.permissions, builderCwd);
+      const createRawBuilder = async (builderCwd: string, sessionId?: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
+        const builderPolicy = new PermissionPolicy(config.permissions, builderCwd, { currentBranchWorkflow: !branchMode });
         const roleBundle = loadRoleBundle("builder", { projectDir: builderCwd });
         const adapterOpts = {
           cwd: builderCwd,
           runtimeExecutable: agentExecutable,
           runtimePhase: "builder" as const,
           model,
-          resumeSessionId: sessionId,
+          ...(sessionRef ? { resumeSessionRef: sessionRef } : sessionId ? { resumeSessionId: sessionId } : {}),
+          configRoot: cwd,
+          sessionRole: "builder" as const,
+          sessionStream: sessionRef?.stream ?? "builder",
+          sessionGeneration: sessionRef?.generation ?? 0,
+          workspaceIdentity: !branchMode ? captureCurrentWorkflowSessionIdentity(builderCwd) : captureWorkspaceIdentity(builderCwd),
+          ticketId: sessionRef?.ticketId,
+          deliveryUnitId: sessionRef?.deliveryUnitId,
           permission: createPermissionHandler(builderPolicy, log),
           effort: builderEffort,
           fast: builderFast,
           systemPromptAppend: roleBundle.system || undefined,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
         };
-        return agent === "codex"
+        const adapter: BuilderAdapter = agent === "codex"
           ? new CodexAdapter(adapterOpts)
           : await ClaudeAdapter.create(adapterOpts);
+        if (sessionRef && adapter.agent === "codex") {
+          const availability = await adapter.validateSession!();
+          if (availability.status !== "available") {
+            await adapter.close().catch(() => {});
+            throw new SessionUnavailableError({ runtime: "codex", phase: "preflight", dispatchState: "not-sent", executable: agentExecutable ?? "codex", cwd: builderCwd, diagnostics: availability.detail ?? `Codex session ${sessionRef.sessionId} is ${availability.status}`, availability });
+          }
+        }
+        return !branchMode ? new CurrentWorkflowGuardAdapter(adapter, builderCwd) : adapter;
       };
 
-      const createBuilder = async (builderCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
-        const initial = await createRawBuilder(builderCwd, sessionId);
+      let activeContinuityRunId: string | undefined;
+      let liveStatusReporter: AgentStatusReporter | undefined;
+      let activeBuilderForStatus: (() => BuilderAdapter) | undefined;
+      const resolvedContinuitySettings = (role: "builder" | "qa"): ResolvedAgentSettings => role === "builder" ? {
+        role, source: roleDefaults.builder ? "project" : "provider", make: agent, model: model ?? "default",
+        reasoning: builderEffort ?? "default", fast: Boolean(builderFast), session_strategy: roleDefaults.builder?.session_strategy ?? "compact",
+        settings_revision: settingsRevision, display_session_cost: sessionCostOverride ?? roleDefaults.builder?.display_session_cost ?? false,
+        auto_compact_threshold_percent: thresholdOverride ?? roleDefaults.builder?.auto_compact_threshold_percent ?? 50,
+        compact_maximum: roleDefaults.builder?.compact_maximum ?? 10,
+      } : {
+        role, source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default",
+        reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact",
+        settings_revision: settingsRevision, display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false,
+        auto_compact_threshold_percent: 50, compact_maximum: 10,
+      };
+
+      const liveRoleSettings = (role: "builder" | "qa", base: ResolvedAgentSettings): ResolvedAgentSettings => {
+        const live = readAgentDefaults(cwd);
+        const revision = live.revision ?? 0;
+        if (revision <= base.settings_revision) return base;
+        const defaults = role === "builder" ? live.builder : live.qa;
+        return {
+          ...base,
+          source: defaults ? "project" : base.source,
+          make: defaults?.make ?? base.make,
+          model: defaults?.model ?? base.model,
+          reasoning: defaults?.reasoning ?? base.reasoning,
+          fast: defaults?.fast ?? base.fast,
+          session_strategy: defaults?.session_strategy ?? base.session_strategy,
+          display_session_cost: defaults?.display_session_cost ?? base.display_session_cost,
+          auto_compact_threshold_percent: defaults?.auto_compact_threshold_percent ?? base.auto_compact_threshold_percent,
+          compact_maximum: defaults?.compact_maximum ?? base.compact_maximum,
+          settings_revision: revision,
+        };
+      };
+
+      const createBuilderForSettings = async (builderCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
+        const ready = await ensureRuntimeReadyForCommand(builderCwd, settings.make, {
+          label: "live Builder settings",
+          yes: true,
+          allowSwitch: false,
+          model: settings.model === "default" ? undefined : settings.model,
+        });
+        const policy = new PermissionPolicy(config.permissions, builderCwd, { currentBranchWorkflow: !branchMode });
+        const roleBundle = loadRoleBundle("builder", { projectDir: builderCwd });
+        const adapterOptions = {
+          cwd: builderCwd,
+          configRoot: cwd,
+          sessionRole: "builder" as const,
+          sessionStream: "builder",
+          workspaceIdentity: !branchMode ? captureCurrentWorkflowSessionIdentity(builderCwd) : captureWorkspaceIdentity(builderCwd),
+          runtimeExecutable: ready.executable,
+          runtimePhase: "builder" as const,
+          model: settings.model === "default" ? undefined : settings.model,
+          permission: createPermissionHandler(policy, log),
+          effort: explicitEffort(settings.reasoning),
+          fast: settings.fast,
+          systemPromptAppend: roleBundle.system || undefined,
+          skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+        };
+        const created = settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
+        return !branchMode ? new CurrentWorkflowGuardAdapter(created, builderCwd) : created;
+      };
+
+      const createQaForSettings = async (qaCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
+        const ready = await ensureRuntimeReadyForCommand(qaCwd, settings.make, {
+          label: "live QA settings",
+          yes: true,
+          allowSwitch: false,
+          model: settings.model === "default" ? undefined : settings.model,
+        });
+        const policy = new PermissionPolicy(config.permissions, qaCwd);
+        const roleBundle = loadRoleBundle("qa", { projectDir: qaCwd });
+        const adapterOptions = {
+          cwd: qaCwd,
+          configRoot: cwd,
+          sessionRole: "qa" as const,
+          sessionStream: "qa",
+          runtimeExecutable: ready.executable,
+          runtimePhase: "qa" as const,
+          model: settings.model === "default" ? undefined : settings.model,
+          permission: createPermissionHandler(policy, log),
+          effort: explicitEffort(settings.reasoning),
+          fast: settings.fast,
+          systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
+          skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+        };
+        return settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
+      };
+
+      const createRecoveringBuilder = async (builderCwd: string, sessionId?: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
+        if (sessionId && !sessionRef) {
+          const availability = {
+            version: 1 as const,
+            status: "unknown" as const,
+            checkedAt: new Date().toISOString(),
+            reason: "legacy-unscoped" as const,
+            detail: "Builder recovery cannot authorize an exact provider resume from a raw session ID",
+          };
+          throw new SessionUnavailableError({
+            runtime: agent,
+            phase: "preflight",
+            dispatchState: "not-sent",
+            executable: agentExecutable ?? agent,
+            cwd: builderCwd,
+            diagnostics: availability.detail,
+            availability,
+          });
+        }
+        const initial = await createRawBuilder(builderCwd, sessionId, sessionRef);
         return new RecoveringAdapter({
           initial,
           runtime: agent,
           label: "builder turn",
           enabled: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY),
           allowSwitch: !(opts.resume || opts.continue),
-          recreate: async (nextRuntime, resumeSessionId) => {
+          recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
             const nextReady = await ensureRuntimeReadyForCommand(builderCwd, nextRuntime, {
               label: "builder recovery",
               allowSwitch: false,
@@ -577,20 +775,178 @@ export function buildStartCommand(): Command {
             agent = nextReady.runtime;
             model = nextReady.model;
             agentExecutable = nextReady.executable;
-            return createRawBuilder(builderCwd, resumeSessionId);
+            return createRawBuilder(builderCwd, resumeSessionId, resumeRef);
           },
         });
       };
 
-      const createRawQa = async (qaCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
+      const continuousBuilder = (
+        adapter: BuilderAdapter,
+        builderCwd: string,
+        runId: string,
+        settings = resolvedContinuitySettings("builder"),
+        replaceRecoveryLeaseAfterCheckpoint = false,
+      ): ContinuityAdapter => new ContinuityAdapter({
+        adapter,
+        projectDir: cwd,
+        runId,
+        role: "builder",
+        settings,
+        authoritativeStateRevision: () => readAgentDefaults(cwd).revision ?? settings.settings_revision,
+        createSuccessor: () => createRecoveringBuilder(builderCwd),
+        replaceRecoveryLeaseAfterCheckpoint,
+        recoverWithHandoff: async ({ reason, reconstruction, predecessor }) => {
+          const effectiveSettings = liveRoleSettings("builder", settings);
+          const context = await predecessor.contextUsage?.().catch(() => undefined);
+          const nativeUsage = await predecessor.sessionUsage?.().catch(() => undefined);
+          const sessionId = predecessor.sessionId();
+          const recoveryDb = new WorkflowDb(cwd);
+          let compactionCount = 0;
+          try { compactionCount = recoveryDb.successfulCompactionCount(runId, "builder", predecessor.sessionRef?.() ?? sessionId); }
+          finally { recoveryDb.close(); }
+          const transfer = await new HandoffService(cwd).transfer({
+            runId, role: "builder", reason, predecessorSessionId: sessionId, predecessorSessionRef: predecessor.sessionRef?.(),
+            allowNonCurrentContinuity: true,
+            roleState: { recovery: "double-invalid-continuity", reconstruction, ...(context ? { contextSample: context } : { occupancy: "unavailable" }) },
+            ...(nativeUsage ? { sessionUsage: {
+              version: 1 as const, runId, role: "builder" as const, provider: predecessor.agent,
+              providerSessionId: sessionId, observedAt: nativeUsage.observedAt, source: nativeUsage.source,
+              cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens,
+              cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
+            } } : {}),
+            compactionCount, compactMaximum: effectiveSettings.compact_maximum,
+            resources: [{ label: "continuity-reconstruction", content: reconstruction, authoritative: true }],
+          }, () => createBuilderForSettings(builderCwd, effectiveSettings));
+          log.write("handoff-transfer", {
+            role: "builder", reason, recovery: "double-invalid-continuity", generation: transfer.manifest.generation,
+            predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
+            acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest,
+          });
+          return transfer.successor;
+        },
+        handleHandoffRequest: async (output, predecessor, frozenAction) => {
+          const request = parseBuilderHandoffRequest(output);
+          if (!request) return undefined;
+          const effectiveSettings = liveRoleSettings("builder", settings);
+          const context = await predecessor.contextUsage?.().catch(() => undefined);
+          const nativeUsage = await predecessor.sessionUsage?.().catch(() => undefined);
+          const sessionId = predecessor.sessionId();
+          const countDb = new WorkflowDb(cwd);
+          let compactionCount = 0;
+          try {
+            const revision = countDb.continuityHead(runId, "builder")?.authoritativeStateRevision ?? settings.settings_revision;
+            countDb.appendContinuityEvent({ runId, role: "builder", kind: "builder_requested_handoff_delta", payload: request.delta, authoritativeStateRevision: revision });
+            countDb.publishContinuityCheckpoint({ runId, role: "builder", delta: request.delta, authoritativeStateRevision: revision });
+            compactionCount = countDb.successfulCompactionCount(runId, "builder", predecessor.sessionRef?.() ?? sessionId);
+          }
+          finally { countDb.close(); }
+          const transfer = await new HandoffService(cwd).transfer({
+            runId,
+            role: "builder",
+            reason: request.reason,
+            predecessorSessionId: sessionId,
+            predecessorSessionRef: predecessor.sessionRef?.(),
+            requestedByBuilder: true,
+            roleState: {
+              ...request.roleState,
+              frozenActionDigest: createHash("sha256").update(frozenAction).digest("hex"),
+              ...(context ? { occupancy: context } : { occupancy: "unavailable" }),
+            },
+            ...(nativeUsage ? { sessionUsage: {
+              version: 1 as const, runId, role: "builder" as const, provider: predecessor.agent,
+              providerSessionId: sessionId, observedAt: nativeUsage.observedAt, source: nativeUsage.source,
+              cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens,
+              cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
+            } } : {}),
+            compactionCount,
+            compactMaximum: effectiveSettings.compact_maximum,
+            resources: [{ label: "frozen-action", content: frozenAction, authoritative: true }],
+          }, () => createBuilderForSettings(builderCwd, effectiveSettings));
+          log.write("handoff-transfer", {
+            requestedByBuilder: true, reason: request.reason, generation: transfer.manifest.generation,
+            predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
+            acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest,
+          });
+          return transfer.successor;
+        },
+      });
+
+      const createBuilder = async (builderCwd: string, sessionId?: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
+        const recoveryMode = String(opts.recoveryMode ?? "");
+        const effectiveSessionId = recoveryMode && recoveryMode !== "exact-session" ? undefined : sessionId;
+        let adapter = await createRecoveringBuilder(builderCwd, effectiveSessionId, effectiveSessionId ? sessionRef : undefined);
+        if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "builder" && activeContinuityRunId === recoveryRecord?.runId) {
+          const service = new HandoffService(cwd);
+          const accepted = await service.acceptStaged(service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration), adapter);
+          adapter = accepted.successor;
+          pendingHandoffGeneration = undefined;
+          log.write("recovery-handoff-accepted", { role: "builder", generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest });
+        }
+        return activeContinuityRunId ? continuousBuilder(
+          adapter,
+          builderCwd,
+          activeContinuityRunId,
+          undefined,
+          String(opts.recoveryMode ?? "") === "fresh-recovery-only" && recoveryRecord?.recoveryDecision?.role !== "qa",
+        ) : adapter;
+      };
+
+      const applyBuilderSettingsBoundary = async (
+        runId: string,
+        builderCwd: string,
+        input: { adapter: BuilderAdapter; current: ResolvedAgentSettings; next: ResolvedAgentSettings; frozenAction: string },
+      ): Promise<BuilderAdapter> => {
+        const context = await input.adapter.contextUsage?.().catch(() => undefined);
+        const nativeUsage = await input.adapter.sessionUsage?.().catch(() => undefined);
+        const sessionId = input.adapter.sessionId();
+        const countDb = new WorkflowDb(cwd);
+        let compactionCount = 0;
+        try { compactionCount = countDb.successfulCompactionCount(runId, "builder", input.adapter.sessionRef?.() ?? sessionId); }
+        finally { countDb.close(); }
+        const reason = `live settings revision ${input.next.settings_revision} changed Builder provider controls from ${input.current.make}/${input.current.model} to ${input.next.make}/${input.next.model}`;
+        const transfer = await new HandoffService(cwd).transfer({
+          runId, role: "builder", reason, predecessorSessionId: sessionId, predecessorSessionRef: input.adapter.sessionRef?.(),
+          roleState: {
+            settingsFrom: input.current, settingsTo: input.next,
+            frozenActionDigest: createHash("sha256").update(input.frozenAction).digest("hex"),
+            ...(context ? { contextSample: context } : { occupancy: "unavailable" }),
+          },
+          ...(nativeUsage ? { sessionUsage: {
+            version: 1 as const, runId, role: "builder" as const, provider: input.adapter.agent,
+            providerSessionId: sessionId, observedAt: nativeUsage.observedAt, source: nativeUsage.source,
+            cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens,
+            cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
+          } } : {}),
+          compactionCount, compactMaximum: input.next.compact_maximum,
+          resources: [{ label: "frozen-action", content: input.frozenAction, authoritative: true }],
+        }, () => createBuilderForSettings(builderCwd, input.next));
+        log.write("handoff-transfer", {
+          role: "builder", reason, settingsRevision: input.next.settings_revision, generation: transfer.manifest.generation,
+          predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
+          acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest,
+        });
+        if (input.adapter instanceof ContinuityAdapter) {
+          await input.adapter.adoptValidatedSuccessor(transfer.successor);
+          return input.adapter;
+        }
+        await input.adapter.close().catch(() => {});
+        return continuousBuilder(transfer.successor, builderCwd, runId, input.next);
+      };
+
+      const createRawQa = async (qaCwd: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
         const qaPolicy = new PermissionPolicy(config.permissions, qaCwd);
         const roleBundle = loadRoleBundle("qa", { projectDir: qaCwd });
         const adapterOpts = {
           cwd: qaCwd,
+          configRoot: cwd,
+          sessionRole: "qa" as const,
+          sessionStream: "qa",
           runtimeExecutable: qaExecutable,
           runtimePhase: "qa" as const,
           model: qaModel,
-          resumeSessionId: sessionId,
+          ...(sessionRef ? { resumeSessionRef: sessionRef } : {}),
+          sessionGeneration: sessionRef?.generation ?? 0,
+          workspaceIdentity: captureWorkspaceIdentity(qaCwd),
           permission: createPermissionHandler(qaPolicy, log),
           effort: qaEffort,
           fast: qaFast,
@@ -602,15 +958,15 @@ export function buildStartCommand(): Command {
           : await ClaudeAdapter.create(adapterOpts);
       };
 
-      const createQa = async (qaCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
-        const initial = await createRawQa(qaCwd, sessionId);
+      const createRecoveringQa = async (qaCwd: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
+        const initial = await createRawQa(qaCwd, sessionRef);
         return new RecoveringAdapter({
           initial,
           runtime: qaAgent,
           label: "QA turn",
           enabled: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY),
-          allowSwitch: !sessionId,
-          recreate: async (nextRuntime, resumeSessionId) => {
+          allowSwitch: !sessionRef,
+          recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
             const nextReady = await ensureRuntimeReadyForCommand(qaCwd, nextRuntime, {
               label: "QA recovery",
               allowSwitch: false,
@@ -619,9 +975,222 @@ export function buildStartCommand(): Command {
             qaAgent = nextReady.runtime;
             qaModel = nextReady.model;
             qaExecutable = nextReady.executable;
-            return createRawQa(qaCwd, resumeSessionId);
+            if (resumeSessionId && !resumeRef) {
+              const availability = {
+                version: 1 as const,
+                status: "unknown" as const,
+                checkedAt: new Date().toISOString(),
+                reason: "legacy-unscoped" as const,
+                detail: "QA retry cannot authorize an exact provider resume from a raw session ID",
+              };
+              throw new SessionUnavailableError({
+                runtime: nextRuntime,
+                phase: "preflight",
+                dispatchState: "not-sent",
+                executable: nextReady.executable,
+                cwd: qaCwd,
+                diagnostics: availability.detail,
+                availability,
+              });
+            }
+            return createRawQa(qaCwd, resumeRef);
           },
         });
+      };
+      const decorateQa = (adapter: BuilderAdapter, qaCwd: string, sessionId?: string, settingsOverride?: ResolvedAgentSettings): BuilderAdapter => {
+        const qaSettings = settingsOverride ?? resolvedContinuitySettings("qa");
+        const continuous = activeContinuityRunId ? new ContinuityAdapter({
+          adapter, projectDir: cwd, runId: activeContinuityRunId, role: "qa", settings: qaSettings,
+          authoritativeStateRevision: () => readAgentDefaults(cwd).revision ?? settingsRevision,
+          createSuccessor: () => createRecoveringQa(qaCwd),
+          replaceRecoveryLeaseAfterCheckpoint: String(opts.recoveryMode ?? "") === "fresh-recovery-only" && recoveryRecord?.recoveryDecision?.role === "qa",
+          recoverWithHandoff: async ({ reason, reconstruction, predecessor }) => {
+            const effectiveSettings = liveRoleSettings("qa", qaSettings);
+            const context = await predecessor.contextUsage?.().catch(() => undefined);
+            const nativeUsage = await predecessor.sessionUsage?.().catch(() => undefined);
+            const predecessorSessionId = predecessor.sessionId();
+            const recoveryDb = new WorkflowDb(cwd);
+            let compactionCount = 0;
+            try { compactionCount = recoveryDb.successfulCompactionCount(activeContinuityRunId!, "qa", predecessor.sessionRef?.() ?? predecessorSessionId); }
+            finally { recoveryDb.close(); }
+            const transfer = await new HandoffService(cwd).transfer({
+              runId: activeContinuityRunId!, role: "qa", reason, predecessorSessionId, predecessorSessionRef: predecessor.sessionRef?.(),
+              allowNonCurrentContinuity: true,
+              roleState: { recovery: "double-invalid-continuity", reconstruction, ...(context ? { contextSample: context } : { occupancy: "unavailable" }) },
+              ...(nativeUsage ? { sessionUsage: {
+                version: 1 as const, runId: activeContinuityRunId!, role: "qa" as const, provider: predecessor.agent,
+                providerSessionId: predecessorSessionId, observedAt: nativeUsage.observedAt, source: nativeUsage.source,
+                cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens,
+                cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
+              } } : {}),
+              compactionCount, compactMaximum: effectiveSettings.compact_maximum,
+              resources: [{ label: "continuity-reconstruction", content: reconstruction, authoritative: true }],
+            }, () => createQaForSettings(qaCwd, effectiveSettings));
+            log.write("handoff-transfer", {
+              role: "qa", reason, recovery: "double-invalid-continuity", generation: transfer.manifest.generation,
+              predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
+              acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest,
+            });
+            return transfer.successor;
+          },
+        }) : adapter;
+        return new RoleStatusAdapter(continuous, (active) => liveStatusReporter?.updateState({
+          role: "qa", provider: active.agent, model: qaSettings.model, reasoning: qaSettings.reasoning, fast: qaSettings.fast,
+          phase: "QA review session", sessionTransition: sessionId ? "resumed QA session" : "QA session", adapter: active,
+          settingsRevision: qaSettings.settings_revision, displaySessionCost: qaSettings.display_session_cost,
+          compactionCount: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.successfulCompactionCount(activeContinuityRunId, "qa", active.sessionRef?.() ?? active.sessionId()) : 0; } finally { db.close(); } },
+          handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.handoffs(activeContinuityRunId).at(-1)?.generation ?? 0 : 0; } finally { db.close(); } },
+        }), () => {
+          const active = activeBuilderForStatus?.();
+          if (active) liveStatusReporter?.updateState({
+            role: "builder", provider: active.agent, model: model ?? "default", reasoning: builderEffort ?? "default", fast: Boolean(builderFast),
+            phase: "builder work session", sessionTransition: "builder session", adapter: active,
+            settingsRevision, displaySessionCost: sessionCostOverride ?? roleDefaults.builder?.display_session_cost ?? false,
+            compactionCount: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.successfulCompactionCount(activeContinuityRunId, "builder", active.sessionRef?.() ?? active.sessionId()) : 0; } finally { db.close(); } },
+            handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.handoffs(activeContinuityRunId).at(-1)?.generation ?? 0 : 0; } finally { db.close(); } },
+          });
+        });
+      };
+
+      const createQa = async (qaCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
+        const recoveryMode = String(opts.recoveryMode ?? "");
+        // A disposable QA cwd is never eligible for exact reuse, even when a
+        // compatibility caller still supplies the previous raw ID.
+        const effectiveSessionId = undefined;
+        void sessionId;
+        let adapter = await createRecoveringQa(qaCwd, effectiveSessionId);
+        let explicitRecoveryAccepted = false;
+        if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "qa" && activeContinuityRunId === recoveryRecord?.runId) {
+          const service = new HandoffService(cwd);
+          const accepted = await service.acceptStaged(service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration), adapter);
+          adapter = accepted.successor;
+          pendingHandoffGeneration = undefined;
+          explicitRecoveryAccepted = true;
+          log.write("recovery-handoff-accepted", { role: "qa", generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest });
+        }
+        // A new disposable QA worktree always means a new provider session.
+        // Transfer cumulative QA state by accepting a durable handoff in that
+        // fresh session; never attach the old session in the new /tmp cwd.
+        if (!explicitRecoveryAccepted && activeContinuityRunId && recoveryMode !== "fresh-recovery-only") {
+          const stateDb = new WorkflowDb(cwd);
+          const priorLease = stateDb.roleMutationLease(activeContinuityRunId, "qa");
+          const head = stateDb.continuityHead(activeContinuityRunId, "qa");
+          const checkpoint = stateDb.latestContinuityCheckpoint(activeContinuityRunId, "qa");
+          const compactionCount = priorLease
+            ? stateDb.successfulCompactionCount(activeContinuityRunId, "qa", priorLease.sessionRef ?? priorLease.providerSessionId)
+            : 0;
+          stateDb.close();
+          if (priorLease) {
+            if (!head || head.state !== "current" || !checkpoint) {
+              await adapter.close().catch(() => {});
+              throw new ContinuityRecoveryRequiredError(activeContinuityRunId, "qa", `cannot transfer cumulative QA state from a ${head?.state ?? "missing"} checkpoint`);
+            }
+            const service = new HandoffService(cwd);
+            const staged = service.stage({
+              runId: activeContinuityRunId,
+              role: "qa",
+              reason: "new disposable QA snapshot requires a fresh location-scoped provider session",
+              predecessorSessionId: priorLease.providerSessionId,
+              predecessorSessionRef: priorLease.sessionRef,
+              roleState: { predecessorGeneration: priorLease.generation, successorSnapshotCwd: qaCwd },
+              compactionCount,
+              compactMaximum: resolvedContinuitySettings("qa").compact_maximum,
+            });
+            const accepted = await service.acceptStaged(staged, adapter);
+            adapter = accepted.successor;
+            log.write("handoff-transfer", {
+              role: "qa", reason: staged.manifest.reason, generation: accepted.manifest.generation,
+              predecessorSessionId: staged.manifest.predecessorSessionId, successorSessionId: accepted.successorSessionId,
+              acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest,
+            });
+          }
+        }
+        return decorateQa(adapter, qaCwd, effectiveSessionId);
+      };
+
+      const applyQaSettingsBoundary = async (
+        runId: string,
+        qaCwd: string,
+        input: { adapter: BuilderAdapter; current: ResolvedAgentSettings; next: ResolvedAgentSettings; frozenAction: string },
+      ): Promise<BuilderAdapter> => {
+        const context = await input.adapter.contextUsage?.().catch(() => undefined);
+        const nativeUsage = await input.adapter.sessionUsage?.().catch(() => undefined);
+        const sessionId = input.adapter.sessionId();
+        const countDb = new WorkflowDb(cwd);
+        let compactionCount = 0;
+        try { compactionCount = countDb.successfulCompactionCount(runId, "qa", input.adapter.sessionRef?.() ?? sessionId); }
+        finally { countDb.close(); }
+        const reason = `live settings revision ${input.next.settings_revision} changed QA provider controls from ${input.current.make}/${input.current.model} to ${input.next.make}/${input.next.model}`;
+        const transfer = await new HandoffService(cwd).transfer({
+          runId, role: "qa", reason, predecessorSessionId: sessionId, predecessorSessionRef: input.adapter.sessionRef?.(),
+          roleState: {
+            settingsFrom: input.current, settingsTo: input.next,
+            frozenActionDigest: createHash("sha256").update(input.frozenAction).digest("hex"),
+            ...(context ? { contextSample: context } : { occupancy: "unavailable" }),
+          },
+          ...(nativeUsage ? { sessionUsage: {
+            version: 1 as const, runId, role: "qa" as const, provider: input.adapter.agent,
+            providerSessionId: sessionId, observedAt: nativeUsage.observedAt, source: nativeUsage.source,
+            cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens,
+            cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
+          } } : {}),
+          compactionCount, compactMaximum: input.next.compact_maximum,
+          resources: [{ label: "frozen-qa-action", content: input.frozenAction, authoritative: true }],
+        }, () => createQaForSettings(qaCwd, input.next));
+        log.write("handoff-transfer", {
+          role: "qa", reason, settingsRevision: input.next.settings_revision, generation: transfer.manifest.generation,
+          predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
+          acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest,
+        });
+        await input.adapter.close().catch(() => {});
+        return decorateQa(transfer.successor, qaCwd, undefined, input.next);
+      };
+
+      const qaSessionBoundary = async (
+        adapter: BuilderAdapter,
+        frozenAction: string,
+        strategy: SessionStrategy,
+        qaCwd: string,
+      ): Promise<BuilderAdapter> => {
+        if (!activeContinuityRunId) throw new Error("QA session boundary requires an active durable run");
+        const qaSettings = resolvedContinuitySettings("qa");
+        const controller = RoleSessionController.managed({
+          projectDir: cwd,
+          runId: activeContinuityRunId,
+          role: "qa",
+          initialSettings: qaSettings,
+          historicalCountUncertain: Boolean(recoveryRecord && (recoveryRecord.legacy || !recoveryRecord.runDecisions)),
+          readSettings: () => liveRoleSettings("qa", qaSettings),
+          settingsBoundary: (input) => applyQaSettingsBoundary(activeContinuityRunId!, qaCwd, input),
+          settingsAdopted: (settings, active) => liveStatusReporter?.updateState({
+            role: "qa", provider: active.agent, model: settings.model, reasoning: settings.reasoning, fast: settings.fast,
+            adapter: active, settingsRevision: settings.settings_revision, displaySessionCost: settings.display_session_cost,
+            sessionTransition: "adopted live settings",
+          }),
+          report: (event) => {
+            currentActivity()?.update(event.kind, event.detail, { provider: qaSettings.make, model: qaSettings.model });
+            log.write("context-lifecycle", { role: "qa", ...event, sample: event.sample });
+          },
+          handoff: async ({ reason, adapter: predecessor, sample, settings, compactionCount }) => {
+            const nativeUsage = await predecessor.sessionUsage?.().catch(() => undefined);
+            const transfer = await new HandoffService(cwd).transfer({
+              runId: activeContinuityRunId!, role: "qa", reason, predecessorSessionId: predecessor.sessionId(), predecessorSessionRef: predecessor.sessionRef?.(),
+              roleState: { frozenActionDigest: createHash("sha256").update(frozenAction).digest("hex"), contextSample: sample },
+              ...(nativeUsage ? { sessionUsage: {
+                version: 1 as const, runId: activeContinuityRunId!, role: "qa" as const, provider: predecessor.agent,
+                providerSessionId: predecessor.sessionId(), observedAt: nativeUsage.observedAt, source: nativeUsage.source,
+                cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens,
+                cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
+              } } : {}),
+              compactionCount, compactMaximum: settings.compact_maximum ?? 10,
+              resources: [{ label: "frozen-qa-action", content: frozenAction, authoritative: true }],
+            }, () => createQaForSettings(qaCwd, settings));
+            log.write("handoff-transfer", { role: "qa", generation: transfer.manifest.generation, predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId, acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest });
+            await predecessor.close().catch(() => {});
+            return decorateQa(transfer.successor, qaCwd, undefined, settings);
+          },
+        });
+        return (await controller.atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter;
       };
       const qaNonconvergence = createQaNonconvergenceHandler(cwd, Boolean(opts.yes), roleDefaults.planner);
 
@@ -667,7 +1236,7 @@ export function buildStartCommand(): Command {
         db.close();
 
         const ticketById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
-        const resumeSessionByTicket = new Map<string, { worktreePath: string; sessionId: string }>();
+        const resumeSessionByTicket = new Map<string, { worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1 }>();
         let auditDependencyCount: number | undefined;
         let plan: BranchPlan;
         if (continueTickets.length > 0) {
@@ -685,7 +1254,12 @@ export function buildStartCommand(): Command {
             const ticket = ticketById.get(ticketId);
             if (!ticket) fail(`ticket ${ticketId} no longer exists in .tickets/tickets.yaml`);
             const sessionId = (opts.resume as string | undefined) ?? session.sessionId;
-            resumeSessionByTicket.set(ticketId, { worktreePath: session.worktreePath, sessionId });
+            let sessionRef = session.sessionRef;
+            if (sessionRef && sessionRef.sessionId !== sessionId) sessionRef = undefined;
+            if (!sessionRef && recoveryRecord) sessionRef = buildRunSessionBinding(recoveryRecord, "builder", sessionId);
+            if (!sessionRef && sessionId === session.sessionId) sessionRef = legacyBranchSessionRef(session, cwd, agent);
+            if (!sessionRef) fail(`session ${sessionId} for ${ticketId} has no unique location-scoped binding; use fresh-with-handoff recovery`);
+            resumeSessionByTicket.set(ticketId, { worktreePath: session.worktreePath, sessionId, sessionRef });
             nodes.push({
               ticket,
               branch: session.branch,
@@ -707,7 +1281,7 @@ export function buildStartCommand(): Command {
           plan = buildBranchPlan(tickets, states, {
             steps,
             baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch ?? currentGitRef(cwd),
-            branchPrefix: opts.branchPrefix as string,
+            branchPrefix,
             maxBranchDepth,
             rootBaseBranches: branchDefaults.rootBaseBranches,
             ticketIds: selectedNewTicket ? [selectedNewTicket] : selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
@@ -715,6 +1289,8 @@ export function buildStartCommand(): Command {
 
           let auditBuilder: BuilderAdapter | undefined;
           let auditViewer: Promise<void> | undefined;
+          const auditRunId = `audit-${stamp}`;
+          activeContinuityRunId = auditRunId;
           try {
             auditBuilder = await createBuilder(cwd);
             auditViewer = printEvents(auditBuilder.events());
@@ -724,7 +1300,7 @@ export function buildStartCommand(): Command {
             plan = buildBranchPlan(tickets, states, {
               steps,
               baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch ?? currentGitRef(cwd),
-              branchPrefix: opts.branchPrefix as string,
+              branchPrefix,
               maxBranchDepth,
               auditDependencies,
               rootBaseBranches: branchDefaults.rootBaseBranches,
@@ -734,24 +1310,35 @@ export function buildStartCommand(): Command {
           } finally {
             await auditBuilder?.close().catch(() => {});
             await auditViewer?.catch(() => {});
+            const auditDb = new WorkflowDb(cwd);
+            try {
+              if (auditDb.getRun(auditRunId)) auditDb.transition(auditRunId, { status: "completed", checkpoint: "branch-audit-complete", remainingWork: {}, event: "audit_completed" });
+            } finally { auditDb.close(); }
+            activeContinuityRunId = undefined;
           }
           if (deliveryRun?.unit.branch_mode === "shared") {
-            plan = applySharedDeliveryBranch(plan, deliveryRun.unit.id, deliveryRun.remaining, opts.branchPrefix as string);
+            plan = applySharedDeliveryBranch(plan, deliveryRun.unit.id, deliveryRun.remaining, branchPrefix);
             const saved = readDeliveryUnitSession(cwd, deliveryRun.unit.id);
             const first = plan.nodes[0];
             if (saved && first && saved.branch === first.branch && existsSync(saved.worktreePath)) {
-              resumeSessionByTicket.set(first.ticket.id, { worktreePath: saved.worktreePath, sessionId: saved.sessionId });
+              const sessionRef = saved.sessionRef ?? createProviderSessionRef({ provider: agent, sessionId: saved.sessionId, role: "builder", stream: "builder", generation: 0, cwd: saved.worktreePath, configRoot: cwd, workspaceIdentity: captureWorkspaceIdentity(saved.worktreePath), ticketId: saved.ticket, deliveryUnitId: saved.unitId, source: "legacy-inferred" });
+              resumeSessionByTicket.set(first.ticket.id, { worktreePath: saved.worktreePath, sessionId: saved.sessionId, sessionRef });
             }
           }
           if (selectedStacks.length && deliveryConfig) {
-            plan = applyExplicitStackTopology(plan, selectedStacks, deliveryConfig, opts.branchPrefix as string);
+            plan = applyExplicitStackTopology(plan, selectedStacks, deliveryConfig, branchPrefix);
           } else if (!deliveryRun) {
             const branchPolicy = loadTicketSetupConfig(cwd)?.build.branch_policy;
-            if (branchPolicy) plan = applySizeBranchPolicy(plan, branchPolicy, deliveryConfig, opts.branchPrefix as string);
+            if (branchPolicy) plan = applySizeBranchPolicy(plan, branchPolicy, deliveryConfig, branchPrefix);
           }
           if (recoveryRecord && opts.resume && plan.nodes[0]) {
             const prior = findResumableBranchSessions(join(cwd, ".foreman")).find((session) => session.ticket === (recoveryRecord.currentTicket ?? plan.nodes[0]!.ticket.id));
-            if (prior) resumeSessionByTicket.set(plan.nodes[0]!.ticket.id, { worktreePath: prior.worktreePath, sessionId: opts.resume as string });
+            if (prior) {
+              const requested = String(opts.resume);
+              const sessionRef = prior.sessionRef?.sessionId === requested ? prior.sessionRef : buildRunSessionBinding(recoveryRecord, "builder", requested) ?? (prior.sessionId === requested ? legacyBranchSessionRef(prior, cwd, agent) : undefined);
+              if (!sessionRef) fail(`session ${requested} has no stored scope for ${plan.nodes[0]!.ticket.id}`);
+              resumeSessionByTicket.set(plan.nodes[0]!.ticket.id, { worktreePath: prior.worktreePath, sessionId: requested, sessionRef });
+            }
           }
         }
 
@@ -796,20 +1383,81 @@ export function buildStartCommand(): Command {
           }
         }
 
+        for (const [ticketId, session] of resumeSessionByTicket) {
+          const ref = session.sessionRef;
+          if (!ref) fail(`session ${session.sessionId} for ${ticketId} has no location-scoped binding`);
+          if (ref.provider !== agent) fail(`session ${ref.sessionId} belongs to ${ref.provider}, but this recovery selected ${agent}`);
+          const availability = await resolveProviderSessionAvailability(ref, {
+            cwd: session.worktreePath,
+            configRoot: cwd,
+            workspaceIdentity: captureWorkspaceIdentity(session.worktreePath),
+            runtimeExecutable: agentExecutable,
+          });
+          if (availability.status !== "available" || !availability.sessionRef) {
+            fail(`exact session ${ref.sessionId} is ${availability.status} (${availability.reason ?? "validation failed"}): ${availability.detail ?? "no provider detail"}. The preserved worktree remains recoverable; choose fresh-with-handoff recovery.`);
+          }
+          resumeSessionByTicket.set(ticketId, { ...session, sessionRef: availability.sessionRef });
+        }
+
         const capturedBranchBuilder: ResolvedAgentSettings = {
           role: "builder", source: opts.agent || opts.model || opts.effort || opts.fast ? "cli" : roleDefaults.builder ? "project" : "provider",
           make: agent, model: model ?? "default", reasoning: builderEffort ?? "default", fast: Boolean(builderFast),
           session_strategy: roleDefaults.builder?.session_strategy ?? "compact", settings_revision: settingsRevision,
+          display_session_cost: sessionCostOverride ?? roleDefaults.builder?.display_session_cost ?? false,
+          auto_compact_threshold_percent: thresholdOverride ?? roleDefaults.builder?.auto_compact_threshold_percent ?? 50,
+          compact_maximum: roleDefaults.builder?.compact_maximum ?? 10,
         };
         const capturedBranchQa: ResolvedAgentSettings = {
           role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default",
           reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", settings_revision: settingsRevision,
+          display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false,
+          auto_compact_threshold_percent: 50, compact_maximum: 10,
         };
-        let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: opts.resume ? String(opts.resume) : null }) : createBuildRun({
+        const firstResumeRef = plan.nodes[0] ? resumeSessionByTicket.get(plan.nodes[0].ticket.id)?.sessionRef : undefined;
+        let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null }) : createBuildRun({
           tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
           repositoryRoot: cwd, branchMode: branchPresentation.allocationMode, baseRef: plan.baseRef, builder: capturedBranchBuilder, qa: capturedBranchQa,
+          runDecisions: { workMode: "branch-per-ticket", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBranchBuilder.auto_compact_threshold_percent ?? 50, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
         });
+        activeContinuityRunId = masterRun.runId;
+        const branchContextControllers = new Map<string, RoleSessionController>();
+        const branchContextController = (worktreePath: string): RoleSessionController => {
+          const existing = branchContextControllers.get(worktreePath);
+          if (existing) return existing;
+          const controller = RoleSessionController.managed({
+            projectDir: cwd, runId: masterRun.runId, role: "builder", initialSettings: capturedBranchBuilder,
+            historicalCountUncertain: Boolean(recoveryRecord && (recoveryRecord.legacy || !recoveryRecord.runDecisions)),
+            readSettings: () => liveRoleSettings("builder", capturedBranchBuilder),
+            settingsBoundary: (input) => applyBuilderSettingsBoundary(masterRun.runId, worktreePath, input),
+            settingsAdopted: (settings, active) => liveStatusReporter?.updateState({
+              role: "builder", provider: active.agent, model: settings.model, reasoning: settings.reasoning, fast: settings.fast,
+              adapter: active, settingsRevision: settings.settings_revision, displaySessionCost: settings.display_session_cost,
+              sessionTransition: "adopted live settings",
+            }),
+            report: (event) => { currentActivity()?.update(event.kind, event.detail, { provider: capturedBranchBuilder.make, model: capturedBranchBuilder.model }); log.write("context-lifecycle", { worktreePath, ...event, sample: event.sample }); },
+            handoff: async ({ reason, adapter, sample, settings, compactionCount, frozenAction }) => {
+              const nativeUsage = await adapter.sessionUsage?.().catch(() => undefined);
+              const transfer = await new HandoffService(cwd).transfer({
+                runId: masterRun.runId, role: "builder", reason, predecessorSessionId: adapter.sessionId(), predecessorSessionRef: adapter.sessionRef?.(),
+                roleState: { worktreePath, frozenActionDigest: createHash("sha256").update(frozenAction).digest("hex"), contextSample: sample },
+                ...(nativeUsage ? { sessionUsage: { version: 1 as const, runId: masterRun.runId, role: "builder" as const, provider: adapter.agent, providerSessionId: adapter.sessionId(), observedAt: nativeUsage.observedAt, source: nativeUsage.source, cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens, cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd } } : {}),
+                compactionCount, compactMaximum: settings.compact_maximum ?? 10,
+                resources: [{ label: "frozen-action", content: frozenAction, authoritative: true }],
+              }, () => createBuilderForSettings(worktreePath, settings));
+              log.write("handoff-transfer", { worktreePath, generation: transfer.manifest.generation, predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId, acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest });
+              if (adapter instanceof ContinuityAdapter) {
+                await adapter.adoptValidatedSuccessor(transfer.successor);
+                return adapter;
+              }
+              await adapter.close().catch(() => {});
+              return continuousBuilder(transfer.successor, worktreePath, masterRun.runId, settings);
+            },
+          });
+          branchContextControllers.set(worktreePath, controller);
+          return controller;
+        };
         const branchHeartbeat = setInterval(() => { masterRun = heartbeatBuildRun(cwd, masterRun); }, 10_000); branchHeartbeat.unref();
+        let branchSessionFailure: SessionUnavailableError | SessionUnavailableContinuityError | undefined;
         const summaries = await runBranchPlan({
           projectDir: cwd,
           runId: masterRun.runId,
@@ -837,13 +1485,54 @@ export function buildStartCommand(): Command {
             archiveDoc: ticketsConfig.paths.archiveDoc,
           },
           resumeSessions: resumeSessionByTicket,
-          createBuilder: (builderCwd, sessionId) => createBuilder(builderCwd, sessionId),
+          createBuilder: (builderCwd, sessionId, sessionRef) => createBuilder(builderCwd, sessionId, sessionRef),
+          recordBuilderSession: (session, ticketId) => { masterRun = persistBuildSession(cwd, { ...masterRun, currentTicket: ticketId }, "builder", session); },
+          recordQaSession: (session, ticketId) => { masterRun = persistBuildSession(cwd, { ...masterRun, currentTicket: ticketId }, "qa", session); },
+          onSessionUnavailable: (error) => { branchSessionFailure = error; },
           createQa: (qaCwd, sessionId) => createQa(qaCwd, sessionId),
           builderSessionStrategy: roleDefaults.builder?.session_strategy ?? "compact",
           qaSessionStrategy: roleDefaults.qa?.session_strategy ?? "compact",
-          observeBuilder: (builder) => printEvents(builder.events()),
+          observeBuilder: async (builder) => {
+            liveStatusReporter?.stop();
+            activeBuilderForStatus = () => builder;
+            const reporter = liveStatusReporter = new AgentStatusReporter({
+              runId: masterRun.runId, role: "builder", provider: builder.agent, model: capturedBranchBuilder.model,
+              reasoning: capturedBranchBuilder.reasoning, fast: capturedBranchBuilder.fast, step: Math.min(plan.nodes.length, branchContextControllers.size + 1), total: plan.nodes.length,
+              phase: "builder ticket session", sessionTransition: builder.sessionId() ? "resumed session" : "initial session", adapter: builder,
+              settingsRevision: capturedBranchBuilder.settings_revision, displaySessionCost: capturedBranchBuilder.display_session_cost ?? false,
+              compactionCount: () => { const db = new WorkflowDb(cwd); try { return db.successfulCompactionCount(masterRun.runId, "builder", builder.sessionRef?.() ?? builder.sessionId()); } finally { db.close(); } },
+              handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.handoffs(masterRun.runId).at(-1)?.generation ?? 0; } finally { db.close(); } },
+            }, (line, snapshot) => {
+              const activity = currentActivity();
+              if (activity && process.stdout.isTTY) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, "")); else console.log(line);
+              log.write("agent-status", { ...snapshot });
+              const db = new WorkflowDb(cwd); try { db.recordTelemetry(masterRun.runId, snapshot); db.recordContextSample(snapshot.contextSample); if (snapshot.sessionUsage) db.recordSessionUsage(snapshot.sessionUsage); } finally { db.close(); }
+            });
+            reporter.start();
+            try { await printEvents(builder.events()); } finally { reporter.stop(); }
+          },
           qaNonconvergence,
+          beforeBuilderTurn: async (adapter, frozenAction, worktreePath) => (await branchContextController(worktreePath).atSafeBoundary(adapter, frozenAction)).adapter,
+          builderSessionBoundary: async (adapter, frozenAction, strategy, worktreePath) => (await branchContextController(worktreePath).atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter,
+          qaSessionBoundary,
         });
+        if (branchSessionFailure) {
+          const failure = branchSessionFailure;
+          const guided = failure instanceof SessionUnavailableContinuityError ? failure.guidedRecovery : failure.failure.dispatchState === "unknown";
+          const summary = failure.message.slice(0, 1000);
+          masterRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, masterRun, guided ? "guided-recovery-required" : "session-unavailable-before-dispatch", {
+            status: "recoverable",
+            failure: { category: "session-unavailable", summary, at: new Date().toISOString() },
+          }), "recoverable");
+          clearInterval(branchHeartbeat);
+          log.write("session-unavailable", { runId: masterRun.runId, guided, message: summary });
+          console.error(`foreman: exact provider session unavailable; preserved branch work remains recoverable: ${summary}`);
+          console.error(guided
+            ? `foreman: continue with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(masterRun.runId)} --guided-recovery`
+            : `foreman: inspect recovery with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(masterRun.runId)} --inspect`);
+          process.exit(2);
+        }
+        if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted; recovery mode was not substituted`);
         clearInterval(branchHeartbeat);
         if (selectedStacks.length) {
           let allComplete = true;
@@ -888,6 +1577,7 @@ export function buildStartCommand(): Command {
             console.log(`  ${command}`);
           }
         }
+        if (masterRun.status === "completed") printHandoffPruneCommand(masterRun.runId);
 
         const failed = summaries.some((row) => row.buildStatus === "blocked" || row.buildStatus === "needs-human");
         process.exit(failed ? 2 : 0);
@@ -902,6 +1592,19 @@ export function buildStartCommand(): Command {
       agent = ready.runtime;
       model = ready.model;
       agentExecutable = ready.executable;
+      if (resumeSessionRef) {
+        if (resumeSessionRef.provider !== agent) fail(`session ${resumeSessionRef.sessionId} belongs to ${resumeSessionRef.provider}, but this recovery selected ${agent}`);
+        const availability = await resolveProviderSessionAvailability(resumeSessionRef, {
+          cwd,
+          configRoot: cwd,
+          workspaceIdentity: captureCurrentWorkflowSessionIdentity(cwd),
+          runtimeExecutable: agentExecutable,
+        });
+        if (availability.status !== "available" || !availability.sessionRef) {
+          fail(`exact session ${resumeSessionRef.sessionId} is ${availability.status} (${availability.reason ?? "validation failed"}): ${availability.detail ?? "no provider detail"}. The current worktree and recovery checkpoints were preserved; choose fresh-with-handoff recovery.`);
+        }
+        resumeSessionRef = availability.sessionRef;
+      }
       if (qaEnabled) {
         const qaReady = await ensureRuntimeReadyForCommand(cwd, qaAgent, { label: "independent QA", yes: Boolean(opts.yes), model: qaModel });
         qaAgent = qaReady.runtime;
@@ -912,11 +1615,16 @@ export function buildStartCommand(): Command {
         role: "builder", source: opts.agent || opts.model || opts.effort || opts.fast ? "cli" : roleDefaults.builder ? "project" : "provider",
         make: agent, model: model ?? "default", reasoning: builderEffort ?? "default", fast: Boolean(builderFast),
         session_strategy: roleDefaults.builder?.session_strategy ?? "compact", settings_revision: settingsRevision,
+        display_session_cost: sessionCostOverride ?? roleDefaults.builder?.display_session_cost ?? false,
+        auto_compact_threshold_percent: thresholdOverride ?? roleDefaults.builder?.auto_compact_threshold_percent ?? 50,
+        compact_maximum: roleDefaults.builder?.compact_maximum ?? 10,
       };
-      const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", settings_revision: settingsRevision };
-      let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: opts.resume ? String(opts.resume) : null }) : createBuildRun({
+      const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false, auto_compact_threshold_percent: 50, compact_maximum: 10, settings_revision: settingsRevision };
+      let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null }) : createBuildRun({
         tickets: [], repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
+        runDecisions: { workMode: "current", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBuilder.auto_compact_threshold_percent ?? 50, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
       });
+      activeContinuityRunId = buildRun.runId;
       const heartbeat = setInterval(() => { buildRun = heartbeatBuildRun(cwd, buildRun); }, 10_000);
       heartbeat.unref();
       const checkpointSignal = (): void => {
@@ -924,22 +1632,92 @@ export function buildStartCommand(): Command {
       };
       process.once("SIGINT", checkpointSignal);
       process.once("SIGTERM", checkpointSignal);
-      const builder = await createBuilder(cwd, resumeSessionId);
+      let builder: BuilderAdapter;
+      try {
+        builder = await createBuilder(cwd, resumeSessionId, resumeSessionRef);
+      } catch (error) {
+        if (!(error instanceof SessionUnavailableError)) throw error;
+        const summary = error.message.slice(0, 1000);
+        buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "session-unavailable-before-dispatch", {
+          status: "recoverable",
+          failure: { category: "session-unavailable", summary, at: new Date().toISOString() },
+        }), "recoverable");
+        clearInterval(heartbeat);
+        log.write("session-unavailable", { runId: buildRun.runId, phase: error.failure.phase, dispatchState: error.failure.dispatchState, message: summary });
+        console.error(`foreman: exact provider session unavailable before dispatch; current worktree state was preserved: ${summary}`);
+        console.error(`foreman: inspect recovery with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --inspect`);
+        process.exit(2);
+      }
+      const contextController = RoleSessionController.managed({
+        projectDir: cwd,
+        runId: buildRun.runId,
+        role: "builder",
+        initialSettings: capturedBuilder,
+        historicalCountUncertain: Boolean(recoveryRecord && (recoveryRecord.legacy || !recoveryRecord.runDecisions)),
+        readSettings: () => liveRoleSettings("builder", capturedBuilder),
+        settingsBoundary: (input) => applyBuilderSettingsBoundary(buildRun.runId, cwd, input),
+        settingsAdopted: (settings, active) => liveStatusReporter?.updateState({
+          role: "builder", provider: active.agent, model: settings.model, reasoning: settings.reasoning, fast: settings.fast,
+          adapter: active, settingsRevision: settings.settings_revision, displaySessionCost: settings.display_session_cost,
+          sessionTransition: "adopted live settings",
+        }),
+        report: (event) => {
+          currentActivity()?.update(event.kind, event.detail, { provider: capturedBuilder.make, model: capturedBuilder.model });
+          log.write("context-lifecycle", { ...event, sample: event.sample });
+        },
+        handoff: async ({ reason, adapter, sample, settings, compactionCount, frozenAction }) => {
+          const nativeUsage = await adapter.sessionUsage?.().catch(() => undefined);
+          const transfer = await new HandoffService(cwd).transfer({
+            runId: buildRun.runId,
+            role: "builder",
+            reason,
+            predecessorSessionId: adapter.sessionId(),
+            predecessorSessionRef: adapter.sessionRef?.(),
+            roleState: { frozenActionDigest: createHash("sha256").update(frozenAction).digest("hex"), contextSample: sample },
+            ...(nativeUsage ? { sessionUsage: {
+              version: 1 as const, runId: buildRun.runId, role: "builder" as const, provider: adapter.agent,
+              providerSessionId: adapter.sessionId(), observedAt: nativeUsage.observedAt, source: nativeUsage.source,
+              cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens,
+              cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
+            } } : {}),
+            compactionCount,
+            compactMaximum: settings.compact_maximum ?? 10,
+            resources: [{ label: "frozen-action", content: frozenAction, authoritative: true }],
+          }, () => createBuilderForSettings(cwd, settings));
+          log.write("handoff-transfer", { generation: transfer.manifest.generation, predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId, acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest });
+          if (adapter instanceof ContinuityAdapter) {
+            await adapter.adoptValidatedSuccessor(transfer.successor);
+            return adapter;
+          }
+          await adapter.close().catch(() => {});
+          return continuousBuilder(transfer.successor, cwd, buildRun.runId, settings);
+        },
+      });
       const foreman = new Foreman(
         builder, log, config.notifications.enabled, qaEnabled, 3, cwd, undefined,
         qaEnabled ? createQa : undefined, capturedQa.session_strategy,
         createBuilder, capturedBuilder.session_strategy,
         qaNonconvergence,
+        async (adapter, frozenAction) => (await contextController.atSafeBoundary(adapter, frozenAction)).adapter,
+        async (adapter, frozenAction, strategy) => (await contextController.atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter,
+        qaSessionBoundary,
       );
-      const statusReporter = new AgentStatusReporter({
+      activeBuilderForStatus = () => foreman.builderAdapter();
+      const statusReporter = liveStatusReporter = new AgentStatusReporter({
+        runId: buildRun.runId,
         role: "builder", provider: capturedBuilder.make, model: capturedBuilder.model,
         reasoning: capturedBuilder.reasoning, fast: capturedBuilder.fast, step: 1, total: steps,
         phase: "builder work session", sessionTransition: resumeSessionId ? "resumed exact session" : "initial session", adapter: () => foreman.builderAdapter(),
+        settingsRevision: capturedBuilder.settings_revision,
+        displaySessionCost: capturedBuilder.display_session_cost ?? false,
+        compactionCount: () => { const db = new WorkflowDb(cwd); try { return db.successfulCompactionCount(buildRun.runId, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()); } finally { db.close(); } },
+        handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.handoffs(buildRun.runId).at(-1)?.generation ?? 0; } finally { db.close(); } },
       }, (line, snapshot) => {
         const activity = currentActivity();
-        if (activity) activity.writePersistent(line); else console.log(line);
+        if (activity && process.stdout.isTTY) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, ""));
+        else console.log(line);
         log.write("agent-status", { ...snapshot });
-        const db = new WorkflowDb(cwd); try { db.recordTelemetry(buildRun.runId, snapshot); } finally { db.close(); }
+        const db = new WorkflowDb(cwd); try { db.recordTelemetry(buildRun.runId, snapshot); db.recordContextSample(snapshot.contextSample); if (snapshot.sessionUsage) db.recordSessionUsage(snapshot.sessionUsage); } finally { db.close(); }
       });
       statusReporter.start();
 
@@ -960,8 +1738,8 @@ export function buildStartCommand(): Command {
         console.log("ai-foreman: asking builder to plan the next tickets or steps...\n");
         buildRun = checkpointBuildRun(cwd, buildRun, "before-preflight");
         await foreman.runPreflight(steps, ticketsContent, preferredTicket);
-        if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderSessionId()!);
-        if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionId()!);
+        if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
+        if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
         buildRun = checkpointBuildRun(cwd, buildRun, "preflight-complete");
 
         if (!opts.yes) {
@@ -1013,7 +1791,9 @@ export function buildStartCommand(): Command {
             currentTicket: ticketId,
           });
         }, preferredTicket);
-        if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionId()!);
+        if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted; recovery mode was not substituted`);
+        if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
+        if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
         buildRun = result.outcome === "all-done" || result.outcome === "plan-complete"
           ? completeBuildRun(cwd, buildRun)
           : releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "builder-or-qa-interrupted", { status: "recoverable" }), "recoverable");
@@ -1025,6 +1805,7 @@ export function buildStartCommand(): Command {
         console.log(`\nforeman: ${result.completed}/${result.requested} step(s) completed`);
         console.log(`foreman: outcome — ${result.outcome}`);
         if (result.detail) console.log(`foreman: ${result.detail}`);
+        if (buildRun.status === "completed") printHandoffPruneCommand(buildRun.runId);
         if (result.outcome !== "all-done" && result.outcome !== "plan-complete") {
           const executable = command.parent?.name() === "rafi" ? "rafi" : "ai-foreman";
           const remainingSteps = Math.max(1, result.requested - result.completed);
@@ -1036,6 +1817,45 @@ export function buildStartCommand(): Command {
       } catch (err) {
         clearInterval(heartbeat);
         statusReporter.stop();
+        if (err instanceof ContextCapabilityError || err instanceof CurrentWorkflowChangedError) {
+          const summary = err.message.slice(0, 1000);
+          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "safe-boundary-paused", {
+            status: "recoverable",
+            failure: { category: "unknown", summary, at: new Date().toISOString() },
+          }), "recoverable");
+          await foreman.close().catch(() => {});
+          log.write("safe-boundary-paused", { runId: buildRun.runId, message: summary });
+          console.error(`foreman: run paused safely: ${summary}`);
+          console.error(`foreman: after resolving the condition, inspect recovery with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --inspect`);
+          process.exit(2);
+        }
+        if (err instanceof SessionUnavailableContinuityError || err instanceof SessionUnavailableError) {
+          const guided = err instanceof SessionUnavailableContinuityError ? err.guidedRecovery : err.failure.dispatchState === "unknown";
+          const summary = err.message.slice(0, 1000);
+          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, guided ? "guided-recovery-required" : "session-unavailable-before-dispatch", {
+            status: "recoverable",
+            failure: { category: "session-unavailable", summary, at: new Date().toISOString() },
+          }), "recoverable");
+          await foreman.close().catch(() => {});
+          log.write("session-unavailable", { runId: buildRun.runId, guided, message: summary });
+          console.error(`foreman: exact provider session unavailable; current worktree state was preserved: ${summary}`);
+          console.error(guided
+            ? `foreman: continue with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --guided-recovery`
+            : `foreman: inspect recovery with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --inspect`);
+          process.exit(2);
+        }
+        if (err instanceof HandoffLoopError || err instanceof ContinuityRecoveryRequiredError) {
+          const summary = err.message.slice(0, 1000);
+          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "guided-recovery-required", {
+            status: "recoverable",
+            failure: { category: "unknown", summary, at: new Date().toISOString() },
+          }), "recoverable");
+          await foreman.close().catch(() => {});
+          log.write("guided-recovery-required", { runId: buildRun.runId, message: summary });
+          console.error(`foreman: run paused at a recoverable continuity checkpoint: ${summary}`);
+          console.error(`foreman: continue with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --guided-recovery`);
+          process.exit(2);
+        }
         buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "failed", { status: "failed", failure: { category: "unknown", summary: err instanceof Error ? err.message.slice(0, 1000) : String(err).slice(0, 1000), at: new Date().toISOString() } }), "failed");
         await foreman.close().catch(() => {});
         log.write("error", { message: String(err) });
@@ -1180,4 +2000,9 @@ function shellQuote(value: string): string {
   return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
     ? value
     : `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function printHandoffPruneCommand(runId: string): void {
+  console.log("foreman: disposable handoff cache can be pruned with:");
+  console.log(`  rafi handoffs prune-cache --run ${shellQuote(runId)} --keep-latest 1`);
 }

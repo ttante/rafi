@@ -50,6 +50,8 @@ import { fileURLToPath } from "node:url";
 import { getAgent, loadSkill } from "special-agents";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 import { promptSessionStrategyDefaults, saveAgentDefaults } from "./agents.js";
+import { isTicketWorkMode, promptPlanningWorkMode, workModeConsequences, workModeLabel } from "./workMode.js";
+import { writeRafiConfigYaml } from "./compiler.js";
 import {
   activateExhaustiveGrill,
   buildAuditAnswersContinuation,
@@ -75,6 +77,9 @@ export interface TicketPlanInstructionOptions {
   grill: "standard" | "exhaustive";
   docsRoot: string;
   workMode?: TicketBuildBranchStrategy;
+  autoCompactThresholdPercent?: number;
+  compactMaximum?: number;
+  branchPrefix?: string;
 }
 
 export function buildTicketPlanInstruction(opts: TicketPlanInstructionOptions): string {
@@ -91,7 +96,12 @@ Validated session snapshots: ${opts.sourceSnapshots.join(", ") || "none"}
 Current tracker context (status is authoritative and must be preserved):
 ${JSON.stringify(opts.context, null, 2)}
 
-User-selected default ticket work mode for this planning session: ${opts.workMode ?? "not selected"}
+Host-owned decisions (planner prose and contradictory fields cannot override them):
+- Work mode: ${opts.workMode ? workModeLabel(opts.workMode) : "not selected"}
+- Git consequences: ${opts.workMode ? workModeConsequences(opts.workMode) : "not selected"}
+- Builder automatic compaction threshold: ${opts.autoCompactThresholdPercent ?? 50}%
+- Builder compact maximum: ${opts.compactMaximum ?? 10}
+- Branch prefix retained for isolated work: ${opts.branchPrefix ?? "feature"}
 
 Conversation rules:
 - Inspect the repository read-only. Do not edit files, configuration, YAML, SQLite, git, branches, or docs.
@@ -99,7 +109,7 @@ Conversation rules:
 - In exhaustive mode every grill-me question must be machine-recognizable: ask exactly one single-select question, put a first choice ending in \`(Recommended)\`, include at least one meaningful alternative, and include the exact \`Stop questions and make the plan now\` choice. Native questions use a header beginning with \`Grill-me\`.
 - If your runtime provides a native AskUserQuestion-style question tool, you may use it; Rafi will collect the user's structured choice or custom response and return it to this same session. If no useful user-judgment question exists, return the candidate and Rafi will independently verify it.
 - Session choices may cover inspection depth, ticket size, estimates, source treatment, delivery grouping, branch mode, PRs, merge behavior, and next work.
-- Unless later user discussion changes it, set proposal build_defaults.branch_strategy to the selected default ticket work mode when build_defaults is present.
+- Set proposal build_defaults to the host-owned values above. A later planner suggestion cannot change them; only another host question can.
 - If more source content is needed, emit one JSON object (or an array) between ${SOURCE_REQUEST_START}/${SOURCE_REQUEST_END}, then ask a needs_input question. Preserve the human's complete answer; never split on spaces, commas, or plus signs.
 - Source request types are local, url, github, gitlab, linear, and jira. For Linear/Jira request only non-secret query settings and environment-variable names, never credentials.
 - Account for every discovered source item with mapped, split, combined, deferred, or excluded disposition and a reason where required.
@@ -126,12 +136,13 @@ export function applyTicketPlanWorkModeDefault(
   proposal: TicketPlanProposal,
   workMode: TicketBuildBranchStrategy | undefined,
 ): TicketPlanProposal {
-  if (!workMode || proposal.build_defaults?.branch_strategy) return proposal;
+  if (!workMode) return proposal;
   return {
     ...proposal,
     build_defaults: {
       ...(proposal.build_defaults ?? {}),
       branch_strategy: workMode,
+      ...(workMode === "current" ? { completion: "none" as const, provider: "local" as const, cleanup: false } : {}),
     },
   };
 }
@@ -228,15 +239,15 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
     }
     const restoredWorkMode = isTicketWorkMode(interview?.answers.workMode) ? interview.answers.workMode : undefined;
     let workMode: TicketBuildBranchStrategy | undefined = resumingInterview ? restoredWorkMode : undefined;
-    let pendingAgentDefaults: AgentDefaultsV1 | undefined;
+    let pendingAgentDefaults: AgentDefaultsV1 | undefined = config.agent_defaults;
+    const restoredAgentDefaults = interview?.answers.agentDefaults as AgentDefaultsV1 | undefined;
+    if (resumingInterview && restoredAgentDefaults?.version === 1) pendingAgentDefaults = restoredAgentDefaults;
     if (interactive && !resumingInterview) {
-      workMode = await promptWorkMode(config.tickets?.build?.branch_strategy);
-      sourceChoice += `\nDefault ticket work mode: ${workMode}`;
+      workMode = await promptPlanningWorkMode(config.tickets?.build?.branch_strategy);
+      sourceChoice += `\nDefault ticket work mode: ${workModeLabel(workMode)}\nGit consequences: ${workModeConsequences(workMode)}`;
       const sessionDefaults = await promptSessionStrategyDefaults(config.agent_defaults);
-      if (sessionDefaults.customized) {
-        pendingAgentDefaults = sessionDefaults.defaults;
-        config = { ...config, agent_defaults: sessionDefaults.defaults };
-      }
+      pendingAgentDefaults = sessionDefaults.defaults;
+      config = { ...config, agent_defaults: sessionDefaults.defaults };
     }
     const briefRequest = sourceRequestFromAnswer(brief, projectDir);
     const choiceRequest = sourceRequestFromAnswer(sourceChoice, projectDir);
@@ -286,7 +297,7 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
         questionId,
       });
     };
-    if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "agent-run", answers: decisionsWithGrillState({ ...interview.answers, sourceChoice, grill, workMode }, grillState), outputs: fingerprint, planningMode: grill });
+    if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "agent-run", answers: decisionsWithGrillState({ ...interview.answers, sourceChoice, grill, workMode, agentDefaults: pendingAgentDefaults, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" }, grillState), decisions: { ...interview.decisions, workflow: { workMode, consequences: workMode ? workModeConsequences(workMode) : undefined, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" } }, outputs: fingerprint, planningMode: grill });
 
     let roleRef: RoleBuilder | undefined;
     const rebuildingLostContinuity = Boolean(interview?.continuityLost || interview?.runtime.continuityLost);
@@ -318,7 +329,7 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
     console.log(`rafi tickets plan: interview=${grill}; agent changes are disabled\n`);
     if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() } });
 
-    const baseInstruction = buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode });
+    const baseInstruction = buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" });
     let result = await role.builder.sendTurn(rebuildingLostContinuity && grillState.answers.length
       ? `${baseInstruction}\n\n${buildAuditAnswersContinuation(grillState)}`
       : baseInstruction);
@@ -405,6 +416,12 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
         result = await role.builder.sendTurn(buildAuditAnswersContinuation(grillState));
         continue;
       }
+      console.log("\nrafi tickets plan: host-owned approval decisions");
+      console.log(`  work mode: ${workMode ? workModeLabel(workMode) : "unchanged"}`);
+      if (workMode) console.log(`  Git consequences: ${workModeConsequences(workMode)}`);
+      console.log(`  Builder auto-compaction: ${pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50}%`);
+      console.log(`  Builder compact maximum: ${pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10}`);
+      console.log(`  branch prefix: ${config.tickets?.build?.branch_prefix ?? "feature"}`);
       const decision = opts.yes ? "approve" : await reviewProposal(proposal);
       if (decision === "cancel") { await role.builder.close(); await chooseStagedSourceDisposition(projectDir, loadedSources.registry, stagedSources); console.log("rafi tickets plan: cancelled; tracker unchanged"); return; }
       if (decision !== "approve") {
@@ -425,7 +442,13 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
       if (drift.length) { result = await role.builder.sendTurn(`The tracker/config changed during review (${drift.join(", ")}). Re-read current state, refresh the exact proposal, and request approval again.`); continue; }
       await role.builder.close();
       const applied = applyApprovedTicketPlan(projectDir, proposal, { expectedFingerprint: fingerprint, docsRoot });
-      if (pendingAgentDefaults) saveAgentDefaults(projectDir, readProjectConfig(projectDir), pendingAgentDefaults);
+      const publishedConfig = readProjectConfig(projectDir);
+      const nextConfig: ProjectConfig = { ...publishedConfig, ...(pendingAgentDefaults ? { agent_defaults: pendingAgentDefaults } : {}), tickets: { ...publishedConfig.tickets, build: { ...publishedConfig.tickets?.build, branch_strategy: workMode ?? publishedConfig.tickets?.build?.branch_strategy, branch_prefix: publishedConfig.tickets?.build?.branch_prefix ?? "feature", ...(workMode === "current" ? { completion: "none" as const, provider: "local" as const, cleanup: false } : {}) } } };
+      if (pendingAgentDefaults) saveAgentDefaults(projectDir, nextConfig, pendingAgentDefaults);
+      else writeRafiConfigYaml(projectDir, nextConfig);
+      const readback = readProjectConfig(projectDir);
+      if (workMode && readback.tickets?.build?.branch_strategy !== workMode) throw new Error("approved ticket work mode failed config readback verification");
+      if ((readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent ?? 50) !== (pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50)) throw new Error("approved compaction threshold failed config readback verification");
       saveSourceRegistry(projectDir, stagedSources);
       if (interview) completeInterview(projectDir, interview);
       console.log(`rafi tickets plan: created ${applied.added.length}, edited ${applied.edited.length}; validation passed`);
@@ -527,25 +550,6 @@ async function promptGrill(): Promise<"standard" | "exhaustive"> {
   ] });
   if (isCancel(answer)) return "standard";
   return answer as "standard" | "exhaustive";
-}
-
-async function promptWorkMode(current?: TicketBuildBranchStrategy): Promise<TicketBuildBranchStrategy> {
-  const { select, isCancel } = await import("@clack/prompts");
-  const answer = await select({
-    message: "Default ticket work mode:",
-    initialValue: current ?? "branch-per-ticket",
-    options: [
-      { value: "current", label: "One branch - work the queue on the current branch" },
-      { value: "batch", label: "Batch branch - use shared branches for explicit delivery batches" },
-      { value: "branch-per-ticket", label: "Branch per ticket - isolate each ticket on its own branch" },
-    ],
-  });
-  if (isCancel(answer)) throw new Error("ticket planning cancelled");
-  return answer as TicketBuildBranchStrategy;
-}
-
-function isTicketWorkMode(value: unknown): value is TicketBuildBranchStrategy {
-  return value === "current" || value === "batch" || value === "branch-per-ticket";
 }
 
 async function reviewProposal(proposal: TicketPlanProposal): Promise<string> {

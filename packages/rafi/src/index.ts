@@ -42,6 +42,7 @@ import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
 import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { runStatus } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
+import { buildHandoffsCommand } from "ai-foreman/cli/handoffs.js";
 import { withActivityContext } from "ai-foreman/activity.js";
 import { buildPlanCommand, runPlanWorkflow } from "./plan.js";
 import { buildTicketPlanCommand } from "./ticketPlan.js";
@@ -51,6 +52,7 @@ import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
 import { buildUninstallCleanupCommand, buildUninstallCommand, buildUninstallRestoreCommand, interpretUninstallInstruction } from "./uninstall.js";
 import { createGitignoreModeFromSelection, updateCreateGitignore, type CreateGitignoreMode } from "./gitignore.js";
+import { CURRENT_BRANCH_WORK_MODE_LABEL, workModeConsequences, workModeLabel } from "./workMode.js";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 import { finalizePreparedOwnedWrite, initializeInstallManifest, prepareOwnedWrite, readInstallManifest } from "./ownership.js";
 import {
@@ -285,12 +287,14 @@ program
         message: "Default ticket work mode:",
         initialValue: "branch-per-ticket",
         options: [
-          { value: "current", label: "One branch - work the queue on the current branch" },
+          { value: "current", label: CURRENT_BRANCH_WORK_MODE_LABEL },
           { value: "batch", label: "Batch branch - use shared branches for explicit delivery batches" },
           { value: "branch-per-ticket", label: "Branch per ticket - isolate each ticket on its own branch" },
         ],
       });
       if (isCancel(branchStrategy)) process.exit(0);
+      log.info(`Work mode: ${workModeLabel(branchStrategy as TicketBuildBranchStrategy)}`);
+      log.info(`Git consequences: ${workModeConsequences(branchStrategy as TicketBuildBranchStrategy)}`);
       checkpointCreateAnswer("agent-session-defaults", "branchStrategy", String(branchStrategy));
 
       const agentDefaultsChoice = await promptSessionStrategyDefaults(defaultAgentDefaults());
@@ -986,6 +990,7 @@ program.addCommand(ticketsCommand);
 program.addCommand(buildStartCommand());
 program.addCommand(buildBuildResumeCommand({ executeStart: (args) => runSelfCommandStatus(args) }));
 program.addCommand(buildBuildStartOverCommand());
+program.addCommand(buildHandoffsCommand());
 program.addCommand(buildAgentsCommand());
 program.addCommand(buildUninstallCommand({ interpret: interpretUninstallInstruction }));
 program.addCommand(buildUninstallRestoreCommand());

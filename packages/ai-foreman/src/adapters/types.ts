@@ -1,7 +1,13 @@
 /**
  * Agent-agnostic interface over a coding agent ("builder").
  */
-import type { RuntimeProbeCategory, RuntimeProbePhase } from "rafi-spec";
+import type {
+  ConfigurableAgentRole,
+  ProviderSessionRefV1,
+  RuntimeProbeCategory,
+  RuntimeProbePhase,
+  SessionAvailabilityV1,
+} from "rafi-spec";
 
 /** A permission request surfaced by a builder before it runs a tool. */
 export interface PermissionRequest {
@@ -40,20 +46,31 @@ export type PermissionHandler = (
 ) => Promise<PermissionDecision>;
 
 /** Result of a single completed turn. */
+export type SessionFailurePhase = "preflight" | "attach" | "turn";
+export type TurnDispatchState = "not-sent" | "unknown";
+
+export interface RuntimeFailure {
+  runtime: "claude" | "codex";
+  phase: RuntimeProbePhase | SessionFailurePhase;
+  category: RuntimeProbeCategory;
+  executable: string;
+  cwd: string;
+  diagnostics: string;
+  dispatchState?: TurnDispatchState;
+  availability?: SessionAvailabilityV1;
+}
+
 export interface TurnResult {
   /** Final assistant message text — where the STEP_STATUS marker lives. */
   text: string;
   isError: boolean;
   numTurns: number;
   costUsd: number;
-  failure?: {
-    runtime: "claude" | "codex";
-    phase: RuntimeProbePhase;
-    category: RuntimeProbeCategory;
-    executable: string;
-    cwd: string;
-    diagnostics: string;
-  };
+  /** True only when the provider supplied this value; never inferred by Rafi. */
+  costAuthoritative?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  failure?: RuntimeFailure;
 }
 
 /** Observability events emitted while a builder works. */
@@ -64,18 +81,31 @@ export type BuilderEvent =
   | { kind: "retry"; provider: "claude" | "codex"; reason: string; attempt?: number; maximum?: number; delayMs?: number; managedBy: "provider" | "rafi" }
   | { kind: "turn-complete"; result: TurnResult }
   | { kind: "session-transition"; transition: "started" | "resumed" | "compacting" | "compacted" | "fresh-fallback"; detail?: string }
-  | { kind: "context-usage"; used: number; maximum?: number; percentage?: number }
+  | { kind: "context-usage"; used: number; maximum?: number; percentage?: number; observedAt?: string; source?: "provider-event" | "provider-query" | "post-compact" }
   | { kind: "error"; message: string };
 
 export interface ContextUsage {
   used: number;
   maximum?: number;
   percentage?: number;
+  observedAt?: string;
+  source?: "provider-event" | "provider-query" | "post-compact";
+}
+
+export interface ProviderSessionUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  authoritativeCostUsd?: number;
+  observedAt: string;
+  source: "provider" | "turn-aggregate";
 }
 
 export interface CompactResult {
   ok: boolean;
   error?: string;
+  /** Preserve exact-session loss so lifecycle policy never treats it as an ordinary retryable compaction failure. */
+  failure?: RuntimeFailure;
 }
 
 export interface ProviderSettingSwitch { model?: string; effort?: EffortLevel; fast?: boolean }
@@ -92,7 +122,19 @@ export interface BuilderAdapterOptions {
   /** Permission decision callback. */
   permission: PermissionHandler;
   /** Resume a prior session instead of starting fresh. */
+  /** @deprecated Foreman-controlled recovery must use resumeSessionRef. */
   resumeSessionId?: string;
+  /** Location-scoped provider conversation to validate before exact resume. */
+  resumeSessionRef?: ProviderSessionRefV1;
+  /** Canonical Rafi configuration/recovery root. Defaults to cwd for compatibility callers. */
+  configRoot?: string;
+  /** Metadata used when the provider first reveals a fresh session identity. */
+  sessionRole?: ConfigurableAgentRole;
+  sessionStream?: string;
+  sessionGeneration?: number;
+  workspaceIdentity?: string;
+  ticketId?: string;
+  deliveryUnitId?: string;
   /** Override the model; omit for the agent's default. */
   model?: string;
   /** Reasoning effort level. Claude also accepts "max"; Codex supports up to "xhigh". */
@@ -116,11 +158,23 @@ export interface BuilderAdapter {
   /** Current session id, once known — used for resume. */
   sessionId(): string | undefined;
 
+  /** Current location-scoped session reference, once known. */
+  sessionRef?(): ProviderSessionRefV1 | undefined;
+
+  /** Host-only metadata promotion after a validated handoff is accepted. */
+  adoptSessionRef?(ref: ProviderSessionRefV1): void;
+
+  /** Attach/probe a requested exact session without starting a provider turn. */
+  validateSession?(): Promise<SessionAvailabilityV1>;
+
   /** Provider-native compaction on the exact live conversation. */
   compact?(): Promise<CompactResult>;
 
   /** Truthful provider context occupancy, when exposed by the provider. */
   contextUsage?(): Promise<ContextUsage | undefined>;
+
+  /** Provider/session cumulative totals; distinct from live context occupancy. */
+  sessionUsage?(): Promise<ProviderSessionUsage | undefined>;
 
   /** Attempt a provider-supported in-conversation model/reasoning transition. */
   switchSettings?(settings: ProviderSettingSwitch): Promise<CompactResult>;

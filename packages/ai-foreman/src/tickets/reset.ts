@@ -204,3 +204,11 @@ function activeFieldCategories(state: TicketState): string[] {
 function digest(value: Buffer | undefined): string | null {
   return value ? createHash("sha256").update(value).digest("hex") : null;
 }
+
+export {
+  applyResolvedTicketReset,
+  resolveTicketResetSelection,
+  TicketResetDependencyConflictError,
+  type DeletedDependencyConflict,
+  type ResolveGroupResetOptions,
+} from "./groupReset.js";

@@ -15,6 +15,7 @@ import {
 const CWD = "/work/project";
 const policy = new PermissionPolicy(DEFAULT_CONFIG.permissions, CWD);
 const readOnlyPolicy = new PermissionPolicy(readOnlyPermissionConfig(), CWD);
+const currentWorkflowPolicy = new PermissionPolicy(DEFAULT_CONFIG.permissions, CWD, { currentBranchWorkflow: true });
 
 test("allows routine bash commands", () => {
   assert.equal(
@@ -41,6 +42,22 @@ test("escalates risky bash commands", () => {
     policy.classify({ toolName: "Bash", input: { command: "npm test && sudo reboot" } }).decision,
     "escalate",
   );
+});
+
+test("current-branch workflow fences every Git lifecycle and review operation while retaining read-only Git", () => {
+  for (const command of [
+    "git add .", "git commit -m work", "git checkout -b feature/x", "git switch main", "git branch new",
+    "git worktree add ../x", "git push origin main", "git merge feature/x", "git rebase main", "git tag v1",
+    "git --git-dir .git commit -m work", "git -c alias.ship=push ship origin main",
+    "gh pr create", "glab mr create",
+  ]) {
+    const result = currentWorkflowPolicy.classify({ toolName: "Bash", input: { command } });
+    assert.equal(result.decision, "escalate", command);
+    assert.match(result.reason, /you manage Git|lifecycle/);
+  }
+  assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command: "git status --short" } }).decision, "allow");
+  assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command: "git diff --stat" } }).decision, "allow");
+  assert.equal(currentWorkflowPolicy.classify({ toolName: "Write", input: { file_path: ".git/HEAD" } }).decision, "escalate");
 });
 
 test("escalates unrecognized bash commands", () => {

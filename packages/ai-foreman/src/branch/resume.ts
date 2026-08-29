@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BranchRunSummary } from "./types.js";
+import type { ProviderSessionRefV1 } from "rafi-spec";
 
 export interface BranchResumeSession {
   ticket: string;
@@ -8,6 +9,7 @@ export interface BranchResumeSession {
   base: string;
   worktreePath: string;
   sessionId: string;
+  sessionRef?: ProviderSessionRefV1;
   logPath: string;
   agent?: string;
   model?: string;
@@ -57,6 +59,7 @@ export function findResumableBranchSessions(foremanDir: string): BranchResumeSes
           base,
           worktreePath,
           sessionId,
+          ...(isProviderSessionRef(record.sessionRef) ? { sessionRef: record.sessionRef } : {}),
           logPath,
           agent: stringField(record.agent),
           model: stringField(record.model),
@@ -138,6 +141,13 @@ function stringField(value: unknown): string | undefined {
 
 function booleanField(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function isProviderSessionRef(value: unknown): value is ProviderSessionRefV1 {
+  if (!value || typeof value !== "object") return false;
+  const ref = value as Partial<ProviderSessionRefV1>;
+  return ref.version === 1 && (ref.provider === "claude" || ref.provider === "codex") && typeof ref.sessionId === "string"
+    && typeof ref.cwd === "string" && typeof ref.configRoot === "string" && typeof ref.workspaceIdentity === "string";
 }
 
 function shellQuote(value: string): string {

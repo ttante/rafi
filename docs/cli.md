@@ -24,7 +24,7 @@ Runtime behavior not fully expressible in Commander help:
 - `rafi compile` emits native artifacts only for configured targets: Codex writes `AGENTS.md`, `.codex/agents/*`, and `.agents/skills/*`; Claude writes `CLAUDE.md`, `.claude/agents/*`, and `.claude/skills/*`. `.rafi/compiled/<role>/*` is always emitted. Files for unselected targets are preserved, not deleted.
 - In `agent_files.mode: append` or `--root-file-mode append`, Rafi appends generated guidance inline unless that would exceed the target runtime's root-file startup guard. Overflow writes generated guidance to a target-specific sidecar (`AGENTS-rafi.md` or `CLAUDE-rafi.md`) and inserts a compact managed reference block near the top of the root file. Claude `@file` imports still load into Claude's context; this keeps root files short, but it is not a Claude context-reduction mechanism.
 - `rafi plan`, `rafi start`, `ai-foreman start`, and `tickets populate` use a single `harness.targets` value from `rafi-config.yaml` when `--agent` is omitted. Missing config or both targets default to Claude.
-- Interactive runtime auth/readiness failures, including structured failures after the initial probe, offer retry, verified switch to the other runtime, or cancel. A switch starts a fresh provider session and reports lost conversational continuity. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because session IDs are runtime-specific.
+- Interactive runtime auth/readiness failures, including structured failures after the initial probe, offer retry, verified switch to the other runtime, or cancel. A switch starts a fresh provider session and reports lost conversational continuity. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because exact sessions are provider- and location-scoped; the stored binding must validate against the original canonical worktree before any turn is sent.
 - Claude runs use the exact absolute system `claude` executable that passed readiness; they never fall back to the SDK-bundled CLI. The SDK loads user, project, and local settings while Claude Code continues to apply managed policy, and it inherits the current process environment. This preserves enterprise login flows such as `/login-okta` and organization proxy/certificate configuration.
 - `@anthropic-ai/claude-agent-sdk` is an optional dependency of `ai-foreman`; `rafi create` does not install it into the target application. `rafi doctor --live-claude` runs an opt-in bounded no-tools request through the real adapter path and uses account quota.
 - `rafi plan` accepts only `STEP_STATUS: plan_complete` as a successful planner result, validates required plan sections before writing, writes versioned history to `<docs.root>/rafi-plans/<timestamp>.md`, and refreshes `<docs.root>/rafi-plan.md`.
@@ -68,11 +68,13 @@ Commands:
   start [options] <project>                           Enlist a builder and drive it through a batch
                                                       of N steps.
   build:resume [options] [project]                    Inspect and resume one interrupted
-                                                      implementation run without discarding partial
-                                                      work.
+                                                      implementation run using an exact recovery
+                                                      mode.
   build:start-over [options] [project]                Safely preserve an implementation run,
                                                       reconcile its tracker state, and prepare a
                                                       fresh restart.
+  handoffs                                            Inspect and explicitly manage validated
+                                                      cumulative handoffs.
   agents [options] [project]                          Configure persistent runtime, model,
                                                       reasoning, fast, and session defaults for
                                                       Rafi roles.
@@ -196,6 +198,7 @@ Commands:
                                                ticket/backlog docs.
   show [options] <ticketId>                    Show the complete canonical ticket, active state,
                                                validation, delivery, and history.
+  groups                                       List and repair durable ticket creation groups.
   reset [options] [ticketId]                   Reset one ticket or an explicit ticket scope to
                                                pristine active state while retaining history.
   update [options] <ticketId>                  Update ticket status or progress fields.
@@ -269,6 +272,7 @@ Options:
   --agent-preference <agent>        populate runtime preference (configured | claude | codex)
   --branch-strategy <strategy>      build branch strategy default (current | batch |
                                     branch-per-ticket)
+  --branch-prefix <prefix>          prefix for Rafi-generated branches (for example team/feature)
   --completion <mode>               build completion default (pr | auto-merge | direct-merge |
                                     none)
   --provider <provider>             PR/MR provider default (auto | github | gitlab | local)
@@ -307,6 +311,7 @@ Options:
   --agent-preference <agent>        populate runtime preference (configured | claude | codex)
   --branch-strategy <strategy>      build branch strategy default (current | batch |
                                     branch-per-ticket)
+  --branch-prefix <prefix>          prefix for Rafi-generated branches (for example team/feature)
   --completion <mode>               build completion default (pr | auto-merge | direct-merge |
                                     none)
   --provider <provider>             PR/MR provider default (auto | github | gitlab | local)
@@ -587,48 +592,56 @@ Usage: rafi start [options] <project>
 Enlist a builder and drive it through a batch of N steps.
 
 Arguments:
-  project                           path to the project directory the builder works in
+  project                             path to the project directory the builder works in
 
 Options:
-  -s, --steps <n>                   number of tickets to drive; may stop within a stack
-  --stacks <n>                      number of complete eligible delivery stacks to build
-  -a, --agent <agent>               builder agent (claude | codex)
-  -m, --model <model>               override the builder's model
-  -r, --resume <sessionId>          resume a prior builder session
-  --recover-run <id>                continue an existing master recovery run ID
-  --continue                        resume the most recent logged session for this project
-  -t, --tickets <path>              path to ticket file (.md, .txt, .yaml, …) — passed to the
-                                    builder as context
-  -y, --yes                         skip pre-flight confirmation prompt
-  --effort <level>                  reasoning effort level (low|medium|high|xhigh)
-  --fast                            fast mode — lower latency (maps to effort=low for codex)
-  --no-qa                           disable per-ticket QA review (enabled by default)
-  --branch-per-ticket               run each selected structured ticket in an isolated git worktree
-                                    and branch
-  --no-branch-per-ticket            disable saved branch-per-ticket defaults for this run
-  --create-pr                       push each successful ticket branch and create a GitHub PR
-                                    (implies --branch-per-ticket)
-  --no-create-pr                    disable saved PR/MR creation defaults for this run
-  --completion <mode>               ticket branch completion behavior (pr | auto-merge |
-                                    direct-merge | none)
-  --merge-method <method>           merge method for local or remote completion (squash | merge |
-                                    rebase)
-  --provider <provider>             PR/MR provider for branch completion (auto | github | gitlab)
-  --auto-merge-wait                 wait for dependency PR/MRs to merge before starting dependent
-                                    tickets
-  --no-auto-merge-wait              do not wait for dependency PR/MRs before dependent tickets
-  --auto-merge-timeout-minutes <n>  auto-merge dependency wait timeout in minutes (blank means no
-                                    timeout)
-  --base <ref>                      base ref for root ticket branches (default: current branch or
-                                    HEAD)
-  --branch-prefix <prefix>          branch name prefix for ticket branches (default: "feature")
-  --max-branch-depth <n>            maximum selected branch stack depth (default: "5")
-  --pr-ready                        create ready-for-review PRs instead of draft PRs
-  --keep-worktrees                  keep successful ticket worktrees for inspection
-  --ticket <id>                     select one new ticket, or identify recovery tickets with
-                                    --resume/--continue/--recover-run (default: [])
-  --skip-delivery-unit <id>         skip one unfinished delivery unit for this run (default: [])
-  -h, --help                        display help for command
+  -s, --steps <n>                     number of tickets to drive; may stop within a stack
+  --stacks <n>                        number of complete eligible delivery stacks to build
+  -a, --agent <agent>                 builder agent (claude | codex)
+  -m, --model <model>                 override the builder's model
+  -r, --resume <sessionId>            resume a prior builder session
+  --recover-run <id>                  continue an existing master recovery run ID
+  --recovery-mode <mode>              frozen build:resume mode (internal recovery receipt)
+  --accept-handoff <generation>       accept a pre-staged cumulative handoff generation
+  --accept-handoff-role <role>        role owning the pre-staged handoff (builder | qa) (default:
+                                      "builder")
+  --continue                          resume the most recent logged session for this project
+  -t, --tickets <path>                path to ticket file (.md, .txt, .yaml, …) — passed to the
+                                      builder as context
+  -y, --yes                           skip pre-flight confirmation prompt
+  --effort <level>                    reasoning effort level (low|medium|high|xhigh)
+  --fast                              fast mode — lower latency (maps to effort=low for codex)
+  --no-qa                             disable per-ticket QA review (enabled by default)
+  --branch-per-ticket                 run each selected structured ticket in an isolated git
+                                      worktree and branch
+  --no-branch-per-ticket              disable saved branch-per-ticket defaults for this run
+  --create-pr                         push each successful ticket branch and create a GitHub PR
+                                      (implies --branch-per-ticket)
+  --no-create-pr                      disable saved PR/MR creation defaults for this run
+  --completion <mode>                 ticket branch completion behavior (pr | auto-merge |
+                                      direct-merge | none)
+  --merge-method <method>             merge method for local or remote completion (squash | merge |
+                                      rebase)
+  --provider <provider>               PR/MR provider for branch completion (auto | github | gitlab)
+  --auto-merge-wait                   wait for dependency PR/MRs to merge before starting dependent
+                                      tickets
+  --no-auto-merge-wait                do not wait for dependency PR/MRs before dependent tickets
+  --auto-merge-timeout-minutes <n>    auto-merge dependency wait timeout in minutes (blank means no
+                                      timeout)
+  --base <ref>                        base ref for root ticket branches (default: current branch or
+                                      HEAD)
+  --branch-prefix <prefix>            branch name prefix for ticket branches
+  --show-session-cost                 show authoritative cost or trustworthy cumulative session
+                                      tokens for Builder and QA
+  --hide-session-cost                 hide session cost/token usage for Builder and QA
+  --auto-compact-threshold <percent>  initial Builder context compaction threshold (1-99)
+  --max-branch-depth <n>              maximum selected branch stack depth (default: "5")
+  --pr-ready                          create ready-for-review PRs instead of draft PRs
+  --keep-worktrees                    keep successful ticket worktrees for inspection
+  --ticket <id>                       select one new ticket, or identify recovery tickets with
+                                      --resume/--continue/--recover-run (default: [])
+  --skip-delivery-unit <id>           skip one unfinished delivery unit for this run (default: [])
+  -h, --help                          display help for command
 ```
 
 ### `rafi status --help`
@@ -673,7 +686,6 @@ Usage: ai-foreman [options] [command]
 Keep Codex / Claude Code builders moving through their step list.
 
 Options:
-  -V, --version               output the version number
   -h, --help                  display help for command
 
 Commands:
@@ -703,6 +715,9 @@ Commands:
   setup:update [options]                       Update selected ticket setup sections in rafi-config.yaml.
   init [options]                               Initialize .tickets/ structure in a project directory.
   populate [options]                           Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
+  show [options] <ticketId>                    Show the complete canonical ticket, active state, validation, delivery, and history.
+  groups                                       List and repair durable ticket creation groups.
+  reset [options] [ticketId]                   Reset one ticket or an explicit ticket scope to pristine active state while retaining history.
   update [options] <ticketId>                  Update ticket status or progress fields.
   complete [options] <ticketId>                Mark a ticket done with validation evidence.
   block [options] <ticketId>                   Mark a ticket as blocked.
@@ -728,50 +743,80 @@ Usage: ai-foreman start [options] <project>
 Enlist a builder and drive it through a batch of N steps.
 
 Arguments:
-  project                   path to the project directory the builder works in
+  project                             path to the project directory the builder
+                                      works in
 
 Options:
-  -s, --steps <n>           number of steps to drive
-  -a, --agent <agent>       builder agent (claude | codex)
-  -m, --model <model>       override the builder's model
-  -r, --resume <sessionId>  resume a prior builder session
-  --continue                resume the most recent logged session for this
-                            project
-  -t, --tickets <path>      path to ticket file (.md, .txt, .yaml, …) — passed
-                            to the builder as context
-  -y, --yes                 skip pre-flight confirmation prompt
-  --effort <level>          reasoning effort level (low|medium|high|xhigh)
-  --fast                    fast mode — lower latency (maps to effort=low for
-                            codex)
-  --no-qa                   disable per-ticket QA review (enabled by default)
-  --branch-per-ticket       run each selected structured ticket in an isolated
-                            git worktree and branch
-  --no-branch-per-ticket    disable saved branch-per-ticket defaults for this
-                            run
-  --create-pr               push each successful ticket branch and create a
-                            GitHub PR (implies --branch-per-ticket)
-  --no-create-pr            disable saved PR/MR creation defaults for this run
-  --completion <mode>       ticket branch completion behavior (pr | auto-merge
-                            | direct-merge | none)
-  --provider <provider>     PR/MR provider for branch completion (auto | github
-                            | gitlab)
-  --auto-merge-wait         wait for dependency PR/MRs to merge before starting
-                            dependent tickets
-  --no-auto-merge-wait      do not wait for dependency PR/MRs before dependent
-                            tickets
-  --auto-merge-timeout-minutes <n>
-                            auto-merge dependency wait timeout in minutes
-                            (blank means no timeout)
-  --base <ref>              base ref for root ticket branches (default: current
-                            branch or HEAD)
-  --branch-prefix <prefix>  branch name prefix for ticket branches (default:
-                            "rafi")
-  --max-branch-depth <n>    maximum selected branch stack depth (default: "2")
-  --pr-ready                create ready-for-review PRs instead of draft PRs
-  --keep-worktrees          keep successful ticket worktrees for inspection
-  --ticket <id>             ticket id to continue in branch mode; repeat for
-                            multiple tickets (default: [])
-  -h, --help                display help for command
+  -s, --steps <n>                     number of tickets to drive; may stop
+                                      within a stack
+  --stacks <n>                        number of complete eligible delivery
+                                      stacks to build
+  -a, --agent <agent>                 builder agent (claude | codex)
+  -m, --model <model>                 override the builder's model
+  -r, --resume <sessionId>            resume a prior builder session
+  --recover-run <id>                  continue an existing master recovery run
+                                      ID
+  --recovery-mode <mode>              frozen build:resume mode (internal
+                                      recovery receipt)
+  --accept-handoff <generation>       accept a pre-staged cumulative handoff
+                                      generation
+  --accept-handoff-role <role>        role owning the pre-staged handoff
+                                      (builder | qa) (default: "builder")
+  --continue                          resume the most recent logged session for
+                                      this project
+  -t, --tickets <path>                path to ticket file (.md, .txt, .yaml, …)
+                                      — passed to the builder as context
+  -y, --yes                           skip pre-flight confirmation prompt
+  --effort <level>                    reasoning effort level
+                                      (low|medium|high|xhigh)
+  --fast                              fast mode — lower latency (maps to
+                                      effort=low for codex)
+  --no-qa                             disable per-ticket QA review (enabled by
+                                      default)
+  --branch-per-ticket                 run each selected structured ticket in an
+                                      isolated git worktree and branch
+  --no-branch-per-ticket              disable saved branch-per-ticket defaults
+                                      for this run
+  --create-pr                         push each successful ticket branch and
+                                      create a GitHub PR (implies
+                                      --branch-per-ticket)
+  --no-create-pr                      disable saved PR/MR creation defaults for
+                                      this run
+  --completion <mode>                 ticket branch completion behavior (pr |
+                                      auto-merge | direct-merge | none)
+  --merge-method <method>             merge method for local or remote
+                                      completion (squash | merge | rebase)
+  --provider <provider>               PR/MR provider for branch completion
+                                      (auto | github | gitlab)
+  --auto-merge-wait                   wait for dependency PR/MRs to merge
+                                      before starting dependent tickets
+  --no-auto-merge-wait                do not wait for dependency PR/MRs before
+                                      dependent tickets
+  --auto-merge-timeout-minutes <n>    auto-merge dependency wait timeout in
+                                      minutes (blank means no timeout)
+  --base <ref>                        base ref for root ticket branches
+                                      (default: current branch or HEAD)
+  --branch-prefix <prefix>            branch name prefix for ticket branches
+  --show-session-cost                 show authoritative cost or trustworthy
+                                      cumulative session tokens for Builder and
+                                      QA
+  --hide-session-cost                 hide session cost/token usage for Builder
+                                      and QA
+  --auto-compact-threshold <percent>  initial Builder context compaction
+                                      threshold (1-99)
+  --max-branch-depth <n>              maximum selected branch stack depth
+                                      (default: "5")
+  --pr-ready                          create ready-for-review PRs instead of
+                                      draft PRs
+  --keep-worktrees                    keep successful ticket worktrees for
+                                      inspection
+  --ticket <id>                       select one new ticket, or identify
+                                      recovery tickets with
+                                      --resume/--continue/--recover-run
+                                      (default: [])
+  --skip-delivery-unit <id>           skip one unfinished delivery unit for
+                                      this run (default: [])
+  -h, --help                          display help for command
 ```
 
 ### `ai-foreman status --help`
@@ -796,11 +841,13 @@ Usage: ai-foreman doctor [options] [project]
 Check Foreman, agent CLIs, config, and optional ticket tracker readiness.
 
 Arguments:
-  project     path to the project directory (default: ".")
+  project        path to the project directory (default: ".")
 
 Options:
-  --github    run GitHub PR readiness checks
-  -h, --help  display help for command
+  --github       run GitHub PR readiness checks
+  --live-claude  run a bounded no-tools Claude adapter request (uses account
+                 quota)
+  -h, --help     display help for command
 ```
 
 ### `rafi build:resume --help`
@@ -808,19 +855,23 @@ Options:
 ```text
 Usage: rafi build:resume [options] [project]
 
-Inspect and resume one interrupted implementation run without discarding partial work.
+Inspect and resume one interrupted implementation run using an exact recovery mode.
 
 Arguments:
-  project            project directory (default: ".")
+  project               project directory (default: ".")
 
 Options:
-  --run <id>         run ID or unique prefix
-  --ticket <id>      select a recoverable run by ticket
-  --inspect          show recovery state and planned actions without mutation
-  --yes              accept the recovery preview (requires --run or --ticket)
-  --fresh-session    start a new provider session with compact saved context
-  --agent <runtime>  switch provider for a fresh session only (claude | codex)
-  -h, --help         display help for command
+  --run <id>            run ID or unique prefix
+  --ticket <id>         narrow mutation scope to one ticket while retaining run-wide context
+  --inspect             show recovery state and planned actions without mutation
+  --yes                 accept the recovery preview (requires --run or --ticket)
+  --fresh-with-handoff  start a genuinely fresh session from validated cumulative context
+  --fresh-session       compatibility mode: ordinary fresh recovery without cumulative handoff
+  --guided-recovery     repair a degraded role checkpoint interactively, then start a validated
+                        successor
+  --agent <runtime>     fresh-mode provider (claude | codex)
+  --model <model>       fresh-mode model override
+  -h, --help            display help for command
 ```
 
 ### `rafi agents --help`
@@ -831,17 +882,21 @@ Usage: rafi agents [options] [project]
 Configure persistent runtime, model, reasoning, fast, and session defaults for Rafi roles.
 
 Arguments:
-  project                        project directory (default: ".")
+  project                             project directory (default: ".")
 
 Options:
-  --agent-type <role>            planner | builder | qa | ticket-maker | uninstaller | all
-  --agent-make <runtime>         claude | codex
-  --model <model>                provider model ID or default
-  --reasoning <level>            provider reasoning level or default
-  --fast                         enable provider fast/speed capability
-  --no-fast                      disable provider fast/speed capability
-  --session-strategy <strategy>  compact | fresh
-  -h, --help                     display help for command
+  --agent-type <role>                 planner | builder | qa | ticket-maker | uninstaller | all
+  --agent-make <runtime>              claude | codex
+  --model <model>                     provider model ID or default
+  --reasoning <level>                 provider reasoning level or default
+  --fast                              enable provider fast/speed capability
+  --no-fast                           disable provider fast/speed capability
+  --session-strategy <strategy>       compact | fresh
+  --show-session-cost                 show authoritative provider cost or cumulative session tokens
+  --no-show-session-cost              hide session cost/token usage
+  --auto-compact-threshold <percent>  Builder context threshold (1-99 percent)
+  --compact-maximum <count>           Builder successful compactions allowed per provider session
+  -h, --help                          display help for command
 ```
 
 ### `rafi uninstall --help`
@@ -928,4 +983,122 @@ Arguments:
 Options:
   -p, --project <dir>  project directory (default: ".")
   -h, --help           display help for command
+```
+
+### `rafi tickets groups --help`
+
+```text
+Usage: rafi tickets groups [options] [command]
+
+List and repair durable ticket creation groups.
+
+Options:
+  -h, --help        display help for command
+
+Commands:
+  list [options]    List immutable ticket creation groups newest first.
+  repair [options]  Preview and group tickets created outside Rafi after the legacy migration.
+  help [command]    display help for command
+```
+
+### `rafi tickets groups list --help`
+
+```text
+Usage: rafi tickets groups list [options]
+
+List immutable ticket creation groups newest first.
+
+Options:
+  -p, --project <dir>  project directory (default: cwd)
+  --json               write the versioned stable JSON envelope
+  -h, --help           display help for command
+```
+
+### `rafi tickets groups repair --help`
+
+```text
+Usage: rafi tickets groups repair [options]
+
+Preview and group tickets created outside Rafi after the legacy migration.
+
+Options:
+  -p, --project <dir>  project directory (default: cwd)
+  -y, --yes            approve the exact preview
+  -h, --help           display help for command
+```
+
+### `rafi tickets reset --help`
+
+```text
+Usage: rafi tickets reset [options] [ticketId]
+
+Reset one ticket or an explicit ticket scope to pristine active state while retaining history.
+
+Options:
+  -p, --project <dir>         project directory (default: cwd)
+  --all                       open the interactive bulk reset scope chooser
+  --scope <scope>             bulk scope (all | completed-and-unfinished | unfinished)
+  --all-groups                reset the exact membership of every durable creation group
+  --recent-groups <count>     reset the exact membership of the newest N creation groups
+  --group <TG-N>              reset one durable creation group by stable ID
+  --group-index <position>    reset one creation group by current newest-first position
+  --deleted-tickets <policy>  missing-definition policy for automation (ignore | restore)
+  --actor <actor>             who requested the reset (default: "user")
+  -y, --yes                   confirm an explicit ticket or --scope without prompting
+  -h, --help                  display help for command
+```
+
+### `rafi handoffs --help`
+
+```text
+Usage: rafi handoffs [options] [command]
+
+Inspect and explicitly manage validated cumulative handoffs.
+
+Options:
+  -h, --help                display help for command
+
+Commands:
+  inspect [options]
+  prune-cache [options]
+  delete-history [options]
+  help [command]            display help for command
+```
+
+### `rafi handoffs inspect --help`
+
+```text
+Usage: rafi handoffs inspect [options]
+
+Options:
+  --run <id>         build run ID
+  --generation <n>   handoff generation
+  --format <format>  markdown or json (default: "markdown")
+  --output <path>    write inspection to a file
+  --project <dir>    project directory (default: ".")
+  -h, --help         display help for command
+```
+
+### `rafi handoffs prune-cache --help`
+
+```text
+Usage: rafi handoffs prune-cache [options]
+
+Options:
+  --run <id>         build run ID
+  --keep-latest <n>  number of newest cache generations to keep (default: "1")
+  --project <dir>    project directory (default: ".")
+  -h, --help         display help for command
+```
+
+### `rafi handoffs delete-history --help`
+
+```text
+Usage: rafi handoffs delete-history [options]
+
+Options:
+  --run <id>       build run ID
+  --yes            confirm irreversible durable history deletion
+  --project <dir>  project directory (default: ".")
+  -h, --help       display help for command
 ```

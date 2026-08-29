@@ -80,7 +80,26 @@ test("build-run schemas accept V1 and V2 recovery records and reject incomplete 
   assert.equal(validateBuildRunRecord({ version: 1, ...common, repository: { root: "/repo", worktree: "/repo", partialFingerprint: "legacy" } }).valid, true);
   const v2 = { version: 2, ...common, repository: { root: "/repo", worktree: "/repo", baselineComplete: true, git: { worktree: "/repo", statusPaths: [], initialStatusPaths: [], runOwnedPaths: [], createdBranch: false, createdWorktree: false } }, progress: { completedTickets: [], completedOperations: [], remainingTickets: ["T001"] } };
   assert.equal(validateBuildRunRecord(v2).valid, true);
+  assert.equal(validateBuildRunRecord({
+    ...v2,
+    sessionBindings: [{
+      version: 1,
+      provider: "codex",
+      sessionId: "thread-1",
+      role: "builder",
+      stream: "builder",
+      generation: 0,
+      cwd: "/repo",
+      configRoot: "/repo",
+      workspaceIdentity: "worktree-1",
+      ticketId: "T001",
+      source: "observed",
+      createdAt: "2026-01-01T00:00:00Z",
+      validatedAt: "2026-01-01T00:00:01Z",
+    }],
+  }).valid, true);
   assert.equal(validateBuildRunRecord({ ...v2, repository: { root: "/repo", worktree: "/repo", baselineComplete: true, git: {} } }).valid, false);
+  assert.equal(validateBuildRunRecord({ ...v2, sessionBindings: [{ version: 1, provider: "codex", sessionId: "thread-1" }] }).valid, false);
 });
 
 test("install-manifest schemas accept legacy V1 and categorized V2 ownership", () => {

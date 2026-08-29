@@ -179,6 +179,7 @@ const ticketsSetupConfig = {
         auto_merge_wait: { type: "boolean" },
         auto_merge_timeout_minutes: { type: ["integer", "null"], minimum: 1 },
         base_branch: { type: "string", minLength: 1 },
+        branch_prefix: { type: "string", minLength: 1 },
         branch_policy: {
           type: "object",
           additionalProperties: false,
@@ -229,6 +230,9 @@ const agentDefaultsShape = {
           reasoning: { type: "string", minLength: 1 },
           fast: { type: "boolean" },
           session_strategy: { enum: ["compact", "fresh"] },
+          display_session_cost: { type: "boolean" },
+          auto_compact_threshold_percent: { type: "integer", minimum: 1, maximum: 99 },
+          compact_maximum: { type: "integer", minimum: 1, maximum: 9007199254740991 },
         },
       }])),
     },
@@ -348,6 +352,18 @@ const buildGitSnapshotV2 = {
   },
 } as const;
 
+const providerSessionRefV1 = {
+  type: "object", additionalProperties: false,
+  required: ["version", "provider", "sessionId", "role", "stream", "generation", "cwd", "configRoot", "source", "createdAt"],
+  properties: {
+    version: { const: 1 }, provider: { enum: ["claude", "codex"] }, sessionId: { type: "string", minLength: 1 },
+    role: { enum: ["builder", "qa", "planner", "ticket-maker", "uninstaller"] }, stream: { type: "string", minLength: 1 },
+    generation: { type: "integer", minimum: 0 }, cwd: { type: "string", minLength: 1 }, configRoot: { type: "string", minLength: 1 },
+    workspaceIdentity: { type: "string", minLength: 1 }, ticketId: { type: "string", minLength: 1 }, deliveryUnitId: { type: "string", minLength: 1 },
+    source: { enum: ["observed", "legacy-inferred"] }, createdAt: { type: "string", minLength: 1 }, validatedAt: { type: "string", minLength: 1 },
+  },
+} as const;
+
 export const buildRunRecordSchema = {
   $id: "rafi/buildRunRecord",
   oneOf: [
@@ -362,6 +378,7 @@ export const buildRunRecordSchema = {
       properties: {
         version: { const: 2 }, ...buildRunBaseProperties,
         repository: { type: "object", additionalProperties: true, required: ["root", "worktree", "git", "baselineComplete"], properties: { root: { type: "string", minLength: 1 }, worktree: { type: "string", minLength: 1 }, git: buildGitSnapshotV2, baselineComplete: { type: "boolean" } } },
+        sessionBindings: { type: "array", items: providerSessionRefV1 },
         progress: { type: "object", additionalProperties: false, required: ["completedTickets", "completedOperations", "remainingTickets"], properties: {
           completedTickets: { type: "array", items: { type: "string" } }, completedOperations: { type: "array", items: { type: "string" } }, remainingTickets: { type: "array", items: { type: "string" } },
           currentStep: { type: "string" }, lastSuccessfulAction: { type: "string" }, nextAction: { type: "string" }, validation: { type: "object" },

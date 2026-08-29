@@ -72,3 +72,21 @@ test("paused activity does not redraw over an interactive prompt", async () => {
   end();
   reporter.dispose();
 });
+
+test("TTY agent status remains the bottom-most live line between activity phases", async () => {
+  const sink = output(true);
+  const reporter = new ActivityReporter("build", { output: sink.target, displayDelayMs: 0, tickMs: 5, quietWarningMs: 10_000 });
+  reporter.setAgentStatus("builder codex/gpt-test; activity=building; context measuring…; compactions=0; handoff=0");
+  const end = reporter.begin("running tests");
+  await new Promise((resolve) => setTimeout(resolve, 8));
+  end();
+  const phaseEndedAt = sink.chunks.length;
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  const later = sink.chunks.slice(phaseEndedAt).join("");
+  assert.match(later, /builder codex\/gpt-test/);
+  assert.match(later, /context measuring…/);
+  reporter.setAgentStatus(undefined);
+  const beforeDispose = sink.chunks.join("");
+  assert.equal(beforeDispose.endsWith("\r\x1b[2K"), true);
+  reporter.dispose();
+});

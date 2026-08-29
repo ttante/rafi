@@ -41,6 +41,12 @@ export interface LogRecord {
     | "qa-protected-files-changed"
     | "qa-evidence"
     | "agent-status"
+    | "context-lifecycle"
+    | "handoff-transfer"
+    | "recovery-handoff-accepted"
+    | "guided-recovery-required"
+    | "safe-boundary-paused"
+    | "session-unavailable"
     | "error";
   [key: string]: unknown;
 }

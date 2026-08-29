@@ -9,6 +9,9 @@ export const NO_UI = "No UI";
 export const LOCAL_ONLY = "Local only";
 export const DEFAULT_DOCS_ROOT = "docs";
 export const RUNTIME_SELECTIONS = ["both", "claude", "codex"] as const;
+export const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT = 50;
+export const DEFAULT_COMPACT_MAXIMUM = 10;
+export const DEFAULT_BRANCH_PREFIX = "feature";
 export type RuntimeSelection = typeof RUNTIME_SELECTIONS[number];
 
 export interface WalkthroughAnswers {
@@ -81,6 +84,7 @@ export const RAFI_AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker", "un
 export const RAFI_SKILL_NAMES = [
   "better-sqlite3-rebuild",
   "grill-me",
+  "handoff",
   "improve-codebase-architecture",
   "prd-to-issues",
   "tdd",
@@ -195,17 +199,7 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
     docs: {
       root: answers.docsRoot ?? DEFAULT_DOCS_ROOT,
     },
-    agent_defaults: answers.agentDefaults ?? {
-      version: 1,
-      revision: 0,
-      roles: {
-        builder: { session_strategy: "compact" },
-        qa: { session_strategy: "compact" },
-        "ticket-maker": { session_strategy: "compact" },
-        planner: { session_strategy: "fresh" },
-        uninstaller: { session_strategy: "fresh" },
-      },
-    },
+    agent_defaults: normalizeProjectAgentDefaults(answers.agentDefaults),
     ...(normalizePlanningSources(answers.planningSources).length > 0
       ? { sources: {
         version: 1 as const,
@@ -237,11 +231,43 @@ export function normalizeProjectConfig(raw: unknown): ProjectConfig {
     ...(normalizePlanningSources(cfg.planning?.sources).length > 0
       ? { planning: { sources: normalizePlanningSources(cfg.planning?.sources) } }
       : {}),
+    agent_defaults: normalizeProjectAgentDefaults(cfg.agent_defaults),
+    ...(cfg.tickets ? {
+      tickets: {
+        ...cfg.tickets,
+        ...(cfg.tickets.build ? { build: { branch_prefix: DEFAULT_BRANCH_PREFIX, ...cfg.tickets.build } } : {}),
+      },
+    } : {}),
     agents: normalizeArtifactMap(cfg.agents, defaultAgentsConfig()),
     skills: normalizeArtifactMap(cfg.skills, defaultSkillsConfig()),
   };
   assertProjectConfig(normalized);
   return normalized;
+}
+
+/** Fill runtime defaults in memory without causing a config write. */
+export function normalizeProjectAgentDefaults(defaults?: AgentDefaultsV1): AgentDefaultsV1 {
+  const sessionDefaults = {
+    builder: "compact",
+    qa: "compact",
+    "ticket-maker": "compact",
+    planner: "fresh",
+    uninstaller: "fresh",
+  } as const;
+  const roles = { ...(defaults?.roles ?? {}) } as AgentDefaultsV1["roles"];
+  for (const [role, sessionStrategy] of Object.entries(sessionDefaults)) {
+    const current = roles[role as keyof typeof sessionDefaults] ?? {};
+    roles[role as keyof typeof sessionDefaults] = {
+      ...current,
+      session_strategy: current.session_strategy ?? sessionStrategy,
+      display_session_cost: current.display_session_cost ?? false,
+      ...(role === "builder" ? {
+        auto_compact_threshold_percent: current.auto_compact_threshold_percent ?? DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+        compact_maximum: current.compact_maximum ?? DEFAULT_COMPACT_MAXIMUM,
+      } : {}),
+    };
+  }
+  return { version: 1, revision: defaults?.revision ?? 0, roles };
 }
 
 export function normalizePlanningSources(value: unknown): string[] {

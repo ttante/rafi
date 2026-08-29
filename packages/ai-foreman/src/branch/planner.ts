@@ -1,4 +1,5 @@
 import type { TicketDef } from "../tickets/ticketSchema.js";
+import { normalizeBranchPrefix } from "./prefix.js";
 import type { TicketState } from "../tickets/stateDb.js";
 import type { BranchIssue, BranchPlan, BranchPlanNode } from "./types.js";
 import type { DeliveryConfig } from "../tickets/delivery.js";
@@ -244,13 +245,7 @@ function uniqueBranchName(prefix: string, ticket: TicketDef, used: Set<string>):
   return branch;
 }
 
-export function normalizeBranchPrefix(prefix: string | undefined): string {
-  const value = prefix === undefined || prefix === "" ? "feature" : prefix;
-  if (value.startsWith("/") || value.endsWith("/") || value.includes("..") || value.includes("//") || /[~^:?*\[\\\s]/.test(value)) {
-    throw new Error(`invalid Git branch prefix: ${value}`);
-  }
-  return value;
-}
+export { normalizeBranchPrefix } from "./prefix.js";
 
 function detectSelectedCycles(tickets: TicketDef[], deps: Map<string, string[]>): string[] {
   const selected = new Set(tickets.map((ticket) => ticket.id));

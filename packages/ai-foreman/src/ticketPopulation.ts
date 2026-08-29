@@ -3,7 +3,7 @@ import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, re
 import { dirname, join, resolve } from "node:path";
 import { stringify } from "yaml";
 import type { StructuredPlanV1 } from "rafi-spec";
-import { WorkflowDb } from "./workflowDb.js";
+import { WorkflowDb, WORKFLOW_DB_FILE } from "./workflowDb.js";
 import { cmdRender, cmdValidate } from "./tickets/commands.js";
 import { loadTickets, validateTicketDefs } from "./tickets/ticketLoader.js";
 import type { TicketDef } from "./tickets/ticketSchema.js";
@@ -93,15 +93,26 @@ export function authorizeTicketRetirements(retirements: string[], input: { inter
 
 export function applyTicketPopulation(projectDir: string, materialized: MaterializedTicketPopulation, runId?: string, now = new Date()): { runId: string; transactionId: string } {
   const root = resolve(projectDir); const config = loadTicketsConfig(root); const paths = resolveTicketPaths(config, root);
+  // Finish any older two-phase publication before resolving a new batch. This
+  // makes direct API use as safe as the CLI pre-action hook.
+  recoverTicketPublications(root);
+  const previousTickets = loadTickets(paths.tickets);
+  const previousIds = new Set(previousTickets.map((ticket) => ticket.id));
+  const createdTickets = materialized.tickets.filter((ticket) => !previousIds.has(ticket.id));
   const workflow = new WorkflowDb(root); let actualRunId = runId;
   let lease: ReturnType<WorkflowDb["acquireLease"]> | undefined;
   try {
     if (!actualRunId) actualRunId = workflow.createRun({ kind: "ticket-populate", originalWork: { tickets: materialized.tickets.map((ticket) => ticket.id) }, state: {} }, now).runId;
     lease = workflow.acquireLease(actualRunId, undefined, now);
+    const operationId = `ticket-populate-publication:${actualRunId}`;
     const deliveryPath = join(root, ".tickets", "delivery.yaml");
     const stage = join(root, ".rafi", "staging", randomUUID()); mkdirSync(stage, { recursive: true });
     const stagedTickets = join(stage, "tickets.yaml"); const stagedDelivery = join(stage, "delivery.yaml");
-    const tx = workflow.beginPublication(actualRunId, { files: [{ staged: stagedTickets, target: paths.tickets }, { staged: stagedDelivery, target: deliveryPath }], stage }, {
+    const tx = workflow.beginPublication(actualRunId, {
+      operation: "ticket-populate", operationId,
+      files: [{ staged: stagedTickets, target: paths.tickets }, { staged: stagedDelivery, target: deliveryPath }],
+      stage, managedTicketIds: materialized.tickets.map((ticket) => ticket.id),
+    }, {
       [paths.tickets]: fileDigest(paths.tickets), [deliveryPath]: fileDigest(deliveryPath),
     }, now);
     fsyncWrite(stagedTickets, stringify({ tickets: materialized.tickets }, { lineWidth: 120 }));
@@ -111,18 +122,30 @@ export function applyTicketPopulation(projectDir: string, materialized: Material
     try {
       db.transaction(() => {
         const at = now.toISOString();
+        db.ensureSyntheticLegacyGroup(previousTickets as Array<TicketDef & Record<string, unknown>>, now);
         for (const ticket of materialized.tickets) if (!db.getState(ticket.id)) db.upsertState(ticket.id, { status: "planned", updated_by: "rafi tickets populate" }, at);
         for (const id of materialized.retirements) {
           const prior = db.getState(id); if (prior?.status === "done") continue;
           db.upsertState(id, { status: "obsolete", completed_at: at, updated_by: "rafi tickets populate" }, at);
           db.insertEvent({ timestamp: at, actor: "rafi tickets populate", ticket_id: id, event_type: "obsolete", old_status: prior?.status ?? "planned", new_status: "obsolete", summary: "Removed by approved plan revision", validation: null, evidence: null, payload_json: JSON.stringify({ runId: actualRunId }) });
         }
+        if (createdTickets.length) db.createTicketGroup({ origin: "ticket-populate", operationId: `ticket-populate:${actualRunId}`, createdAt: at, members: createdTickets.map((ticket) => ({ ticketId: ticket.id, definition: ticket, validatedAt: at })) });
+        db.recordOperationReceipt({
+          operation_id: operationId,
+          operation_type: "ticket-populate-publication",
+          ticket_id: null,
+          run_id: actualRunId!,
+          completed_at: at,
+          payload_json: JSON.stringify({ transactionId: tx.transactionId, tickets: materialized.tickets.map((ticket) => ticket.id) }),
+        });
       });
     } finally { db.close(); }
     workflow.updatePublication(tx.transactionId, "tracker_committed", now);
     publishStaged(stagedTickets, paths.tickets); publishStaged(stagedDelivery, deliveryPath);
     workflow.updatePublication(tx.transactionId, "published", now);
     cmdRender(root); const validation = cmdValidate(root); if (!validation.clean) throw new Error(`published ticket population failed validation: ${validation.issues.map((issue) => issue.message).join("; ")}`);
+    const snapshotDb = new StateDb(paths.stateDb);
+    try { for (const ticket of materialized.tickets) if (snapshotDb.getTicketGroupForTicket(ticket.id)) snapshotDb.updateTicketDefinitionSnapshot(ticket.id, ticket, now.toISOString()); } finally { snapshotDb.close(); }
     workflow.updatePublication(tx.transactionId, "committed", now);
     workflow.transition(actualRunId, { status: "completed", checkpoint: "population-committed", remainingWork: {}, state: { transactionId: tx.transactionId } }, now);
     rmSync(stage, { recursive: true, force: true }); return { runId: actualRunId, transactionId: tx.transactionId };
@@ -131,16 +154,62 @@ export function applyTicketPopulation(projectDir: string, materialized: Material
 
 /** Startup recovery deterministically finishes publications after tracker commit. */
 export function recoverTicketPublications(projectDir: string): string[] {
+  if (!existsSync(join(resolve(projectDir), WORKFLOW_DB_FILE))) return [];
   const workflow = new WorkflowDb(projectDir); const recovered: string[] = [];
   try {
     for (const tx of workflow.incompletePublications()) {
-      const intent = tx.intent as { files: Array<{ staged: string; target: string }>; stage: string };
-      if (["tracker_committed", "published"].includes(tx.status)) {
-        if (tx.status === "tracker_committed") for (const file of intent.files) if (existsSync(file.staged)) publishStaged(file.staged, file.target);
-        workflow.updatePublication(tx.transactionId, "committed"); recovered.push(tx.transactionId); rmSync(intent.stage, { recursive: true, force: true });
-      } else {
-        rmSync(intent.stage, { recursive: true, force: true }); workflow.updatePublication(tx.transactionId, "rolled_back"); recovered.push(tx.transactionId);
+      const intent = tx.intent as {
+        operation?: string;
+        operationId?: string;
+        files?: Array<{ staged: string; target: string }>;
+        stage?: string;
+        managedTicketIds?: string[];
+      };
+      const run = workflow.getRun(tx.runId);
+      const isLegacyPopulation = !intent.operation && Array.isArray(intent.files) && run?.kind === "ticket-populate";
+      if (intent.operation !== "ticket-populate" && !isLegacyPopulation) continue;
+      if (!intent.files || !intent.stage) throw new Error(`ticket population ${tx.transactionId} has an invalid durable publication intent`);
+
+      const root = resolve(projectDir);
+      const config = loadTicketsConfig(root);
+      const paths = resolveTicketPaths(config, root);
+      let trackerCommitted = ["tracker_committed", "published"].includes(tx.status);
+      if (!trackerCommitted && intent.operationId) {
+        const receiptDb = new StateDb(paths.stateDb);
+        try { trackerCommitted = Boolean(receiptDb.getOperationReceipt(intent.operationId)); }
+        finally { receiptDb.close(); }
       }
+
+      if (!trackerCommitted) {
+        rmSync(intent.stage, { recursive: true, force: true });
+        workflow.updatePublication(tx.transactionId, "rolled_back");
+        if (run && run.status !== "failed") workflow.transition(run.runId, { status: "failed", checkpoint: "population-rolled-back-before-tracker-commit", state: { ...run.state, recoveredPublication: tx.transactionId } });
+        recovered.push(tx.transactionId);
+        continue;
+      }
+
+      if (tx.status !== "published") {
+        for (const file of intent.files) {
+          if (!existsSync(file.staged)) throw new Error(`ticket population ${tx.transactionId} cannot recover because staged file is missing: ${file.staged}`);
+          publishStaged(file.staged, file.target);
+        }
+        workflow.updatePublication(tx.transactionId, "published");
+      }
+      cmdRender(root);
+      const validation = cmdValidate(root);
+      if (!validation.clean) throw new Error(`recovered ticket population failed validation: ${validation.issues.map((issue) => issue.message).join("; ")}`);
+      const definitions = loadTickets(paths.tickets);
+      const managedIds = new Set(intent.managedTicketIds ?? definitions.map((ticket) => ticket.id));
+      const snapshotDb = new StateDb(paths.stateDb);
+      try {
+        snapshotDb.transaction(() => {
+          for (const ticket of definitions) if (managedIds.has(ticket.id) && snapshotDb.getTicketGroupForTicket(ticket.id)) snapshotDb.updateTicketDefinitionSnapshot(ticket.id, ticket);
+        });
+      } finally { snapshotDb.close(); }
+      workflow.updatePublication(tx.transactionId, "committed");
+      if (run && run.status !== "completed") workflow.transition(run.runId, { status: "completed", checkpoint: "population-recovered", remainingWork: {}, state: { ...run.state, recoveredPublication: tx.transactionId } });
+      recovered.push(tx.transactionId);
+      rmSync(intent.stage, { recursive: true, force: true });
     }
     return recovered;
   } finally { workflow.close(); }

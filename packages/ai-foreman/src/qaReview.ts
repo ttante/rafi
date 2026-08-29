@@ -1,12 +1,13 @@
-import type { SessionStrategy } from "rafi-spec";
-import type { BuilderAdapter } from "./adapters/types.js";
+import type { ProviderSessionRefV1, SessionStrategy } from "rafi-spec";
+import type { BuilderAdapter, CompactResult } from "./adapters/types.js";
+import { SessionUnavailableError } from "./adapters/sessionFailure.js";
 import { currentActivity, withActivityPhase } from "./activity.js";
 import { buildQaFixInstruction, buildQaInstruction, parseStepStatus } from "./foreman.js";
 import { createDisposableQaSnapshotAsync } from "./qaSnapshot.js";
 import type { TicketDef } from "./tickets/ticketSchema.js";
 import { loadTicketSetupConfigWithDefaults } from "./tickets/setupConfig.js";
 
-export interface QaStreamState { sessionId?: string; reviews: number; modificationViolations: number }
+export interface QaStreamState { sessionId?: string; sessionRef?: ProviderSessionRefV1; reviews: number; modificationViolations: number }
 export interface QaNonconvergenceContext { ticket: TicketDef; history: Array<{ cycle: number; outcome: string; detail: string }>; builderWorktree: string }
 export type QaNonconvergenceDecision = { action: "retry" | "pause" | "waive" | "remediate"; remediation?: string };
 export interface IsolatedQaOptions {
@@ -16,6 +17,8 @@ export interface IsolatedQaOptions {
   qaStrategy: SessionStrategy;
   state: QaStreamState;
   createQa: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>;
+  /** Host-owned ordinary QA boundary. Fresh strategies must return a validated successor. */
+  sessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>;
   fix: (issues: string) => Promise<{ ok: boolean; detail?: string }>;
   maxCycles: number;
   evidence?: (entry: { cycle: number; outcome: string; detail: string; qaDiff?: string[] }) => void;
@@ -53,15 +56,14 @@ async function oneReview(opts: IsolatedQaOptions, cycle: number): Promise<Isolat
   const snapshot = await withActivityPhase("preparing disposable QA snapshot", () => createDisposableQaSnapshotAsync(opts.builderWorktree, progress));
   let qa: BuilderAdapter | undefined;
   try {
-    const resume = opts.qaStrategy === "compact" && opts.state.modificationViolations === 0 ? opts.state.sessionId : undefined;
-    qa = await opts.createQa(snapshot.path, resume);
-    if (opts.qaStrategy === "compact" && opts.state.reviews > 0 && resume) {
-      const compacted = await withActivityPhase("compacting QA session", () => compactWithRetry(qa!));
-      if (!compacted.ok) { await qa.close(); qa = await opts.createQa(snapshot.path); opts.state.sessionId = undefined; }
-    }
     const handoff = buildQaReviewHandoff(opts.ticket, opts.builderSummary, snapshot.manifest.diffDigest, loadTicketSetupConfigWithDefaults(opts.builderWorktree).build.validation_checklist);
+    // Every disposable snapshot has a distinct cwd and therefore must have a
+    // fresh provider conversation. Cumulative QA state remains in the durable
+    // continuity/checkpoint stream; an old provider session is never moved
+    // into a newly-created /tmp/rafi-qa-* directory.
+    qa = await opts.createQa(snapshot.path);
     const turn = await qa.sendTurn(handoff); const status = parseStepStatus(turn.text);
-    opts.state.reviews += 1; opts.state.sessionId = qa.sessionId();
+    opts.state.reviews += 1; opts.state.sessionId = qa.sessionId(); opts.state.sessionRef = qa.sessionRef?.();
     const changes = await withActivityPhase("checking QA file changes", () => snapshot.qaChanges());
     if (changes.length) {
       opts.state.modificationViolations += 1;
@@ -90,11 +92,19 @@ export function buildQaReviewHandoff(ticket: TicketDef, builderSummary: string, 
   ].join("\n");
 }
 
-export async function compactWithRetry(adapter: BuilderAdapter): Promise<{ ok: boolean; error?: string }> {
+export async function compactWithRetry(adapter: BuilderAdapter): Promise<CompactResult> {
   if (!adapter.compact) return { ok: false, error: "native compaction unavailable" };
   let error = "";
   for (let attempt = 0; attempt < 2; attempt++) {
-    const result = await adapter.compact(); if (result.ok) return { ok: true }; error = result.error ?? "compaction failed";
+    try {
+      const result = await adapter.compact();
+      if (result.ok) return { ok: true };
+      if (result.failure?.category === "session-unavailable") return result;
+      error = result.error ?? "compaction failed";
+    } catch (failure) {
+      if (failure instanceof SessionUnavailableError) return { ok: false, error: failure.message, failure: failure.failure };
+      error = failure instanceof Error ? failure.message : String(failure);
+    }
   }
   return { ok: false, error };
 }

@@ -1,5 +1,5 @@
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
-import type { SessionStrategy } from "rafi-spec";
+import type { ProviderSessionRefV1, SessionStrategy } from "rafi-spec";
 import { buildDurableQaFixHandoff, compactWithRetry, runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaStreamState } from "../qaReview.js";
 import { changeManifestAsync } from "../qaSnapshot.js";
 import { Foreman, MARKER_SPEC, parseStepStatus } from "../foreman.js";
@@ -23,12 +23,14 @@ import {
 } from "./git.js";
 import { checkGitHubPrMerged, createOrReusePr, enableGitHubAutoMerge, pushBranchForPr } from "./github.js";
 import { checkGitLabMrMerged, createOrReuseMr, enableGitLabAutoMerge, pushBranchForMr } from "./gitlab.js";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { WorkflowDb } from "../workflowDb.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
+import { SessionUnavailableError } from "../adapters/sessionFailure.js";
+import { SessionUnavailableContinuityError } from "../continuity.js";
 
-export interface DeliveryUnitSession { unitId: string; branch: string; worktreePath: string; sessionId: string; ticket: string; }
+export interface DeliveryUnitSession { unitId: string; branch: string; worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1; ticket: string; }
 export type BaseWorktreePolicy = "enforce" | "warn" | "skip";
 
 export function readDeliveryUnitSession(projectDir: string, unitId: string): DeliveryUnitSession | undefined {
@@ -64,13 +66,21 @@ export interface BranchRunnerOptions {
   allowedBaseDirtyPaths?: string[];
   baseWorktreePolicy?: BaseWorktreePolicy;
   trackerPaths?: { progressDoc: string; archiveDoc: string };
-  resumeSessions?: Map<string, { worktreePath: string; sessionId: string }>;
-  createBuilder: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>;
+  resumeSessions?: Map<string, { worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1 }>;
+  createBuilder: (cwd: string, sessionId?: string, sessionRef?: ProviderSessionRefV1) => Promise<BuilderAdapter>;
+  /** Persist every observed Builder binding before later work can supersede it. */
+  recordBuilderSession?: (session: string | ProviderSessionRefV1, ticketId: string, worktreePath: string) => void;
+  recordQaSession?: (session: string | ProviderSessionRefV1, ticketId: string, worktreePath: string) => void;
+  /** Notify the host and stop the branch plan without discarding its worktree. */
+  onSessionUnavailable?: (error: SessionUnavailableError | SessionUnavailableContinuityError) => void;
   createQa?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>;
   builderSessionStrategy?: SessionStrategy;
   qaSessionStrategy?: SessionStrategy;
   observeBuilder?: (builder: BuilderAdapter) => Promise<void>;
   qaNonconvergence?: (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision>;
+  beforeBuilderTurn?: (adapter: BuilderAdapter, frozenAction: string, cwd: string) => Promise<BuilderAdapter>;
+  builderSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>;
+  qaSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>;
 }
 
 export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRunSummary[]> {
@@ -94,7 +104,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
   const summaries: BranchRunSummary[] = [];
   const successfulBranches = new Set<string>();
   const pushedBranches = new Set<string>();
-  let builderStreamSession: string | undefined;
+  let builderStream: { sessionId: string; sessionRef?: ProviderSessionRefV1; worktreePath: string } | undefined;
   let builderWorkSessions = 0;
   const qaStream: QaStreamState = { reviews: 0, modificationViolations: 0 };
 
@@ -192,6 +202,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           base: node.baseBranch,
           worktreePath,
           sessionId: resumeSession.sessionId,
+          sessionRef: resumeSession.sessionRef,
         });
       }
 
@@ -200,11 +211,23 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         summary: resumeSession ? `Resuming branch ${node.branch}` : `Starting branch ${node.branch}`,
       }));
 
-      const continuedBuilderSession = resumeSession?.sessionId ?? (opts.builderSessionStrategy === "compact" ? builderStreamSession : undefined);
-      builder = await opts.createBuilder(worktreePath, continuedBuilderSession);
-      if (opts.builderSessionStrategy === "compact" && builderWorkSessions > 0 && continuedBuilderSession) {
-        const compacted = await compactWithRetry(builder);
-        if (!compacted.ok) { await builder.close(); builder = await opts.createBuilder(worktreePath); }
+      const ticketInstruction = resumeSession ? buildBranchTicketResumeInstruction(node, opts.trackerPaths) : buildBranchTicketInstruction(node, opts.trackerPaths);
+      // Reattach the predecessor even for a `fresh` strategy so the host can
+      // publish and validate a cumulative handoff before creating its successor.
+      const sameWorktreeStream = builderStream && canonical(builderStream.worktreePath) === canonical(worktreePath) ? builderStream : undefined;
+      const continuedBuilderSession = resumeSession?.sessionId ?? sameWorktreeStream?.sessionId;
+      const continuedBuilderRef = resumeSession?.sessionRef ?? sameWorktreeStream?.sessionRef;
+      builder = await opts.createBuilder(worktreePath, continuedBuilderSession, continuedBuilderRef);
+      if (builderWorkSessions > 0 && continuedBuilderSession) {
+        const strategy = opts.builderSessionStrategy ?? "compact";
+        if (opts.builderSessionBoundary) {
+          builder = await opts.builderSessionBoundary(builder, ticketInstruction, strategy, worktreePath);
+        } else if (strategy === "compact") {
+          const compacted = await compactWithRetry(builder);
+          if (!compacted.ok) { await builder.close(); builder = await opts.createBuilder(worktreePath); }
+        } else {
+          await builder.close(); builder = await opts.createBuilder(worktreePath);
+        }
       }
       builderWorkSessions += 1;
       viewer = opts.observeBuilder?.(builder);
@@ -215,14 +238,25 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         opts.qaEnabled,
         3,
         undefined,
+        undefined,
+        undefined,
+        opts.qaSessionStrategy ?? "compact",
+        undefined,
+        opts.builderSessionStrategy ?? "compact",
+        undefined,
+        opts.beforeBuilderTurn ? (adapter, action) => opts.beforeBuilderTurn!(adapter, action, worktreePath) : undefined,
       );
 
-      const { result, status } = await foreman.runInstruction(
-        resumeSession ? buildBranchTicketResumeInstruction(node, opts.trackerPaths) : buildBranchTicketInstruction(node, opts.trackerPaths),
-      );
+      const { result, status } = await foreman.runInstruction(ticketInstruction);
+      builder = foreman.builderAdapter();
       workflowCheckpoint(opts.projectDir, opts.runId, "builder-after", node.ticket.id, { status: status.kind, sessionId: builder.sessionId(), worktree: worktreePath });
       const sessionId = builder.sessionId();
-      builderStreamSession = opts.builderSessionStrategy === "compact" ? sessionId : undefined;
+      const sessionRef = builder.sessionRef?.();
+      if (sessionId) builderStream = { sessionId, ...(sessionRef ? { sessionRef } : {}), worktreePath };
+      if (sessionId) {
+        opts.recordBuilderSession?.(sessionRef ?? sessionId, node.ticket.id, worktreePath);
+        workflowCheckpoint(opts.projectDir, opts.runId, "builder-session-scoped", node.ticket.id, { sessionId, sessionRef, worktree: worktreePath, branch: node.branch });
+      }
       if (sessionId) {
         opts.log.write("branch-session", {
           ticket: node.ticket.id,
@@ -230,6 +264,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           base: node.baseBranch,
           worktreePath,
           sessionId,
+          sessionRef: builder.sessionRef?.(),
           agent: opts.agent,
           model: opts.model,
           effort: opts.effort,
@@ -246,7 +281,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         if (node.deliveryUnitId) {
           const path = deliverySessionPath(opts.projectDir, node.deliveryUnitId);
           mkdirSync(join(opts.projectDir, ".foreman", "delivery-sessions"), { recursive: true });
-          writeFileSync(path, `${JSON.stringify({ unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, ticket: node.ticket.id }, null, 2)}\n`, "utf8");
+          writeFileSync(path, `${JSON.stringify({ unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, sessionRef: builder.sessionRef?.(), ticket: node.ticket.id }, null, 2)}\n`, "utf8");
         }
       }
       opts.log.write("step", {
@@ -278,28 +313,41 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         const qa = await runIsolatedQa({
           ticket: node.ticket, builderWorktree: worktreePath, builderSummary: status.summary ?? result.text,
           qaStrategy: opts.qaSessionStrategy ?? "compact", state: qaStream, createQa: opts.createQa, maxCycles: 3,
+          sessionBoundary: opts.qaSessionBoundary,
           evidence: (entry) => opts.log.write("qa-evidence", { ticket: node.ticket.id, ...entry }),
           fix: async (issues) => {
             if (!builder) return { ok: false, detail: "Builder session unavailable" };
             builderWorkSessions += 1;
-            if (opts.builderSessionStrategy === "compact" && builder.sessionId()) {
-              const compacted = await compactWithRetry(builder);
-              if (!compacted.ok) { await builder.close(); builder = await opts.createBuilder(worktreePath); }
-            } else if (opts.builderSessionStrategy === "fresh") {
-              await builder.close(); builder = await opts.createBuilder(worktreePath);
-            }
             const digest = (await withActivityPhase("recording QA fix changes", () => changeManifestAsync(
               worktreePath,
               (state, detail) => currentActivity()?.update(state, detail),
               "recording QA fix changes",
             ))).diffDigest;
-            const fixed = await builder.sendTurn(buildDurableQaFixHandoff(node.ticket, issues, worktreePath, result.text, digest));
+            const fixInstruction = buildDurableQaFixHandoff(node.ticket, issues, worktreePath, result.text, digest);
+            const strategy = opts.builderSessionStrategy ?? "compact";
+            if (opts.builderSessionBoundary) {
+              builder = await opts.builderSessionBoundary(builder, fixInstruction, strategy, worktreePath);
+            } else if (strategy === "compact" && builder.sessionId()) {
+              const compacted = await compactWithRetry(builder);
+              if (!compacted.ok) { await builder.close(); builder = await opts.createBuilder(worktreePath); }
+            } else if (strategy === "fresh") {
+              await builder.close(); builder = await opts.createBuilder(worktreePath);
+            }
+            if (opts.beforeBuilderTurn) builder = await opts.beforeBuilderTurn(builder, fixInstruction, worktreePath);
+            const fixed = await builder.sendTurn(fixInstruction);
             const fixedStatus = parseStepStatus(fixed.text);
-            builderStreamSession = opts.builderSessionStrategy === "compact" ? builder.sessionId() : undefined;
+            const fixedSessionId = builder.sessionId();
+            const fixedSessionRef = builder.sessionRef?.();
+            if (fixedSessionId) builderStream = { sessionId: fixedSessionId, ...(fixedSessionRef ? { sessionRef: fixedSessionRef } : {}), worktreePath };
+            if (fixedSessionId) {
+              opts.recordBuilderSession?.(fixedSessionRef ?? fixedSessionId, node.ticket.id, worktreePath);
+              workflowCheckpoint(opts.projectDir, opts.runId, "builder-session-scoped", node.ticket.id, { sessionId: fixedSessionId, sessionRef: fixedSessionRef, worktree: worktreePath, branch: node.branch });
+            }
             return { ok: !fixed.isError && fixedStatus.kind === "done", detail: fixedStatus.error ?? fixed.text.slice(0, 500) };
           },
           onNonconvergence: opts.qaNonconvergence,
         });
+        if (qaStream.sessionId) opts.recordQaSession?.(qaStream.sessionRef ?? qaStream.sessionId, node.ticket.id, worktreePath);
         workflowCheckpoint(opts.projectDir, opts.runId, "qa-after", node.ticket.id, { outcome: qa.outcome, detail: qa.detail });
         if (qa.outcome !== "passed" && qa.outcome !== "waived") {
           const detail = qa.detail ?? "QA did not pass";
@@ -517,6 +565,14 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
 
       if (!opts.keepWorktrees && completionMode !== "direct-merge" && completesSharedUnit) removeTicketWorktree(opts.projectDir, worktreePath);
     } catch (err) {
+      if (err instanceof SessionUnavailableError || err instanceof SessionUnavailableContinuityError) {
+        const message = err.message;
+        opts.log.write("branch-issue", { ticket: node.ticket.id, code: "session_unavailable", message, blocking: true });
+        notifyIssue(opts.notificationsEnabled, `${node.ticket.id}: ${message}`);
+        summaries.push(summaryFor(node, "blocked", message));
+        opts.onSessionUnavailable?.(err);
+        return summaries;
+      }
       const message = err instanceof Error ? err.message : String(err);
       const code: "branch_switch" | "tracker_touched" | "builder_error" = message.includes("switched branch")
         ? "branch_switch"
@@ -555,6 +611,7 @@ function workflowCheckpoint(projectDir: string, runId: string, checkpoint: strin
   try {
     const run = db.getRun(runId); if (!run) return;
     db.transition(runId, { checkpoint, state: { ...run.state, currentTicket: ticket, ...payload }, event: checkpoint, payload: { ticket, ...payload } });
+    db.appendContinuityEvent({ runId, role: "host", kind: checkpoint, payload: { ticket, ...payload }, authoritativeStateRevision: db.continuityHead(runId, "run")?.authoritativeStateRevision ?? 0 });
   } finally { db.close(); }
 }
 
@@ -645,6 +702,10 @@ function autoMergePollMs(): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function canonical(path: string): string {
+  try { return realpathSync.native(path); } catch { return resolve(path); }
 }
 
 function notifyIssue(enabled: boolean, message: string): void {

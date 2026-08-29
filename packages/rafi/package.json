@@ -1,6 +1,6 @@
 {
   "name": "@rafi-ai/cli",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Interactive AI app engineering for Claude and Codex: interview, plan, ticket, and build with QA.",
   "preferGlobal": true,
   "license": "Apache-2.0",
@@ -37,9 +37,9 @@
     "node": ">=20"
   },
   "dependencies": {
-    "ai-foreman": "1.7.6",
-    "special-agents": "0.8.4",
-    "rafi-spec": "0.8.4",
+    "ai-foreman": "1.7.7",
+    "special-agents": "0.8.5",
+    "rafi-spec": "0.8.5",
     "ajv": "^8.20.0",
     "@clack/prompts": "^1.4.0",
     "commander": "^12.1.0",
