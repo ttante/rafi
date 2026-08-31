@@ -31,6 +31,7 @@ import type {
   BuilderAdapterOptions,
   BuilderEvent,
   NativeCompaction,
+  NativeAutoCompactionPolicy,
   CompactResult,
   ContextUsage,
   PermissionDecision,
@@ -207,6 +208,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   private compactResult?: CompactResult;
   private autoCompactionPrepared = false;
   private preparedAutoCompactThreshold?: number;
+  private preparedAutoCompactionPolicy?: NativeAutoCompactionPolicy;
   private manualCompactionInFlight = false;
   private nativeCompactions: NativeCompaction[] = [];
   private nativeCompactionSequence = 0;
@@ -497,10 +499,10 @@ export class ClaudeAdapter implements BuilderAdapter {
     return { ok: false, error: sanitizeDiagnostics(result.text || "Claude did not emit an explicit compact status") };
   }
 
-  async prepareAutoCompaction(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<void> {
+  async prepareAutoCompaction(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<NativeAutoCompactionPolicy | void> {
     if (thresholdPercent === undefined) return;
     const threshold = validThreshold(thresholdPercent);
-    if (this.autoCompactionPrepared && this.preparedAutoCompactThreshold === threshold) return;
+    if (this.autoCompactionPrepared && this.preparedAutoCompactThreshold === threshold) return this.preparedAutoCompactionPolicy;
     this.opts.autoCompactThresholdPercent = threshold;
     await this.query.initializationResult();
     await this.query.applyFlagSettings({ autoCompactEnabled: true });
@@ -518,13 +520,28 @@ export class ClaudeAdapter implements BuilderAdapter {
     const requestedWindow = tokenLimit(baseline.maxTokens, threshold) + reserve;
     await this.query.applyFlagSettings({ autoCompactEnabled: true, autoCompactWindow: requestedWindow });
     const installed = await this.query.getContextUsage();
-    if (!installed.isAutoCompactEnabled || installed.autoCompactThreshold === undefined
-      || installed.autoCompactThreshold > tokenLimit(baseline.maxTokens, threshold)) {
-      throw new Error("Claude did not accept the requested native automatic-compaction ceiling");
+    if (!installed.isAutoCompactEnabled || !Number.isFinite(installed.maxTokens) || installed.maxTokens <= 0
+      || !Number.isFinite(installed.autoCompactThreshold) || installed.autoCompactThreshold === undefined) {
+      throw new Error("Claude did not expose an enabled native automatic-compaction threshold after configuration");
     }
+    // `applyFlagSettings` can legitimately clamp autoCompactWindow. The
+    // provider's reported trigger is authoritative; rejecting the entire run
+    // merely because a configured value is below that minimum made defaults
+    // unusable. Lifecycle code consumes this verified effective ceiling.
+    const effectiveThresholdPercent = Math.max(1, Math.min(99,
+      Math.floor(installed.autoCompactThreshold / installed.maxTokens * 100)));
+    this.preparedAutoCompactionPolicy = {
+      requestedThresholdPercent: threshold,
+      effectiveThresholdPercent,
+      modelContextWindow: installed.maxTokens,
+      triggerTokens: installed.autoCompactThreshold,
+    };
     this.autoCompactionPrepared = true;
     this.preparedAutoCompactThreshold = threshold;
+    return this.preparedAutoCompactionPolicy;
   }
+
+  autoCompactionPolicy(): NativeAutoCompactionPolicy | undefined { return this.preparedAutoCompactionPolicy; }
 
   drainNativeCompactions(): NativeCompaction[] {
     const pending = this.nativeCompactions;

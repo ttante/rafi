@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ContinuityCheckpoint, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
-import type { BuilderAdapter, CompactResult, ContextUsage, NativeCompaction, ProviderSessionUsage, ProviderSettingSwitch, RuntimeFailure, TurnResult } from "./adapters/types.js";
+import type { BuilderAdapter, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, ProviderSessionUsage, ProviderSettingSwitch, RuntimeFailure, TurnResult } from "./adapters/types.js";
 import { BuilderEventQueue } from "./activity.js";
 import { WorkflowDb } from "./workflowDb.js";
 
@@ -235,7 +235,8 @@ export class ContinuityAdapter implements BuilderAdapter {
   adoptSessionRef(ref: import("rafi-spec").ProviderSessionRefV1): void { this.adapter.adoptSessionRef?.(ref); }
   validateSession(): Promise<import("rafi-spec").SessionAvailabilityV1> { return this.adapter.validateSession?.() ?? Promise.resolve({ version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped" }); }
   compact(): Promise<CompactResult> { return this.adapter.compact ? this.adapter.compact() : Promise.resolve({ ok: false, error: "provider adapter does not expose native compaction" }); }
-  prepareAutoCompaction(thresholdPercent?: number): Promise<void> { return this.adapter.prepareAutoCompaction?.(thresholdPercent) ?? Promise.resolve(); }
+  prepareAutoCompaction(thresholdPercent?: number): Promise<NativeAutoCompactionPolicy | void> { return this.adapter.prepareAutoCompaction?.(thresholdPercent) ?? Promise.resolve(); }
+  autoCompactionPolicy(): NativeAutoCompactionPolicy | undefined { return this.adapter.autoCompactionPolicy?.(); }
   drainNativeCompactions(): import("./adapters/types.js").NativeCompaction[] { return this.adapter.drainNativeCompactions?.() ?? []; }
   restoreNativeCompactions(compactions: NativeCompaction[]): void { this.adapter.restoreNativeCompactions?.(compactions); }
   contextUsageAfterNativeCompaction(compaction: NativeCompaction): Promise<ContextUsage | undefined> { return this.adapter.contextUsageAfterNativeCompaction?.(compaction) ?? Promise.resolve(undefined); }

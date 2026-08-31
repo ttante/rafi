@@ -380,6 +380,8 @@ export class ThresholdCompactionController {
   private crossing = 0;
   private readonly seenSessions = new Set<string>();
   private runOnlyThreshold?: number;
+  /** Verified provider ceiling. It may be higher than configured when the provider clamps. */
+  private providerEffectiveThreshold?: number;
   private bootstrapScheduled = false;
   private bootstrapRecoveryDepth = 0;
   private historicalCountUncertain: boolean;
@@ -391,6 +393,7 @@ export class ThresholdCompactionController {
 
   async atSafeBoundary(adapter: BuilderAdapter, frozenAction: string): Promise<ContextBoundaryResult> {
     adapter = await this.adoptSettings(adapter, frozenAction);
+    this.syncProviderEffectiveThreshold(adapter);
     if (!adapter.sessionId() && !this.bootstrapScheduled) {
       this.bootstrapScheduled = true;
       const sample: ContextSample = {
@@ -439,6 +442,7 @@ export class ThresholdCompactionController {
     const revisionBeforeSettle = this.settings.settings_revision;
     const sessionBeforeSettle = adapterSessionKey(adapter);
     adapter = await this.adoptSettings(adapter, frozenAction);
+    this.syncProviderEffectiveThreshold(adapter);
     if (this.settings.settings_revision !== revisionBeforeSettle || adapterSessionKey(adapter) !== sessionBeforeSettle) {
       sample = await this.measure(adapter, "provider-query");
       session = adapter.sessionRef?.() ?? adapter.sessionId();
@@ -468,6 +472,7 @@ export class ThresholdCompactionController {
     strategy: SessionStrategy = this.settings.session_strategy,
   ): Promise<ContextBoundaryResult> {
     adapter = await this.adoptSettings(adapter, frozenAction);
+    this.syncProviderEffectiveThreshold(adapter);
     const nativeCount = await this.observeNativeCompactions(adapter);
     const sample = await this.measure(adapter, "provider-query");
     const db = new WorkflowDb(this.options.projectDir);
@@ -688,6 +693,7 @@ export class ThresholdCompactionController {
     }
     this.settings = next;
     this.runOnlyThreshold = undefined;
+    this.syncProviderEffectiveThreshold(adoptedAdapter);
     const db = new WorkflowDb(this.options.projectDir);
     try { const ref = adoptedAdapter.sessionRef?.(); db.acknowledgeSettings({ runId: this.options.runId, role: this.options.role, providerSessionId: adoptedAdapter.sessionId(), ...(ref ? { sessionRef: ref, sessionKey: providerSessionKey(ref) } : {}), revision: next.settings_revision, acknowledgedAt: this.now().toISOString() }); }
     finally { db.close(); }
@@ -731,7 +737,14 @@ export class ThresholdCompactionController {
     try { return db.handoffs(this.options.runId).at(-1)?.generation ?? 0; }
     finally { db.close(); }
   }
-  private threshold(): number { return this.runOnlyThreshold ?? this.settings.auto_compact_threshold_percent ?? 50; }
+  private syncProviderEffectiveThreshold(adapter: BuilderAdapter): void {
+    const policy = adapter.autoCompactionPolicy?.();
+    const effective = policy?.effectiveThresholdPercent;
+    this.providerEffectiveThreshold = effective !== undefined && Number.isInteger(effective) && effective >= 1 && effective <= 99
+      ? effective
+      : undefined;
+  }
+  private threshold(): number { return this.runOnlyThreshold ?? this.providerEffectiveThreshold ?? this.settings.auto_compact_threshold_percent ?? 50; }
   private now(): Date { return this.options.now?.() ?? new Date(); }
 }
 

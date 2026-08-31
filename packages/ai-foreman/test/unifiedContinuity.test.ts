@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import type { ContinuityDelta, ProviderSessionRefV1, ResolvedAgentSettings } from "rafi-spec";
-import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, NativeCompaction, TurnResult } from "../src/adapters/types.js";
+import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, TurnResult } from "../src/adapters/types.js";
 import { ContinuityAdapter } from "../src/continuity.js";
 import { HANDOFF_ACCEPTED, HandoffLoopError, HandoffService } from "../src/handoffs.js";
 import { ThresholdCompactionController } from "../src/sessionLifecycle.js";
@@ -34,6 +34,7 @@ class FakeAdapter implements BuilderAdapter {
   private usageIndex = 0;
   private adoptedRef?: ProviderSessionRefV1;
   nativeCompactions: NativeCompaction[] = [];
+  policy?: NativeAutoCompactionPolicy;
   constructor(
     private readonly id: string | undefined,
     private readonly turns: TurnResult[] = [],
@@ -55,6 +56,7 @@ class FakeAdapter implements BuilderAdapter {
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.adoptedRef = ref; }
   async compact(): Promise<CompactResult> { this.compactCalls += 1; this.usageIndex = Math.min(this.usageIndex + 1, this.usages.length - 1); return this.compactResult; }
   async prepareAutoCompaction(_threshold?: number): Promise<void> {}
+  autoCompactionPolicy(): NativeAutoCompactionPolicy | undefined { return this.policy; }
   async contextUsage(): Promise<ContextUsage | undefined> { return this.usages[this.usageIndex]; }
   drainNativeCompactions(): NativeCompaction[] { const pending = this.nativeCompactions; this.nativeCompactions = []; return pending; }
   advanceUsage(): void { this.usageIndex = Math.min(this.usageIndex + 1, this.usages.length - 1); }
@@ -239,6 +241,29 @@ test("a threshold-only live update reconfigures the active provider before ackno
   const db = new WorkflowDb(projectDir);
   assert.equal(db.settingsAcknowledgments(2)[0]?.providerSessionId, "session-1");
   db.close();
+});
+
+test("Builder and QA use a provider-clamped native ceiling at safe boundaries", async () => {
+  for (const role of ["builder", "qa"] as const) {
+    const projectDir = root(`rafi-clamped-${role}-`);
+    const adapter = new FakeAdapter(`${role}-session`, [], [{ used: 75, maximum: 100, percentage: 75 }], { ok: true }, "claude");
+    adapter.policy = {
+      requestedThresholdPercent: 50,
+      effectiveThresholdPercent: 79,
+      modelContextWindow: 100,
+      triggerTokens: 79,
+    };
+    const controller = new ThresholdCompactionController({
+      projectDir,
+      runId: `run-${role}`,
+      role,
+      initialSettings: { ...SETTINGS, role },
+    });
+    const result = await controller.atSafeBoundary(adapter, "frozen action");
+    assert.equal(result.effectiveThreshold, 79);
+    assert.equal(result.action, "below-threshold");
+    assert.equal(adapter.compactCalls, 0);
+  }
 });
 
 test("a newer live provider revision is acknowledged only after its validated settings boundary returns the requested provider", async () => {

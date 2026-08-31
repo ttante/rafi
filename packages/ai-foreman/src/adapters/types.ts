@@ -92,6 +92,18 @@ export interface ContextUsage {
   source?: "provider-event" | "provider-query" | "post-compact";
 }
 
+/**
+ * The provider-native automatic-compaction policy that was actually installed.
+ * Providers may clamp a requested ceiling to a model- or runtime-specific
+ * minimum, so lifecycle enforcement must consume the effective value.
+ */
+export interface NativeAutoCompactionPolicy {
+  requestedThresholdPercent: number;
+  effectiveThresholdPercent: number;
+  modelContextWindow?: number;
+  triggerTokens?: number;
+}
+
 export interface ProviderSessionUsage {
   inputTokens?: number;
   outputTokens?: number;
@@ -187,7 +199,10 @@ export interface BuilderAdapter {
    * dispatched. This intentionally happens outside a work turn so a long,
    * tool-heavy first turn is protected too.
    */
-  prepareAutoCompaction?(thresholdPercent?: number): Promise<void>;
+  prepareAutoCompaction?(thresholdPercent?: number): Promise<NativeAutoCompactionPolicy | void>;
+
+  /** The last provider-native automatic-compaction policy verified on this transport. */
+  autoCompactionPolicy?(): NativeAutoCompactionPolicy | undefined;
 
   /** Consume provider-native compactions observed since the prior drain. */
   drainNativeCompactions?(): NativeCompaction[];

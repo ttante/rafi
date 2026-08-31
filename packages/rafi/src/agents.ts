@@ -200,6 +200,7 @@ export function buildAgentsCommand(): Command {
       const anyFlags = ["agentType", "agentMake", "model", "reasoning", "fast", "sessionStrategy", "showSessionCost", "autoCompactThreshold", "compactMaximum"].some((key) => opts[key] !== undefined);
       let selected: ConfigurableAgentRole[];
       let settings: AgentRoleDefaultsV1;
+      let promptedRoleSettings: Partial<Record<ConfigurableAgentRole, AgentRoleDefaultsV1>> | undefined;
       if (anyFlags) {
         const missing = missingAgentUpdateFlags(opts);
         if (missing.length) throw new Error(`partial agent configuration; missing: ${missing.join(", ")}`);
@@ -213,7 +214,10 @@ export function buildAgentsCommand(): Command {
         }
       } else {
         if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("noninteractive use requires --agent-type and at least one setting flag");
-        ({ selected, settings } = await promptAgentSettings(root));
+        const prompted = await promptAgentSettings(root);
+        selected = prompted.selected;
+        settings = prompted.settings;
+        promptedRoleSettings = prompted.roleSettings;
       }
       const config = readConfig(root);
       const defaults: AgentDefaultsV1 = structuredClone(config.agent_defaults ?? { version: 1, revision: 0, roles: {} });
@@ -221,7 +225,10 @@ export function buildAgentsCommand(): Command {
         const readiness = await probeRuntime(root, settings.make, { phase: "capability-discovery" });
         if (!readiness.ok) throw new Error(`cannot save unsupported settings: ${readiness.diagnostics || readiness.category}`);
       }
-      for (const role of selected) defaults.roles[role] = { ...defaults.roles[role], ...settings };
+      for (const role of selected) {
+        const roleSettings = !anyFlags ? promptedRoleSettings?.[role] : undefined;
+        defaults.roles[role] = { ...defaults.roles[role], ...settings, ...roleSettings };
+      }
       defaults.revision = (defaults.revision ?? 0) + 1;
       const validation = validateAgentDefaults(defaults);
       if (!validation.valid) throw new Error(validation.errors.join("; "));
@@ -274,8 +281,8 @@ export async function waitForLiveSettingsAcknowledgments(
   }));
 }
 
-async function promptAgentSettings(root: string): Promise<{ selected: ConfigurableAgentRole[]; settings: AgentRoleDefaultsV1 }> {
-  const { multiselect, select, confirm, isCancel } = await import("@clack/prompts");
+async function promptAgentSettings(root: string): Promise<{ selected: ConfigurableAgentRole[]; settings: AgentRoleDefaultsV1; roleSettings?: Partial<Record<ConfigurableAgentRole, AgentRoleDefaultsV1>> }> {
+  const { multiselect, select, confirm, text, isCancel } = await import("@clack/prompts");
   const roleAnswer = await multiselect({
     message: "Which roles should share these settings?",
     initialValues: [...CONFIGURABLE_ROLES],
@@ -303,9 +310,40 @@ async function promptAgentSettings(root: string): Promise<{ selected: Configurab
     { value: "fresh", label: "Fresh conversation with durable handoff" },
   ] });
   if (isCancel(sessionStrategy)) throw new Error("agent configuration cancelled; nothing was saved");
+  const roleSettings: Partial<Record<ConfigurableAgentRole, AgentRoleDefaultsV1>> = {};
+  const existing = readConfig(root).agent_defaults;
+  for (const role of roleAnswer as ConfigurableAgentRole[]) {
+    if (role !== "builder" && role !== "qa") continue;
+    const label = role === "builder" ? "Builder" : "QA";
+    const currentThreshold = existing?.roles[role]?.auto_compact_threshold_percent ?? DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
+    const threshold = await text({
+      message: `${label} automatic compaction threshold (1-99):`,
+      defaultValue: String(currentThreshold),
+      validate: (value) => {
+        const parsed = Number(value);
+        return Number.isInteger(parsed) && parsed >= 1 && parsed <= 99 ? undefined : "Enter an integer from 1 to 99";
+      },
+    });
+    if (isCancel(threshold)) throw new Error("agent configuration cancelled; nothing was saved");
+    const currentMaximum = existing?.roles[role]?.compact_maximum ?? DEFAULT_COMPACT_MAXIMUM;
+    const maximum = await text({
+      message: `${label} maximum successful compactions per provider session:`,
+      defaultValue: String(currentMaximum),
+      validate: (value) => {
+        const parsed = Number(value);
+        return Number.isSafeInteger(parsed) && parsed > 0 ? undefined : "Enter a positive safe integer";
+      },
+    });
+    if (isCancel(maximum)) throw new Error("agent configuration cancelled; nothing was saved");
+    roleSettings[role] = { auto_compact_threshold_percent: Number(threshold), compact_maximum: Number(maximum) };
+  }
   const ok = await confirm({ message: `Apply to ${(roleAnswer as string[]).join(", ")} in ${root}?`, initialValue: false });
   if (isCancel(ok) || !ok) throw new Error("agent configuration cancelled; nothing was saved");
-  return { selected: roleAnswer as ConfigurableAgentRole[], settings: { make: make as "claude" | "codex", model: modelValue, reasoning: String(reasoning), fast: Boolean(fast), session_strategy: sessionStrategy as SessionStrategy } };
+  return {
+    selected: roleAnswer as ConfigurableAgentRole[],
+    settings: { make: make as "claude" | "codex", model: modelValue, reasoning: String(reasoning), fast: Boolean(fast), session_strategy: sessionStrategy as SessionStrategy },
+    roleSettings,
+  };
 }
 
 function parseRoles(value: string): ConfigurableAgentRole[] {

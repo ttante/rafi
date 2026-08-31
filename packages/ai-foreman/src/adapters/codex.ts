@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { loadSkill } from "special-agents";
 import { BuilderEventQueue, withActivityPhase } from "../activity.js";
 import { normalizeRuntimeErrorText } from "../runtimeAuth.js";
-import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, CompactResult, ContextUsage, NativeCompaction, ProviderSessionUsage, ProviderSettingSwitch, TurnResult } from "./types.js";
+import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, ProviderSessionUsage, ProviderSettingSwitch, TurnResult } from "./types.js";
 import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
 import { canonicalSessionPath, createProviderSessionRef, validateProviderSessionScope } from "../sessionIdentity.js";
 import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
@@ -50,6 +50,7 @@ export class CodexAdapter implements BuilderAdapter {
   private nativeAutoCompactTokenLimit?: number;
   private autoCompactionPrepared = false;
   private preparedAutoCompactThreshold?: number;
+  private preparedAutoCompactionPolicy?: NativeAutoCompactionPolicy;
   private nativeCompactions: NativeCompaction[] = [];
   private nativeCompactionSequence = 0;
   private manualCompactionInFlight = false;
@@ -177,10 +178,10 @@ export class CodexAdapter implements BuilderAdapter {
     }
   }
 
-  async prepareAutoCompaction(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<void> {
+  async prepareAutoCompaction(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<NativeAutoCompactionPolicy | void> {
     if (thresholdPercent === undefined) return;
     const threshold = validThreshold(thresholdPercent);
-    if (this.autoCompactionPrepared && this.preparedAutoCompactThreshold === threshold) return;
+    if (this.autoCompactionPrepared && this.preparedAutoCompactThreshold === threshold) return this.preparedAutoCompactionPolicy;
     this.opts.autoCompactThresholdPercent = threshold;
     await this.ensureThread();
     // Codex reports its model context window in token-usage notifications, not
@@ -202,7 +203,16 @@ export class CodexAdapter implements BuilderAdapter {
     await this.ensureThread();
     this.autoCompactionPrepared = true;
     this.preparedAutoCompactThreshold = threshold;
+    this.preparedAutoCompactionPolicy = {
+      requestedThresholdPercent: threshold,
+      effectiveThresholdPercent: threshold,
+      modelContextWindow: maximum,
+      triggerTokens: this.nativeAutoCompactTokenLimit,
+    };
+    return this.preparedAutoCompactionPolicy;
   }
+
+  autoCompactionPolicy(): NativeAutoCompactionPolicy | undefined { return this.preparedAutoCompactionPolicy; }
 
   drainNativeCompactions(): NativeCompaction[] {
     const pending = this.nativeCompactions;

@@ -123,7 +123,7 @@ test("Claude API retry messages normalize into immediate retry events", () => {
   });
 });
 
-test("Claude automatic compaction preserves its provider reserve while enforcing the requested ceiling", async () => {
+test("Claude automatic compaction records a provider-clamped effective ceiling", async () => {
   const adapter = Object.create(ClaudeAdapter.prototype) as ClaudeAdapter;
   const calls: Array<Record<string, unknown>> = [];
   let contextCalls = 0;
@@ -135,11 +135,18 @@ test("Claude automatic compaction preserves its provider reserve while enforcing
     applyFlagSettings: async (settings: Record<string, unknown>) => { calls.push(settings); },
   };
   Object.assign(adapter as object, { opts: { ...BASE_OPTS, autoCompactThresholdPercent: 50 }, query });
-  await adapter.prepareAutoCompaction();
+  const policy = await adapter.prepareAutoCompaction();
   assert.deepEqual(calls, [
     { autoCompactEnabled: true },
     { autoCompactEnabled: true, autoCompactWindow: 140 },
   ]);
+  assert.deepEqual(policy, {
+    requestedThresholdPercent: 50,
+    effectiveThresholdPercent: 71,
+    modelContextWindow: 140,
+    triggerTokens: 100,
+  });
+  assert.deepEqual(adapter.autoCompactionPolicy(), policy);
 });
 
 // --- Codex adapter instruction building ---

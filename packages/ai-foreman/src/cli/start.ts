@@ -1908,7 +1908,14 @@ async function prepareNativeAutoCompaction(adapter: BuilderAdapter): Promise<voi
     throw new Error(`${adapter.agent} does not support provider-native automatic compaction`);
   }
   try {
-    await adapter.prepareAutoCompaction();
+    const policy = await adapter.prepareAutoCompaction();
+    if (policy && policy.effectiveThresholdPercent !== policy.requestedThresholdPercent) {
+      console.log(
+        `foreman: ${adapter.agent} applied automatic compaction at ${policy.effectiveThresholdPercent}% `
+        + `(configured ${policy.requestedThresholdPercent}%; provider minimum or clamp). `
+        + "Use `rafi agents .` to update the Builder or QA saved threshold interactively.",
+      );
+    }
   } catch (error) {
     await adapter.close().catch(() => {});
     throw error;
