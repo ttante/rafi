@@ -203,71 +203,13 @@ test("Codex token usage keeps live context and cumulative provider totals separa
       },
     },
   });
-  const context = await a.contextUsage();
-  assert.equal(context?.used, 12);
-  assert.equal(context?.maximum, 100);
-  assert.equal(context?.percentage, 12);
-  assert.equal(context?.source, "provider-event");
-  assert.equal(context?.sequence, 1);
+  assert.deepEqual(await a.contextUsage(), {
+    used: 72, maximum: 100, percentage: 72, observedAt: (await a.contextUsage())?.observedAt, source: "provider-event",
+  });
   assert.deepEqual(await a.sessionUsage(), {
     inputTokens: 50, outputTokens: 22, totalTokens: 72,
     observedAt: (await a.sessionUsage())?.observedAt, source: "provider",
   });
-  await a.close();
-});
-
-test("Codex app-server receives the absolute native ceiling without mutating user configuration", () => {
-  const a = adapter();
-  (a as unknown as { nativeTokenLimit: number }).nativeTokenLimit = 4096;
-  assert.deepEqual(a.buildAppServerArgs(), [
-    "app-server", "--listen", "stdio://",
-    "-c", "model_auto_compact_token_limit=4096",
-    "-c", 'model_auto_compact_token_limit_scope="total"',
-  ]);
-});
-
-test("Codex context discovery uses one raw tool-free setup turn and preserves the scoped thread across transport restart", async () => {
-  const a = adapter({ resumeSessionId: "session-1", systemPromptAppend: "must not be added to setup" });
-  const internal = a as unknown as {
-    usage?: { used: number; maximum: number; percentage: number; sequence: number; source: "provider-event" };
-    ensureThread(): Promise<void>;
-    restartTransport(): Promise<void>;
-    sendTurnInternal(text: string, setup?: boolean): Promise<{ text: string; isError: boolean; numTurns: number; costUsd: number }>;
-  };
-  const calls: string[] = [];
-  internal.ensureThread = async () => { calls.push(`thread:${a.sessionId()}`); };
-  internal.restartTransport = async () => { calls.push(`restart:${a.sessionId()}`); };
-  internal.sendTurnInternal = async (text, setup) => {
-    calls.push(`setup:${String(setup)}:${text}`);
-    internal.usage = { used: 12, maximum: 100, percentage: 12, sequence: 1, source: "provider-event" };
-    return { text: "CONTEXT_READY", isError: false, numTurns: 1, costUsd: 0 };
-  };
-  const prepared = await a.prepareContextManagement({
-    role: "builder", configuredThresholdPercent: 50, compactMaximum: 10,
-    settingsRevision: 1, model: "test-model",
-  });
-  assert.equal(prepared.configuredTokenLimit, 50);
-  assert.equal(a.sessionId(), "session-1");
-  assert.ok(calls.some((call) => call.includes("setup:true:Rafi context setup only. Do not call tools")));
-  assert.ok(!calls.some((call) => call.includes("must not be added to setup")));
-  assert.ok(calls.includes("restart:session-1"));
-  assert.equal(calls.at(-1), "thread:session-1");
-  await a.close();
-});
-
-test("Codex interrupted turns are distinct from ordinary provider failures", async () => {
-  const a = adapter({ resumeSessionId: "session-1" });
-  const internal = a as unknown as {
-    ensureThread(): Promise<void>;
-    request(method: string): Promise<unknown>;
-    waitFor(method: string): Promise<Record<string, unknown>>;
-  };
-  internal.ensureThread = async () => {};
-  internal.request = async () => ({ turn: { id: "turn-1" } });
-  internal.waitFor = async () => ({ threadId: "session-1", turn: { id: "turn-1", status: "interrupted" } });
-  const result = await a.sendTurn("continue");
-  assert.equal(result.isError, false);
-  assert.deepEqual(result.interrupted, { reason: "compaction-boundary" });
   await a.close();
 });
 
@@ -288,7 +230,7 @@ test("Codex native compaction requires explicit completion and a fresh post-comp
     return {};
   };
   assert.deepEqual(await a.compact(), { ok: true });
-  assert.equal((await a.contextUsage())?.percentage, 4);
+  assert.equal((await a.contextUsage())?.percentage, 24);
   await a.close();
 });
 

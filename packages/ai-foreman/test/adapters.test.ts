@@ -6,9 +6,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildClaudeQueryOptions, claudeApiRetryEvent, mergeClaudeProviderSessionUsage, permissionDecisionToClaudeResult, requireClaudeSDK } from "../src/adapters/claude.js";
-import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
-import type { BuilderAdapterOptions, BuilderEvent } from "../src/adapters/types.js";
+import type { BuilderAdapterOptions } from "../src/adapters/types.js";
 
 const BASE_OPTS: BuilderAdapterOptions = {
   cwd: "/tmp/test",
@@ -122,93 +121,6 @@ test("Claude API retry messages normalize into immediate retry events", () => {
     delayMs: 1500,
     managedBy: "provider",
   });
-});
-
-test("Claude initialization installs and live-reapplies the absolute native auto-compact window", async () => {
-  const calls: string[] = [];
-  const modelMaximum = 200_000;
-  const nativeReserve = 33_000;
-  let window = modelMaximum;
-  let enabled = false;
-  let release!: () => void;
-  const wait = new Promise<void>((resolve) => { release = resolve; });
-  const queryObject = (async function* () { await wait; })() as AsyncGenerator<never> & Record<string, unknown>;
-  Object.assign(queryObject, {
-    initializationResult: async () => { calls.push("initialize"); return {}; },
-    getContextUsage: async () => {
-      calls.push("usage");
-      return {
-        totalTokens: 40_000,
-        maxTokens: window,
-        percentage: 40_000 / window * 100,
-        model: "claude-test",
-        isAutoCompactEnabled: enabled,
-        autoCompactThreshold: window - nativeReserve,
-      };
-    },
-    applyFlagSettings: async (settings: { autoCompactWindow?: number | null }) => {
-      calls.push(`apply:${settings.autoCompactWindow}`);
-      if (settings.autoCompactWindow === null) window = modelMaximum;
-      else if (settings.autoCompactWindow !== undefined) window = settings.autoCompactWindow;
-      enabled = true;
-    },
-    interrupt: async () => {},
-    setModel: async () => {},
-  });
-  const Constructor = ClaudeAdapter as unknown as new (
-    opts: BuilderAdapterOptions,
-    query: (input: unknown) => typeof queryObject,
-  ) => ClaudeAdapter;
-  const a = new Constructor(BASE_OPTS, () => queryObject);
-  const prepared = await a.prepareContextManagement({
-    role: "builder", configuredThresholdPercent: 50, compactMaximum: 10,
-    settingsRevision: 1, model: "claude-test",
-  });
-  assert.equal(prepared.configuredTokenLimit, 100_000);
-  assert.equal(prepared.installedNativeTokenLimit, 100_000);
-  assert.equal(prepared.sample?.maximum, modelMaximum);
-  assert.equal(prepared.sample?.percentage, 20);
-  assert.deepEqual(calls.slice(0, 5), ["initialize", "apply:undefined", "usage", "apply:133000", "usage"]);
-  const preparedAgain = await a.prepareContextManagement({
-    role: "builder", configuredThresholdPercent: 50, compactMaximum: 10,
-    settingsRevision: 1, model: "claude-test",
-  });
-  assert.equal(preparedAgain.modelContextWindow, modelMaximum, "repeated preparation must not mistake the narrowed native window for model capacity");
-  assert.equal(preparedAgain.configuredTokenLimit, 100_000);
-  const updated = await a.updateContextManagement({
-    role: "builder", configuredThresholdPercent: 40, compactMaximum: 10,
-    settingsRevision: 2, model: "claude-test",
-  });
-  assert.equal(updated.configuredTokenLimit, 80_000);
-  assert.equal(updated.installedNativeTokenLimit, 80_000);
-  assert.ok(calls.includes("apply:113000"));
-  release();
-  await a.close();
-});
-
-test("Claude compact boundary and compact_result signals form one deduplicated native success", async () => {
-  let release!: () => void;
-  const wait = new Promise<void>((resolve) => { release = resolve; });
-  const queryObject = (async function* () { await wait; })() as AsyncGenerator<never> & Record<string, unknown>;
-  Object.assign(queryObject, { interrupt: async () => {}, getContextUsage: async () => ({ totalTokens: 20, maxTokens: 100, percentage: 20, model: "claude-test" }) });
-  const Constructor = ClaudeAdapter as unknown as new (
-    opts: BuilderAdapterOptions,
-    query: (input: unknown) => typeof queryObject,
-  ) => ClaudeAdapter;
-  const a = new Constructor({ ...BASE_OPTS, resumeSessionId: "session-1" }, () => queryObject);
-  const events: BuilderEvent[] = [];
-  const eventPump = (async () => { for await (const event of a.events()) events.push(event); })();
-  const handle = (a as unknown as { handle(message: unknown): Promise<void> }).handle.bind(a);
-  await handle({ type: "system", subtype: "status", status: "compacting", uuid: "compact-1", session_id: "session-1" });
-  await handle({ type: "system", subtype: "compact_boundary", uuid: "boundary-1", session_id: "session-1", compact_metadata: { trigger: "auto", pre_tokens: 70, post_tokens: 20 } });
-  await handle({ type: "system", subtype: "status", status: null, compact_result: "success", uuid: "result-1", session_id: "session-1" });
-  release();
-  await eventPump;
-  const compactEvents = events.filter((event) => event.kind === "context-compaction");
-  assert.deepEqual(compactEvents.map((event) => event.phase), ["started", "succeeded"]);
-  assert.equal(compactEvents[0]?.providerEventId, "compact-1");
-  assert.equal(compactEvents[1]?.providerEventId, "compact-1");
-  await a.close();
 });
 
 // --- Codex adapter instruction building ---

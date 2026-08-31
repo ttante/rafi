@@ -71,61 +71,7 @@ export interface TurnResult {
   inputTokens?: number;
   outputTokens?: number;
   failure?: RuntimeFailure;
-  /** A provider turn stopped at a context-compaction boundary, not a failure. */
-  interrupted?: {
-    reason: "compaction-boundary";
-    providerEventId?: string;
-  };
 }
-
-export type ContextCompactionOrigin = "provider-auto" | "rafi-manual" | "recovery" | "boundary";
-export type ContextCompactionPhase = "started" | "succeeded" | "failed";
-
-/** Native context policy installed before a Builder/QA role may do real work. */
-export interface ContextManagementPolicy {
-  role: "builder" | "qa";
-  configuredThresholdPercent: number;
-  compactMaximum: number;
-  settingsRevision: number;
-  model: string;
-  /** Continue a provider-monotonic sequence after process recovery. */
-  providerSequenceStart?: number;
-  /** A persisted, model-matched maximum may avoid a discovery turn. */
-  knownModelContextWindow?: number;
-  /** Native compaction stays enabled until the host vetoes a boundary. */
-  nativeCompactionEnabled?: boolean;
-}
-
-export interface PreparedContextManagement {
-  modelContextWindow: number;
-  configuredTokenLimit: number;
-  installedNativeTokenLimit: number;
-  installedNativePercent: number;
-  sample?: ContextUsage;
-}
-
-export interface ContextCompactionEvent {
-  kind: "context-compaction";
-  phase: ContextCompactionPhase;
-  origin: ContextCompactionOrigin;
-  providerEventId: string;
-  providerSequence: number;
-  provider: "claude" | "codex";
-  sessionId?: string;
-  sessionRef?: ProviderSessionRefV1;
-  observedAt: string;
-  postCompactSample?: ContextUsage;
-  reason?: string;
-}
-
-export interface InterruptResult {
-  ok: boolean;
-  error?: string;
-  providerEventId?: string;
-}
-
-/** Host-owned gate used by wrappers that need additional provider turns. */
-export type ManagedTurnDispatcher = (text: string, invoke: () => Promise<TurnResult>) => Promise<TurnResult>;
 
 /** Observability events emitted while a builder works. */
 export type BuilderEvent =
@@ -135,8 +81,7 @@ export type BuilderEvent =
   | { kind: "retry"; provider: "claude" | "codex"; reason: string; attempt?: number; maximum?: number; delayMs?: number; managedBy: "provider" | "rafi" }
   | { kind: "turn-complete"; result: TurnResult }
   | { kind: "session-transition"; transition: "started" | "resumed" | "compacting" | "compacted" | "fresh-fallback"; detail?: string }
-  | { kind: "context-usage"; used: number; maximum?: number; percentage?: number; observedAt?: string; source?: "provider-event" | "provider-query" | "post-compact"; sequence?: number; sessionId?: string; model?: string }
-  | ContextCompactionEvent
+  | { kind: "context-usage"; used: number; maximum?: number; percentage?: number; observedAt?: string; source?: "provider-event" | "provider-query" | "post-compact" }
   | { kind: "error"; message: string };
 
 export interface ContextUsage {
@@ -145,10 +90,6 @@ export interface ContextUsage {
   percentage?: number;
   observedAt?: string;
   source?: "provider-event" | "provider-query" | "post-compact";
-  /** Monotonic within one scoped provider session. */
-  sequence?: number;
-  sessionId?: string;
-  model?: string;
 }
 
 export interface ProviderSessionUsage {
@@ -206,8 +147,6 @@ export interface BuilderAdapterOptions {
   systemPromptAppend?: string;
   /** Skill names to preload for this session (Claude: lazy-loaded; Codex: flattened). */
   skills?: string[];
-  /** Builder/QA native policy used even for setup and handoff-acceptance turns. */
-  contextManagementPolicy?: ContextManagementPolicy;
 }
 
 export interface BuilderAdapter {
@@ -230,18 +169,6 @@ export interface BuilderAdapter {
 
   /** Provider-native compaction on the exact live conversation. */
   compact?(): Promise<CompactResult>;
-
-  /** Initialize the session and install native in-turn context controls. */
-  prepareContextManagement?(policy: ContextManagementPolicy): Promise<PreparedContextManagement>;
-
-  /** Safely reconfigure native in-turn controls on the same session. */
-  updateContextManagement?(policy: ContextManagementPolicy): Promise<PreparedContextManagement>;
-
-  /** Stop only at a provider-observed compaction boundary. */
-  interruptTurnAtCompactionBoundary?(providerEventId?: string): Promise<InterruptResult>;
-
-  /** Route wrapper-owned repair/retry/follow-up turns through the role gate. */
-  installManagedTurnDispatcher?(dispatcher: ManagedTurnDispatcher): void;
 
   /** Truthful provider context occupancy, when exposed by the provider. */
   contextUsage?(): Promise<ContextUsage | undefined>;

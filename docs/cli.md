@@ -894,9 +894,8 @@ Options:
   --session-strategy <strategy>       compact | fresh
   --show-session-cost                 show authoritative provider cost or cumulative session tokens
   --no-show-session-cost              hide session cost/token usage
-  --auto-compact-threshold <percent>  Builder/QA context ceiling (1-99 percent)
-  --compact-maximum <count>           Builder/QA successful compactions allowed per provider
-                                      session
+  --auto-compact-threshold <percent>  Builder context threshold (1-99 percent)
+  --compact-maximum <count>           Builder successful compactions allowed per provider session
   -h, --help                          display help for command
 ```
 

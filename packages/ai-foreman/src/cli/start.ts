@@ -39,7 +39,7 @@ import type { BranchResumeSession } from "../branch/resume.js";
 import type { BranchPlan, BranchPlanNode, CompletionMode, MergeMethod, ReviewProvider } from "../branch/types.js";
 import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig.js";
 import { loadDeliveryConfig, selectDeliveryUnitForRun, selectStacksForRun, updateStackDeliveryState, type DeliveryConfig, type DeliveryStack, type DeliveryUnitProgress } from "../tickets/delivery.js";
-import { AgentStatusReporter, RoleStatusAdapter, type AgentStatusReporterInput } from "../statusReporter.js";
+import { AgentStatusReporter, RoleStatusAdapter } from "../statusReporter.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
 import { WorkflowDb, readCurrentWorkflowLease } from "../workflowDb.js";
 import { makeLogPath as makeRoleLogPath, readOnlyPermissionConfig, runRoleInstruction } from "../agentRun.js";
@@ -636,13 +636,6 @@ export function buildStartCommand(): Command {
           fast: builderFast,
           systemPromptAppend: roleBundle.system || undefined,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
-          contextManagementPolicy: {
-            role: "builder" as const,
-            configuredThresholdPercent: thresholdOverride ?? roleDefaults.builder?.auto_compact_threshold_percent ?? 50,
-            compactMaximum: roleDefaults.builder?.compact_maximum ?? 10,
-            settingsRevision,
-            model: model ?? "default",
-          },
         };
         const adapter: BuilderAdapter = agent === "codex"
           ? new CodexAdapter(adapterOpts)
@@ -660,7 +653,6 @@ export function buildStartCommand(): Command {
       let activeContinuityRunId: string | undefined;
       let liveStatusReporter: AgentStatusReporter | undefined;
       let activeBuilderForStatus: (() => BuilderAdapter) | undefined;
-      let activeBuilderContextSnapshot: AgentStatusReporterInput["contextSnapshot"];
       const resolvedContinuitySettings = (role: "builder" | "qa"): ResolvedAgentSettings => role === "builder" ? {
         role, source: roleDefaults.builder ? "project" : "provider", make: agent, model: model ?? "default",
         reasoning: builderEffort ?? "default", fast: Boolean(builderFast), session_strategy: roleDefaults.builder?.session_strategy ?? "compact",
@@ -671,66 +663,27 @@ export function buildStartCommand(): Command {
         role, source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default",
         reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact",
         settings_revision: settingsRevision, display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false,
-        auto_compact_threshold_percent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50,
-        compact_maximum: roleDefaults.qa?.compact_maximum ?? 10,
-      };
-
-      const liveRoleFields = [
-        "make", "model", "reasoning", "fast", "session_strategy", "display_session_cost",
-        "auto_compact_threshold_percent", "compact_maximum",
-      ] as const;
-      type LiveRoleField = typeof liveRoleFields[number];
-      const observedRoleDefaults: Record<"builder" | "qa", AgentRoleDefaultsV1> = {
-        builder: { ...(roleDefaults.builder ?? {}) },
-        qa: { ...(roleDefaults.qa ?? {}) },
-      };
-      const observedProjectRevision: Record<"builder" | "qa", number> = { builder: settingsRevision, qa: settingsRevision };
-      const effectiveRoleRevision: Record<"builder" | "qa", number> = { builder: settingsRevision, qa: settingsRevision };
-      const liveRoleOverrides: Record<"builder" | "qa", Map<LiveRoleField, AgentRoleDefaultsV1[LiveRoleField]>> = {
-        builder: new Map(),
-        qa: new Map(),
+        auto_compact_threshold_percent: 50, compact_maximum: 10,
       };
 
       const liveRoleSettings = (role: "builder" | "qa", base: ResolvedAgentSettings): ResolvedAgentSettings => {
         const live = readAgentDefaults(cwd);
         const revision = live.revision ?? 0;
+        if (revision <= base.settings_revision) return base;
         const defaults = role === "builder" ? live.builder : live.qa;
-        if (revision > observedProjectRevision[role]) {
-          const prior = observedRoleDefaults[role];
-          let roleChanged = false;
-          for (const field of liveRoleFields) {
-            const value = defaults?.[field];
-            if (!Object.is(value, prior[field])) {
-              liveRoleOverrides[role].set(field, value);
-              roleChanged = true;
-            }
-          }
-          const revisionDb = new WorkflowDb(cwd);
-          let targetedFields: string[];
-          try { targetedFields = revisionDb.projectSettingsRevisionTargets(revision)[role] ?? []; }
-          finally { revisionDb.close(); }
-          for (const field of targetedFields) {
-            if ((liveRoleFields as readonly string[]).includes(field)) {
-              const typedField = field as LiveRoleField;
-              liveRoleOverrides[role].set(typedField, defaults?.[typedField]);
-            }
-          }
-          observedRoleDefaults[role] = { ...(defaults ?? {}) };
-          observedProjectRevision[role] = revision;
-          if (roleChanged || targetedFields.length) effectiveRoleRevision[role] = revision;
-        }
-        if (effectiveRoleRevision[role] <= base.settings_revision) return base;
-        const merged: ResolvedAgentSettings = {
+        return {
           ...base,
           source: defaults ? "project" : base.source,
-          settings_revision: effectiveRoleRevision[role],
+          make: defaults?.make ?? base.make,
+          model: defaults?.model ?? base.model,
+          reasoning: defaults?.reasoning ?? base.reasoning,
+          fast: defaults?.fast ?? base.fast,
+          session_strategy: defaults?.session_strategy ?? base.session_strategy,
+          display_session_cost: defaults?.display_session_cost ?? base.display_session_cost,
+          auto_compact_threshold_percent: defaults?.auto_compact_threshold_percent ?? base.auto_compact_threshold_percent,
+          compact_maximum: defaults?.compact_maximum ?? base.compact_maximum,
+          settings_revision: revision,
         };
-        const mutable = merged as unknown as Record<string, unknown>;
-        for (const [field, value] of liveRoleOverrides[role]) {
-          if (value === undefined) continue;
-          mutable[field] = value;
-        }
-        return merged;
       };
 
       const createBuilderForSettings = async (builderCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
@@ -756,10 +709,6 @@ export function buildStartCommand(): Command {
           fast: settings.fast,
           systemPromptAppend: roleBundle.system || undefined,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
-          contextManagementPolicy: {
-            role: "builder" as const, configuredThresholdPercent: settings.auto_compact_threshold_percent,
-            compactMaximum: settings.compact_maximum, settingsRevision: settings.settings_revision, model: settings.model,
-          },
         };
         const created = settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
         return !branchMode ? new CurrentWorkflowGuardAdapter(created, builderCwd) : created;
@@ -787,10 +736,6 @@ export function buildStartCommand(): Command {
           fast: settings.fast,
           systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
-          contextManagementPolicy: {
-            role: "qa" as const, configuredThresholdPercent: settings.auto_compact_threshold_percent,
-            compactMaximum: settings.compact_maximum, settingsRevision: settings.settings_revision, model: settings.model,
-          },
         };
         return settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
       };
@@ -1007,13 +952,6 @@ export function buildStartCommand(): Command {
           fast: qaFast,
           systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
-          contextManagementPolicy: {
-            role: "qa" as const,
-            configuredThresholdPercent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50,
-            compactMaximum: roleDefaults.qa?.compact_maximum ?? 10,
-            settingsRevision,
-            model: qaModel ?? "default",
-          },
         };
         return qaAgent === "codex"
           ? new CodexAdapter(adapterOpts)
@@ -1110,7 +1048,6 @@ export function buildStartCommand(): Command {
             settingsRevision, displaySessionCost: sessionCostOverride ?? roleDefaults.builder?.display_session_cost ?? false,
             compactionCount: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.successfulCompactionCount(activeContinuityRunId, "builder", active.sessionRef?.() ?? active.sessionId()) : 0; } finally { db.close(); } },
             handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.handoffs(activeContinuityRunId).at(-1)?.generation ?? 0 : 0; } finally { db.close(); } },
-            contextSnapshot: activeBuilderContextSnapshot,
           });
         });
       };
@@ -1221,7 +1158,6 @@ export function buildStartCommand(): Command {
           projectDir: cwd,
           runId: activeContinuityRunId,
           role: "qa",
-          requireNativeContextManagement: true,
           initialSettings: qaSettings,
           historicalCountUncertain: Boolean(recoveryRecord && (recoveryRecord.legacy || !recoveryRecord.runDecisions)),
           readSettings: () => liveRoleSettings("qa", qaSettings),
@@ -1234,7 +1170,6 @@ export function buildStartCommand(): Command {
           report: (event) => {
             currentActivity()?.update(event.kind, event.detail, { provider: qaSettings.make, model: qaSettings.model });
             log.write("context-lifecycle", { role: "qa", ...event, sample: event.sample });
-            void liveStatusReporter?.tick();
           },
           handoff: async ({ reason, adapter: predecessor, sample, settings, compactionCount }) => {
             const nativeUsage = await predecessor.sessionUsage?.().catch(() => undefined);
@@ -1255,7 +1190,6 @@ export function buildStartCommand(): Command {
             return decorateQa(transfer.successor, qaCwd, undefined, settings);
           },
         });
-        liveStatusReporter?.updateState({ contextSnapshot: () => controller.contextSnapshot() });
         return (await controller.atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter;
       };
       const qaNonconvergence = createQaNonconvergenceHandler(cwd, Boolean(opts.yes), roleDefaults.planner);
@@ -1355,65 +1289,12 @@ export function buildStartCommand(): Command {
 
           let auditBuilder: BuilderAdapter | undefined;
           let auditViewer: Promise<void> | undefined;
-          let auditCompleted = false;
           const auditRunId = `audit-${stamp}`;
           activeContinuityRunId = auditRunId;
           try {
-            const auditSettings = resolvedContinuitySettings("builder");
-            const auditInstruction = buildBranchAuditInstruction(plan.nodes.map((node) => node.ticket));
-            const auditDb = new WorkflowDb(cwd);
-            try {
-              auditDb.ensureRun(auditRunId);
-              auditDb.appendContinuityEvent({
-                runId: auditRunId, role: "host", kind: "branch_audit_initialized",
-                payload: { frozenActionDigest: createHash("sha256").update(auditInstruction).digest("hex") },
-                authoritativeStateRevision: auditSettings.settings_revision,
-              });
-              auditDb.publishContinuityCheckpoint({
-                runId: auditRunId, role: "builder", authoritativeStateRevision: auditSettings.settings_revision,
-                delta: {
-                  version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [],
-                  openWork: ["complete the selected-ticket dependency audit"], nextAction: "complete the selected-ticket dependency audit",
-                },
-              });
-            } finally { auditDb.close(); }
             auditBuilder = await createBuilder(cwd);
-            const auditController = RoleSessionController.managed({
-              projectDir: cwd, runId: auditRunId, role: "builder", initialSettings: auditSettings,
-              requireNativeContextManagement: true,
-              readSettings: () => liveRoleSettings("builder", auditSettings),
-              settingsBoundary: (input) => applyBuilderSettingsBoundary(auditRunId, cwd, input),
-              report: (event) => log.write("context-lifecycle", { phase: "branch-audit", ...event, sample: event.sample }),
-              handoff: async ({ reason, adapter, sample, settings, compactionCount, frozenAction }) => {
-                const nativeUsage = await adapter.sessionUsage?.().catch(() => undefined);
-                const transfer = await new HandoffService(cwd).transfer({
-                  runId: auditRunId, role: "builder", reason, predecessorSessionId: adapter.sessionId(), predecessorSessionRef: adapter.sessionRef?.(),
-                  roleState: { phase: "branch-audit", frozenActionDigest: createHash("sha256").update(frozenAction).digest("hex"), contextSample: sample },
-                  ...(nativeUsage ? { sessionUsage: {
-                    version: 1 as const, runId: auditRunId, role: "builder" as const, provider: adapter.agent,
-                    providerSessionId: adapter.sessionId(), observedAt: nativeUsage.observedAt, source: nativeUsage.source,
-                    cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens,
-                    cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
-                  } } : {}),
-                  compactionCount, compactMaximum: settings.compact_maximum,
-                  resources: [{ label: "frozen-branch-audit", content: frozenAction, authoritative: true }],
-                }, () => createBuilderForSettings(cwd, settings));
-                log.write("handoff-transfer", {
-                  phase: "branch-audit", reason, generation: transfer.manifest.generation,
-                  predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
-                  acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest,
-                });
-                if (adapter instanceof ContinuityAdapter) {
-                  await adapter.adoptValidatedSuccessor(transfer.successor);
-                  return adapter;
-                }
-                await adapter.close().catch(() => {});
-                return continuousBuilder(transfer.successor, cwd, auditRunId, settings);
-              },
-            });
-            auditBuilder = (await auditController.atSafeBoundary(auditBuilder, auditInstruction)).adapter;
             auditViewer = printEvents(auditBuilder.events());
-            const audit = await auditBuilder.sendTurn(auditInstruction);
+            const audit = await auditBuilder.sendTurn(buildBranchAuditInstruction(plan.nodes.map((node) => node.ticket)));
             if (audit.isError) throw new Error(audit.text);
             const auditDependencies = parseAuditDependencies(audit.text);
             plan = buildBranchPlan(tickets, states, {
@@ -1426,15 +1307,12 @@ export function buildStartCommand(): Command {
               ticketIds: selectedNewTicket ? [selectedNewTicket] : selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
             });
             auditDependencyCount = auditDependencies.length;
-            auditCompleted = true;
           } finally {
             await auditBuilder?.close().catch(() => {});
             await auditViewer?.catch(() => {});
             const auditDb = new WorkflowDb(cwd);
             try {
-              if (auditDb.getRun(auditRunId)) auditDb.transition(auditRunId, auditCompleted
-                ? { status: "completed", checkpoint: "branch-audit-complete", remainingWork: {}, event: "audit_completed" }
-                : { status: "paused", checkpoint: "branch-audit-interrupted", remainingWork: { action: "complete the selected-ticket dependency audit" }, event: "audit_interrupted" });
+              if (auditDb.getRun(auditRunId)) auditDb.transition(auditRunId, { status: "completed", checkpoint: "branch-audit-complete", remainingWork: {}, event: "audit_completed" });
             } finally { auditDb.close(); }
             activeContinuityRunId = undefined;
           }
@@ -1533,8 +1411,7 @@ export function buildStartCommand(): Command {
           role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default",
           reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", settings_revision: settingsRevision,
           display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false,
-          auto_compact_threshold_percent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50,
-          compact_maximum: roleDefaults.qa?.compact_maximum ?? 10,
+          auto_compact_threshold_percent: 50, compact_maximum: 10,
         };
         const firstResumeRef = plan.nodes[0] ? resumeSessionByTicket.get(plan.nodes[0].ticket.id)?.sessionRef : undefined;
         let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null }) : createBuildRun({
@@ -1549,7 +1426,6 @@ export function buildStartCommand(): Command {
           if (existing) return existing;
           const controller = RoleSessionController.managed({
             projectDir: cwd, runId: masterRun.runId, role: "builder", initialSettings: capturedBranchBuilder,
-            requireNativeContextManagement: true,
             historicalCountUncertain: Boolean(recoveryRecord && (recoveryRecord.legacy || !recoveryRecord.runDecisions)),
             readSettings: () => liveRoleSettings("builder", capturedBranchBuilder),
             settingsBoundary: (input) => applyBuilderSettingsBoundary(masterRun.runId, worktreePath, input),
@@ -1558,7 +1434,7 @@ export function buildStartCommand(): Command {
               adapter: active, settingsRevision: settings.settings_revision, displaySessionCost: settings.display_session_cost,
               sessionTransition: "adopted live settings",
             }),
-            report: (event) => { currentActivity()?.update(event.kind, event.detail, { provider: capturedBranchBuilder.make, model: capturedBranchBuilder.model }); log.write("context-lifecycle", { worktreePath, ...event, sample: event.sample }); void liveStatusReporter?.tick(); },
+            report: (event) => { currentActivity()?.update(event.kind, event.detail, { provider: capturedBranchBuilder.make, model: capturedBranchBuilder.model }); log.write("context-lifecycle", { worktreePath, ...event, sample: event.sample }); },
             handoff: async ({ reason, adapter, sample, settings, compactionCount, frozenAction }) => {
               const nativeUsage = await adapter.sessionUsage?.().catch(() => undefined);
               const transfer = await new HandoffService(cwd).transfer({
@@ -1609,7 +1485,7 @@ export function buildStartCommand(): Command {
             archiveDoc: ticketsConfig.paths.archiveDoc,
           },
           resumeSessions: resumeSessionByTicket,
-          createBuilder: async (builderCwd, sessionId, sessionRef) => branchContextController(builderCwd).manage(await createBuilder(builderCwd, sessionId, sessionRef)),
+          createBuilder: (builderCwd, sessionId, sessionRef) => createBuilder(builderCwd, sessionId, sessionRef),
           recordBuilderSession: (session, ticketId) => { masterRun = persistBuildSession(cwd, { ...masterRun, currentTicket: ticketId }, "builder", session); },
           recordQaSession: (session, ticketId) => { masterRun = persistBuildSession(cwd, { ...masterRun, currentTicket: ticketId }, "qa", session); },
           onSessionUnavailable: (error) => { branchSessionFailure = error; },
@@ -1619,9 +1495,6 @@ export function buildStartCommand(): Command {
           observeBuilder: async (builder) => {
             liveStatusReporter?.stop();
             activeBuilderForStatus = () => builder;
-            activeBuilderContextSnapshot = () => [...branchContextControllers.values()]
-              .map((controller) => controller.contextSnapshot())
-              .find((snapshot) => snapshot?.contextSample.providerSessionId === builder.sessionId());
             const reporter = liveStatusReporter = new AgentStatusReporter({
               runId: masterRun.runId, role: "builder", provider: builder.agent, model: capturedBranchBuilder.model,
               reasoning: capturedBranchBuilder.reasoning, fast: capturedBranchBuilder.fast, step: Math.min(plan.nodes.length, branchContextControllers.size + 1), total: plan.nodes.length,
@@ -1629,12 +1502,11 @@ export function buildStartCommand(): Command {
               settingsRevision: capturedBranchBuilder.settings_revision, displaySessionCost: capturedBranchBuilder.display_session_cost ?? false,
               compactionCount: () => { const db = new WorkflowDb(cwd); try { return db.successfulCompactionCount(masterRun.runId, "builder", builder.sessionRef?.() ?? builder.sessionId()); } finally { db.close(); } },
               handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.handoffs(masterRun.runId).at(-1)?.generation ?? 0; } finally { db.close(); } },
-              contextSnapshot: activeBuilderContextSnapshot,
             }, (line, snapshot) => {
               const activity = currentActivity();
               if (activity && process.stdout.isTTY) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, "")); else console.log(line);
               log.write("agent-status", { ...snapshot });
-              const db = new WorkflowDb(cwd); try { db.recordTelemetry(masterRun.runId, snapshot); if (snapshot.sessionUsage) db.recordSessionUsage(snapshot.sessionUsage); } finally { db.close(); }
+              const db = new WorkflowDb(cwd); try { db.recordTelemetry(masterRun.runId, snapshot); db.recordContextSample(snapshot.contextSample); if (snapshot.sessionUsage) db.recordSessionUsage(snapshot.sessionUsage); } finally { db.close(); }
             });
             reporter.start();
             try { await printEvents(builder.events()); } finally { reporter.stop(); }
@@ -1747,7 +1619,7 @@ export function buildStartCommand(): Command {
         auto_compact_threshold_percent: thresholdOverride ?? roleDefaults.builder?.auto_compact_threshold_percent ?? 50,
         compact_maximum: roleDefaults.builder?.compact_maximum ?? 10,
       };
-      const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false, auto_compact_threshold_percent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50, compact_maximum: roleDefaults.qa?.compact_maximum ?? 10, settings_revision: settingsRevision };
+      const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false, auto_compact_threshold_percent: 50, compact_maximum: 10, settings_revision: settingsRevision };
       let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null }) : createBuildRun({
         tickets: [], repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
         runDecisions: { workMode: "current", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBuilder.auto_compact_threshold_percent ?? 50, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
@@ -1780,7 +1652,6 @@ export function buildStartCommand(): Command {
         projectDir: cwd,
         runId: buildRun.runId,
         role: "builder",
-        requireNativeContextManagement: true,
         initialSettings: capturedBuilder,
         historicalCountUncertain: Boolean(recoveryRecord && (recoveryRecord.legacy || !recoveryRecord.runDecisions)),
         readSettings: () => liveRoleSettings("builder", capturedBuilder),
@@ -1793,7 +1664,6 @@ export function buildStartCommand(): Command {
         report: (event) => {
           currentActivity()?.update(event.kind, event.detail, { provider: capturedBuilder.make, model: capturedBuilder.model });
           log.write("context-lifecycle", { ...event, sample: event.sample });
-          void liveStatusReporter?.tick();
         },
         handoff: async ({ reason, adapter, sample, settings, compactionCount, frozenAction }) => {
           const nativeUsage = await adapter.sessionUsage?.().catch(() => undefined);
@@ -1823,8 +1693,6 @@ export function buildStartCommand(): Command {
           return continuousBuilder(transfer.successor, cwd, buildRun.runId, settings);
         },
       });
-      builder = contextController.manage(builder);
-      activeBuilderContextSnapshot = () => contextController.contextSnapshot();
       const foreman = new Foreman(
         builder, log, config.notifications.enabled, qaEnabled, 3, cwd, undefined,
         qaEnabled ? createQa : undefined, capturedQa.session_strategy,
@@ -1844,13 +1712,12 @@ export function buildStartCommand(): Command {
         displaySessionCost: capturedBuilder.display_session_cost ?? false,
         compactionCount: () => { const db = new WorkflowDb(cwd); try { return db.successfulCompactionCount(buildRun.runId, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()); } finally { db.close(); } },
         handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.handoffs(buildRun.runId).at(-1)?.generation ?? 0; } finally { db.close(); } },
-        contextSnapshot: () => contextController.contextSnapshot(),
       }, (line, snapshot) => {
         const activity = currentActivity();
         if (activity && process.stdout.isTTY) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, ""));
         else console.log(line);
         log.write("agent-status", { ...snapshot });
-        const db = new WorkflowDb(cwd); try { db.recordTelemetry(buildRun.runId, snapshot); if (snapshot.sessionUsage) db.recordSessionUsage(snapshot.sessionUsage); } finally { db.close(); }
+        const db = new WorkflowDb(cwd); try { db.recordTelemetry(buildRun.runId, snapshot); db.recordContextSample(snapshot.contextSample); if (snapshot.sessionUsage) db.recordSessionUsage(snapshot.sessionUsage); } finally { db.close(); }
       });
       statusReporter.start();
 

@@ -11,7 +11,7 @@ import { ClaudeAdapter, probeClaudeSession } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import { RecoveringAdapter } from "../src/adapters/recovering.js";
 import { SessionUnavailableError } from "../src/adapters/sessionFailure.js";
-import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, ContextManagementPolicy, ContextUsage, InterruptResult, PreparedContextManagement, TurnResult } from "../src/adapters/types.js";
+import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, TurnResult } from "../src/adapters/types.js";
 import { CurrentWorkflowGuardAdapter, captureCurrentWorkflowSessionIdentity } from "../src/branch/currentGuard.js";
 import { buildRunSessionBinding, createBuildRun, persistBuildSession, projectBuildRecovery, releaseBuildLease } from "../src/buildRuns.js";
 import { ContinuityAdapter, SessionUnavailableContinuityError } from "../src/continuity.js";
@@ -20,7 +20,6 @@ import { compactWithRetry, runIsolatedQa, type QaStreamState } from "../src/qaRe
 import { createProviderSessionRef, providerSessionKey, resolveUniqueSessionBinding, validateProviderSessionScope } from "../src/sessionIdentity.js";
 import { RoleSessionController, RoleSessionValidationError, ThresholdCompactionController } from "../src/sessionLifecycle.js";
 import { WorkflowDb } from "../src/workflowDb.js";
-import { AsyncQueue } from "../src/util/asyncQueue.js";
 
 const SETTINGS: ResolvedAgentSettings = {
   role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false,
@@ -30,7 +29,6 @@ const SETTINGS: ResolvedAgentSettings = {
 
 class StaticAdapter implements BuilderAdapter {
   readonly agent: "claude" | "codex";
-  readonly queue = new AsyncQueue<BuilderEvent>();
   sends = 0;
   closed = false;
 
@@ -41,23 +39,12 @@ class StaticAdapter implements BuilderAdapter {
     agent: "claude" | "codex" = "codex",
   ) { this.agent = agent; }
 
-  async sendTurn(): Promise<TurnResult> { this.sends += 1; this.queue.push({ kind: "turn-complete", result: this.result }); return this.result; }
+  async sendTurn(): Promise<TurnResult> { this.sends += 1; return this.result; }
   sessionId(): string | undefined { return this.id; }
   sessionRef(): ProviderSessionRefV1 | undefined { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.ref = ref; }
-  prepareContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { return Promise.resolve(preparedContext(policy, this.context())); }
-  updateContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { return Promise.resolve(preparedContext(policy, this.context())); }
-  interruptTurnAtCompactionBoundary(providerEventId?: string): Promise<InterruptResult> { return Promise.resolve({ ok: true, providerEventId }); }
-  contextUsage(): Promise<ContextUsage> { return Promise.resolve(this.context()); }
-  events(): AsyncIterable<BuilderEvent> { return this.queue; }
-  async close(): Promise<void> { this.closed = true; this.queue.close(); }
-
-  private context(): ContextUsage { return { used: 10, maximum: 100, percentage: 10, sequence: 1, source: "provider-query", sessionId: this.id }; }
-}
-
-function preparedContext(policy: ContextManagementPolicy, sample: ContextUsage): PreparedContextManagement {
-  const configuredTokenLimit = Math.max(1, Math.floor(100 * policy.configuredThresholdPercent / 100));
-  return { modelContextWindow: 100, configuredTokenLimit, installedNativeTokenLimit: configuredTokenLimit, installedNativePercent: configuredTokenLimit, sample };
+  async *events(): AsyncIterable<BuilderEvent> {}
+  async close(): Promise<void> { this.closed = true; }
 }
 
 function temp(prefix: string): string { return mkdtempSync(join(tmpdir(), prefix)); }

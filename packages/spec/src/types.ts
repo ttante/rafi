@@ -296,9 +296,9 @@ export interface AgentRoleDefaultsV1 {
   session_strategy?: SessionStrategy;
   /** Show authoritative provider cost or trustworthy cumulative tokens. */
   display_session_cost?: boolean;
-  /** Builder/QA live-context ceiling. Missing values normalize to 50. */
+  /** Builder-only live context threshold. Missing values normalize to 50. */
   auto_compact_threshold_percent?: number;
-  /** Builder/QA successful compactions allowed per provider session. */
+  /** Builder-only successful compactions allowed per provider session. */
   compact_maximum?: number;
 }
 export interface AgentDefaultsV1 {
@@ -800,10 +800,6 @@ export interface ContextSample {
   settingsRevision: number;
   compactionCount: number;
   handoffGeneration: number;
-  /** Provider-monotonic occupancy sequence, when available. */
-  sequence?: number;
-  /** Durable threshold generation that accepted this sample. */
-  thresholdGeneration?: number;
 }
 
 export interface SessionUsageSample {

@@ -1,6 +1,6 @@
 {
   "name": "rafi-spec",
-  "version": "0.8.6",
+  "version": "0.8.5",
   "description": "Rafi neutral schema: rule packs, skills, agents, and project config shapes shared by special-agents and ai-foreman.",
   "license": "Apache-2.0",
   "type": "module",

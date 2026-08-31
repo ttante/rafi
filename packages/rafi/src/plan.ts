@@ -853,8 +853,6 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       console.log(`  Git consequences: ${workModeConsequences(selectedWorkMode)}`);
       console.log(`  Builder auto-compaction: ${selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50}%`);
       console.log(`  Builder compact maximum: ${selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10}`);
-      console.log(`  QA auto-compaction: ${selectedAgentDefaults?.roles.qa?.auto_compact_threshold_percent ?? 50}%`);
-      console.log(`  QA compact maximum: ${selectedAgentDefaults?.roles.qa?.compact_maximum ?? 10}`);
       console.log(`  branch prefix: ${selectedBranchPrefix}`);
       if (opts.yes) break;
       console.log(`\n${renderStructuredPlanMarkdown(plan)}`);
@@ -915,9 +913,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
     if (readback.tickets?.build?.branch_strategy !== selectedWorkMode
       || readback.tickets?.build?.branch_prefix !== selectedBranchPrefix
       || readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent !== (selectedAgentDefaults.roles.builder?.auto_compact_threshold_percent ?? 50)
-      || readback.agent_defaults?.roles.builder?.compact_maximum !== (selectedAgentDefaults.roles.builder?.compact_maximum ?? 10)
-      || readback.agent_defaults?.roles.qa?.auto_compact_threshold_percent !== (selectedAgentDefaults.roles.qa?.auto_compact_threshold_percent ?? 50)
-      || readback.agent_defaults?.roles.qa?.compact_maximum !== (selectedAgentDefaults.roles.qa?.compact_maximum ?? 10)) {
+      || readback.agent_defaults?.roles.builder?.compact_maximum !== (selectedAgentDefaults.roles.builder?.compact_maximum ?? 10)) {
       throw new Error("approved host workflow decisions failed config readback verification");
     }
     const decisionReceipt = {

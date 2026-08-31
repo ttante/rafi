@@ -19,13 +19,6 @@ export interface AgentStatusSnapshot {
   contextSample: ContextSample;
   sessionUsage?: SessionUsageSample;
   sessionTransition: string;
-  lifecycleState?: string;
-  configuredCeilingPercent?: number;
-  installedNativeTokenLimit?: number;
-  installedNativePercent?: number;
-  compactionCount?: number;
-  compactMaximum?: number;
-  settingsRevision?: number;
   at: string;
 }
 
@@ -64,20 +57,6 @@ export interface AgentStatusReporterInput {
   adapter: BuilderAdapter | (() => BuilderAdapter);
   compactionCount?: number | (() => number);
   handoffGeneration?: number | (() => number);
-  /** Shared enforcement snapshot. When supplied, status never polls occupancy independently. */
-  contextSnapshot?: () => {
-    role: "builder" | "qa";
-    provider: "claude" | "codex";
-    model: string;
-    lifecycleState: string;
-    contextSample: ContextSample;
-    configuredCeilingPercent: number;
-    installedNativeTokenLimit?: number;
-    installedNativePercent?: number;
-    compactionCount: number;
-    compactMaximum: number;
-    settingsRevision: number;
-  } | undefined;
 }
 
 /**
@@ -87,7 +66,6 @@ export interface AgentStatusReporterInput {
 export class AgentStatusReporter {
   private handle?: unknown;
   private lastGoodContext?: ContextSample;
-  private readonly lastGoodByRole = new Map<"builder" | "qa", ContextSample>();
 
   constructor(
     private readonly input: AgentStatusReporterInput,
@@ -105,34 +83,17 @@ export class AgentStatusReporter {
   async tick(): Promise<void> {
     const adapter = this.adapter();
     const now = this.clock.now();
+    let observed: ContextUsage | undefined;
+    try { observed = await adapter.contextUsage?.(); } catch { observed = undefined; }
+
     let contextSample: ContextSample;
-    const hasCoordinator = this.input.contextSnapshot !== undefined;
-    const coordinated = this.input.contextSnapshot?.();
-    if (coordinated && coordinated.role === this.input.role) {
-      contextSample = coordinated.contextSample;
-      this.input.provider = coordinated.provider;
-      this.input.model = coordinated.model;
-      this.input.settingsRevision = coordinated.settingsRevision;
-      this.input.compactionCount = coordinated.compactionCount;
-      if (contextSample.freshness === "fresh") {
-        this.lastGoodContext = contextSample;
-        this.lastGoodByRole.set(this.input.role, contextSample);
-      }
-    } else if (!hasCoordinator) {
-      let observed: ContextUsage | undefined;
-      try { observed = await adapter.contextUsage?.(); } catch { observed = undefined; }
-      if (observed && Number.isFinite(observed.used)) contextSample = this.contextSample(observed, now);
-      else if (this.lastGoodContext) contextSample = { ...this.lastGoodContext, freshness: "stale" };
-      else contextSample = { ...this.measuringSample(now), freshness: "unavailable" };
-    } else {
-      const prior = this.lastGoodByRole.get(this.input.role);
-      contextSample = prior
-        ? { ...prior, freshness: "stale" }
-        : { ...this.measuringSample(now), freshness: "unavailable" };
-    }
-    if (contextSample.freshness === "fresh") {
+    if (observed && Number.isFinite(observed.used)) {
+      contextSample = this.contextSample(observed, now);
       this.lastGoodContext = contextSample;
-      this.lastGoodByRole.set(this.input.role, contextSample);
+    } else if (this.lastGoodContext) {
+      contextSample = { ...this.lastGoodContext, freshness: "stale" };
+    } else {
+      contextSample = { ...this.measuringSample(now), freshness: "unavailable" };
     }
 
     let sessionUsage: SessionUsageSample | undefined;
@@ -173,18 +134,16 @@ export class AgentStatusReporter {
     const priorRole = this.input.role;
     const priorAdapter = this.adapter();
     const priorSessionId = priorAdapter.sessionId();
-    if (this.lastGoodContext) this.lastGoodByRole.set(priorRole, this.lastGoodContext);
     Object.assign(this.input, patch);
     if (priorRole !== this.input.role
       || priorAdapter !== this.adapter()
       || priorSessionId !== this.adapter().sessionId()
-      || patch.sessionTransition !== undefined) this.lastGoodContext = this.lastGoodByRole.get(this.input.role);
+      || patch.sessionTransition !== undefined) this.lastGoodContext = undefined;
     this.emitSnapshot(this.measuringSample(), undefined);
   }
 
   private emitSnapshot(contextSample: ContextSample, sessionUsage?: SessionUsageSample, now = this.clock.now()): void {
-    const coordinated = this.input.contextSnapshot?.();
-    const { adapter: _adapter, displaySessionCost: _display, compactionCount: _compactions, handoffGeneration: _handoffs, contextSnapshot: _contextSnapshot, ...base } = this.input;
+    const { adapter: _adapter, displaySessionCost: _display, compactionCount: _compactions, handoffGeneration: _handoffs, ...base } = this.input;
     const context = contextSample.used === undefined ? undefined : {
       used: contextSample.used,
       maximum: contextSample.maximum,
@@ -195,29 +154,13 @@ export class AgentStatusReporter {
       ...(context ? { context } : {}),
       contextSample,
       ...(sessionUsage ? { sessionUsage } : {}),
-      ...(coordinated && coordinated.role === this.input.role ? {
-        lifecycleState: coordinated.lifecycleState,
-        configuredCeilingPercent: coordinated.configuredCeilingPercent,
-        installedNativeTokenLimit: coordinated.installedNativeTokenLimit,
-        installedNativePercent: coordinated.installedNativePercent,
-        compactionCount: coordinated.compactionCount,
-        compactMaximum: coordinated.compactMaximum,
-        settingsRevision: coordinated.settingsRevision,
-      } : {
-        compactionCount: contextSample.compactionCount,
-        settingsRevision: contextSample.settingsRevision,
-      }),
       at: now.toISOString(),
     };
     const line = [
       `${snapshot.role} ${snapshot.provider}/${snapshot.model}`,
       `activity=${snapshot.phase}`,
       formatContext(contextSample),
-      ...(snapshot.configuredCeilingPercent === undefined ? [] : [`ceiling=${snapshot.configuredCeilingPercent}%`]),
-      ...(snapshot.installedNativePercent === undefined ? [] : [`native=${snapshot.installedNativePercent.toFixed(1)}%${snapshot.installedNativeTokenLimit === undefined ? "" : `/${snapshot.installedNativeTokenLimit}`}`]),
-      ...(snapshot.lifecycleState ? [`state=${formatLifecycle(snapshot.lifecycleState)}`] : []),
-      `compactions=${snapshot.compactionCount ?? contextSample.compactionCount}${snapshot.compactMaximum === undefined ? "" : `/${snapshot.compactMaximum}`}`,
-      `revision=${snapshot.settingsRevision ?? contextSample.settingsRevision}`,
+      `compactions=${contextSample.compactionCount}`,
       `handoff=${contextSample.handoffGeneration}`,
       `session=${snapshot.sessionTransition}`,
       ...(this.input.displaySessionCost ? [formatSessionUsage(sessionUsage)] : []),
@@ -274,10 +217,6 @@ export class RoleStatusAdapter implements BuilderAdapter {
   adoptSessionRef(ref: import("rafi-spec").ProviderSessionRefV1): void { this.adapter.adoptSessionRef?.(ref); }
   validateSession(): Promise<import("rafi-spec").SessionAvailabilityV1> { return this.adapter.validateSession?.() ?? Promise.resolve({ version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped" }); }
   compact(): Promise<CompactResult> { this.onActive(this.adapter); return this.adapter.compact?.() ?? Promise.resolve({ ok: false, error: "native compaction unavailable" }); }
-  prepareContextManagement(policy: import("./adapters/types.js").ContextManagementPolicy): Promise<import("./adapters/types.js").PreparedContextManagement> { this.onActive(this.adapter); if (!this.adapter.prepareContextManagement) return Promise.reject(new Error("native context management unavailable")); return this.adapter.prepareContextManagement(policy); }
-  updateContextManagement(policy: import("./adapters/types.js").ContextManagementPolicy): Promise<import("./adapters/types.js").PreparedContextManagement> { if (!this.adapter.updateContextManagement) return Promise.reject(new Error("native context reconfiguration unavailable")); return this.adapter.updateContextManagement(policy); }
-  interruptTurnAtCompactionBoundary(providerEventId?: string): Promise<import("./adapters/types.js").InterruptResult> { return this.adapter.interruptTurnAtCompactionBoundary?.(providerEventId) ?? Promise.resolve({ ok: false, error: "compaction-boundary interruption unavailable", providerEventId }); }
-  installManagedTurnDispatcher(dispatcher: import("./adapters/types.js").ManagedTurnDispatcher): void { this.adapter.installManagedTurnDispatcher?.(dispatcher); }
   contextUsage(): Promise<ContextUsage | undefined> { return this.adapter.contextUsage?.() ?? Promise.resolve(undefined); }
   sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.adapter.sessionUsage?.() ?? Promise.resolve(undefined); }
   switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> { return this.adapter.switchSettings?.(settings) ?? Promise.resolve({ ok: false, error: "settings switch unavailable" }); }
@@ -311,15 +250,6 @@ function formatContext(sample: ContextSample): string {
     ? `${sample.used ?? "unknown"}/${sample.maximum ?? "unknown"}`
     : `${sample.percentage.toFixed(1)}% (${sample.used ?? "unknown"}/${sample.maximum ?? "unknown"})`;
   return `context ${occupancy}${sample.freshness === "stale" ? " stale" : ""}`;
-}
-
-function formatLifecycle(state: string): string {
-  if (state === "initializing") return "measuring";
-  if (state === "threshold_pending") return "pending";
-  if (state === "native_compacting" || state === "host_compacting") return "compacting";
-  if (state === "compacted_unverified") return "verifying";
-  if (state === "handoff_required" || state === "resuming") return "handing off";
-  return state;
 }
 
 function formatSessionUsage(sample: SessionUsageSample | undefined): string {
