@@ -62,6 +62,9 @@ async function oneReview(opts: IsolatedQaOptions, cycle: number): Promise<Isolat
     // continuity/checkpoint stream; an old provider session is never moved
     // into a newly-created /tmp/rafi-qa-* directory.
     qa = await opts.createQa(snapshot.path);
+    // The first turn in every disposable QA snapshot enters the same managed
+    // lifecycle gate. `compact` evaluates the ceiling and is a no-op below it.
+    if (opts.sessionBoundary) qa = await opts.sessionBoundary(qa, handoff, "compact", snapshot.path);
     const turn = await qa.sendTurn(handoff); const status = parseStepStatus(turn.text);
     opts.state.reviews += 1; opts.state.sessionId = qa.sessionId(); opts.state.sessionRef = qa.sessionRef?.();
     const changes = await withActivityPhase("checking QA file changes", () => snapshot.qaChanges());

@@ -421,6 +421,8 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
       if (workMode) console.log(`  Git consequences: ${workModeConsequences(workMode)}`);
       console.log(`  Builder auto-compaction: ${pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50}%`);
       console.log(`  Builder compact maximum: ${pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10}`);
+      console.log(`  QA auto-compaction: ${pendingAgentDefaults?.roles.qa?.auto_compact_threshold_percent ?? 50}%`);
+      console.log(`  QA compact maximum: ${pendingAgentDefaults?.roles.qa?.compact_maximum ?? 10}`);
       console.log(`  branch prefix: ${config.tickets?.build?.branch_prefix ?? "feature"}`);
       const decision = opts.yes ? "approve" : await reviewProposal(proposal);
       if (decision === "cancel") { await role.builder.close(); await chooseStagedSourceDisposition(projectDir, loadedSources.registry, stagedSources); console.log("rafi tickets plan: cancelled; tracker unchanged"); return; }
@@ -449,6 +451,9 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
       const readback = readProjectConfig(projectDir);
       if (workMode && readback.tickets?.build?.branch_strategy !== workMode) throw new Error("approved ticket work mode failed config readback verification");
       if ((readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent ?? 50) !== (pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50)) throw new Error("approved compaction threshold failed config readback verification");
+      if ((readback.agent_defaults?.roles.builder?.compact_maximum ?? 10) !== (pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10)) throw new Error("approved Builder compact maximum failed config readback verification");
+      if ((readback.agent_defaults?.roles.qa?.auto_compact_threshold_percent ?? 50) !== (pendingAgentDefaults?.roles.qa?.auto_compact_threshold_percent ?? 50)) throw new Error("approved QA compaction threshold failed config readback verification");
+      if ((readback.agent_defaults?.roles.qa?.compact_maximum ?? 10) !== (pendingAgentDefaults?.roles.qa?.compact_maximum ?? 10)) throw new Error("approved QA compact maximum failed config readback verification");
       saveSourceRegistry(projectDir, stagedSources);
       if (interview) completeInterview(projectDir, interview);
       console.log(`rafi tickets plan: created ${applied.added.length}, edited ${applied.edited.length}; validation passed`);

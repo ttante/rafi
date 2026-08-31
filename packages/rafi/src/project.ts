@@ -261,7 +261,7 @@ export function normalizeProjectAgentDefaults(defaults?: AgentDefaultsV1): Agent
       ...current,
       session_strategy: current.session_strategy ?? sessionStrategy,
       display_session_cost: current.display_session_cost ?? false,
-      ...(role === "builder" ? {
+      ...(role === "builder" || role === "qa" ? {
         auto_compact_threshold_percent: current.auto_compact_threshold_percent ?? DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
         compact_maximum: current.compact_maximum ?? DEFAULT_COMPACT_MAXIMUM,
       } : {}),

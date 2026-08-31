@@ -88,12 +88,46 @@ export interface CompactionAttemptRecord {
   sessionRef?: ProviderSessionRefV1;
   sessionKey?: string;
   crossingKey: string;
-  status: "started" | "succeeded" | "failed";
+  status: "started" | "succeeded" | "failed" | "unverified";
+  origin: "provider-auto" | "rafi-manual" | "recovery" | "boundary";
+  providerEventId?: string;
+  thresholdGenerationId?: string;
   beforeSample?: ContextSample;
   afterSample?: ContextSample;
   error?: string;
   createdAt: string;
   updatedAt: string;
+}
+export type ThresholdLifecycleState =
+  | "initializing" | "armed" | "threshold_pending" | "native_compacting" | "host_compacting"
+  | "compacted_unverified" | "retrying" | "handoff_required" | "resuming";
+export interface ThresholdGenerationRecord {
+  generationId: string;
+  runId: string;
+  role: "builder" | "qa";
+  providerSessionId?: string;
+  sessionRef?: ProviderSessionRefV1;
+  sessionKey?: string;
+  generation: number;
+  state: ThresholdLifecycleState;
+  configuredCeilingPercent: number;
+  installedNativeTokenLimit?: number;
+  installedNativePercent?: number;
+  settingsRevision: number;
+  model: string;
+  latestSample?: ContextSample;
+  frozenActionDigest?: string;
+  providerEventId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ActiveRoleAdapterRecord {
+  runId: string;
+  role: "builder" | "qa";
+  providerSessionId?: string;
+  sessionKey?: string;
+  settingsRevision: number;
+  observedAt: string;
 }
 export interface RoleMutationLease {
   runId: string;
@@ -194,8 +228,29 @@ export class WorkflowDb {
     })();
   }
 
-  recordProjectSettingsRevision(revision: number, defaults: unknown, now = new Date()): void {
-    this.db.prepare("INSERT OR REPLACE INTO project_settings_revisions(revision,defaults_json,created_at) VALUES(?,?,?)").run(revision, json(defaults), now.toISOString());
+  recordProjectSettingsRevision(
+    revision: number,
+    defaults: unknown,
+    targetsOrNow: Readonly<Record<string, readonly string[]>> | Date = {},
+    now = new Date(),
+  ): void {
+    const targets = targetsOrNow instanceof Date ? {} : targetsOrNow;
+    const recordedAt = targetsOrNow instanceof Date ? targetsOrNow : now;
+    this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO project_settings_revisions(revision,defaults_json,created_at) VALUES(?,?,?)
+        ON CONFLICT(revision) DO UPDATE SET defaults_json=excluded.defaults_json,created_at=excluded.created_at`).run(revision, json(defaults), recordedAt.toISOString());
+      const entries = Object.entries(targets);
+      if (entries.length) {
+        this.db.prepare("DELETE FROM project_settings_revision_targets WHERE revision=?").run(revision);
+        const insert = this.db.prepare("INSERT INTO project_settings_revision_targets(revision,role,fields_json) VALUES(?,?,?)");
+        for (const [role, fields] of entries) insert.run(revision, role, json([...new Set(fields)].sort()));
+      }
+    })();
+  }
+
+  projectSettingsRevisionTargets(revision: number): Record<string, string[]> {
+    const rows = this.db.prepare("SELECT role,fields_json FROM project_settings_revision_targets WHERE revision=? ORDER BY role").all(revision) as Array<{ role: string; fields_json: string }>;
+    return Object.fromEntries(rows.map((row) => [row.role, parseJson(row.fields_json) as string[]]));
   }
 
   recordTelemetry(runId: string, snapshot: unknown, now = new Date()): void {
@@ -242,15 +297,26 @@ export class WorkflowDb {
       this.db.prepare(`INSERT INTO live_settings_acknowledgments(run_id,role,provider_session_id,session_key,session_ref_json,revision,acknowledged_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(run_id,role,revision) DO UPDATE SET provider_session_id=excluded.provider_session_id,session_key=excluded.session_key,session_ref_json=excluded.session_ref_json,acknowledged_at=excluded.acknowledged_at`)
         .run(ack.runId, ack.role, session.id, session.key, session.refJson, ack.revision, ack.acknowledgedAt);
+      if (session.key) {
+        this.db.prepare(`INSERT INTO live_settings_session_acknowledgments(run_id,role,provider_session_id,session_key,session_ref_json,revision,acknowledged_at)
+          VALUES(?,?,?,?,?,?,?) ON CONFLICT(run_id,role,session_key,revision) DO UPDATE SET provider_session_id=excluded.provider_session_id,session_ref_json=excluded.session_ref_json,acknowledged_at=excluded.acknowledged_at`)
+          .run(ack.runId, ack.role, session.id, session.key, session.refJson, ack.revision, ack.acknowledgedAt);
+      }
       this.insertEvent(ack.runId, "live_settings_acknowledged", `settings:${ack.revision}`, { role: ack.role, providerSessionId: session.id, sessionKey: session.key }, ack.acknowledgedAt);
     })();
   }
 
   settingsAcknowledgments(revision: number): LiveSettingsAcknowledgment[] {
-    const rows = this.db.prepare("SELECT * FROM live_settings_acknowledgments WHERE revision=? ORDER BY acknowledged_at").all(revision) as Array<{
+    type AckRow = {
       run_id: string; role: "builder" | "qa"; provider_session_id: string | null; session_key: string | null; session_ref_json: string | null; revision: number; acknowledged_at: string;
-    }>;
-    return rows.map((row) => ({ runId: row.run_id, role: row.role, ...(row.provider_session_id ? { providerSessionId: row.provider_session_id } : {}), ...(row.session_key ? { sessionKey: row.session_key } : {}), ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}), revision: row.revision, acknowledgedAt: row.acknowledged_at }));
+    };
+    const scoped = this.db.prepare("SELECT * FROM live_settings_session_acknowledgments WHERE revision=? ORDER BY acknowledged_at").all(revision) as AckRow[];
+    const covered = new Set(scoped.map((row) => `${row.run_id}:${row.role}`));
+    const legacy = (this.db.prepare("SELECT * FROM live_settings_acknowledgments WHERE revision=? ORDER BY acknowledged_at").all(revision) as AckRow[])
+      .filter((row) => !covered.has(`${row.run_id}:${row.role}`));
+    return [...scoped, ...legacy]
+      .sort((left, right) => left.acknowledged_at.localeCompare(right.acknowledged_at))
+      .map((row) => ({ runId: row.run_id, role: row.role, ...(row.provider_session_id ? { providerSessionId: row.provider_session_id } : {}), ...(row.session_key ? { sessionKey: row.session_key } : {}), ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}), revision: row.revision, acknowledgedAt: row.acknowledged_at }));
   }
 
   appendContinuityEvent(input: {
@@ -565,22 +631,36 @@ export class WorkflowDb {
     sessionKey?: string;
     crossingKey: string;
     beforeSample?: ContextSample;
+    origin?: CompactionAttemptRecord["origin"];
+    providerEventId?: string;
+    thresholdGenerationId?: string;
   }, now = new Date()): CompactionAttemptRecord {
     this.ensureRun(input.runId);
     const at = now.toISOString();
     const session = sessionParts(input.sessionRef, input.providerSessionId, input.sessionKey);
-    this.db.prepare(`INSERT OR IGNORE INTO compaction_attempts(idempotency_key,run_id,role,provider_session_id,session_key,session_ref_json,crossing_key,status,before_sample_json,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,'started',?,?,?)`).run(input.idempotencyKey, input.runId, input.role, session.id, session.key, session.refJson, input.crossingKey, input.beforeSample ? json(input.beforeSample) : null, at, at);
-    return this.compactionAttempt(input.idempotencyKey)!;
+    this.db.prepare(`INSERT OR IGNORE INTO compaction_attempts(idempotency_key,run_id,role,provider_session_id,session_key,session_ref_json,crossing_key,status,before_sample_json,origin,provider_event_id,threshold_generation_id,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,'started',?,?,?,?,?,?)`).run(
+        input.idempotencyKey, input.runId, input.role, session.id, session.key, session.refJson,
+        input.crossingKey, input.beforeSample ? json(input.beforeSample) : null, input.origin ?? "rafi-manual",
+        input.providerEventId ?? null, input.thresholdGenerationId ?? null, at, at,
+      );
+    const direct = this.compactionAttempt(input.idempotencyKey);
+    if (direct) return direct;
+    if (session.key && input.providerEventId) {
+      const duplicate = this.db.prepare("SELECT * FROM compaction_attempts WHERE run_id=? AND role=? AND session_key=? AND provider_event_id=?").get(input.runId, input.role, session.key, input.providerEventId) as DbCompactionAttempt | undefined;
+      if (duplicate) return compactionAttemptFromRow(duplicate);
+    }
+    throw new Error(`failed to persist compaction attempt ${input.idempotencyKey}`);
   }
 
-  finishCompactionAttempt(idempotencyKey: string, input: { ok: boolean; afterSample?: ContextSample; error?: string }, now = new Date()): CompactionAttemptRecord {
+  finishCompactionAttempt(idempotencyKey: string, input: { ok: boolean; afterSample?: ContextSample; error?: string; status?: "succeeded" | "failed" | "unverified" }, now = new Date()): CompactionAttemptRecord {
     const prior = this.compactionAttempt(idempotencyKey);
     if (!prior) throw new Error(`compaction attempt not found: ${idempotencyKey}`);
     if (prior.status !== "started") return prior;
     this.db.prepare("UPDATE compaction_attempts SET status=?,after_sample_json=?,error=?,updated_at=? WHERE idempotency_key=?")
-      .run(input.ok ? "succeeded" : "failed", input.afterSample ? json(input.afterSample) : null, input.error ? sanitizeText(input.error).slice(0, 2000) : null, now.toISOString(), idempotencyKey);
-    this.insertEvent(prior.runId, input.ok ? "compaction_succeeded" : "compaction_failed", `context:${prior.role}`, { idempotencyKey, providerSessionId: prior.providerSessionId, sessionKey: prior.sessionKey, crossingKey: prior.crossingKey }, now.toISOString());
+      .run(input.status ?? (input.ok ? "succeeded" : "failed"), input.afterSample ? json(input.afterSample) : null, input.error ? sanitizeText(input.error).slice(0, 2000) : null, now.toISOString(), idempotencyKey);
+    const status = input.status ?? (input.ok ? "succeeded" : "failed");
+    this.insertEvent(prior.runId, `compaction_${status}`, `context:${prior.role}`, { idempotencyKey, providerSessionId: prior.providerSessionId, sessionKey: prior.sessionKey, crossingKey: prior.crossingKey, origin: prior.origin, providerEventId: prior.providerEventId }, now.toISOString());
     return this.compactionAttempt(idempotencyKey)!;
   }
 
@@ -589,13 +669,91 @@ export class WorkflowDb {
     return row ? compactionAttemptFromRow(row) : undefined;
   }
 
+  linkCompactionProviderEvent(idempotencyKey: string, providerEventId: string): CompactionAttemptRecord {
+    const prior = this.compactionAttempt(idempotencyKey);
+    if (!prior) throw new Error(`compaction attempt not found: ${idempotencyKey}`);
+    if (prior.providerEventId === providerEventId) return prior;
+    this.db.prepare("UPDATE compaction_attempts SET provider_event_id=?,updated_at=? WHERE idempotency_key=?")
+      .run(providerEventId, new Date().toISOString(), idempotencyKey);
+    return this.compactionAttempt(idempotencyKey)!;
+  }
+
+  compactionAttempts(runId: string, role: "builder" | "qa", providerSession?: string | ProviderSessionRefV1): CompactionAttemptRecord[] {
+    if (!providerSession) return [];
+    const session = sessionParts(typeof providerSession === "object" ? providerSession : undefined, typeof providerSession === "string" ? providerSession : undefined);
+    const rows = session.key
+      ? this.db.prepare("SELECT * FROM compaction_attempts WHERE run_id=? AND role=? AND session_key=? ORDER BY created_at,idempotency_key").all(runId, role, session.key)
+      : this.db.prepare("SELECT * FROM compaction_attempts WHERE run_id=? AND role=? AND provider_session_id=? AND session_key IS NULL ORDER BY created_at,idempotency_key").all(runId, role, session.id);
+    return (rows as DbCompactionAttempt[]).map(compactionAttemptFromRow);
+  }
+
   successfulCompactionCount(runId: string, role: "builder" | "qa", providerSession?: string | ProviderSessionRefV1): number {
     if (!providerSession) return 0;
     const session = sessionParts(typeof providerSession === "object" ? providerSession : undefined, typeof providerSession === "string" ? providerSession : undefined);
     const row = session.key
-      ? this.db.prepare(`SELECT COUNT(*) AS count FROM compaction_attempts WHERE run_id=? AND role=? AND session_key=? AND status='succeeded'`).get(runId, role, session.key) as { count: number }
-      : this.db.prepare(`SELECT COUNT(*) AS count FROM compaction_attempts WHERE run_id=? AND role=? AND provider_session_id=? AND session_key IS NULL AND status='succeeded'`).get(runId, role, session.id) as { count: number };
+      ? this.db.prepare(`SELECT COUNT(*) AS count FROM compaction_attempts WHERE run_id=? AND role=? AND session_key=? AND status IN ('succeeded','unverified')`).get(runId, role, session.key) as { count: number }
+      : this.db.prepare(`SELECT COUNT(*) AS count FROM compaction_attempts WHERE run_id=? AND role=? AND provider_session_id=? AND session_key IS NULL AND status IN ('succeeded','unverified')`).get(runId, role, session.id) as { count: number };
     return row.count;
+  }
+
+  upsertThresholdGeneration(input: Omit<ThresholdGenerationRecord, "createdAt" | "updatedAt">, now = new Date()): ThresholdGenerationRecord {
+    this.ensureRun(input.runId);
+    const at = now.toISOString();
+    const session = sessionParts(input.sessionRef, input.providerSessionId, input.sessionKey);
+    this.db.prepare(`INSERT INTO threshold_generations(
+      generation_id,run_id,role,provider_session_id,session_key,session_ref_json,generation,state,configured_ceiling_percent,
+      installed_native_token_limit,installed_native_percent,settings_revision,model,latest_sample_json,frozen_action_digest,provider_event_id,created_at,updated_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(generation_id) DO UPDATE SET
+      provider_session_id=excluded.provider_session_id,session_key=excluded.session_key,session_ref_json=excluded.session_ref_json,
+      state=excluded.state,configured_ceiling_percent=excluded.configured_ceiling_percent,
+      installed_native_token_limit=excluded.installed_native_token_limit,installed_native_percent=excluded.installed_native_percent,
+      settings_revision=excluded.settings_revision,model=excluded.model,latest_sample_json=excluded.latest_sample_json,
+      frozen_action_digest=COALESCE(excluded.frozen_action_digest,threshold_generations.frozen_action_digest),
+      provider_event_id=COALESCE(excluded.provider_event_id,threshold_generations.provider_event_id),updated_at=excluded.updated_at`).run(
+        input.generationId, input.runId, input.role, session.id, session.key, session.refJson, input.generation, input.state,
+        input.configuredCeilingPercent, input.installedNativeTokenLimit ?? null, input.installedNativePercent ?? null,
+        input.settingsRevision, input.model, input.latestSample ? json(input.latestSample) : null,
+        input.frozenActionDigest ?? null, input.providerEventId ?? null, at, at,
+      );
+    return this.thresholdGeneration(input.generationId)!;
+  }
+
+  thresholdGeneration(generationId: string): ThresholdGenerationRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM threshold_generations WHERE generation_id=?").get(generationId) as DbThresholdGeneration | undefined;
+    return row ? thresholdGenerationFromRow(row) : undefined;
+  }
+
+  thresholdGenerations(runId: string, role?: "builder" | "qa", sessionKey?: string): ThresholdGenerationRecord[] {
+    const rows = role && sessionKey
+      ? this.db.prepare("SELECT * FROM threshold_generations WHERE run_id=? AND role=? AND session_key=? ORDER BY generation").all(runId, role, sessionKey)
+      : role
+        ? this.db.prepare("SELECT * FROM threshold_generations WHERE run_id=? AND role=? ORDER BY created_at,generation").all(runId, role)
+        : this.db.prepare("SELECT * FROM threshold_generations WHERE run_id=? ORDER BY created_at,generation").all(runId);
+    return (rows as DbThresholdGeneration[]).map(thresholdGenerationFromRow);
+  }
+
+  markRoleAdapterActive(input: ActiveRoleAdapterRecord): void {
+    this.ensureRun(input.runId);
+    const sessionKey = input.sessionKey ?? `${input.role}:unscoped:${input.providerSessionId ?? "pending"}`;
+    this.db.prepare(`INSERT INTO active_role_adapter_sessions(run_id,role,provider_session_id,session_key,settings_revision,observed_at)
+      VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,role,session_key) DO UPDATE SET provider_session_id=excluded.provider_session_id,settings_revision=excluded.settings_revision,observed_at=excluded.observed_at`)
+      .run(input.runId, input.role, input.providerSessionId ?? null, sessionKey, input.settingsRevision, input.observedAt);
+  }
+
+  clearRoleAdapterActive(runId: string, role: "builder" | "qa", sessionKey?: string): void {
+    if (sessionKey) this.db.prepare("DELETE FROM active_role_adapter_sessions WHERE run_id=? AND role=? AND session_key=?").run(runId, role, sessionKey);
+    else this.db.prepare("DELETE FROM active_role_adapter_sessions WHERE run_id=? AND role=?").run(runId, role);
+  }
+
+  activeRoleAdapters(runId?: string, observedAfter?: string): ActiveRoleAdapterRecord[] {
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (runId) { clauses.push("run_id=?"); values.push(runId); }
+    if (observedAfter) { clauses.push("observed_at>=?"); values.push(observedAfter); }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db.prepare(`SELECT * FROM active_role_adapter_sessions${where} ORDER BY run_id,role,session_key`).all(...values) as Array<{ run_id: string; role: "builder" | "qa"; provider_session_id: string | null; session_key: string | null; settings_revision: number; observed_at: string }>;
+    return rows.map((row) => ({ runId: row.run_id, role: row.role, ...(row.provider_session_id ? { providerSessionId: row.provider_session_id } : {}), ...(row.session_key ? { sessionKey: row.session_key } : {}), settingsRevision: row.settings_revision, observedAt: row.observed_at }));
   }
 
   recordRecoveryDecision(receipt: BuildRecoveryDecisionReceipt): void {
@@ -719,6 +877,7 @@ export class WorkflowDb {
       CREATE TABLE IF NOT EXISTS workflow_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),event_type TEXT NOT NULL,checkpoint TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS role_settings(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,boundary INTEGER NOT NULL,revision INTEGER NOT NULL,settings_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(run_id,role,boundary));
       CREATE TABLE IF NOT EXISTS project_settings_revisions(revision INTEGER PRIMARY KEY,defaults_json TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS project_settings_revision_targets(revision INTEGER NOT NULL REFERENCES project_settings_revisions(revision),role TEXT NOT NULL,fields_json TEXT NOT NULL,PRIMARY KEY(revision,role));
       CREATE TABLE IF NOT EXISTS workflow_telemetry(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),snapshot_json TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS provider_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,stream TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,session_id TEXT,session_key TEXT,session_ref_json TEXT,transition TEXT NOT NULL,settings_revision INTEGER NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS provider_session_bindings(session_key TEXT PRIMARY KEY,provider_session_id TEXT NOT NULL,role TEXT NOT NULL,session_ref_json TEXT NOT NULL,observed_at TEXT NOT NULL);
@@ -731,12 +890,15 @@ export class WorkflowDb {
       CREATE TABLE IF NOT EXISTS context_samples(sample_id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,provider_session_id TEXT,session_key TEXT,session_ref_json TEXT,sample_json TEXT NOT NULL,observed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_usage_samples(sample_id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,provider_session_id TEXT,session_key TEXT,session_ref_json TEXT,sample_json TEXT NOT NULL,observed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS live_settings_acknowledgments(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,provider_session_id TEXT,session_key TEXT,session_ref_json TEXT,revision INTEGER NOT NULL,acknowledged_at TEXT NOT NULL,PRIMARY KEY(run_id,role,revision));
+      CREATE TABLE IF NOT EXISTS live_settings_session_acknowledgments(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,provider_session_id TEXT,session_key TEXT NOT NULL,session_ref_json TEXT,revision INTEGER NOT NULL,acknowledged_at TEXT NOT NULL,PRIMARY KEY(run_id,role,session_key,revision));
       CREATE TABLE IF NOT EXISTS continuity_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,kind TEXT NOT NULL,payload_json TEXT NOT NULL,digest TEXT NOT NULL UNIQUE,authoritative_state_revision INTEGER NOT NULL,session_key TEXT,session_ref_json TEXT,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS continuity_checkpoints(checkpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,event_sequence INTEGER NOT NULL,state TEXT NOT NULL,delta_json TEXT NOT NULL,digest TEXT NOT NULL UNIQUE,predecessor_digest TEXT,authoritative_state_revision INTEGER NOT NULL,session_key TEXT,session_ref_json TEXT,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS continuity_heads(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,state TEXT NOT NULL,event_sequence INTEGER NOT NULL,digest TEXT NOT NULL,authoritative_state_revision INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(run_id,role));
       CREATE TABLE IF NOT EXISTS handoffs(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),generation INTEGER NOT NULL,role TEXT NOT NULL,manifest_digest TEXT NOT NULL,markdown_digest TEXT NOT NULL,predecessor_session_id TEXT,predecessor_session_key TEXT,predecessor_session_ref_json TEXT,successor_session_id TEXT,successor_session_key TEXT,successor_session_ref_json TEXT,state TEXT NOT NULL,failure TEXT,created_at TEXT NOT NULL,accepted_at TEXT,PRIMARY KEY(run_id,generation));
       CREATE TABLE IF NOT EXISTS role_mutation_leases(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,generation INTEGER NOT NULL,provider_session_id TEXT NOT NULL,provider_session_key TEXT,provider_session_ref_json TEXT,moved_at TEXT NOT NULL,PRIMARY KEY(run_id,role));
-      CREATE TABLE IF NOT EXISTS compaction_attempts(idempotency_key TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,provider_session_id TEXT,session_key TEXT,session_ref_json TEXT,crossing_key TEXT NOT NULL,status TEXT NOT NULL,before_sample_json TEXT,after_sample_json TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS compaction_attempts(idempotency_key TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,provider_session_id TEXT,session_key TEXT,session_ref_json TEXT,crossing_key TEXT NOT NULL,status TEXT NOT NULL,before_sample_json TEXT,after_sample_json TEXT,error TEXT,origin TEXT NOT NULL DEFAULT 'rafi-manual',provider_event_id TEXT,threshold_generation_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS threshold_generations(generation_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,provider_session_id TEXT,session_key TEXT,session_ref_json TEXT,generation INTEGER NOT NULL,state TEXT NOT NULL,configured_ceiling_percent REAL NOT NULL,installed_native_token_limit INTEGER,installed_native_percent REAL,settings_revision INTEGER NOT NULL,model TEXT NOT NULL,latest_sample_json TEXT,frozen_action_digest TEXT,provider_event_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(run_id,role,session_key,generation));
+      CREATE TABLE IF NOT EXISTS active_role_adapter_sessions(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,provider_session_id TEXT,session_key TEXT NOT NULL,settings_revision INTEGER NOT NULL,observed_at TEXT NOT NULL,PRIMARY KEY(run_id,role,session_key));
       CREATE TABLE IF NOT EXISTS recovery_decisions(decision_id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),decided_at TEXT NOT NULL,mode TEXT NOT NULL,digest TEXT NOT NULL UNIQUE,session_key TEXT,session_ref_json TEXT,receipt_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS workflow_events_run ON workflow_events(run_id,sequence);
       CREATE INDEX IF NOT EXISTS operations_run ON operation_journal(run_id,status);
@@ -754,7 +916,7 @@ export class WorkflowDb {
       continuity_checkpoints: { session_key: "TEXT", session_ref_json: "TEXT" },
       handoffs: { predecessor_session_key: "TEXT", predecessor_session_ref_json: "TEXT", successor_session_key: "TEXT", successor_session_ref_json: "TEXT" },
       role_mutation_leases: { provider_session_key: "TEXT", provider_session_ref_json: "TEXT" },
-      compaction_attempts: { session_key: "TEXT", session_ref_json: "TEXT" },
+      compaction_attempts: { session_key: "TEXT", session_ref_json: "TEXT", origin: "TEXT NOT NULL DEFAULT 'rafi-manual'", provider_event_id: "TEXT", threshold_generation_id: "TEXT" },
       recovery_decisions: { session_key: "TEXT", session_ref_json: "TEXT" },
     })) {
       for (const [column, definition] of Object.entries(columns)) this.ensureColumn(table, column, definition);
@@ -765,6 +927,10 @@ export class WorkflowDb {
       CREATE INDEX IF NOT EXISTS context_samples_scoped ON context_samples(run_id,role,session_key,sample_id);
       CREATE INDEX IF NOT EXISTS session_usage_scoped ON session_usage_samples(run_id,role,session_key,sample_id);
       CREATE INDEX IF NOT EXISTS compaction_session_scoped ON compaction_attempts(run_id,role,session_key,status);
+      CREATE UNIQUE INDEX IF NOT EXISTS compaction_native_event_unique ON compaction_attempts(run_id,role,session_key,provider_event_id) WHERE provider_event_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS threshold_generation_scoped ON threshold_generations(run_id,role,session_key,generation);
+      CREATE INDEX IF NOT EXISTS active_role_adapter_session_observed ON active_role_adapter_sessions(observed_at,run_id,role);
+      CREATE INDEX IF NOT EXISTS live_settings_session_revision ON live_settings_session_acknowledgments(revision,run_id,role,session_key);
     `);
   }
 
@@ -781,7 +947,8 @@ type DbContinuityEvent = { sequence: number; run_id: string; role: "builder" | "
 type DbContinuityCheckpoint = { checkpoint_id: number; run_id: string; role: "builder" | "qa"; event_sequence: number; state: ContinuityHeadState; delta_json: string; digest: string; predecessor_digest: string | null; authoritative_state_revision: number; session_key: string | null; session_ref_json: string | null; created_at: string };
 type DbContinuityHead = { run_id: string; role: "builder" | "qa" | "run"; state: ContinuityHeadState; event_sequence: number; digest: string; authoritative_state_revision: number; updated_at: string };
 type DbHandoff = { run_id: string; generation: number; manifest_digest: string; markdown_digest: string; predecessor_session_id: string | null; predecessor_session_key: string | null; predecessor_session_ref_json: string | null; successor_session_id: string | null; successor_session_key: string | null; successor_session_ref_json: string | null; state: HandoffLineage["state"]; created_at: string; accepted_at: string | null };
-type DbCompactionAttempt = { idempotency_key: string; run_id: string; role: "builder" | "qa"; provider_session_id: string | null; session_key: string | null; session_ref_json: string | null; crossing_key: string; status: CompactionAttemptRecord["status"]; before_sample_json: string | null; after_sample_json: string | null; error: string | null; created_at: string; updated_at: string };
+type DbCompactionAttempt = { idempotency_key: string; run_id: string; role: "builder" | "qa"; provider_session_id: string | null; session_key: string | null; session_ref_json: string | null; crossing_key: string; status: CompactionAttemptRecord["status"]; before_sample_json: string | null; after_sample_json: string | null; error: string | null; origin: CompactionAttemptRecord["origin"]; provider_event_id: string | null; threshold_generation_id: string | null; created_at: string; updated_at: string };
+type DbThresholdGeneration = { generation_id: string; run_id: string; role: "builder" | "qa"; provider_session_id: string | null; session_key: string | null; session_ref_json: string | null; generation: number; state: ThresholdLifecycleState; configured_ceiling_percent: number; installed_native_token_limit: number | null; installed_native_percent: number | null; settings_revision: number; model: string; latest_sample_json: string | null; frozen_action_digest: string | null; provider_event_id: string | null; created_at: string; updated_at: string };
 
 function rowToRun(row: DbRun): WorkflowRunSnapshot { return { runId: row.run_id, kind: row.kind, status: row.status, checkpoint: row.checkpoint, originalWork: parseJson(row.original_work_json), remainingWork: parseJson(row.remaining_work_json), state: parseJson(row.state_json) as Record<string, unknown>, ...(row.lease_generation === null ? {} : { leaseGeneration: row.lease_generation }), legacy: Boolean(row.legacy), createdAt: row.created_at, updatedAt: row.updated_at }; }
 function operationFromRow(row: DbOperation): OperationRecord { return { idempotencyKey: row.idempotency_key, runId: row.run_id, kind: row.kind, status: row.status, intent: parseJson(row.intent_json), ...(row.result_json ? { result: parseJson(row.result_json) } : {}), ...(row.external_id ? { externalId: row.external_id } : {}), ...(row.error ? { error: row.error } : {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
@@ -789,7 +956,21 @@ function continuityEventFromRow(row: DbContinuityEvent): ContinuityEvent { retur
 function continuityCheckpointFromRow(row: DbContinuityCheckpoint): ContinuityCheckpoint { return { checkpointId: row.checkpoint_id, runId: row.run_id, role: row.role, sequence: row.event_sequence, state: row.state, delta: parseJson(row.delta_json) as ContinuityDelta, digest: row.digest, ...(row.predecessor_digest ? { predecessorDigest: row.predecessor_digest } : {}), authoritativeStateRevision: row.authoritative_state_revision, createdAt: row.created_at, ...(row.session_key ? { sessionKey: row.session_key } : {}), ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}) }; }
 function continuityHeadFromRow(row: DbContinuityHead): ContinuityHead { return { runId: row.run_id, role: row.role, state: row.state, sequence: row.event_sequence, digest: row.digest, authoritativeStateRevision: row.authoritative_state_revision, updatedAt: row.updated_at }; }
 function handoffFromRow(row: DbHandoff): HandoffLineage { return { runId: row.run_id, generation: row.generation, manifestDigest: row.manifest_digest, markdownDigest: row.markdown_digest, ...(row.predecessor_session_id ? { predecessorSessionId: row.predecessor_session_id } : {}), ...(row.predecessor_session_ref_json ? { predecessorSessionRef: parseJson(row.predecessor_session_ref_json) as ProviderSessionRefV1 } : {}), ...(row.successor_session_id ? { successorSessionId: row.successor_session_id } : {}), ...(row.successor_session_ref_json ? { successorSessionRef: parseJson(row.successor_session_ref_json) as ProviderSessionRefV1 } : {}), state: row.state, createdAt: row.created_at, ...(row.accepted_at ? { acceptedAt: row.accepted_at } : {}) }; }
-function compactionAttemptFromRow(row: DbCompactionAttempt): CompactionAttemptRecord { return { idempotencyKey: row.idempotency_key, runId: row.run_id, role: row.role, ...(row.provider_session_id ? { providerSessionId: row.provider_session_id } : {}), ...(row.session_key ? { sessionKey: row.session_key } : {}), ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}), crossingKey: row.crossing_key, status: row.status, ...(row.before_sample_json ? { beforeSample: parseJson(row.before_sample_json) as ContextSample } : {}), ...(row.after_sample_json ? { afterSample: parseJson(row.after_sample_json) as ContextSample } : {}), ...(row.error ? { error: row.error } : {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
+function compactionAttemptFromRow(row: DbCompactionAttempt): CompactionAttemptRecord { return { idempotencyKey: row.idempotency_key, runId: row.run_id, role: row.role, ...(row.provider_session_id ? { providerSessionId: row.provider_session_id } : {}), ...(row.session_key ? { sessionKey: row.session_key } : {}), ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}), crossingKey: row.crossing_key, status: row.status, origin: row.origin ?? "rafi-manual", ...(row.provider_event_id ? { providerEventId: row.provider_event_id } : {}), ...(row.threshold_generation_id ? { thresholdGenerationId: row.threshold_generation_id } : {}), ...(row.before_sample_json ? { beforeSample: parseJson(row.before_sample_json) as ContextSample } : {}), ...(row.after_sample_json ? { afterSample: parseJson(row.after_sample_json) as ContextSample } : {}), ...(row.error ? { error: row.error } : {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
+function thresholdGenerationFromRow(row: DbThresholdGeneration): ThresholdGenerationRecord { return {
+  generationId: row.generation_id, runId: row.run_id, role: row.role,
+  ...(row.provider_session_id ? { providerSessionId: row.provider_session_id } : {}),
+  ...(row.session_key ? { sessionKey: row.session_key } : {}),
+  ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}),
+  generation: row.generation, state: row.state, configuredCeilingPercent: row.configured_ceiling_percent,
+  ...(row.installed_native_token_limit === null ? {} : { installedNativeTokenLimit: row.installed_native_token_limit }),
+  ...(row.installed_native_percent === null ? {} : { installedNativePercent: row.installed_native_percent }),
+  settingsRevision: row.settings_revision, model: row.model,
+  ...(row.latest_sample_json ? { latestSample: parseJson(row.latest_sample_json) as ContextSample } : {}),
+  ...(row.frozen_action_digest ? { frozenActionDigest: row.frozen_action_digest } : {}),
+  ...(row.provider_event_id ? { providerEventId: row.provider_event_id } : {}),
+  createdAt: row.created_at, updatedAt: row.updated_at,
+}; }
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 function parseJson(value: string): unknown { return JSON.parse(value); }
 function sessionParts(ref?: ProviderSessionRefV1, rawId?: string, suppliedKey?: string): {

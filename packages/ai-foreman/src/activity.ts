@@ -241,7 +241,11 @@ export function reportBuilderEvent(event: BuilderEvent): void {
   } else if (event.kind === "tool") reporter.update(`running ${event.name}`, briefInput(event.input));
   else if (event.kind === "text") reporter.update("processing agent response");
   else if (event.kind === "session-transition") reporter.update(`session ${event.transition}`, event.detail);
-  else if (event.kind === "context-usage") reporter.pulse(event.percentage === undefined ? undefined : `context ${event.percentage.toFixed(0)}%`);
+  else if (event.kind === "context-compaction") reporter.update(
+    event.phase === "started" ? "compacting context" : event.phase === "succeeded" ? "context compacted" : "context compaction failed",
+    `${event.origin} ${event.providerEventId}`,
+    { provider: event.provider },
+  );
   else if (event.kind === "turn-complete") reporter.update(event.result.isError ? "agent turn failed" : "agent turn complete");
   else if (event.kind === "error") reporter.update("provider error", event.message);
 }

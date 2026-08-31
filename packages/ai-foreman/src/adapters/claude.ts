@@ -31,8 +31,12 @@ import type {
   BuilderAdapterOptions,
   BuilderEvent,
   CompactResult,
+  ContextCompactionOrigin,
+  ContextManagementPolicy,
   ContextUsage,
+  InterruptResult,
   PermissionDecision,
+  PreparedContextManagement,
   ProviderSettingSwitch,
   ProviderSessionUsage,
   TurnResult,
@@ -192,11 +196,15 @@ export function claudeApiRetryEvent(message: {
 export class ClaudeAdapter implements BuilderAdapter {
   readonly agent = "claude" as const;
 
-  private readonly inbox = new AsyncQueue<SDKUserMessage>();
+  private inbox = new AsyncQueue<SDKUserMessage>();
   private readonly eventQueue = new BuilderEventQueue();
-  private readonly query: Query;
-  private readonly abort = new AbortController();
-  private readonly pumpDone: Promise<void>;
+  private query!: Query;
+  private abort = new AbortController();
+  private pumpDone!: Promise<void>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly queryFactory: (options: any) => Query;
+  private transportGeneration = 0;
+  private transportObservedSessionId?: string;
   private _sessionId?: string;
   private _sessionRef?: ProviderSessionRefV1;
   private readonly stderrChunks: string[] = [];
@@ -204,6 +212,19 @@ export class ClaudeAdapter implements BuilderAdapter {
   private structuredError?: string;
   private apiErrorStatus?: number | null;
   private compactResult?: CompactResult;
+  private contextPolicy?: ContextManagementPolicy;
+  private contextSequence = 0;
+  private compactionSequence = 0;
+  private activeCompaction?: { providerEventId: string; providerSequence: number; origin: ContextCompactionOrigin };
+  private manualCompactionPending = false;
+  private boundaryInterrupt?: { providerEventId?: string };
+  private compactionTerminalObserved = false;
+  private lastContextUsage?: ContextUsage;
+  /** Full provider context capacity, before Rafi narrows Claude's auto-compact window. */
+  private modelContextWindow?: number;
+  /** SDK-owned space between autoCompactWindow and the actual used-token trigger. */
+  private nativeAutoCompactReserve?: number;
+  private contextPrepared = false;
   private cumulativeUsage: ProviderSessionUsage = { observedAt: new Date(0).toISOString(), source: "provider" };
   private pending?: {
     resolve: (r: TurnResult) => void;
@@ -250,13 +271,26 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private constructor(private readonly opts: BuilderAdapterOptions, query: (o: any) => Query) {
+  private constructor(private readonly opts: BuilderAdapterOptions, queryFactory: (o: any) => Query) {
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
     this._sessionRef = opts.resumeSessionRef;
-    this.query = query({
+    this.queryFactory = queryFactory;
+    this.query = this.openQuery();
+    const generation = ++this.transportGeneration;
+    this.pumpDone = this.pump(this.query, generation);
+  }
+
+  private openQuery(nativeAutoCompactWindow?: number): Query {
+    const scopedOpts = this._sessionRef
+      ? { ...this.opts, resumeSessionId: this._sessionRef.sessionId, resumeSessionRef: this._sessionRef }
+      : this.opts;
+    return this.queryFactory({
       prompt: this.inbox,
       options: {
-        ...buildClaudeQueryOptions(opts),
+        ...buildClaudeQueryOptions(scopedOpts),
+        ...(nativeAutoCompactWindow === undefined ? {} : {
+          settings: { autoCompactEnabled: true, autoCompactWindow: nativeAutoCompactWindow },
+        }),
         abortController: this.abort,
         stderr: (data: string) => this.captureStderr(data),
         canUseTool: async (
@@ -272,7 +306,7 @@ export class ClaudeAdapter implements BuilderAdapter {
             toolUseID?: string;
           } = {},
         ): Promise<PermissionResult> => {
-          const decision = await opts.permission({
+          const decision = await this.opts.permission({
             toolName,
             input,
             signal: requestOptions.signal,
@@ -287,16 +321,20 @@ export class ClaudeAdapter implements BuilderAdapter {
         },
       },
     });
-    this.pumpDone = this.pump();
   }
 
   /** Background loop: consume the SDK message stream until it ends. */
-  private async pump(): Promise<void> {
+  private async pump(query: Query, generation: number): Promise<void> {
     try {
-      for await (const msg of this.query) {
-        this.handle(msg);
+      for await (const msg of query) {
+        if (generation !== this.transportGeneration) return;
+        // Keep provider messages ordered through post-compaction measurement. In
+        // particular, a result message must not overtake the fresh context sample
+        // produced for the preceding compact_result/compact_boundary message.
+        await this.handle(msg);
       }
     } catch (err) {
+      if (generation !== this.transportGeneration) return;
       // Suppress the AbortError that fires when close() aborts the stream.
       const isShutdownAbort =
         this.closed &&
@@ -311,6 +349,7 @@ export class ClaudeAdapter implements BuilderAdapter {
         this.settlePending(result);
       }
     } finally {
+      if (generation !== this.transportGeneration) return;
       this.streamEnded = true;
       if (!this.closed && this.pending) {
         const result = this.streamFailureResult("Claude stream ended without a result", Boolean(this.opts.resumeSessionRef ?? this.opts.resumeSessionId));
@@ -323,8 +362,9 @@ export class ClaudeAdapter implements BuilderAdapter {
     }
   }
 
-  private handle(msg: SDKMessage): void {
+  private async handle(msg: SDKMessage): Promise<void> {
     if ("session_id" in msg && typeof msg.session_id === "string") {
+      this.transportObservedSessionId = msg.session_id;
       this._sessionId = msg.session_id;
       this.observeSession(msg.session_id);
     }
@@ -348,12 +388,39 @@ export class ClaudeAdapter implements BuilderAdapter {
       if (msg.error) this.turnSignals.push(`auth status: ${msg.error}`);
       if (msg.output.length > 0) this.turnSignals.push(...msg.output.map((line) => `auth: ${line}`));
     } else if (msg.type === "system" && msg.subtype === "status") {
-      if (msg.status === "compacting") this.eventQueue.push({ kind: "session-transition", transition: "compacting" });
+      if (msg.status === "compacting") {
+        this.compactionTerminalObserved = false;
+        this.eventQueue.push({ kind: "session-transition", transition: "compacting" });
+        const providerSequence = ++this.compactionSequence;
+        const origin: ContextCompactionOrigin = this.manualCompactionPending ? "rafi-manual" : "provider-auto";
+        this.activeCompaction = { providerEventId: msg.uuid, providerSequence, origin };
+        this.eventQueue.push({
+          kind: "context-compaction", phase: "started", origin, providerEventId: msg.uuid,
+          providerSequence, provider: "claude", sessionId: this._sessionId, sessionRef: this._sessionRef,
+          observedAt: new Date().toISOString(),
+        });
+      }
       if (msg.compact_result === "success") {
         this.compactResult = { ok: true };
         this.eventQueue.push({ kind: "session-transition", transition: "compacted" });
+        if (!this.compactionTerminalObserved) await this.completeCompaction(true);
       } else if (msg.compact_result === "failed") {
         this.compactResult = { ok: false, error: sanitizeDiagnostics(msg.compact_error ?? "Claude native compaction failed") };
+        if (!this.compactionTerminalObserved) await this.completeCompaction(false, this.compactResult.error);
+      }
+    } else if (msg.type === "system" && msg.subtype === "compact_boundary") {
+      if (!this.compactionTerminalObserved) {
+        // The boundary is itself a successful native compact signal. Query the
+        // SDK immediately and use its post_tokens only as a fallback if that
+        // authoritative query is unavailable.
+        if (!this.activeCompaction) {
+          this.activeCompaction = {
+            providerEventId: msg.uuid,
+            providerSequence: ++this.compactionSequence,
+            origin: msg.compact_metadata.trigger === "manual" ? "rafi-manual" : "provider-auto",
+          };
+        }
+        await this.completeCompaction(true, undefined, msg.compact_metadata.post_tokens);
       }
     } else if (msg.type === "system" && msg.subtype === "api_retry") {
       this.structuredError = msg.error;
@@ -410,7 +477,9 @@ export class ClaudeAdapter implements BuilderAdapter {
         costUsd: msg.total_cost_usd,
         costAuthoritative: Number.isFinite(msg.total_cost_usd),
         failure,
+        ...(this.boundaryInterrupt ? { interrupted: { reason: "compaction-boundary" as const, ...(this.boundaryInterrupt.providerEventId ? { providerEventId: this.boundaryInterrupt.providerEventId } : {}) } } : {}),
       };
+      this.boundaryInterrupt = undefined;
       const rawResult = msg as unknown as Record<string, unknown>;
       const mergedUsage = mergeClaudeProviderSessionUsage(this.cumulativeUsage, rawResult);
       result.inputTokens = mergedUsage.inputTokens;
@@ -426,7 +495,10 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   sendTurn(text: string): Promise<TurnResult> {
-    return withActivityPhase(`Claude ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(text));
+    return withActivityPhase(`Claude ${activityPhase(this.opts.runtimePhase)}`, async () => {
+      if (this.opts.contextManagementPolicy && !this.contextPrepared) await this.prepareContextManagement(this.opts.contextManagementPolicy);
+      return this.sendTurnInternal(text);
+    });
   }
 
   private sendTurnInternal(text: string): Promise<TurnResult> {
@@ -479,21 +551,53 @@ export class ClaudeAdapter implements BuilderAdapter {
 
   async compact(): Promise<CompactResult> {
     this.compactResult = undefined;
-    const result = await this.sendTurn("/compact");
-    if (result.failure?.category === "session-unavailable") {
-      return { ok: false, error: result.text || result.failure.diagnostics, failure: result.failure };
+    this.manualCompactionPending = true;
+    try {
+      const result = await this.sendTurn("/compact");
+      if (result.failure?.category === "session-unavailable") {
+        return { ok: false, error: result.text || result.failure.diagnostics, failure: result.failure };
+      }
+      if (this.compactResult) return this.compactResult;
+      return { ok: false, error: sanitizeDiagnostics(result.text || "Claude did not emit an explicit compact status") };
+    } finally {
+      this.manualCompactionPending = false;
     }
-    if (this.compactResult) return this.compactResult;
-    return { ok: false, error: sanitizeDiagnostics(result.text || "Claude did not emit an explicit compact status") };
   }
 
   async contextUsage(): Promise<ContextUsage | undefined> {
     try {
       const usage = await this.query.getContextUsage();
-      const result = { used: usage.totalTokens, maximum: usage.maxTokens, percentage: usage.percentage, observedAt: new Date().toISOString(), source: "provider-query" as const };
+      const result = this.makeContextUsage(usage);
+      this.lastContextUsage = result;
       this.eventQueue.push({ kind: "context-usage", ...result });
       return result;
     } catch { return undefined; }
+  }
+
+  async prepareContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> {
+    validateContextPolicy(policy);
+    if (this.contextPrepared) return this.configureContextManagement(policy, false);
+    await this.query.initializationResult();
+    const prepared = await this.configureContextManagement(policy, true);
+    this.contextPrepared = true;
+    return prepared;
+  }
+
+  async updateContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> {
+    validateContextPolicy(policy);
+    return this.configureContextManagement(policy, false);
+  }
+
+  async interruptTurnAtCompactionBoundary(providerEventId?: string): Promise<InterruptResult> {
+    if (!this.pending) return { ok: false, error: "no active Claude turn exists at the compaction boundary", providerEventId };
+    try {
+      this.boundaryInterrupt = { providerEventId };
+      await this.query.interrupt();
+      return { ok: true, providerEventId };
+    } catch (error) {
+      this.boundaryInterrupt = undefined;
+      return { ok: false, error: error instanceof Error ? error.message : String(error), providerEventId };
+    }
   }
 
   async sessionUsage(): Promise<ProviderSessionUsage | undefined> {
@@ -503,9 +607,13 @@ export class ClaudeAdapter implements BuilderAdapter {
   async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
     if (settings.effort !== this.opts.effort || settings.fast !== this.opts.fast) return { ok: false, error: "Claude SDK cannot change reasoning/fast controls on an existing transport" };
     if (settings.model === this.opts.model) return { ok: true };
-    const result = await this.sendTurn(`/model ${settings.model ?? "default"}`);
-    if (result.isError) return { ok: false, error: result.text, ...(result.failure ? { failure: result.failure } : {}) };
-    this.opts.model = settings.model; return { ok: true };
+    try {
+      await this.query.setModel(settings.model);
+      this.opts.model = settings.model;
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   events(): AsyncIterable<BuilderEvent> {
@@ -532,6 +640,215 @@ export class ClaudeAdapter implements BuilderAdapter {
       role: this.opts.sessionRole, stream: this.opts.sessionStream, generation: this.opts.sessionGeneration,
       workspaceIdentity: this.opts.workspaceIdentity, ticketId: this.opts.ticketId, deliveryUnitId: this.opts.deliveryUnitId,
       source: "observed",
+    });
+  }
+
+  private makeContextUsage(usage: { totalTokens: number; maxTokens: number; percentage?: number; model?: string }): ContextUsage {
+    const maximum = this.modelContextWindow
+      ?? (Number.isFinite(usage.maxTokens) && usage.maxTokens > 0 ? usage.maxTokens : this.lastContextUsage?.maximum);
+    // Once Rafi installs a smaller autoCompactWindow, the SDK's percentage and
+    // maxTokens describe that artificial window. Enforcement and display stay
+    // relative to the full model capacity discovered before reconfiguration.
+    const percentage = maximum ? usage.totalTokens / maximum * 100
+      : Number.isFinite(usage.percentage) ? usage.percentage : undefined;
+    return {
+      used: usage.totalTokens,
+      ...(maximum ? { maximum } : {}),
+      ...(percentage !== undefined ? { percentage } : {}),
+      observedAt: new Date().toISOString(),
+      source: "provider-query",
+      sequence: ++this.contextSequence,
+      ...(this._sessionId ? { sessionId: this._sessionId } : {}),
+      ...(this.opts.model ?? usage.model ? { model: this.opts.model ?? usage.model } : {}),
+    };
+  }
+
+  private async configureContextManagement(
+    policy: ContextManagementPolicy,
+    initial: boolean,
+  ): Promise<PreparedContextManagement> {
+    const modelChanged = this.contextPolicy !== undefined && this.contextPolicy.model !== policy.model;
+    if (modelChanged) {
+      this.modelContextWindow = undefined;
+      this.nativeAutoCompactReserve = undefined;
+      await this.restartTransport();
+    }
+    this.contextPolicy = { ...policy };
+    this.compactionSequence = Math.max(this.compactionSequence, policy.providerSequenceStart ?? 0);
+    this.contextSequence = Math.max(this.contextSequence, policy.providerSequenceStart ?? 0);
+
+    if (initial || modelChanged || !this.modelContextWindow || !this.nativeAutoCompactReserve) {
+      // Enable first so getContextUsage exposes the provider's real trigger.
+      await this.query.applyFlagSettings({ autoCompactEnabled: true });
+      const baseline = await this.query.getContextUsage();
+      const baselineWindow = positiveNumber(baseline.maxTokens);
+      const baselineTrigger = positiveNumber(baseline.autoCompactThreshold);
+      if (!baselineWindow || !baselineTrigger || baselineTrigger >= baselineWindow) {
+        throw new Error("Claude did not expose a usable maxTokens/autoCompactThreshold pair after enabling native auto-compaction");
+      }
+      this.modelContextWindow = policy.knownModelContextWindow ?? baselineWindow;
+      this.nativeAutoCompactReserve = baselineWindow - baselineTrigger;
+    }
+
+    const maximum = this.modelContextWindow;
+    const reserve = this.nativeAutoCompactReserve;
+    const configuredTokenLimit = tokenCeiling(maximum, policy.configuredThresholdPercent);
+    // Claude's setting is a total window, not the used-token trigger. Preserve
+    // the SDK-reported output/compaction reserve so its resulting trigger lands
+    // on (or earlier than) Rafi's configured absolute ceiling.
+    const requestedNativeWindow = configuredTokenLimit + reserve;
+    await this.query.applyFlagSettings({ autoCompactEnabled: true, autoCompactWindow: requestedNativeWindow });
+    let verified = await this.query.getContextUsage();
+    // The SDK applies flag-layer changes through an internal settings watcher;
+    // give that watcher a short bounded interval before declaring the native
+    // control unavailable.
+    for (let attempt = 0; attempt < 4
+      && positiveNumber(verified.autoCompactThreshold) !== undefined
+      && positiveNumber(verified.autoCompactThreshold)! > configuredTokenLimit; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      verified = await this.query.getContextUsage();
+    }
+    if (initial && positiveNumber(verified.autoCompactThreshold)! > configuredTokenLimit) {
+      // Some SDK builds commit flag-layer changes to the active query state at
+      // the next streaming-input boundary. Use the same approved, tool-free
+      // setup exchange that the handoff monitor already recognizes, then
+      // verify again before any real role work is dispatched.
+      const setup = await this.sendTurnInternal(
+        "Rafi context setup only. Do not call tools or change files. Reply with exactly CONTEXT_READY.",
+      );
+      if (setup.isError || setup.text.trim() !== "CONTEXT_READY") {
+        throw new Error(`Claude context setup did not complete safely: ${setup.text.slice(0, 240)}`);
+      }
+      verified = await this.query.getContextUsage();
+    }
+    if (positiveNumber(verified.autoCompactThreshold)! > configuredTokenLimit) {
+      // Current SDK releases accept applyFlagSettings but some noninteractive
+      // transports do not project autoCompactWindow into their already-created
+      // query state. Restart only that transport with equivalent inline flag
+      // settings and resume the exact scoped conversation.
+      await this.restartTransport(requestedNativeWindow);
+      verified = await this.query.getContextUsage();
+    }
+    if (!verified.isAutoCompactEnabled) throw new Error("Claude disabled native auto-compaction during context configuration");
+    const installed = positiveNumber(verified.autoCompactThreshold);
+    if (!installed) throw new Error("Claude did not report the installed native auto-compaction trigger");
+    if (installed > configuredTokenLimit) {
+      throw new Error(
+        `Claude installed native compaction at ${installed} tokens, later than the configured ${configuredTokenLimit}-token ceiling `
+        + `(requested SDK window ${requestedNativeWindow}; this ceiling may be below the provider's supported minimum)`,
+      );
+    }
+    const sample = this.makeContextUsage(verified);
+    this.lastContextUsage = sample;
+    this.eventQueue.push({ kind: "context-usage", ...sample });
+    return {
+      modelContextWindow: maximum,
+      configuredTokenLimit,
+      installedNativeTokenLimit: installed,
+      installedNativePercent: installed / maximum * 100,
+      sample,
+    };
+  }
+
+  private async restartTransport(nativeAutoCompactWindow?: number): Promise<void> {
+    if (this.pending) throw new Error("Claude context transport cannot restart while a provider turn is active");
+    const expectedSessionId = this._sessionId;
+    const expectedSessionRef = this._sessionRef;
+    if (!expectedSessionId || !expectedSessionRef) {
+      throw new Error("Claude context transport restart requires an established location-scoped session");
+    }
+
+    const priorQuery = this.query;
+    const priorInbox = this.inbox;
+    const priorPump = this.pumpDone;
+    const generation = ++this.transportGeneration;
+    priorInbox.close();
+    priorQuery.close();
+    await priorPump.catch(() => {});
+
+    this.inbox = new AsyncQueue<SDKUserMessage>();
+    this.abort = new AbortController();
+    this.streamEnded = false;
+    this.terminalResult = undefined;
+    this.transportObservedSessionId = undefined;
+    this.query = this.openQuery(nativeAutoCompactWindow);
+    this.pumpDone = this.pump(this.query, generation);
+    await this.query.initializationResult();
+    for (let attempt = 0; attempt < 10 && !this.transportObservedSessionId; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+    if (this.transportObservedSessionId && this.transportObservedSessionId !== expectedSessionId) {
+      this.query.close();
+      throw new Error(
+        `Claude context transport did not resume the exact scoped session ${expectedSessionId} `
+        + `(observed ${this.transportObservedSessionId})`,
+      );
+    }
+    if (!this.transportObservedSessionId) {
+      // Claude does not always repeat the session-start frame until the next
+      // user message. Validate the exact persisted, location-scoped target;
+      // the immediately following context query then proves this transport is
+      // usable before any real role action is dispatched.
+      const availability = await probeClaudeSession(expectedSessionRef, {
+        cwd: this.opts.cwd,
+        configRoot: this.opts.configRoot,
+        workspaceIdentity: this.opts.workspaceIdentity,
+        role: this.opts.sessionRole,
+        stream: this.opts.sessionStream,
+        ticketId: this.opts.ticketId,
+        deliveryUnitId: this.opts.deliveryUnitId,
+      });
+      if (availability.status !== "available") {
+        this.query.close();
+        throw new Error(
+          `Claude context transport could not validate scoped session ${expectedSessionId}: `
+          + `${availability.reason ?? availability.status} (${availability.detail ?? "no provider detail"})`,
+        );
+      }
+    }
+  }
+
+  private async completeCompaction(ok: boolean, reason?: string, fallbackPostTokens?: number): Promise<void> {
+    this.compactionTerminalObserved = true;
+    const active = this.activeCompaction;
+    const providerSequence = active?.providerSequence ?? ++this.compactionSequence;
+    const providerEventId = active?.providerEventId ?? `claude:${this._sessionId ?? "pending"}:${providerSequence}`;
+    const origin = active?.origin ?? (this.manualCompactionPending ? "rafi-manual" : "provider-auto");
+    this.activeCompaction = undefined;
+    if (!ok) {
+      this.eventQueue.push({
+        kind: "context-compaction", phase: "failed", origin, providerEventId, providerSequence,
+        provider: "claude", sessionId: this._sessionId, sessionRef: this._sessionRef,
+        observedAt: new Date().toISOString(), reason,
+      });
+      return;
+    }
+    let postCompactSample: ContextUsage | undefined;
+    try {
+      const usage = await this.query.getContextUsage();
+      postCompactSample = { ...this.makeContextUsage(usage), source: "post-compact" };
+      this.lastContextUsage = postCompactSample;
+      this.eventQueue.push({ kind: "context-usage", ...postCompactSample });
+    } catch {
+      if (fallbackPostTokens !== undefined && this.lastContextUsage?.maximum) {
+        postCompactSample = {
+          ...this.makeContextUsage({
+            totalTokens: fallbackPostTokens,
+            maxTokens: this.lastContextUsage.maximum,
+            model: this.opts.model,
+          }),
+          source: "post-compact",
+        };
+        this.lastContextUsage = postCompactSample;
+        this.eventQueue.push({ kind: "context-usage", ...postCompactSample });
+      }
+      // Otherwise the shared coordinator records this success as unverified
+      // and hands off after its own bounded query attempts.
+    }
+    this.eventQueue.push({
+      kind: "context-compaction", phase: "succeeded", origin, providerEventId, providerSequence,
+      provider: "claude", sessionId: this._sessionId, sessionRef: this._sessionRef,
+      observedAt: new Date().toISOString(), ...(postCompactSample ? { postCompactSample } : {}),
     });
   }
 
@@ -562,6 +879,22 @@ export class ClaudeAdapter implements BuilderAdapter {
 }
 
 function finiteNumber(value: unknown): number | undefined { const parsed = Number(value); return value !== null && value !== undefined && value !== "" && Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined; }
+
+function positiveNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function tokenCeiling(maximum: number, percentage: number): number {
+  return Math.max(1, Math.floor(maximum * percentage / 100));
+}
+
+function validateContextPolicy(policy: ContextManagementPolicy): void {
+  if (!Number.isInteger(policy.configuredThresholdPercent) || policy.configuredThresholdPercent < 1 || policy.configuredThresholdPercent > 99) {
+    throw new Error("configured context threshold must be an integer from 1 to 99");
+  }
+  if (!Number.isSafeInteger(policy.compactMaximum) || policy.compactMaximum < 1) throw new Error("compact maximum must be a positive safe integer");
+}
 
 function isMissingClaudeSession(message: string): boolean {
   return /no conversation found with session id|session .* not found|conversation .* not found/i.test(message);

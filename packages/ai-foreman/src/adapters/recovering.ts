@@ -2,7 +2,7 @@ import { isCancel, log, select } from "@clack/prompts";
 import type { AgentRuntime } from "../runtimeAuth.js";
 import { AsyncQueue } from "../util/asyncQueue.js";
 import { pauseActivityForInput, reportBuilderEvent } from "../activity.js";
-import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, ProviderSessionUsage, TurnResult } from "./types.js";
+import type { BuilderAdapter, BuilderEvent, CompactResult, ContextManagementPolicy, ContextUsage, InterruptResult, ManagedTurnDispatcher, PreparedContextManagement, ProviderSessionUsage, TurnResult } from "./types.js";
 import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
 
 export type TurnRecoveryChoice = "retry" | "switch" | "cancel";
@@ -26,6 +26,7 @@ export class RecoveringAdapter implements BuilderAdapter {
   private readonly eventQueue = new AsyncQueue<BuilderEvent>();
   private eventPump: Promise<void>;
   private closed = false;
+  private turnDispatcher?: ManagedTurnDispatcher;
 
   constructor(private readonly opts: RecoveringAdapterOptions) {
     this.adapter = opts.initial;
@@ -39,7 +40,8 @@ export class RecoveringAdapter implements BuilderAdapter {
 
   async sendTurn(text: string): Promise<TurnResult> {
     while (true) {
-      const result = await this.adapter.sendTurn(text);
+      const invoke = () => this.adapter.sendTurn(text);
+      const result = this.turnDispatcher ? await this.turnDispatcher(text, invoke) : await invoke();
       const sessionRef = this.adapter.sessionRef?.();
       if (sessionRef && this.opts.onSessionRef) {
         try { this.opts.onSessionRef(sessionRef); }
@@ -85,6 +87,10 @@ export class RecoveringAdapter implements BuilderAdapter {
   }
 
   compact(): Promise<CompactResult> { return this.adapter.compact?.() ?? Promise.resolve({ ok: false, error: "native compaction unavailable" }); }
+  prepareContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { if (!this.adapter.prepareContextManagement) return Promise.reject(new Error("native context management unavailable")); return this.adapter.prepareContextManagement(policy); }
+  updateContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { if (!this.adapter.updateContextManagement) return Promise.reject(new Error("native context reconfiguration unavailable")); return this.adapter.updateContextManagement(policy); }
+  interruptTurnAtCompactionBoundary(providerEventId?: string): Promise<InterruptResult> { return this.adapter.interruptTurnAtCompactionBoundary?.(providerEventId) ?? Promise.resolve({ ok: false, error: "compaction-boundary interruption unavailable", providerEventId }); }
+  installManagedTurnDispatcher(dispatcher: ManagedTurnDispatcher): void { this.turnDispatcher = dispatcher; }
   contextUsage(): Promise<ContextUsage | undefined> { return this.adapter.contextUsage?.() ?? Promise.resolve(undefined); }
   sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.adapter.sessionUsage?.() ?? Promise.resolve(undefined); }
 

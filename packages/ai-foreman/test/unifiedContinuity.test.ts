@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import type { ContinuityDelta, ProviderSessionRefV1, ResolvedAgentSettings } from "rafi-spec";
-import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, TurnResult } from "../src/adapters/types.js";
+import type { BuilderAdapter, BuilderEvent, CompactResult, ContextManagementPolicy, ContextUsage, InterruptResult, PreparedContextManagement, TurnResult } from "../src/adapters/types.js";
 import { ContinuityAdapter } from "../src/continuity.js";
 import { HANDOFF_ACCEPTED, HandoffLoopError, HandoffService } from "../src/handoffs.js";
 import { ThresholdCompactionController } from "../src/sessionLifecycle.js";
@@ -15,6 +15,7 @@ import { StateDb } from "../src/tickets/stateDb.js";
 import { loadTickets } from "../src/tickets/ticketLoader.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import { WorkflowDb } from "../src/workflowDb.js";
+import { AsyncQueue } from "../src/util/asyncQueue.js";
 
 const EMPTY_DELTA: ContinuityDelta = {
   version: 1,
@@ -29,6 +30,7 @@ const SETTINGS: ResolvedAgentSettings = {
 
 class FakeAdapter implements BuilderAdapter {
   readonly agent: "claude" | "codex";
+  readonly queue = new AsyncQueue<BuilderEvent>();
   compactCalls = 0;
   closed = false;
   private usageIndex = 0;
@@ -41,7 +43,9 @@ class FakeAdapter implements BuilderAdapter {
     agent: "claude" | "codex" = "codex",
   ) { this.agent = agent; }
   async sendTurn(): Promise<TurnResult> {
-    return this.turns.shift() ?? { text: `${HANDOFF_ACCEPTED}\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 };
+    const result = this.turns.shift() ?? { text: `${HANDOFF_ACCEPTED}\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 };
+    this.queue.push({ kind: "turn-complete", result });
+    return result;
   }
   sessionId(): string | undefined { return this.id; }
   sessionRef(): ProviderSessionRefV1 | undefined {
@@ -53,10 +57,20 @@ class FakeAdapter implements BuilderAdapter {
   }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.adoptedRef = ref; }
   async compact(): Promise<CompactResult> { this.compactCalls += 1; this.usageIndex = Math.min(this.usageIndex + 1, this.usages.length - 1); return this.compactResult; }
+  prepareContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { return Promise.resolve(this.prepared(policy)); }
+  updateContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { return Promise.resolve(this.prepared(policy)); }
+  interruptTurnAtCompactionBoundary(providerEventId?: string): Promise<InterruptResult> { return Promise.resolve({ ok: true, providerEventId }); }
   async contextUsage(): Promise<ContextUsage | undefined> { return this.usages[this.usageIndex]; }
   advanceUsage(): void { this.usageIndex = Math.min(this.usageIndex + 1, this.usages.length - 1); }
-  async *events(): AsyncIterable<BuilderEvent> {}
-  async close(): Promise<void> { this.closed = true; }
+  events(): AsyncIterable<BuilderEvent> { return this.queue; }
+  async close(): Promise<void> { this.closed = true; this.queue.close(); }
+
+  private prepared(policy: ContextManagementPolicy): PreparedContextManagement {
+    const sample = this.usages[this.usageIndex] ?? { used: 0, maximum: 100, percentage: 0 };
+    const maximum = sample.maximum ?? 100;
+    const configuredTokenLimit = Math.max(1, Math.floor(maximum * policy.configuredThresholdPercent / 100));
+    return { modelContextWindow: maximum, configuredTokenLimit, installedNativeTokenLimit: configuredTokenLimit, installedNativePercent: configuredTokenLimit / maximum * 100, sample };
+  }
 }
 
 function root(prefix: string): string { return mkdtempSync(join(tmpdir(), prefix)); }
@@ -197,7 +211,7 @@ test("a newer live provider revision is acknowledged only after its validated se
     },
   });
   const result = await controller.atSafeBoundary(predecessor, "frozen action");
-  assert.equal(result.adapter, successor);
+  assert.equal(result.adapter.sessionId(), successor.sessionId());
   assert.equal(result.action, "below-threshold");
   assert.equal(transfers, 1);
   const db = new WorkflowDb(projectDir);
@@ -205,7 +219,7 @@ test("a newer live provider revision is acknowledged only after its validated se
   db.close();
 });
 
-test("a fresh successor that bootstraps above threshold compacts once and adopts only a run-local raised threshold", async () => {
+test("a fresh successor that remains above threshold pauses instead of raising the configured ceiling", async () => {
   const projectDir = root("rafi-high-bootstrap-");
   const predecessor = new FakeAdapter("session-1", [], [{ used: 70, maximum: 100, percentage: 70 }]);
   const successor = new FakeAdapter("session-2", [], [
@@ -217,12 +231,9 @@ test("a fresh successor that bootstraps above threshold compacts once and adopts
     historicalCountUncertain: true,
     handoff: async () => successor,
   });
-  const result = await controller.atSafeBoundary(predecessor, "frozen action");
-  assert.equal(result.action, "handed-off");
-  assert.equal(result.adapter, successor);
+  await assert.rejects(() => controller.atSafeBoundary(predecessor, "frozen action"), /configured 50% ceiling|configured ceiling/);
   assert.equal(successor.compactCalls, 1);
-  assert.equal(result.sample.percentage, 65);
-  assert.equal(result.effectiveThreshold, 75);
+  assert.equal(controller.effectiveThreshold(), 50);
   assert.equal(controller.effectiveSettings().auto_compact_threshold_percent, 50);
 });
 

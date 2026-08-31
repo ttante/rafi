@@ -115,7 +115,9 @@ What each part does:
 | `--branch-prefix <prefix>` | `feature` / `rafi` / another valid Git prefix | `feature` | Prefix for generated ticket branches. Explicit prefixes are preserved verbatim. |
 | `--max-branch-depth <n>` | positive integer | `5` | Maximum selected branch/PR stack depth (root PR is depth 1). |
 | `--show-session-cost` / `--hide-session-cost` | flags | saved role preferences | Show authoritative provider cost or trustworthy cumulative tokens for Builder and QA; does not change context occupancy display. |
-| `--auto-compact-threshold <percent>` | integer `1`–`99` | saved Builder value, then `50` | Initial run threshold override. A newer persistent settings revision wins at the next safe boundary. |
+| `--auto-compact-threshold <percent>` | integer `1`–`99` | saved Builder value, then `50` | Initial Builder threshold override. A later explicit Builder-threshold revision wins for the active run. |
+
+Builder and QA context ceilings are configured independently (default `50%`, maximum `10` successful compactions per scoped provider session). Claude and Codex install the ceiling as a native in-turn auto-compaction limit before real work begins; Rafi verifies the post-compaction occupancy and counts provider-native and host-requested compactions together. An ineffective or failed compact receives one bounded retry, followed by a validated cumulative handoff. Status output reports the configured and installed ceilings, lifecycle state, scoped count/maximum, and settings revision without substituting cumulative session tokens for active context occupancy.
 
 Auto-detected tracker files:
 
@@ -606,6 +608,14 @@ pnpm build
 
 pnpm dev -- start ../../examples/dummy-project --steps 2
 ```
+
+Changes to provider adapters or context lifecycle enforcement also require the opt-in authenticated gate:
+
+```bash
+pnpm test:live-providers
+```
+
+It exercises Claude and Codex as both Builder and QA with a low native ceiling, verifies in-turn compaction and same-session continuation, then verifies a maximum-one boundary interruption and validated fresh handoff. Set `RAFI_LIVE_CONTEXT_THRESHOLD_PERCENT` to an integer from `1` through `10` to override its default `10%` ceiling. Very low Claude ceilings can intentionally fail the capability check when they fall below the SDK's minimum native window. The gate uses locally authenticated provider CLIs and is intentionally skipped by the ordinary test suite.
 
 Package output:
 

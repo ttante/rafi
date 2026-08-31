@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, ProviderSessionUsage, ProviderSettingSwitch, TurnResult } from "../adapters/types.js";
+import type { BuilderAdapter, BuilderEvent, CompactResult, ContextManagementPolicy, ContextUsage, InterruptResult, ManagedTurnDispatcher, PreparedContextManagement, ProviderSessionUsage, ProviderSettingSwitch, TurnResult } from "../adapters/types.js";
 import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
 
 export interface CurrentWorkflowIdentity {
@@ -49,6 +49,10 @@ export class CurrentWorkflowGuardAdapter implements BuilderAdapter {
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.adapter.adoptSessionRef?.(ref); }
   validateSession(): Promise<SessionAvailabilityV1> { assertCurrentWorkflowIdentity(this.cwd, this.expected); return this.adapter.validateSession?.() ?? Promise.resolve({ version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped" }); }
   async compact(): Promise<CompactResult> { assertCurrentWorkflowIdentity(this.cwd, this.expected); const result = await (this.adapter.compact?.() ?? Promise.resolve({ ok: false, error: "native compaction unavailable" })); assertCurrentWorkflowIdentity(this.cwd, this.expected); return result; }
+  async prepareContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { assertCurrentWorkflowIdentity(this.cwd, this.expected); if (!this.adapter.prepareContextManagement) throw new Error("native context management unavailable"); const result = await this.adapter.prepareContextManagement(policy); assertCurrentWorkflowIdentity(this.cwd, this.expected); return result; }
+  async updateContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { assertCurrentWorkflowIdentity(this.cwd, this.expected); if (!this.adapter.updateContextManagement) throw new Error("native context reconfiguration unavailable"); const result = await this.adapter.updateContextManagement(policy); assertCurrentWorkflowIdentity(this.cwd, this.expected); return result; }
+  interruptTurnAtCompactionBoundary(providerEventId?: string): Promise<InterruptResult> { return this.adapter.interruptTurnAtCompactionBoundary?.(providerEventId) ?? Promise.resolve({ ok: false, error: "compaction-boundary interruption unavailable", providerEventId }); }
+  installManagedTurnDispatcher(dispatcher: ManagedTurnDispatcher): void { this.adapter.installManagedTurnDispatcher?.(dispatcher); }
   contextUsage(): Promise<ContextUsage | undefined> { return this.adapter.contextUsage?.() ?? Promise.resolve(undefined); }
   sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.adapter.sessionUsage?.() ?? Promise.resolve(undefined); }
   switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> { return this.adapter.switchSettings?.(settings) ?? Promise.resolve({ ok: false, error: "settings switch unavailable" }); }

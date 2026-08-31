@@ -1,6 +1,6 @@
 {
   "name": "ai-foreman",
-  "version": "1.7.7",
+  "version": "1.7.8",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
   "license": "Apache-2.0",
   "type": "module",
@@ -137,7 +137,7 @@
     "dev": "tsx src/index.ts",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 tsx --test test/providerSmoke.test.ts",
+    "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 tsx --test --test-concurrency=1 test/providerSmoke.test.ts test/providerContextAcceptance.test.ts",
     "prepublishOnly": "pnpm build && pnpm test && pnpm typecheck"
   },
   "keywords": [
@@ -158,8 +158,8 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.148"
   },
   "dependencies": {
-    "special-agents": "0.8.5",
-    "rafi-spec": "0.8.5",
+    "special-agents": "0.8.6",
+    "rafi-spec": "0.8.6",
     "@clack/prompts": "^1.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",

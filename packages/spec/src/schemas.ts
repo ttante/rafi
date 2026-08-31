@@ -231,8 +231,10 @@ const agentDefaultsShape = {
           fast: { type: "boolean" },
           session_strategy: { enum: ["compact", "fresh"] },
           display_session_cost: { type: "boolean" },
-          auto_compact_threshold_percent: { type: "integer", minimum: 1, maximum: 99 },
-          compact_maximum: { type: "integer", minimum: 1, maximum: 9007199254740991 },
+          ...(role === "builder" || role === "qa" ? {
+            auto_compact_threshold_percent: { type: "integer", minimum: 1, maximum: 99 },
+            compact_maximum: { type: "integer", minimum: 1, maximum: 9007199254740991 },
+          } : {}),
         },
       }])),
     },

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ContinuityCheckpoint, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
-import type { BuilderAdapter, CompactResult, ContextUsage, ProviderSessionUsage, ProviderSettingSwitch, RuntimeFailure, TurnResult } from "./adapters/types.js";
+import type { BuilderAdapter, CompactResult, ContextManagementPolicy, ContextUsage, InterruptResult, ManagedTurnDispatcher, PreparedContextManagement, ProviderSessionUsage, ProviderSettingSwitch, RuntimeFailure, TurnResult } from "./adapters/types.js";
 import { BuilderEventQueue } from "./activity.js";
 import { WorkflowDb } from "./workflowDb.js";
 
@@ -101,7 +101,7 @@ export interface ContinuityAdapterOptions {
   role: "builder" | "qa";
   settings: ResolvedAgentSettings;
   authoritativeStateRevision?: () => number;
-  /** Fresh successor creation after the same-session repair also fails. */
+  /** @deprecated Use recoverWithHandoff so successor acceptance is lifecycle-managed and durable. */
   createSuccessor?: (handoff: string) => Promise<BuilderAdapter>;
   /**
    * Production recovery path for a double-invalid delta. The callback must
@@ -121,6 +121,7 @@ export class ContinuityAdapter implements BuilderAdapter {
   private readonly queue = new BuilderEventQueue();
   private sourcePump?: Promise<void>;
   private recoveryLeasePending: boolean;
+  private turnDispatcher?: ManagedTurnDispatcher;
 
   constructor(private readonly options: ContinuityAdapterOptions) {
     this.adapter = options.adapter;
@@ -146,7 +147,7 @@ export class ContinuityAdapter implements BuilderAdapter {
       db.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "turn_started", payload: { role: this.options.role, instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) }, authoritativeStateRevision: this.revision() });
     } finally { db.close(); }
 
-    const original = await this.adapter.sendTurn(`${instruction}\n\n${continuityInstruction()}`);
+    const original = await this.providerTurn(`${instruction}\n\n${continuityInstruction()}`);
     const activeSession = this.adapter.sessionRef?.() ?? this.adapter.sessionId();
     if (activeSession) {
       const leaseDb = new WorkflowDb(this.options.projectDir);
@@ -156,6 +157,27 @@ export class ContinuityAdapter implements BuilderAdapter {
     if (original.failure?.category === "session-unavailable") {
       this.recordSessionUnavailable(original.failure, instruction);
       throw new SessionUnavailableContinuityError(this.options.runId, this.options.role, original.failure);
+    }
+    if (original.interrupted?.reason === "compaction-boundary") {
+      // The coordinator owns the validated handoff and replay of this frozen
+      // action. A protocol-repair turn here would run in the interrupted
+      // predecessor (or race successor adoption) without a completed delta.
+      const interruptedDb = new WorkflowDb(this.options.projectDir);
+      try {
+        interruptedDb.appendContinuityEvent({
+          runId: this.options.runId,
+          role: "host",
+          kind: "turn_interrupted_at_compaction_boundary",
+          payload: {
+            role: this.options.role,
+            providerEventId: original.interrupted.providerEventId,
+            instructionDigest: sha(instruction),
+          },
+          authoritativeStateRevision: this.revision(),
+          sessionRef: this.adapter.sessionRef?.(),
+        });
+      } finally { interruptedDb.close(); }
+      return original;
     }
     const parsed = parseContinuityDelta(original.text);
     if (parsed.delta) {
@@ -172,12 +194,34 @@ export class ContinuityAdapter implements BuilderAdapter {
       return { ...original, text: parsed.cleanText };
     }
 
-    const repair = await this.adapter.sendTurn([
+    const repair = await this.providerTurn([
       "Continuity protocol repair only. Do not run tools, repeat work, or change files.",
       `Your prior turn's continuity record was invalid: ${parsed.error?.problems.join("; ")}.`,
       continuityInstruction(),
       "Return only the continuity record.",
     ].join("\n"));
+    if (repair.interrupted?.reason === "compaction-boundary") {
+      // Preserve the predecessor and let the outer managed dispatch perform
+      // the validated handoff/replay. Treating this as another invalid delta
+      // would race continuity recovery against the coordinator and could lose
+      // the original frozen action.
+      const interruptedDb = new WorkflowDb(this.options.projectDir);
+      try {
+        interruptedDb.appendContinuityEvent({
+          runId: this.options.runId,
+          role: "host",
+          kind: "continuity_repair_interrupted_at_compaction_boundary",
+          payload: {
+            role: this.options.role,
+            providerEventId: repair.interrupted.providerEventId,
+            instructionDigest: sha(instruction),
+          },
+          authoritativeStateRevision: this.revision(),
+          sessionRef: this.adapter.sessionRef?.(),
+        });
+      } finally { interruptedDb.close(); }
+      return repair;
+    }
     const repaired = parseContinuityDelta(repair.text);
     if (repaired.delta) {
       this.publish(repaired.delta, "turn_completed_after_repair", original);
@@ -213,21 +257,14 @@ export class ContinuityAdapter implements BuilderAdapter {
       await this.adoptValidatedSuccessor(successor);
       return { ...original, text: parsed.cleanText };
     }
-    if (!this.options.createSuccessor) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "continuity repair failed in the original session and no validated successor is configured");
-
-    const successor = await this.options.createSuccessor(handoff);
-    const accepted = await successor.sendTurn(`${handoff}\n\nReply with HANDOFF_ACCEPTED on the first line, then ${continuityInstruction()}`);
-    const successorDelta = parseContinuityDelta(accepted.text);
-    if (!/^HANDOFF_ACCEPTED\b/m.test(accepted.text) || !successorDelta.delta || !successor.sessionId()) {
-      await successor.close().catch(() => {});
-      throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "fresh successor did not validate and accept the cumulative checkpoint");
-    }
-    await this.adoptValidatedSuccessor(successor);
-    this.publish(successorDelta.delta, "fresh_successor_accepted", accepted);
-    const leaseDb = new WorkflowDb(this.options.projectDir);
-    try { leaseDb.moveRoleLeaseAfterValidatedRecovery(this.options.runId, this.options.role, successor.sessionRef?.() ?? successor.sessionId()!, "double-invalid continuity recovery"); }
-    finally { leaseDb.close(); }
-    return { ...original, text: parsed.cleanText };
+    // A raw create-and-send fallback cannot install native context control,
+    // account compactions, or validate the scoped successor atomically. Refuse
+    // it instead of allowing continuity recovery to escape the managed gate.
+    throw new ContinuityRecoveryRequiredError(
+      this.options.runId,
+      this.options.role,
+      "continuity repair failed in the original session and no lifecycle-managed recoverWithHandoff callback is configured",
+    );
   }
 
   sessionId(): string | undefined { return this.adapter.sessionId(); }
@@ -235,6 +272,13 @@ export class ContinuityAdapter implements BuilderAdapter {
   adoptSessionRef(ref: import("rafi-spec").ProviderSessionRefV1): void { this.adapter.adoptSessionRef?.(ref); }
   validateSession(): Promise<import("rafi-spec").SessionAvailabilityV1> { return this.adapter.validateSession?.() ?? Promise.resolve({ version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped" }); }
   compact(): Promise<CompactResult> { return this.adapter.compact ? this.adapter.compact() : Promise.resolve({ ok: false, error: "provider adapter does not expose native compaction" }); }
+  prepareContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { if (!this.adapter.prepareContextManagement) return Promise.reject(new Error("provider adapter does not expose native context management")); return this.adapter.prepareContextManagement(policy); }
+  updateContextManagement(policy: ContextManagementPolicy): Promise<PreparedContextManagement> { if (!this.adapter.updateContextManagement) return Promise.reject(new Error("provider adapter does not expose native context reconfiguration")); return this.adapter.updateContextManagement(policy); }
+  interruptTurnAtCompactionBoundary(providerEventId?: string): Promise<InterruptResult> { return this.adapter.interruptTurnAtCompactionBoundary?.(providerEventId) ?? Promise.resolve({ ok: false, error: "provider adapter does not expose compaction-boundary interruption", providerEventId }); }
+  installManagedTurnDispatcher(dispatcher: ManagedTurnDispatcher): void {
+    this.turnDispatcher = dispatcher;
+    this.adapter.installManagedTurnDispatcher?.(dispatcher);
+  }
   contextUsage(): Promise<ContextUsage | undefined> { return this.adapter.contextUsage?.() ?? Promise.resolve(undefined); }
   sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.adapter.sessionUsage?.() ?? Promise.resolve(undefined); }
   switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> { return this.adapter.switchSettings ? this.adapter.switchSettings(settings) : Promise.resolve({ ok: false, error: "provider adapter does not support settings changes" }); }
@@ -246,8 +290,14 @@ export class ContinuityAdapter implements BuilderAdapter {
     if (successor === this.adapter) return;
     const prior = this.adapter;
     this.adapter = successor;
+    if (this.turnDispatcher) successor.installManagedTurnDispatcher?.(this.turnDispatcher);
     this.pumpEvents();
     await prior.close().catch(() => {});
+  }
+
+  private providerTurn(text: string): Promise<TurnResult> {
+    const invoke = () => this.adapter.sendTurn(text);
+    return this.turnDispatcher ? this.turnDispatcher(text, invoke) : invoke();
   }
 
   private publish(delta: ContinuityDelta, kind: string, result: TurnResult): ContinuityCheckpoint {
@@ -315,7 +365,7 @@ export class ContinuityAdapter implements BuilderAdapter {
     this.sourcePump = (async () => {
       try { for await (const event of source.events()) {
         this.queue.push(event);
-        if (event.kind === "tool" || event.kind === "session-transition" || event.kind === "context-usage") {
+        if (event.kind === "tool" || event.kind === "session-transition" || event.kind === "context-usage" || event.kind === "context-compaction") {
           const db = new WorkflowDb(this.options.projectDir);
           try {
             const payload = event.kind === "tool"
