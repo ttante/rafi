@@ -584,6 +584,16 @@ export class WorkflowDb {
     return this.compactionAttempt(idempotencyKey)!;
   }
 
+  /** Attach an eventually available measurement without changing confirmed accounting. */
+  recordCompactionAfterSample(idempotencyKey: string, afterSample: ContextSample, now = new Date()): CompactionAttemptRecord {
+    const prior = this.compactionAttempt(idempotencyKey);
+    if (!prior) throw new Error(`compaction attempt not found: ${idempotencyKey}`);
+    if (prior.status !== "succeeded") return prior;
+    this.db.prepare("UPDATE compaction_attempts SET after_sample_json=?,updated_at=? WHERE idempotency_key=?")
+      .run(json(afterSample), now.toISOString(), idempotencyKey);
+    return this.compactionAttempt(idempotencyKey)!;
+  }
+
   compactionAttempt(idempotencyKey: string): CompactionAttemptRecord | undefined {
     const row = this.db.prepare("SELECT * FROM compaction_attempts WHERE idempotency_key=?").get(idempotencyKey) as DbCompactionAttempt | undefined;
     return row ? compactionAttemptFromRow(row) : undefined;
@@ -611,6 +621,25 @@ export class WorkflowDb {
 
   recoveryDecisions(runId: string): BuildRecoveryDecisionReceipt[] {
     return (this.db.prepare("SELECT receipt_json FROM recovery_decisions WHERE run_id=? ORDER BY decision_id").all(runId) as Array<{ receipt_json: string }>).map((row) => parseJson(row.receipt_json) as BuildRecoveryDecisionReceipt);
+  }
+
+  /**
+   * A process may die after dispatching a provider turn but before its durable
+   * continuity checkpoint. The provider may have compacted during that gap, so
+   * recovery must not treat that role session's compaction history as complete.
+   */
+  hasUncheckpointedRoleTurn(runId: string, role: "builder" | "qa"): boolean {
+    const events = this.continuityEvents(runId);
+    let startSequence = 0;
+    for (const event of events) {
+      if (event.kind === "turn_started" && event.role === "host" && (event.payload as { role?: string }).role === role) {
+        startSequence = event.sequence;
+      } else if (startSequence && event.sequence > startSequence
+        && (event.kind === "turn_completed" || event.kind === "turn_completed_after_repair" || event.kind === "fresh_successor_accepted")) {
+        startSequence = 0;
+      }
+    }
+    return startSequence > 0;
   }
 
   beginPublication(runId: string, intent: unknown, previousDigests: unknown, now = new Date()): PublicationTransaction {

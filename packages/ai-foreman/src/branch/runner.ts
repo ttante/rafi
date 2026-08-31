@@ -77,6 +77,8 @@ export interface BranchRunnerOptions {
   builderSessionStrategy?: SessionStrategy;
   qaSessionStrategy?: SessionStrategy;
   observeBuilder?: (builder: BuilderAdapter) => Promise<void>;
+  observeBuilderNativeCompactions?: (builder: BuilderAdapter, cwd: string) => Promise<void>;
+  observeQaNativeCompactions?: (adapter: BuilderAdapter) => Promise<void>;
   qaNonconvergence?: (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision>;
   beforeBuilderTurn?: (adapter: BuilderAdapter, frozenAction: string, cwd: string) => Promise<BuilderAdapter>;
   builderSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>;
@@ -245,6 +247,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         opts.builderSessionStrategy ?? "compact",
         undefined,
         opts.beforeBuilderTurn ? (adapter, action) => opts.beforeBuilderTurn!(adapter, action, worktreePath) : undefined,
+        undefined,
+        undefined,
+        async (adapter) => opts.observeBuilderNativeCompactions?.(adapter, worktreePath),
       );
 
       const { result, status } = await foreman.runInstruction(ticketInstruction);
@@ -314,6 +319,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           ticket: node.ticket, builderWorktree: worktreePath, builderSummary: status.summary ?? result.text,
           qaStrategy: opts.qaSessionStrategy ?? "compact", state: qaStream, createQa: opts.createQa, maxCycles: 3,
           sessionBoundary: opts.qaSessionBoundary,
+          observeNativeCompactions: opts.observeQaNativeCompactions,
           evidence: (entry) => opts.log.write("qa-evidence", { ticket: node.ticket.id, ...entry }),
           fix: async (issues) => {
             if (!builder) return { ok: false, detail: "Builder session unavailable" };

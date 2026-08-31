@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import type { ContinuityDelta, ProviderSessionRefV1, ResolvedAgentSettings } from "rafi-spec";
-import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, TurnResult } from "../src/adapters/types.js";
+import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, NativeCompaction, TurnResult } from "../src/adapters/types.js";
 import { ContinuityAdapter } from "../src/continuity.js";
 import { HANDOFF_ACCEPTED, HandoffLoopError, HandoffService } from "../src/handoffs.js";
 import { ThresholdCompactionController } from "../src/sessionLifecycle.js";
@@ -33,6 +33,7 @@ class FakeAdapter implements BuilderAdapter {
   closed = false;
   private usageIndex = 0;
   private adoptedRef?: ProviderSessionRefV1;
+  nativeCompactions: NativeCompaction[] = [];
   constructor(
     private readonly id: string | undefined,
     private readonly turns: TurnResult[] = [],
@@ -53,7 +54,9 @@ class FakeAdapter implements BuilderAdapter {
   }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.adoptedRef = ref; }
   async compact(): Promise<CompactResult> { this.compactCalls += 1; this.usageIndex = Math.min(this.usageIndex + 1, this.usages.length - 1); return this.compactResult; }
+  async prepareAutoCompaction(_threshold?: number): Promise<void> {}
   async contextUsage(): Promise<ContextUsage | undefined> { return this.usages[this.usageIndex]; }
+  drainNativeCompactions(): NativeCompaction[] { const pending = this.nativeCompactions; this.nativeCompactions = []; return pending; }
   advanceUsage(): void { this.usageIndex = Math.min(this.usageIndex + 1, this.usages.length - 1); }
   async *events(): AsyncIterable<BuilderEvent> {}
   async close(): Promise<void> { this.closed = true; }
@@ -177,6 +180,64 @@ test("threshold compaction records observable success and hands off instead of e
   assert.equal(handoffs, 1);
   const db = new WorkflowDb(projectDir);
   assert.equal(db.successfulCompactionCount("run-1", "builder", predecessor.sessionRef()!), 1);
+  db.close();
+});
+
+test("provider-native compactions are persisted and force a successor before another Builder turn", async () => {
+  const projectDir = root("rafi-native-compact-");
+  const predecessor = new FakeAdapter("session-1", [], [{ used: 20, maximum: 100, percentage: 20 }]);
+  predecessor.nativeCompactions.push({ id: "native-1", occurredAt: "2026-01-01T00:00:00.000Z", provider: "codex" });
+  const successor = new FakeAdapter("session-2", [], [{ used: 10, maximum: 100, percentage: 10 }]);
+  const controller = new ThresholdCompactionController({
+    projectDir, runId: "run-1", role: "builder", initialSettings: SETTINGS,
+    handoff: async () => successor,
+  });
+  const result = await controller.atSafeBoundary(predecessor, "next frozen action");
+  assert.equal(result.action, "handed-off");
+  const db = new WorkflowDb(projectDir);
+  assert.equal(db.successfulCompactionCount("run-1", "builder", predecessor.sessionRef()!), 1);
+  db.close();
+});
+
+test("provider-native QA compactions are persisted against the disposable QA session", async () => {
+  const projectDir = root("rafi-native-qa-compact-");
+  const qa = new FakeAdapter("qa-session-1", [], [{ used: 20, maximum: 100, percentage: 20 }]);
+  qa.nativeCompactions.push({ id: "native-qa-1", occurredAt: "2026-01-01T00:00:00.000Z", provider: "codex" });
+  const controller = new ThresholdCompactionController({
+    projectDir, runId: "run-1", role: "qa", initialSettings: { ...SETTINGS, role: "qa" },
+  });
+  assert.equal(await controller.observeNativeCompactions(qa), 1);
+  const db = new WorkflowDb(projectDir);
+  assert.equal(db.successfulCompactionCount("run-1", "qa", qa.sessionRef()!), 1);
+  db.close();
+});
+
+test("an uncheckpointed provider turn is visible to recovery as uncertain", () => {
+  const projectDir = root("rafi-uncheckpointed-turn-");
+  const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1");
+  db.appendContinuityEvent({
+    runId: "run-1", role: "host", kind: "turn_started", payload: { role: "builder" }, authoritativeStateRevision: 1,
+  });
+  assert.equal(db.hasUncheckpointedRoleTurn("run-1", "builder"), true);
+  db.appendContinuityEvent({
+    runId: "run-1", role: "builder", kind: "turn_completed", payload: {}, authoritativeStateRevision: 1,
+  });
+  assert.equal(db.hasUncheckpointedRoleTurn("run-1", "builder"), false);
+  db.close();
+});
+
+test("a threshold-only live update reconfigures the active provider before acknowledgement", async () => {
+  const projectDir = root("rafi-native-live-");
+  const predecessor = new FakeAdapter("session-1", [], [{ used: 20, maximum: 100, percentage: 20 }]);
+  let configured: number | undefined;
+  predecessor.prepareAutoCompaction = async (threshold) => { configured = threshold; };
+  const next = { ...SETTINGS, auto_compact_threshold_percent: 70, settings_revision: 2 };
+  const controller = new ThresholdCompactionController({ projectDir, runId: "run-1", role: "builder", initialSettings: SETTINGS, readSettings: () => next });
+  await controller.atSafeBoundary(predecessor, "frozen action");
+  assert.equal(configured, 70);
+  const db = new WorkflowDb(projectDir);
+  assert.equal(db.settingsAcknowledgments(2)[0]?.providerSessionId, "session-1");
   db.close();
 });
 

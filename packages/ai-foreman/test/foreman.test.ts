@@ -238,3 +238,21 @@ test("preflight rejects an adapter error instead of treating it as a plan", asyn
     rmSync(dir, { recursive: true });
   }
 });
+
+test("every follow-up Builder dispatch re-enters the safe boundary", async () => {
+  const dir = makeTmpDir();
+  try {
+    const builder = new FakeBuilder(["missing final marker", "STEP_STATUS: done | summary=\"corrected\""]);
+    const boundaries: string[] = [];
+    const foreman = new Foreman(
+      builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      async (adapter, frozenAction) => { boundaries.push(frozenAction); return adapter; },
+    );
+    const result = await foreman.runInstruction("perform one action");
+    assert.equal(result.status.kind, "done");
+    assert.equal(boundaries.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});

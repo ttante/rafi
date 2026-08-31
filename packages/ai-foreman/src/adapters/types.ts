@@ -108,6 +108,16 @@ export interface CompactResult {
   failure?: RuntimeFailure;
 }
 
+/** A provider-confirmed compaction that happened without Rafi issuing /compact. */
+export interface NativeCompaction {
+  /** Stable for the lifetime of an adapter; used for durable idempotency. */
+  id: string;
+  occurredAt: string;
+  provider: "claude" | "codex";
+  /** Adapter-local usage generation captured with the provider confirmation. */
+  usageRevision?: number;
+}
+
 export interface ProviderSettingSwitch { model?: string; effort?: EffortLevel; fast?: boolean }
 
 export type EffortLevel = "low" | "medium" | "high" | "xhigh";
@@ -177,7 +187,16 @@ export interface BuilderAdapter {
    * dispatched. This intentionally happens outside a work turn so a long,
    * tool-heavy first turn is protected too.
    */
-  prepareAutoCompaction?(): Promise<void>;
+  prepareAutoCompaction?(thresholdPercent?: number): Promise<void>;
+
+  /** Consume provider-native compactions observed since the prior drain. */
+  drainNativeCompactions?(): NativeCompaction[];
+
+  /** Return a drained batch to the adapter when durable receipt failed. */
+  restoreNativeCompactions?(compactions: NativeCompaction[]): void;
+
+  /** Return occupancy known to postdate a native-compaction event, if available. */
+  contextUsageAfterNativeCompaction?(compaction: NativeCompaction): Promise<ContextUsage | undefined>;
 
   /** Truthful provider context occupancy, when exposed by the provider. */
   contextUsage?(): Promise<ContextUsage | undefined>;

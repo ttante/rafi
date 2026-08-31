@@ -266,7 +266,7 @@ test("Codex automatic compaction discovers the provider window before restarting
   internal.ensureThread = async () => { ensured += 1; };
   internal.sendTurnInternal = async () => {
     internal.usage = { maximum: 200 };
-    return { isError: false, text: "CONTEXT_READY" };
+    return { isError: false, text: "context is ready" };
   };
   internal.restartForAutoCompaction = async () => { restarted += 1; };
   await a.prepareAutoCompaction();
@@ -277,6 +277,29 @@ test("Codex automatic compaction discovers the provider window before restarting
     "-c", "model_auto_compact_token_limit=100",
     "-c", 'model_auto_compact_token_limit_scope="total"',
   ]);
+  await a.close();
+});
+
+test("Codex records provider-triggered compactions when completion follows usage", async () => {
+  const a = adapter({ resumeSessionId: "session-1" });
+  const internal = a as unknown as { handle(message: unknown): void; nativeCompactions: unknown[] };
+  internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 80 }, last: {}, modelContextWindow: 100 } } });
+  internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { type: "contextCompaction" } } });
+  const recorded = a.drainNativeCompactions();
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]?.provider, "codex");
+  assert.equal(recorded[0]?.usageRevision, 1, "the event records which cached usage generation preceded compaction");
+  assert.equal(a.drainNativeCompactions().length, 0, "draining is idempotent");
+  await a.close();
+});
+
+test("Codex records provider-triggered compactions when usage follows completion without duplication", async () => {
+  const a = adapter({ resumeSessionId: "session-1" });
+  const internal = a as unknown as { handle(message: unknown): void; nativeCompactions: unknown[] };
+  internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { type: "contextCompaction" } } });
+  assert.equal(a.drainNativeCompactions().length, 1);
+  internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 25 }, last: {}, modelContextWindow: 100 } } });
+  assert.equal(a.drainNativeCompactions().length, 0, "a later usage event must not duplicate the completion");
   await a.close();
 });
 

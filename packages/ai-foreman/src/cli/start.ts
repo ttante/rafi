@@ -48,7 +48,7 @@ import { eligibleTickets, evaluateTicketEligibility } from "../tickets/eligibili
 import { BUILTIN_BRANCH_PREFIX, validateBranchPrefix } from "../branch/prefix.js";
 import { captureCurrentWorkflowSessionIdentity, CurrentWorkflowChangedError, CurrentWorkflowGuardAdapter } from "../branch/currentGuard.js";
 import { ContinuityAdapter, ContinuityRecoveryRequiredError, SessionUnavailableContinuityError } from "../continuity.js";
-import { ContextCapabilityError, RoleSessionController } from "../sessionLifecycle.js";
+import { ContextCapabilityError, RoleSessionController, ThresholdCompactionController } from "../sessionLifecycle.js";
 import { HandoffLoopError, HandoffService, parseBuilderHandoffRequest } from "../handoffs.js";
 import { captureWorkspaceIdentity, createProviderSessionRef, resolveUniqueSessionBinding } from "../sessionIdentity.js";
 import { SessionUnavailableError } from "../adapters/sessionFailure.js";
@@ -942,6 +942,16 @@ export function buildStartCommand(): Command {
       };
 
       const createRawQa = async (qaCwd: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
+        // Isolated QA conversations are intentionally disposable. Resolve live
+        // QA settings for each one so a threshold-only update applies to the
+        // very next review instead of waiting for a nonexistent session reuse.
+        const qaSettings = liveRoleSettings("qa", resolvedContinuitySettings("qa"));
+        const ready = await ensureRuntimeReadyForCommand(qaCwd, qaSettings.make, {
+          label: "live QA settings",
+          yes: true,
+          allowSwitch: false,
+          model: qaSettings.model === "default" ? undefined : qaSettings.model,
+        });
         const qaPolicy = new PermissionPolicy(config.permissions, qaCwd);
         const roleBundle = loadRoleBundle("qa", { projectDir: qaCwd });
         const adapterOpts = {
@@ -949,20 +959,20 @@ export function buildStartCommand(): Command {
           configRoot: cwd,
           sessionRole: "qa" as const,
           sessionStream: "qa",
-          runtimeExecutable: qaExecutable,
+          runtimeExecutable: ready.executable,
           runtimePhase: "qa" as const,
-          model: qaModel,
+          model: qaSettings.model === "default" ? undefined : qaSettings.model,
           ...(sessionRef ? { resumeSessionRef: sessionRef } : {}),
           sessionGeneration: sessionRef?.generation ?? 0,
           workspaceIdentity: captureWorkspaceIdentity(qaCwd),
           permission: createPermissionHandler(qaPolicy, log),
-          effort: qaEffort,
-          fast: qaFast,
+          effort: explicitEffort(qaSettings.reasoning),
+          fast: qaSettings.fast,
           systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
-          autoCompactThresholdPercent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50,
+          autoCompactThresholdPercent: qaSettings.auto_compact_threshold_percent,
         };
-        const created = qaAgent === "codex"
+        const created = qaSettings.make === "codex"
           ? new CodexAdapter(adapterOpts)
           : await ClaudeAdapter.create(adapterOpts);
         await prepareNativeAutoCompaction(created);
@@ -1170,7 +1180,7 @@ export function buildStartCommand(): Command {
           runId: activeContinuityRunId,
           role: "qa",
           initialSettings: qaSettings,
-          historicalCountUncertain: Boolean(recoveryRecord && (recoveryRecord.legacy || !recoveryRecord.runDecisions)),
+          historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, recoveryRecord, activeContinuityRunId, "qa"),
           readSettings: () => liveRoleSettings("qa", qaSettings),
           settingsBoundary: (input) => applyQaSettingsBoundary(activeContinuityRunId!, qaCwd, input),
           settingsAdopted: (settings, active) => liveStatusReporter?.updateState({
@@ -1202,6 +1212,18 @@ export function buildStartCommand(): Command {
           },
         });
         return (await controller.atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter;
+      };
+      const observeQaNativeCompactions = async (adapter: BuilderAdapter): Promise<void> => {
+        if (!activeContinuityRunId) return;
+        const qaSettings = resolvedContinuitySettings("qa");
+        const controller = new ThresholdCompactionController({
+          projectDir: cwd,
+          runId: activeContinuityRunId,
+          role: "qa",
+          initialSettings: qaSettings,
+          historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, recoveryRecord, activeContinuityRunId, "qa"),
+        });
+        await controller.observeNativeCompactions(adapter);
       };
       const qaNonconvergence = createQaNonconvergenceHandler(cwd, Boolean(opts.yes), roleDefaults.planner);
 
@@ -1438,7 +1460,7 @@ export function buildStartCommand(): Command {
           if (existing) return existing;
           const controller = RoleSessionController.managed({
             projectDir: cwd, runId: masterRun.runId, role: "builder", initialSettings: capturedBranchBuilder,
-            historicalCountUncertain: Boolean(recoveryRecord && (recoveryRecord.legacy || !recoveryRecord.runDecisions)),
+            historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, recoveryRecord, masterRun.runId, "builder"),
             readSettings: () => liveRoleSettings("builder", capturedBranchBuilder),
             settingsBoundary: (input) => applyBuilderSettingsBoundary(masterRun.runId, worktreePath, input),
             settingsAdopted: (settings, active) => liveStatusReporter?.updateState({
@@ -1525,8 +1547,10 @@ export function buildStartCommand(): Command {
           },
           qaNonconvergence,
           beforeBuilderTurn: async (adapter, frozenAction, worktreePath) => (await branchContextController(worktreePath).atSafeBoundary(adapter, frozenAction)).adapter,
+          observeBuilderNativeCompactions: async (adapter, worktreePath) => { await branchContextController(worktreePath).observeNativeCompactions(adapter); },
           builderSessionBoundary: async (adapter, frozenAction, strategy, worktreePath) => (await branchContextController(worktreePath).atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter,
           qaSessionBoundary,
+          observeQaNativeCompactions,
         });
         if (branchSessionFailure) {
           const failure = branchSessionFailure;
@@ -1665,7 +1689,7 @@ export function buildStartCommand(): Command {
         runId: buildRun.runId,
         role: "builder",
         initialSettings: capturedBuilder,
-        historicalCountUncertain: Boolean(recoveryRecord && (recoveryRecord.legacy || !recoveryRecord.runDecisions)),
+        historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, recoveryRecord, buildRun.runId, "builder"),
         readSettings: () => liveRoleSettings("builder", capturedBuilder),
         settingsBoundary: (input) => applyBuilderSettingsBoundary(buildRun.runId, cwd, input),
         settingsAdopted: (settings, active) => liveStatusReporter?.updateState({
@@ -1713,6 +1737,8 @@ export function buildStartCommand(): Command {
         async (adapter, frozenAction) => (await contextController.atSafeBoundary(adapter, frozenAction)).adapter,
         async (adapter, frozenAction, strategy) => (await contextController.atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter,
         qaSessionBoundary,
+        observeQaNativeCompactions,
+        async (adapter) => { await contextController.observeNativeCompactions(adapter); },
       );
       activeBuilderForStatus = () => foreman.builderAdapter();
       const statusReporter = liveStatusReporter = new AgentStatusReporter({
@@ -1974,6 +2000,19 @@ function readAgentDefaults(projectDir: string): { revision?: number; builder?: A
 
 function explicitDefaultValue(value: string | undefined): string | undefined {
   return value && value !== "default" ? value : undefined;
+}
+
+function recoveryCompactionHistoryUncertain(
+  projectDir: string,
+  recovery: { legacy?: boolean; runDecisions?: unknown } | undefined,
+  runId: string | undefined,
+  role: "builder" | "qa",
+): boolean {
+  if (!recovery) return false;
+  if (recovery.legacy || !recovery.runDecisions || !runId) return true;
+  const db = new WorkflowDb(projectDir);
+  try { return db.hasUncheckpointedRoleTurn(runId, role); }
+  finally { db.close(); }
 }
 
 /** Make the executable branch plan exactly match each explicit root-to-tip stack. */

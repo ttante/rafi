@@ -292,6 +292,9 @@ export class Foreman {
     private readonly beforeBuilderTurn?: (adapter: BuilderAdapter, frozenAction: string) => Promise<BuilderAdapter>,
     private readonly builderSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy) => Promise<BuilderAdapter>,
     private readonly qaSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>,
+    private readonly observeQaNativeCompactions?: (adapter: BuilderAdapter) => Promise<void>,
+    /** Persist a Builder's provider-native event immediately after every turn. */
+    private readonly observeBuilderNativeCompactions?: (adapter: BuilderAdapter) => Promise<void>,
   ) {
     this.ticketsEnabled = !!(projectDir && isTicketsInitialized(projectDir));
   }
@@ -350,6 +353,7 @@ export class Foreman {
       adapter = this.builder;
     }
     let result = await adapter.sendTurn(instruction);
+    await this.observeBuilderNative(adapter);
     let status = parseStepStatus(result.text);
     if (result.failure?.category === "session-unavailable") return { result, status };
     if (status.kind === "unknown") {
@@ -357,9 +361,14 @@ export class Foreman {
         status = { kind: "needs_input", question: lastLine(result.text), choices: ["Continue", "Cancel"] };
       } else {
         const qa = /\bQA\b|qa_pass|qa_fail/i.test(instruction);
+        if (adapter === this.builder && this.beforeBuilderTurn) {
+          this.builder = await this.beforeBuilderTurn(this.builder, instruction);
+          adapter = this.builder;
+        }
         result = await adapter.sendTurn(qa
           ? "Protocol correction only: based on the review already completed, return exactly one final STEP_STATUS: qa_pass or STEP_STATUS: qa_fail marker. Do not repeat QA, tests, tools, or compaction."
           : "Protocol correction only: based on the work already completed, return exactly one final STEP_STATUS: done, plan_complete, blocked, or needs_input marker. Do not repeat implementation, tools, or compaction.");
+        await this.observeBuilderNative(adapter);
         status = parseStepStatus(result.text);
         if (status.kind === "unknown") status = { ...status, error: `protocol correction exhausted: ${status.error ?? "missing final marker"}` };
       }
@@ -390,7 +399,12 @@ export class Foreman {
         break;
       }
 
+      if (adapter === this.builder && this.beforeBuilderTurn) {
+        this.builder = await this.beforeBuilderTurn(this.builder, String(answer));
+        adapter = this.builder;
+      }
       result = await adapter.sendTurn(String(answer));
+      await this.observeBuilderNative(adapter);
       status = parseStepStatus(result.text);
     }
 
@@ -402,6 +416,7 @@ export class Foreman {
     const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId);
     if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, instruction);
     const result = await this.builder.sendTurn(instruction);
+    await this.observeBuilderNative(this.builder);
     this.log.write("preflight", {
       ticketsProvided: ticketsContent !== undefined,
       costUsd: result.costUsd,
@@ -415,6 +430,7 @@ export class Foreman {
   async sendPreflightFeedback(feedback: string): Promise<void> {
     if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, feedback);
     const result = await this.builder.sendTurn(feedback);
+    await this.observeBuilderNative(this.builder);
     this.log.write("preflight", { feedback: true, costUsd: result.costUsd, isError: result.isError });
     if (result.isError) throw new Error(result.text);
   }
@@ -424,6 +440,10 @@ export class Foreman {
     instruction: string,
   ): Promise<{ result: TurnResult; status: StepStatus }> {
     return this.doTurn(instruction);
+  }
+
+  private async observeBuilderNative(adapter: BuilderAdapter): Promise<void> {
+    if (adapter === this.builder) await this.observeBuilderNativeCompactions?.(adapter);
   }
 
   /**
@@ -445,6 +465,7 @@ export class Foreman {
         state: this.qaStream,
         createQa: this.qaFactory,
         sessionBoundary: this.qaSessionBoundary,
+        observeNativeCompactions: this.observeQaNativeCompactions,
         maxCycles: this.qaMaxCycles,
         fix: async (issues) => {
           const instruction = buildQaFixInstruction(issues);

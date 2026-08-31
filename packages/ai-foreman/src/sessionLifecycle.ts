@@ -102,6 +102,13 @@ export class RoleSessionController {
     return result;
   }
 
+  /** Record provider-native automatic compaction immediately after a role turn. */
+  async observeNativeCompactions(adapter: BuilderAdapter): Promise<number | undefined> {
+    if (!this.thresholdController) throw new Error("this role session controller does not own threshold lifecycle policy");
+    await this.adoptManagedAdapter(adapter);
+    return this.thresholdController.observeNativeCompactions(adapter);
+  }
+
   effectiveSettings(): ResolvedAgentSettings {
     return this.thresholdController?.effectiveSettings() ?? this.options.settings;
   }
@@ -395,6 +402,9 @@ export class ThresholdCompactionController {
       try { db.recordContextSample(sample); } finally { db.close(); }
       return { adapter, action: "continued", sample, effectiveThreshold: this.threshold(), compactionCount: 0 };
     }
+    // Drain first so a provider-confirmed compaction is persisted with a
+    // measurement taken after the event, regardless of provider event order.
+    const nativeCount = await this.observeNativeCompactions(adapter);
     let sample = await this.measure(adapter, "provider-query");
     const threshold = this.threshold();
     let session = adapter.sessionRef?.() ?? adapter.sessionId();
@@ -405,10 +415,18 @@ export class ThresholdCompactionController {
     let count = 0;
     try {
       db.recordContextSample(sample);
-      count = db.successfulCompactionCount(this.options.runId, this.options.role, session);
+      count = nativeCount ?? db.successfulCompactionCount(this.options.runId, this.options.role, session);
     } finally { db.close(); }
 
+    // An interrupted dispatched turn leaves both conversation state and native
+    // compaction accounting unknowable. Do not continue that exact session,
+    // even if its next occupancy sample happens to be below threshold.
+    if (this.historicalCountUncertain) {
+      return this.performHandoff(adapter, sample, count, frozenAction, "a prior provider turn lacked a durable completion checkpoint; handing off rather than reusing an uncertain session");
+    }
+
     if ((sample.percentage ?? -1) < threshold) {
+      if (nativeCount !== undefined && count >= (this.settings.compact_maximum ?? 10)) return this.performHandoff(adapter, sample, count, frozenAction, `compact maximum ${this.settings.compact_maximum ?? 10} reached after provider-native compaction`);
       this.armed = true;
       return { adapter, action: "below-threshold", sample, effectiveThreshold: threshold, compactionCount: count };
     }
@@ -450,12 +468,13 @@ export class ThresholdCompactionController {
     strategy: SessionStrategy = this.settings.session_strategy,
   ): Promise<ContextBoundaryResult> {
     adapter = await this.adoptSettings(adapter, frozenAction);
+    const nativeCount = await this.observeNativeCompactions(adapter);
     const sample = await this.measure(adapter, "provider-query");
     const db = new WorkflowDb(this.options.projectDir);
     let count = 0;
     try {
       db.recordContextSample(sample);
-      count = db.successfulCompactionCount(this.options.runId, this.options.role, adapter.sessionRef?.() ?? adapter.sessionId());
+      count = nativeCount ?? db.successfulCompactionCount(this.options.runId, this.options.role, adapter.sessionRef?.() ?? adapter.sessionId());
     } finally { db.close(); }
     if (strategy === "fresh") {
       return this.performHandoff(adapter, sample, count, frozenAction, "ordinary session_strategy=fresh boundary requires a validated fresh successor");
@@ -466,6 +485,48 @@ export class ThresholdCompactionController {
 
   effectiveSettings(): ResolvedAgentSettings { return this.settings; }
   effectiveThreshold(): number { return this.threshold(); }
+
+  /** Persist provider-triggered compactions at a host-owned boundary. */
+  async observeNativeCompactions(adapter: BuilderAdapter, afterSample?: ContextSample): Promise<number | undefined> {
+    const observed = adapter.drainNativeCompactions?.() ?? [];
+    if (observed.length === 0) return undefined;
+    const sessionId = adapter.sessionId();
+    const sessionRef = adapter.sessionRef?.();
+    if (!sessionId || !sessionRef) {
+      adapter.restoreNativeCompactions?.(observed);
+      throw new ContextCapabilityError(this.options.runId, this.options.role, "provider reported automatic compaction without a validated session identity");
+    }
+    const sessionKey = providerSessionKey(sessionRef);
+    const db = new WorkflowDb(this.options.projectDir);
+    try {
+      const keys: string[] = [];
+      for (const compaction of observed) {
+        const idempotencyKey = `native-compact:${this.options.runId}:${this.options.role}:${sha(`${sessionKey}:${compaction.id}`).slice(0, 32)}`;
+        keys.push(idempotencyKey);
+        const prior = db.startCompactionAttempt({
+          idempotencyKey, runId: this.options.runId, role: this.options.role,
+          providerSessionId: sessionId, sessionRef, sessionKey,
+          crossingKey: `provider-native:${compaction.provider}:${compaction.id}`,
+        });
+        // Confirmation, not occupancy telemetry, is authoritative for the
+        // count. Persist it first so an out-of-order or unavailable usage
+        // event cannot lose a completed provider compaction.
+        if (prior.status === "started") db.finishCompactionAttempt(idempotencyKey, { ok: true });
+      }
+      const usage = afterSample ? undefined : await adapter.contextUsageAfterNativeCompaction?.(observed.at(-1)!);
+      const sample = afterSample ?? (usage ? this.sampleFromUsage(adapter, usage, "post-compact") : undefined);
+      if (sample) {
+        db.recordContextSample(sample);
+        for (const key of keys) db.recordCompactionAfterSample(key, sample);
+      }
+      return db.successfulCompactionCount(this.options.runId, this.options.role, sessionRef);
+    } catch (error) {
+      // Do not lose a provider confirmation merely because its durable receipt
+      // encountered a transient database/measurement failure.
+      adapter.restoreNativeCompactions?.(observed);
+      throw error;
+    } finally { db.close(); }
+  }
 
   private async compactSession(
     adapter: BuilderAdapter,
@@ -604,6 +665,7 @@ export class ThresholdCompactionController {
       || next.model !== this.settings.model
       || next.reasoning !== this.settings.reasoning
       || next.fast !== this.settings.fast;
+    const nativeCompactionChanged = next.auto_compact_threshold_percent !== this.settings.auto_compact_threshold_percent;
     let adoptedAdapter = adapter;
     if (providerControlsChanged) {
       if (this.options.settingsBoundary) {
@@ -618,6 +680,11 @@ export class ThresholdCompactionController {
       if (adoptedAdapter.agent !== next.make) {
         throw new ContextCapabilityError(this.options.runId, this.options.role, `settings revision ${next.settings_revision} requested ${next.make}, but the adopted session reports ${adoptedAdapter.agent}`);
       }
+    }
+    if (nativeCompactionChanged && !providerControlsChanged) {
+      if (!adapter.prepareAutoCompaction) throw new ContextCapabilityError(this.options.runId, this.options.role, `settings revision ${next.settings_revision} cannot apply provider-native automatic compaction`);
+      try { await adapter.prepareAutoCompaction(next.auto_compact_threshold_percent); }
+      catch (error) { throw new ContextCapabilityError(this.options.runId, this.options.role, `settings revision ${next.settings_revision} could not apply the automatic-compaction threshold: ${sanitize(error)}`); }
     }
     this.settings = next;
     this.runOnlyThreshold = undefined;
@@ -637,6 +704,10 @@ export class ThresholdCompactionController {
       if (usage && Number.isFinite(usage.used) && (usage.percentage !== undefined || usage.maximum !== undefined)) break;
     }
     if (!usage || !Number.isFinite(usage.used)) throw new ContextCapabilityError(this.options.runId, this.options.role, `truthful context occupancy was unavailable after ${attempts} provider attempt(s)`);
+    return this.sampleFromUsage(adapter, usage, source);
+  }
+
+  private sampleFromUsage(adapter: BuilderAdapter, usage: ContextUsage, source: ContextSample["source"]): ContextSample {
     const percentage = usage.percentage ?? (usage.maximum ? usage.used / usage.maximum * 100 : undefined);
     if (percentage === undefined || !Number.isFinite(percentage)) throw new ContextCapabilityError(this.options.runId, this.options.role, "provider context occupancy lacks a usable percentage and maximum");
     const ref = adapter.sessionRef?.();

@@ -396,6 +396,7 @@ test("each disposable QA cycle creates a fresh provider session in a different s
   execFileSync("git", ["commit", "-qm", "base"], { cwd: projectDir });
   const cws: string[] = [];
   const resumeIds: Array<string | undefined> = [];
+  const observedQaSessions: string[] = [];
   let created = 0;
   const state: QaStreamState = { reviews: 0, modificationViolations: 0 };
   const result = await runIsolatedQa({
@@ -418,12 +419,14 @@ test("each disposable QA cycle creates a fresh provider session in a different s
       });
     },
     fix: async () => ({ ok: true }),
+    observeNativeCompactions: async (adapter) => { if (adapter.sessionId()) observedQaSessions.push(adapter.sessionId()!); },
   });
   assert.equal(result.outcome, "passed");
   assert.equal(created, 2);
   assert.notEqual(cws[0], cws[1]);
   assert.ok(cws.every((cwd) => cwd.includes("rafi-qa-") && cwd.endsWith("/review")));
   assert.deepEqual(resumeIds, [undefined, undefined]);
+  assert.deepEqual(observedQaSessions, ["qa-1", "qa-2"]);
   assert.equal(state.sessionId, "qa-2");
 });
 

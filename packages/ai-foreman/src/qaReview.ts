@@ -19,6 +19,8 @@ export interface IsolatedQaOptions {
   createQa: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>;
   /** Host-owned ordinary QA boundary. Fresh strategies must return a validated successor. */
   sessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>;
+  /** Persist provider-native automatic compactions without imposing an ordinary QA boundary. */
+  observeNativeCompactions?: (adapter: BuilderAdapter) => Promise<void>;
   fix: (issues: string) => Promise<{ ok: boolean; detail?: string }>;
   maxCycles: number;
   evidence?: (entry: { cycle: number; outcome: string; detail: string; qaDiff?: string[] }) => void;
@@ -63,6 +65,7 @@ async function oneReview(opts: IsolatedQaOptions, cycle: number): Promise<Isolat
     // into a newly-created /tmp/rafi-qa-* directory.
     qa = await opts.createQa(snapshot.path);
     const turn = await qa.sendTurn(handoff); const status = parseStepStatus(turn.text);
+    await opts.observeNativeCompactions?.(qa);
     opts.state.reviews += 1; opts.state.sessionId = qa.sessionId(); opts.state.sessionRef = qa.sessionRef?.();
     const changes = await withActivityPhase("checking QA file changes", () => snapshot.qaChanges());
     if (changes.length) {

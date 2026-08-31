@@ -30,6 +30,7 @@ import type {
   BuilderAdapter,
   BuilderAdapterOptions,
   BuilderEvent,
+  NativeCompaction,
   CompactResult,
   ContextUsage,
   PermissionDecision,
@@ -205,6 +206,10 @@ export class ClaudeAdapter implements BuilderAdapter {
   private apiErrorStatus?: number | null;
   private compactResult?: CompactResult;
   private autoCompactionPrepared = false;
+  private preparedAutoCompactThreshold?: number;
+  private manualCompactionInFlight = false;
+  private nativeCompactions: NativeCompaction[] = [];
+  private nativeCompactionSequence = 0;
   private cumulativeUsage: ProviderSessionUsage = { observedAt: new Date(0).toISOString(), source: "provider" };
   private pending?: {
     resolve: (r: TurnResult) => void;
@@ -353,6 +358,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       if (msg.compact_result === "success") {
         this.compactResult = { ok: true };
         this.eventQueue.push({ kind: "session-transition", transition: "compacted" });
+        if (!this.manualCompactionInFlight) this.nativeCompactions.push({ id: `claude:${this._sessionId ?? "unknown"}:${++this.nativeCompactionSequence}`, occurredAt: new Date().toISOString(), provider: "claude" });
       } else if (msg.compact_result === "failed") {
         this.compactResult = { ok: false, error: sanitizeDiagnostics(msg.compact_error ?? "Claude native compaction failed") };
       }
@@ -480,7 +486,10 @@ export class ClaudeAdapter implements BuilderAdapter {
 
   async compact(): Promise<CompactResult> {
     this.compactResult = undefined;
-    const result = await this.sendTurn("/compact");
+    this.manualCompactionInFlight = true;
+    let result: TurnResult;
+    try { result = await this.sendTurn("/compact"); }
+    finally { this.manualCompactionInFlight = false; }
     if (result.failure?.category === "session-unavailable") {
       return { ok: false, error: result.text || result.failure.diagnostics, failure: result.failure };
     }
@@ -488,9 +497,11 @@ export class ClaudeAdapter implements BuilderAdapter {
     return { ok: false, error: sanitizeDiagnostics(result.text || "Claude did not emit an explicit compact status") };
   }
 
-  async prepareAutoCompaction(): Promise<void> {
-    if (this.autoCompactionPrepared || this.opts.autoCompactThresholdPercent === undefined) return;
-    const threshold = validThreshold(this.opts.autoCompactThresholdPercent);
+  async prepareAutoCompaction(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<void> {
+    if (thresholdPercent === undefined) return;
+    const threshold = validThreshold(thresholdPercent);
+    if (this.autoCompactionPrepared && this.preparedAutoCompactThreshold === threshold) return;
+    this.opts.autoCompactThresholdPercent = threshold;
     await this.query.initializationResult();
     await this.query.applyFlagSettings({ autoCompactEnabled: true });
     const baseline = await this.query.getContextUsage();
@@ -512,7 +523,15 @@ export class ClaudeAdapter implements BuilderAdapter {
       throw new Error("Claude did not accept the requested native automatic-compaction ceiling");
     }
     this.autoCompactionPrepared = true;
+    this.preparedAutoCompactThreshold = threshold;
   }
+
+  drainNativeCompactions(): NativeCompaction[] {
+    const pending = this.nativeCompactions;
+    this.nativeCompactions = [];
+    return pending;
+  }
+  restoreNativeCompactions(compactions: NativeCompaction[]): void { this.nativeCompactions.unshift(...compactions); }
 
   async contextUsage(): Promise<ContextUsage | undefined> {
     try {

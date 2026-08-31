@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { loadSkill } from "special-agents";
 import { BuilderEventQueue, withActivityPhase } from "../activity.js";
 import { normalizeRuntimeErrorText } from "../runtimeAuth.js";
-import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, CompactResult, ContextUsage, ProviderSessionUsage, ProviderSettingSwitch, TurnResult } from "./types.js";
+import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, CompactResult, ContextUsage, NativeCompaction, ProviderSessionUsage, ProviderSettingSwitch, TurnResult } from "./types.js";
 import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
 import { canonicalSessionPath, createProviderSessionRef, validateProviderSessionScope } from "../sessionIdentity.js";
 import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
@@ -49,6 +49,11 @@ export class CodexAdapter implements BuilderAdapter {
   private stderr = "";
   private nativeAutoCompactTokenLimit?: number;
   private autoCompactionPrepared = false;
+  private preparedAutoCompactThreshold?: number;
+  private nativeCompactions: NativeCompaction[] = [];
+  private nativeCompactionSequence = 0;
+  private manualCompactionInFlight = false;
+  private observedToolCalls = 0;
 
   constructor(private readonly opts: BuilderAdapterOptions) {
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
@@ -156,11 +161,14 @@ export class CodexAdapter implements BuilderAdapter {
           && this.usageRevision > usageRevision
           && this.usage !== undefined;
       }, 30_000);
-      await Promise.all([
-        this.request("thread/compact/start", { threadId: this._sessionId }),
-        done,
-        postCompactUsage,
-      ]);
+      this.manualCompactionInFlight = true;
+      try {
+        await Promise.all([
+          this.request("thread/compact/start", { threadId: this._sessionId }),
+          done,
+          postCompactUsage,
+        ]);
+      } finally { this.manualCompactionInFlight = false; }
       this.eventQueue.push({ kind: "session-transition", transition: "compacted" });
       return { ok: true };
     } catch (error) {
@@ -169,19 +177,21 @@ export class CodexAdapter implements BuilderAdapter {
     }
   }
 
-  async prepareAutoCompaction(): Promise<void> {
-    if (this.autoCompactionPrepared || this.opts.autoCompactThresholdPercent === undefined) return;
-    const threshold = validThreshold(this.opts.autoCompactThresholdPercent);
+  async prepareAutoCompaction(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<void> {
+    if (thresholdPercent === undefined) return;
+    const threshold = validThreshold(thresholdPercent);
+    if (this.autoCompactionPrepared && this.preparedAutoCompactThreshold === threshold) return;
+    this.opts.autoCompactThresholdPercent = threshold;
     await this.ensureThread();
     // Codex reports its model context window in token-usage notifications, not
     // in thread/start. Establish the otherwise idle thread with a constrained
     // setup turn, then restart the app server with the provider-native ceiling
     // before any Builder or QA work is sent.
-    if (!this.usage) {
-      const setup = await this.sendTurnInternal("Rafi setup only: do not call tools or modify files; reply exactly CONTEXT_READY.");
-      if (setup.isError || setup.text.trim() !== "CONTEXT_READY") {
-        throw new Error(`Codex automatic-compaction setup failed: ${setup.text.slice(0, 240)}`);
-      }
+    if (!this.usage?.maximum) {
+      const toolsBefore = this.observedToolCalls;
+      const setup = await this.sendTurnInternal("Rafi internal initialization only. Do not call tools or modify files. Reply briefly that the context is ready.");
+      if (setup.isError) throw new Error(`Codex automatic-compaction setup failed: ${setup.text.slice(0, 240)}`);
+      if (this.observedToolCalls !== toolsBefore) throw new Error("Codex automatic-compaction setup unexpectedly called a tool");
     }
     const maximum = this.usage?.maximum;
     if (!maximum || !Number.isFinite(maximum) || maximum <= 0) {
@@ -191,9 +201,24 @@ export class CodexAdapter implements BuilderAdapter {
     await this.restartForAutoCompaction();
     await this.ensureThread();
     this.autoCompactionPrepared = true;
+    this.preparedAutoCompactThreshold = threshold;
   }
 
+  drainNativeCompactions(): NativeCompaction[] {
+    const pending = this.nativeCompactions;
+    this.nativeCompactions = [];
+    return pending;
+  }
+  restoreNativeCompactions(compactions: NativeCompaction[]): void { this.nativeCompactions.unshift(...compactions); }
+
   async contextUsage(): Promise<ContextUsage | undefined> { return this.usage; }
+  async contextUsageAfterNativeCompaction(compaction: NativeCompaction): Promise<ContextUsage | undefined> {
+    if (compaction.usageRevision === undefined || this.usageRevision > compaction.usageRevision) return this.usage;
+    try {
+      await this.waitFor("thread/tokenUsage/updated", () => this.usageRevision > compaction.usageRevision!, 5_000);
+      return this.usage;
+    } catch { return undefined; }
+  }
   async sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.providerSessionUsage ? { ...this.providerSessionUsage } : undefined; }
   async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
     this.opts.model = settings.model; this.opts.effort = settings.effort; this.opts.fast = settings.fast;
@@ -357,12 +382,26 @@ export class CodexAdapter implements BuilderAdapter {
     const params = message.params ?? {};
     if (message.method === "item/started") {
       const item = params.item as Record<string, unknown> | undefined;
+      if (isCodexToolItem(item)) this.observedToolCalls += 1;
       const activity = codexItemActivity(item);
       if (activity) this.eventQueue.push({ kind: "activity", provider: "codex", ...activity });
     } else if (message.method === "item/completed") {
       const item = params.item as Record<string, unknown> | undefined;
       if (item?.type === "agentMessage" && typeof item.text === "string") { this.activeText.push(item.text); this.eventQueue.push({ kind: "text", text: item.text }); }
-      else if (item?.type === "commandExecution") this.eventQueue.push({ kind: "tool", name: "command_execution", input: { command: item.command } });
+      else if (item?.type === "commandExecution") {
+        this.eventQueue.push({ kind: "tool", name: "command_execution", input: { command: item.command } });
+      } else if (item?.type === "contextCompaction" && !this.manualCompactionInFlight) {
+        // Completion is the provider's authoritative confirmation. Token-usage
+        // notifications may arrive before or after it, so do not make durable
+        // compaction accounting depend on their delivery order.
+        this.nativeCompactions.push({
+          id: `codex:${this._sessionId ?? "unknown"}:${Date.now()}:${++this.nativeCompactionSequence}`,
+          occurredAt: new Date().toISOString(),
+          provider: "codex",
+          usageRevision: this.usageRevision,
+        });
+        this.eventQueue.push({ kind: "session-transition", transition: "compacted", detail: "provider-native automatic compaction" });
+      }
       else {
         const activity = codexItemActivity(item, true);
         if (activity) this.eventQueue.push({ kind: "activity", provider: "codex", ...activity });
@@ -487,6 +526,10 @@ function codexItemActivity(item: Record<string, unknown> | undefined, completed 
   if (item.type === "contextCompaction") return { state: completed ? "context compacted" : "compacting context" };
   if (item.type === "agentMessage") return { state: completed ? "received response" : "writing response" };
   return undefined;
+}
+
+function isCodexToolItem(item: Record<string, unknown> | undefined): boolean {
+  return item?.type === "commandExecution" || item?.type === "mcpToolCall" || item?.type === "dynamicToolCall" || item?.type === "webSearch" || item?.type === "fileChange";
 }
 
 function loadSkillMarkdown(cwd: string, skill: string): string | undefined {

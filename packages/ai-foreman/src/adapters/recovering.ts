@@ -2,7 +2,7 @@ import { isCancel, log, select } from "@clack/prompts";
 import type { AgentRuntime } from "../runtimeAuth.js";
 import { AsyncQueue } from "../util/asyncQueue.js";
 import { pauseActivityForInput, reportBuilderEvent } from "../activity.js";
-import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, ProviderSessionUsage, TurnResult } from "./types.js";
+import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, NativeCompaction, ProviderSessionUsage, TurnResult } from "./types.js";
 import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
 
 export type TurnRecoveryChoice = "retry" | "switch" | "cancel";
@@ -85,6 +85,10 @@ export class RecoveringAdapter implements BuilderAdapter {
   }
 
   compact(): Promise<CompactResult> { return this.adapter.compact?.() ?? Promise.resolve({ ok: false, error: "native compaction unavailable" }); }
+  prepareAutoCompaction(thresholdPercent?: number): Promise<void> { return this.adapter.prepareAutoCompaction?.(thresholdPercent) ?? Promise.resolve(); }
+  drainNativeCompactions(): import("./types.js").NativeCompaction[] { return this.adapter.drainNativeCompactions?.() ?? []; }
+  restoreNativeCompactions(compactions: NativeCompaction[]): void { this.adapter.restoreNativeCompactions?.(compactions); }
+  contextUsageAfterNativeCompaction(compaction: NativeCompaction): Promise<ContextUsage | undefined> { return this.adapter.contextUsageAfterNativeCompaction?.(compaction) ?? Promise.resolve(undefined); }
   contextUsage(): Promise<ContextUsage | undefined> { return this.adapter.contextUsage?.() ?? Promise.resolve(undefined); }
   sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.adapter.sessionUsage?.() ?? Promise.resolve(undefined); }
 
