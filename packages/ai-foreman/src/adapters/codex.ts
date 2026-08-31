@@ -47,6 +47,8 @@ export class CodexAdapter implements BuilderAdapter {
   private providerSessionUsage?: ProviderSessionUsage;
   private lastTurnTokens?: { inputTokens?: number; outputTokens?: number };
   private stderr = "";
+  private nativeAutoCompactTokenLimit?: number;
+  private autoCompactionPrepared = false;
 
   constructor(private readonly opts: BuilderAdapterOptions) {
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
@@ -58,7 +60,16 @@ export class CodexAdapter implements BuilderAdapter {
       .filter((part): part is string => Boolean(part)).join("\n\n");
   }
 
-  buildAppServerArgs(): string[] { return ["app-server", "--listen", "stdio://"]; }
+  buildAppServerArgs(): string[] {
+    const args = ["app-server", "--listen", "stdio://"];
+    if (this.nativeAutoCompactTokenLimit !== undefined) {
+      args.push(
+        "-c", `model_auto_compact_token_limit=${this.nativeAutoCompactTokenLimit}`,
+        "-c", 'model_auto_compact_token_limit_scope="total"',
+      );
+    }
+    return args;
+  }
 
   /** Deprecated fixture helper. Runtime execution uses only app-server. */
   buildArgs(instruction: string): string[] {
@@ -156,6 +167,30 @@ export class CodexAdapter implements BuilderAdapter {
       if (error instanceof SessionUnavailableError) return { ok: false, error: error.message, failure: error.failure };
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  async prepareAutoCompaction(): Promise<void> {
+    if (this.autoCompactionPrepared || this.opts.autoCompactThresholdPercent === undefined) return;
+    const threshold = validThreshold(this.opts.autoCompactThresholdPercent);
+    await this.ensureThread();
+    // Codex reports its model context window in token-usage notifications, not
+    // in thread/start. Establish the otherwise idle thread with a constrained
+    // setup turn, then restart the app server with the provider-native ceiling
+    // before any Builder or QA work is sent.
+    if (!this.usage) {
+      const setup = await this.sendTurnInternal("Rafi setup only: do not call tools or modify files; reply exactly CONTEXT_READY.");
+      if (setup.isError || setup.text.trim() !== "CONTEXT_READY") {
+        throw new Error(`Codex automatic-compaction setup failed: ${setup.text.slice(0, 240)}`);
+      }
+    }
+    const maximum = this.usage?.maximum;
+    if (!maximum || !Number.isFinite(maximum) || maximum <= 0) {
+      throw new Error("Codex did not report a model context window during automatic-compaction setup");
+    }
+    this.nativeAutoCompactTokenLimit = tokenLimit(maximum, threshold);
+    await this.restartForAutoCompaction();
+    await this.ensureThread();
+    this.autoCompactionPrepared = true;
   }
 
   async contextUsage(): Promise<ContextUsage | undefined> { return this.usage; }
@@ -292,8 +327,8 @@ export class CodexAdapter implements BuilderAdapter {
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => { if (line.trim()) try { this.handle(JSON.parse(line) as RpcMessage); } catch { /* ignore non-protocol stdout */ } });
     child.stderr.on("data", (chunk: Buffer) => { this.stderr = `${this.stderr}${chunk.toString()}`.slice(-8192); });
-    child.on("error", (error) => this.disconnect(error));
-    child.on("close", (code) => this.disconnect(new Error(`Codex app-server exited with code ${code ?? "unknown"}`)));
+    child.on("error", (error) => { if (this.process === child) this.disconnect(error); });
+    child.on("close", (code) => { if (this.process === child) this.disconnect(new Error(`Codex app-server exited with code ${code ?? "unknown"}`)); });
     await this.request("initialize", { clientInfo: { name: "rafi", title: "Rafi", version: "1" }, capabilities: { experimentalApi: true, requestAttestation: false } });
     this.write({ method: "initialized", params: {} });
     this.initialized = true;
@@ -403,6 +438,15 @@ export class CodexAdapter implements BuilderAdapter {
     this.notificationWaiters.clear();
   }
 
+  private async restartForAutoCompaction(): Promise<void> {
+    const child = this.process;
+    if (!child) return;
+    this.process = undefined;
+    this.initialized = false;
+    this.threadAttached = false;
+    if (child.exitCode === null) child.kill("SIGTERM");
+  }
+
   private buildSkillsAppendix(): string | undefined {
     if (!this.opts.skills?.length) return undefined;
     const blocks = this.opts.skills.map((skill) => loadSkillMarkdown(this.opts.cwd, skill)).filter((block): block is string => Boolean(block));
@@ -413,6 +457,15 @@ export class CodexAdapter implements BuilderAdapter {
 function optionalNonNegative(value: unknown): number | undefined {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : undefined;
+}
+
+function validThreshold(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 99) throw new Error("automatic compaction threshold must be an integer from 1 to 99");
+  return value;
+}
+
+function tokenLimit(maximum: number, percentage: number): number {
+  return Math.max(1, Math.floor(maximum * percentage / 100));
 }
 
 function activityPhase(phase: BuilderAdapterOptions["runtimePhase"]): string {

@@ -296,9 +296,9 @@ export interface AgentRoleDefaultsV1 {
   session_strategy?: SessionStrategy;
   /** Show authoritative provider cost or trustworthy cumulative tokens. */
   display_session_cost?: boolean;
-  /** Builder-only live context threshold. Missing values normalize to 50. */
+  /** Builder/QA live context threshold. Missing values normalize to 50. */
   auto_compact_threshold_percent?: number;
-  /** Builder-only successful compactions allowed per provider session. */
+  /** Builder/QA successful compactions allowed per provider session. */
   compact_maximum?: number;
 }
 export interface AgentDefaultsV1 {

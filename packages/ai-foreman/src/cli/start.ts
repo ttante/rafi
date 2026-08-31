@@ -636,6 +636,7 @@ export function buildStartCommand(): Command {
           fast: builderFast,
           systemPromptAppend: roleBundle.system || undefined,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+          autoCompactThresholdPercent: thresholdOverride ?? roleDefaults.builder?.auto_compact_threshold_percent ?? 50,
         };
         const adapter: BuilderAdapter = agent === "codex"
           ? new CodexAdapter(adapterOpts)
@@ -647,6 +648,7 @@ export function buildStartCommand(): Command {
             throw new SessionUnavailableError({ runtime: "codex", phase: "preflight", dispatchState: "not-sent", executable: agentExecutable ?? "codex", cwd: builderCwd, diagnostics: availability.detail ?? `Codex session ${sessionRef.sessionId} is ${availability.status}`, availability });
           }
         }
+        await prepareNativeAutoCompaction(adapter);
         return !branchMode ? new CurrentWorkflowGuardAdapter(adapter, builderCwd) : adapter;
       };
 
@@ -663,7 +665,8 @@ export function buildStartCommand(): Command {
         role, source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default",
         reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact",
         settings_revision: settingsRevision, display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false,
-        auto_compact_threshold_percent: 50, compact_maximum: 10,
+        auto_compact_threshold_percent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50,
+        compact_maximum: roleDefaults.qa?.compact_maximum ?? 10,
       };
 
       const liveRoleSettings = (role: "builder" | "qa", base: ResolvedAgentSettings): ResolvedAgentSettings => {
@@ -709,8 +712,10 @@ export function buildStartCommand(): Command {
           fast: settings.fast,
           systemPromptAppend: roleBundle.system || undefined,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+          autoCompactThresholdPercent: settings.auto_compact_threshold_percent,
         };
         const created = settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
+        await prepareNativeAutoCompaction(created);
         return !branchMode ? new CurrentWorkflowGuardAdapter(created, builderCwd) : created;
       };
 
@@ -736,8 +741,11 @@ export function buildStartCommand(): Command {
           fast: settings.fast,
           systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+          autoCompactThresholdPercent: settings.auto_compact_threshold_percent,
         };
-        return settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
+        const created = settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
+        await prepareNativeAutoCompaction(created);
+        return created;
       };
 
       const createRecoveringBuilder = async (builderCwd: string, sessionId?: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
@@ -952,10 +960,13 @@ export function buildStartCommand(): Command {
           fast: qaFast,
           systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+          autoCompactThresholdPercent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50,
         };
-        return qaAgent === "codex"
+        const created = qaAgent === "codex"
           ? new CodexAdapter(adapterOpts)
           : await ClaudeAdapter.create(adapterOpts);
+        await prepareNativeAutoCompaction(created);
+        return created;
       };
 
       const createRecoveringQa = async (qaCwd: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
@@ -1411,7 +1422,8 @@ export function buildStartCommand(): Command {
           role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default",
           reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", settings_revision: settingsRevision,
           display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false,
-          auto_compact_threshold_percent: 50, compact_maximum: 10,
+          auto_compact_threshold_percent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50,
+          compact_maximum: roleDefaults.qa?.compact_maximum ?? 10,
         };
         const firstResumeRef = plan.nodes[0] ? resumeSessionByTicket.get(plan.nodes[0].ticket.id)?.sessionRef : undefined;
         let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null }) : createBuildRun({
@@ -1619,7 +1631,7 @@ export function buildStartCommand(): Command {
         auto_compact_threshold_percent: thresholdOverride ?? roleDefaults.builder?.auto_compact_threshold_percent ?? 50,
         compact_maximum: roleDefaults.builder?.compact_maximum ?? 10,
       };
-      const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false, auto_compact_threshold_percent: 50, compact_maximum: 10, settings_revision: settingsRevision };
+      const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false, auto_compact_threshold_percent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50, compact_maximum: roleDefaults.qa?.compact_maximum ?? 10, settings_revision: settingsRevision };
       let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null }) : createBuildRun({
         tickets: [], repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
         runDecisions: { workMode: "current", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBuilder.auto_compact_threshold_percent ?? 50, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
@@ -1862,6 +1874,19 @@ export function buildStartCommand(): Command {
         fail(`run failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
+}
+
+async function prepareNativeAutoCompaction(adapter: BuilderAdapter): Promise<void> {
+  if (!adapter.prepareAutoCompaction) {
+    await adapter.close().catch(() => {});
+    throw new Error(`${adapter.agent} does not support provider-native automatic compaction`);
+  }
+  try {
+    await adapter.prepareAutoCompaction();
+  } catch (error) {
+    await adapter.close().catch(() => {});
+    throw error;
+  }
 }
 
 function createQaNonconvergenceHandler(projectDir: string, noninteractive: boolean, planner?: AgentRoleDefaultsV1): (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision> {

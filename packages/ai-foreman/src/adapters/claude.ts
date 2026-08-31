@@ -204,6 +204,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   private structuredError?: string;
   private apiErrorStatus?: number | null;
   private compactResult?: CompactResult;
+  private autoCompactionPrepared = false;
   private cumulativeUsage: ProviderSessionUsage = { observedAt: new Date(0).toISOString(), source: "provider" };
   private pending?: {
     resolve: (r: TurnResult) => void;
@@ -487,6 +488,32 @@ export class ClaudeAdapter implements BuilderAdapter {
     return { ok: false, error: sanitizeDiagnostics(result.text || "Claude did not emit an explicit compact status") };
   }
 
+  async prepareAutoCompaction(): Promise<void> {
+    if (this.autoCompactionPrepared || this.opts.autoCompactThresholdPercent === undefined) return;
+    const threshold = validThreshold(this.opts.autoCompactThresholdPercent);
+    await this.query.initializationResult();
+    await this.query.applyFlagSettings({ autoCompactEnabled: true });
+    const baseline = await this.query.getContextUsage();
+    if (!Number.isFinite(baseline.maxTokens) || baseline.maxTokens <= 0
+      || !Number.isFinite(baseline.autoCompactThreshold) || baseline.autoCompactThreshold === undefined
+      || !baseline.isAutoCompactEnabled) {
+      throw new Error("Claude did not expose an enabled native automatic-compaction threshold");
+    }
+    // Claude's setting is the total window. Preserve the provider's own
+    // response/compaction reserve, so the resulting used-token trigger is at
+    // or before Rafi's configured percentage.
+    const reserve = baseline.maxTokens - baseline.autoCompactThreshold;
+    if (reserve < 0) throw new Error("Claude reported an invalid automatic-compaction reserve");
+    const requestedWindow = tokenLimit(baseline.maxTokens, threshold) + reserve;
+    await this.query.applyFlagSettings({ autoCompactEnabled: true, autoCompactWindow: requestedWindow });
+    const installed = await this.query.getContextUsage();
+    if (!installed.isAutoCompactEnabled || installed.autoCompactThreshold === undefined
+      || installed.autoCompactThreshold > tokenLimit(baseline.maxTokens, threshold)) {
+      throw new Error("Claude did not accept the requested native automatic-compaction ceiling");
+    }
+    this.autoCompactionPrepared = true;
+  }
+
   async contextUsage(): Promise<ContextUsage | undefined> {
     try {
       const usage = await this.query.getContextUsage();
@@ -562,6 +589,15 @@ export class ClaudeAdapter implements BuilderAdapter {
 }
 
 function finiteNumber(value: unknown): number | undefined { const parsed = Number(value); return value !== null && value !== undefined && value !== "" && Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined; }
+
+function validThreshold(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 99) throw new Error("automatic compaction threshold must be an integer from 1 to 99");
+  return value;
+}
+
+function tokenLimit(maximum: number, percentage: number): number {
+  return Math.max(1, Math.floor(maximum * percentage / 100));
+}
 
 function isMissingClaudeSession(message: string): boolean {
   return /no conversation found with session id|session .* not found|conversation .* not found/i.test(message);

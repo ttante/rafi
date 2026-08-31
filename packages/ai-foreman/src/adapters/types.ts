@@ -147,6 +147,8 @@ export interface BuilderAdapterOptions {
   systemPromptAppend?: string;
   /** Skill names to preload for this session (Claude: lazy-loaded; Codex: flattened). */
   skills?: string[];
+  /** Provider-native context ceiling, as a percentage of that provider's model window. */
+  autoCompactThresholdPercent?: number;
 }
 
 export interface BuilderAdapter {
@@ -169,6 +171,13 @@ export interface BuilderAdapter {
 
   /** Provider-native compaction on the exact live conversation. */
   compact?(): Promise<CompactResult>;
+
+  /**
+   * Install and verify provider-native automatic compaction before role work is
+   * dispatched. This intentionally happens outside a work turn so a long,
+   * tool-heavy first turn is protected too.
+   */
+  prepareAutoCompaction?(): Promise<void>;
 
   /** Truthful provider context occupancy, when exposed by the provider. */
   contextUsage?(): Promise<ContextUsage | undefined>;

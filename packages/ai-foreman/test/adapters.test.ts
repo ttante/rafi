@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildClaudeQueryOptions, claudeApiRetryEvent, mergeClaudeProviderSessionUsage, permissionDecisionToClaudeResult, requireClaudeSDK } from "../src/adapters/claude.js";
+import { buildClaudeQueryOptions, ClaudeAdapter, claudeApiRetryEvent, mergeClaudeProviderSessionUsage, permissionDecisionToClaudeResult, requireClaudeSDK } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import type { BuilderAdapterOptions } from "../src/adapters/types.js";
 
@@ -121,6 +121,25 @@ test("Claude API retry messages normalize into immediate retry events", () => {
     delayMs: 1500,
     managedBy: "provider",
   });
+});
+
+test("Claude automatic compaction preserves its provider reserve while enforcing the requested ceiling", async () => {
+  const adapter = Object.create(ClaudeAdapter.prototype) as ClaudeAdapter;
+  const calls: Array<Record<string, unknown>> = [];
+  let contextCalls = 0;
+  const query = {
+    initializationResult: async () => ({}),
+    getContextUsage: async () => contextCalls++ === 0
+      ? { maxTokens: 200, autoCompactThreshold: 160, isAutoCompactEnabled: true }
+      : { maxTokens: 140, autoCompactThreshold: 100, isAutoCompactEnabled: true },
+    applyFlagSettings: async (settings: Record<string, unknown>) => { calls.push(settings); },
+  };
+  Object.assign(adapter as object, { opts: { ...BASE_OPTS, autoCompactThresholdPercent: 50 }, query });
+  await adapter.prepareAutoCompaction();
+  assert.deepEqual(calls, [
+    { autoCompactEnabled: true },
+    { autoCompactEnabled: true, autoCompactWindow: 140 },
+  ]);
 });
 
 // --- Codex adapter instruction building ---

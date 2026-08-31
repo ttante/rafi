@@ -83,36 +83,38 @@ export async function promptSessionStrategyDefaults(defaults?: AgentDefaultsV1):
     customized = true;
   }
 
-  const thresholdCurrent = next.roles.builder?.auto_compact_threshold_percent ?? DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
-  const thresholdChoice = await select({ message: "Automatically compact Builder context at:", options: [
-    { value: "saved", label: `${thresholdCurrent}% (Recommended)` },
-    { value: "custom", label: "Custom percentage" },
-  ] });
-  if (isCancel(thresholdChoice)) return { defaults: current, customized: false };
-  let threshold = thresholdCurrent;
-  if (thresholdChoice === "custom") {
-    const answer = await text({ message: "Builder automatic compaction threshold (1-99):", defaultValue: String(thresholdCurrent), validate: (value) => {
-      const parsed = Number(value); return Number.isInteger(parsed) && parsed >= 1 && parsed <= 99 ? undefined : "Enter an integer from 1 to 99";
-    } });
-    if (isCancel(answer)) return { defaults: current, customized: false };
-    threshold = Number(answer); customized ||= threshold !== thresholdCurrent;
+  for (const role of ["builder", "qa"] as const) {
+    const label = role === "builder" ? "Builder" : "QA";
+    const thresholdCurrent = next.roles[role]?.auto_compact_threshold_percent ?? DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
+    const thresholdChoice = await select({ message: `Automatically compact ${label} context at:`, options: [
+      { value: "saved", label: `${thresholdCurrent}% (Recommended)` },
+      { value: "custom", label: "Custom percentage" },
+    ] });
+    if (isCancel(thresholdChoice)) return { defaults: current, customized: false };
+    let threshold = thresholdCurrent;
+    if (thresholdChoice === "custom") {
+      const answer = await text({ message: `${label} automatic compaction threshold (1-99):`, defaultValue: String(thresholdCurrent), validate: (value) => {
+        const parsed = Number(value); return Number.isInteger(parsed) && parsed >= 1 && parsed <= 99 ? undefined : "Enter an integer from 1 to 99";
+      } });
+      if (isCancel(answer)) return { defaults: current, customized: false };
+      threshold = Number(answer); customized ||= threshold !== thresholdCurrent;
+    }
+    const maximumCurrent = next.roles[role]?.compact_maximum ?? DEFAULT_COMPACT_MAXIMUM;
+    const maximumChoice = await select({ message: `Maximum successful compactions per ${label} provider session:`, options: [
+      { value: "saved", label: `${maximumCurrent} (Recommended)` },
+      { value: "custom", label: "Custom maximum" },
+    ] });
+    if (isCancel(maximumChoice)) return { defaults: current, customized: false };
+    let maximum = maximumCurrent;
+    if (maximumChoice === "custom") {
+      const answer = await text({ message: `${label} compact maximum:`, defaultValue: String(maximumCurrent), validate: (value) => {
+        const parsed = Number(value); return Number.isSafeInteger(parsed) && parsed > 0 ? undefined : "Enter a positive safe integer";
+      } });
+      if (isCancel(answer)) return { defaults: current, customized: false };
+      maximum = Number(answer); customized ||= maximum !== maximumCurrent;
+    }
+    next.roles[role] = { ...next.roles[role], auto_compact_threshold_percent: threshold, compact_maximum: maximum };
   }
-
-  const maximumCurrent = next.roles.builder?.compact_maximum ?? DEFAULT_COMPACT_MAXIMUM;
-  const maximumChoice = await select({ message: "Maximum successful compactions per Builder provider session:", options: [
-    { value: "saved", label: `${maximumCurrent} (Recommended)` },
-    { value: "custom", label: "Custom maximum" },
-  ] });
-  if (isCancel(maximumChoice)) return { defaults: current, customized: false };
-  let maximum = maximumCurrent;
-  if (maximumChoice === "custom") {
-    const answer = await text({ message: "Builder compact maximum:", defaultValue: String(maximumCurrent), validate: (value) => {
-      const parsed = Number(value); return Number.isSafeInteger(parsed) && parsed > 0 ? undefined : "Enter a positive safe integer";
-    } });
-    if (isCancel(answer)) return { defaults: current, customized: false };
-    maximum = Number(answer); customized ||= maximum !== maximumCurrent;
-  }
-  next.roles.builder = { ...next.roles.builder, auto_compact_threshold_percent: threshold, compact_maximum: maximum };
   next.revision = customized ? (current.revision ?? 0) + 1 : current.revision;
   const validation = validateAgentDefaults(next);
   if (!validation.valid) throw new Error(validation.errors.join("; "));
@@ -190,8 +192,8 @@ export function buildAgentsCommand(): Command {
     .option("--session-strategy <strategy>", "compact | fresh")
     .option("--show-session-cost", "show authoritative provider cost or cumulative session tokens")
     .option("--no-show-session-cost", "hide session cost/token usage")
-    .option("--auto-compact-threshold <percent>", "Builder context threshold (1-99 percent)")
-    .option("--compact-maximum <count>", "Builder successful compactions allowed per provider session")
+    .option("--auto-compact-threshold <percent>", "Builder or QA context threshold (1-99 percent)")
+    .option("--compact-maximum <count>", "Builder or QA successful compactions allowed per provider session")
     .action(async (project: string, opts: Record<string, unknown>) => {
       const root = resolve(project);
       const lifecycle = assertLifecycleForCommand(root, "agents");
@@ -203,8 +205,8 @@ export function buildAgentsCommand(): Command {
         if (missing.length) throw new Error(`partial agent configuration; missing: ${missing.join(", ")}`);
         selected = parseRoles(String(opts.agentType));
         settings = parseSettings(opts);
-        if ((settings.auto_compact_threshold_percent !== undefined || settings.compact_maximum !== undefined) && (selected.length !== 1 || selected[0] !== "builder")) {
-          throw new Error("--auto-compact-threshold and --compact-maximum require --agent-type builder");
+        if ((settings.auto_compact_threshold_percent !== undefined || settings.compact_maximum !== undefined) && (selected.length !== 1 || !["builder", "qa"].includes(selected[0]!))) {
+          throw new Error("--auto-compact-threshold and --compact-maximum require --agent-type builder or qa");
         }
         if (settings.display_session_cost !== undefined && selected.some((role) => role !== "builder" && role !== "qa")) {
           throw new Error("session-cost display is configurable only for builder and qa");

@@ -253,6 +253,33 @@ test("Codex native compaction rejects completion without authoritative post-comp
   await a.close();
 });
 
+test("Codex automatic compaction discovers the provider window before restarting with a native ceiling", async () => {
+  const a = adapter({ autoCompactThresholdPercent: 50 });
+  const internal = a as unknown as {
+    usage: { maximum: number };
+    ensureThread(): Promise<void>;
+    sendTurnInternal(text: string): Promise<{ isError: boolean; text: string }>;
+    restartForAutoCompaction(): Promise<void>;
+  };
+  let ensured = 0;
+  let restarted = 0;
+  internal.ensureThread = async () => { ensured += 1; };
+  internal.sendTurnInternal = async () => {
+    internal.usage = { maximum: 200 };
+    return { isError: false, text: "CONTEXT_READY" };
+  };
+  internal.restartForAutoCompaction = async () => { restarted += 1; };
+  await a.prepareAutoCompaction();
+  assert.equal(ensured, 2, "the configured server must resume the discovered thread");
+  assert.equal(restarted, 1);
+  assert.deepEqual(a.buildAppServerArgs(), [
+    "app-server", "--listen", "stdio://",
+    "-c", "model_auto_compact_token_limit=100",
+    "-c", 'model_auto_compact_token_limit_scope="total"',
+  ]);
+  await a.close();
+});
+
 test("CodexAdapter normalizes 401 process failures into repair guidance", async () => {
   const binDir = mkdtempSync(join(tmpdir(), "codex-auth-test-"));
   const projectDir = mkdtempSync(join(tmpdir(), "codex-auth-project-"));
