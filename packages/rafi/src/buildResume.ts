@@ -21,6 +21,8 @@ export interface BuildResumeCommandOptions {
   executeStart: (args: string[]) => Promise<number> | number;
   /** Deterministic provider probe injection for unit tests. */
   resolveProjection?: typeof resolveBuildRecoveryProjection;
+  /** Deterministic plan-approval prompt injection for unit tests. */
+  resolvePlanUpdateApproval?: () => Promise<"auto" | "review" | undefined>;
 }
 
 export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions): Command {
@@ -30,7 +32,8 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
     .option("--run <id>", "run ID or unique prefix")
     .option("--ticket <id>", "narrow mutation scope to one ticket while retaining run-wide context")
     .option("--inspect", "show recovery state and planned actions without mutation")
-    .option("--yes", "accept the recovery preview (requires --run or --ticket)")
+    .option("--yes", "auto-approve the implementation plan and later plan updates for this resumed process")
+    .option("--no", "review the implementation plan and later plan updates for this resumed process")
     .option("--fresh-with-handoff", "start a genuinely fresh session from validated cumulative context")
     .option("--fresh-session", "compatibility mode: ordinary fresh recovery without cumulative handoff")
     .option("--guided-recovery", "repair a degraded role checkpoint interactively, then start a validated successor")
@@ -40,6 +43,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       const root = resolve(project);
       assertLifecycleForCommand(root, "build-resume");
       validateModeFlags(opts);
+      validateApprovalFlags(opts);
       if (opts.agent && !["claude", "codex"].includes(String(opts.agent))) throw new Error("--agent must be claude or codex");
       const runs = recoverableBuildRuns(root);
       if (runs.length === 0) { console.log("rafi build:resume: no unfinished or recoverable runs found"); return; }
@@ -65,12 +69,21 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       let reconstructable = Boolean(head && head.state === "current" && db.latestContinuityCheckpoint(selected.runId, role));
       const guidedAvailable = Boolean(head && ["degraded", "invalid"].includes(head.state));
       let mode = explicitMode(opts);
-      if (!mode && !opts.yes && process.stdin.isTTY && process.stdout.isTTY) mode = await promptMode(Boolean(projection.exactSessionId), reconstructable, guidedAvailable);
+      if (!mode && process.stdin.isTTY && process.stdout.isTTY) mode = await promptMode(Boolean(projection.exactSessionId), reconstructable, guidedAvailable);
       if (!mode) mode = projection.exactSessionId ? "exact-session" : undefined;
       if (!mode) { db.close(); throw new Error(`this run has no compatible exact session; choose ${reconstructable ? "--fresh-with-handoff or " : ""}--fresh-session`); }
       if (mode === "exact-session" && !projection.exactSessionId) { db.close(); throw new Error("exact-session was selected, but the frozen projection has no compatible provider session"); }
       if ((opts.agent || opts.model) && mode === "exact-session") { db.close(); throw new Error("--agent and --model are accepted only for fresh recovery modes"); }
-      const settings = requestedSettings(selected, role, opts);
+      let planUpdateApproval: "auto" | "review";
+      try {
+        planUpdateApproval = await resolvePlanUpdateApproval(opts, commandOpts.resolvePlanUpdateApproval);
+      } catch (error) {
+        db.close();
+        throw error;
+      }
+      let settings: ResolvedAgentSettings;
+      try { settings = requestedSettings(selected, role, opts); }
+      catch (error) { db.close(); throw error; }
       if (mode === "guided-recovery") {
         if (!process.stdin.isTTY || !process.stdout.isTTY) { db.close(); throw new Error("--guided-recovery requires an interactive TTY"); }
         if (!guidedAvailable) { db.close(); throw new Error("guided recovery is available only for a degraded or double-failure role checkpoint"); }
@@ -120,13 +133,14 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         ...(projection.exactSessionRef ? { predecessorSessionRef: projection.exactSessionRef } : {}),
         ...(projection.sessionAvailability ? { sessionAvailability: projection.sessionAvailability } : {}),
         ...((opts.agent || opts.model) ? { requestedSuccessor: { ...(opts.agent ? { agent: String(opts.agent) as "claude" | "codex" } : {}), ...(opts.model ? { model: String(opts.model) } : {}) } } : {}),
+        planUpdateApproval,
         decidedAt: new Date().toISOString(),
       };
       db.recordRecoveryDecision(receipt);
       db.close();
       selected = { ...saveBuildRun(root, { ...selected, checkpoint: "recovery-decision-frozen", recoveryDecision: receipt }), active: false };
 
-      const args = ["start", root, "--steps", String(opts.ticket ? 1 : Math.max(1, selected.tickets.length)), "--yes", "--recover-run", selected.runId, "--recovery-mode", mode];
+      const args = ["start", root, "--steps", String(opts.ticket ? 1 : Math.max(1, selected.tickets.length)), "--recover-run", selected.runId, "--recovery-mode", mode];
       if (opts.ticket) args.push("--ticket", String(opts.ticket));
       if (selected.branchMode !== "current") { args.push("--branch-per-ticket"); if (mode !== "exact-session") args.push("--continue"); }
       if (mode === "exact-session") args.push("--resume", projection.exactSessionId!);
@@ -138,13 +152,52 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       if (settings.reasoning !== "default") args.push("--effort", settings.reasoning);
       if (settings.fast) args.push("--fast");
       const code = await commandOpts.executeStart(args);
-      if (code !== 0) throw new Error(`build recovery mode ${mode} exited with status ${code}; Rafi did not substitute another recovery path`);
+      if (code !== 0) process.exitCode = code;
     });
 }
 
 function validateModeFlags(opts: Record<string, unknown>): void {
   const selected = [opts.freshWithHandoff, opts.freshSession, opts.guidedRecovery].filter(Boolean).length;
   if (selected > 1) throw new Error("--fresh-with-handoff, --fresh-session, and --guided-recovery are mutually exclusive");
+}
+function validateApprovalFlags(opts: Record<string, unknown>): void {
+  if (opts.yes && opts.no) throw new Error("--yes and --no are mutually exclusive");
+}
+
+async function resolvePlanUpdateApproval(
+  opts: Record<string, unknown>,
+  injected?: () => Promise<"auto" | "review" | undefined>,
+): Promise<"auto" | "review"> {
+  if (opts.yes) return "auto";
+  if (opts.no) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      throw new Error("--no requires an interactive TTY to review plan updates; use --yes to auto-approve this resumed process");
+    }
+    return "review";
+  }
+  if (injected) {
+    const answer = await injected();
+    if (!answer) throw new Error("build recovery cancelled before mutation");
+    return answer;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("choose --yes to auto-approve plan updates in this non-interactive resumed process; no recovery mutation was performed");
+  }
+  const answer = await promptPlanUpdateApproval();
+  if (!answer) throw new Error("build recovery cancelled before mutation");
+  return answer;
+}
+
+async function promptPlanUpdateApproval(): Promise<"auto" | "review" | undefined> {
+  const { select, isCancel } = await import("@clack/prompts");
+  const answer = await select<"review" | "auto">({
+    message: "How should Rafi handle implementation-plan updates during this resumed process?",
+    options: [
+      { value: "review", label: "Ask me to review each plan update (Recommended)" },
+      { value: "auto", label: "Auto-approve plan updates for this resumed process" },
+    ],
+  });
+  return isCancel(answer) ? undefined : answer;
 }
 function explicitMode(opts: Record<string, unknown>): BuildRecoveryMode | undefined {
   if (opts.freshWithHandoff) return "fresh-with-handoff";
@@ -260,7 +313,7 @@ function requestedSettings(run: BuildRunRecordV2, role: "builder" | "qa", opts: 
 
 function selectByFlags(runs: RecoverableRun[], opts: Record<string, unknown>): RecoverableRun | undefined {
   if (opts.run && opts.ticket) throw new Error("choose either --run or --ticket");
-  if (opts.yes && !opts.run && !opts.ticket) throw new Error("--yes requires --run or --ticket");
+  if ((opts.yes || opts.no) && !opts.run && !opts.ticket) throw new Error("--yes and --no require --run or --ticket");
   const matches = opts.run ? runs.filter((run) => run.runId === opts.run || run.runId.startsWith(String(opts.run)))
     : opts.ticket ? runs.filter((run) => run.currentTicket === opts.ticket || run.tickets.includes(String(opts.ticket))) : [];
   if (matches.length > 1) throw new Error(opts.ticket ? `multiple recoverable build runs found for ticket ${String(opts.ticket)}; choose one with --run (${matches.map((run) => run.runId.slice(0, 8)).join(", ")})` : "selection is ambiguous; provide a longer run ID");

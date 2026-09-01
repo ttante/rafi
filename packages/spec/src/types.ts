@@ -938,5 +938,7 @@ export interface BuildRecoveryDecisionReceipt {
   successorSessionRef?: ProviderSessionRefV1;
   sessionAvailability?: SessionAvailabilityV1;
   requestedSuccessor?: { agent?: "claude" | "codex"; model?: string };
+  /** Invocation-scoped policy for implementation-plan reviews in the resumed process. */
+  planUpdateApproval: "auto" | "review";
   decidedAt: string;
 }

@@ -35,7 +35,7 @@ importers:
         specifier: 4.10.38
         version: 4.10.38
       rafi-spec:
-        specifier: 0.8.7
+        specifier: 0.8.8
         version: link:../spec
       special-agents:
         specifier: 0.8.7
@@ -70,7 +70,7 @@ importers:
         specifier: ^1.4.0
         version: 1.5.0
       ai-foreman:
-        specifier: 1.7.11
+        specifier: 1.7.12
         version: link:../ai-foreman
       ajv:
         specifier: ^8.20.0
@@ -79,7 +79,7 @@ importers:
         specifier: ^12.1.0
         version: 12.1.0
       rafi-spec:
-        specifier: 0.8.7
+        specifier: 0.8.8
         version: link:../spec
       special-agents:
         specifier: 0.8.7
@@ -121,7 +121,7 @@ importers:
         version: 8.20.0
       rafi-spec:
         specifier: 0.8.7
-        version: link:../spec
+        version: 0.8.7
       yaml:
         specifier: ^2.5.1
         version: 2.9.0
@@ -848,6 +848,10 @@ packages:
   qs@6.15.2:
     resolution: {integrity: sha512-Rzq0KEyX/w/tEybncDgdkZrJgVUsUMk3xjh3t5bv3S1HTAtg+uOYt72+ZfwiQwKdysThkTBdL/rTi6HDmX9Ddw==}
     engines: {node: '>=0.6'}
+
+  rafi-spec@0.8.7:
+    resolution: {integrity: sha512-tRjW/HkzhjM/C3DGxdnOwKTorRt6x3a5l/fRykWIsL5cbpW190UULVDJpaLx8J+Z4l9/QDMWeXfmNzb3KBLPVQ==}
+    engines: {node: '>=20'}
 
   range-parser@1.2.1:
     resolution: {integrity: sha512-Hrgsx+orqoygnmhFbKaHE6c296J+HTAQXoxEF6gNupROmmGJRoyzfG3ccAveqCBrwr/2yxQ5BVd/GTl5agOwSg==}
@@ -1701,6 +1705,10 @@ snapshots:
     dependencies:
       side-channel: 1.1.0
     optional: true
+
+  rafi-spec@0.8.7:
+    dependencies:
+      ajv: 8.20.0
 
   range-parser@1.2.1:
     optional: true

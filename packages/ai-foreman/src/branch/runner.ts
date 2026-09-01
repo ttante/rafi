@@ -5,7 +5,7 @@ import { changeManifestAsync } from "../qaSnapshot.js";
 import { Foreman, MARKER_SPEC, parseStepStatus } from "../foreman.js";
 import type { Log } from "../log.js";
 import { fireNotification } from "../notify.js";
-import { cmdBlock, cmdComplete, cmdUpdate } from "../tickets/commands.js";
+import { cmdBlock, cmdComplete, cmdUnblock, cmdUpdate } from "../tickets/commands.js";
 import type { BranchPlan, BranchPlanNode, BranchRunSummary, CompletionMode, GitHubFailureCode, MergeMethod, PrResult, ReviewProvider } from "./types.js";
 import {
   commitAll,
@@ -53,6 +53,7 @@ export interface BranchRunnerOptions {
   effort?: EffortLevel;
   fast?: boolean;
   notificationsEnabled: boolean;
+  terminalBellEnabled?: boolean;
   qaEnabled: boolean;
   createPr: boolean;
   completionMode?: CompletionMode;
@@ -208,10 +209,13 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         });
       }
 
-      journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:in-progress`, { ticket: node.ticket.id, status: "in_progress" }, () => cmdUpdate(opts.projectDir, node.ticket.id, {
-        status: "in_progress", actor: "foreman",
-        summary: resumeSession ? `Resuming branch ${node.branch}` : `Starting branch ${node.branch}`,
-      }));
+      journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:in-progress`, { ticket: node.ticket.id, status: "in_progress" }, () => {
+        if (resumeSession) cmdUnblock(opts.projectDir, node.ticket.id, { actor: "foreman", summary: `Reopened by explicit branch recovery for ${node.branch}` });
+        cmdUpdate(opts.projectDir, node.ticket.id, {
+          status: "in_progress", actor: "foreman",
+          summary: resumeSession ? `Resuming branch ${node.branch}` : `Starting branch ${node.branch}`,
+        });
+      });
 
       const ticketInstruction = resumeSession ? buildBranchTicketResumeInstruction(node, opts.trackerPaths) : buildBranchTicketInstruction(node, opts.trackerPaths);
       // Reattach the predecessor even for a `fresh` strategy so the host can
@@ -236,7 +240,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       const foreman = new Foreman(
         builder,
         opts.log,
-        opts.notificationsEnabled,
+        { desktop: opts.notificationsEnabled, terminalBell: opts.terminalBellEnabled ?? true },
         opts.qaEnabled,
         3,
         undefined,
@@ -247,6 +251,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         opts.builderSessionStrategy ?? "compact",
         undefined,
         opts.beforeBuilderTurn ? (adapter, action) => opts.beforeBuilderTurn!(adapter, action, worktreePath) : undefined,
+        undefined,
         undefined,
         undefined,
         async (adapter) => opts.observeBuilderNativeCompactions?.(adapter, worktreePath),
@@ -320,6 +325,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           qaStrategy: opts.qaSessionStrategy ?? "compact", state: qaStream, createQa: opts.createQa, maxCycles: 3,
           sessionBoundary: opts.qaSessionBoundary,
           observeNativeCompactions: opts.observeQaNativeCompactions,
+          resolveBlocked: (adapter, reason) => foreman.resolveBlocker(adapter, reason),
           evidence: (entry) => opts.log.write("qa-evidence", { ticket: node.ticket.id, ...entry }),
           fix: async (issues) => {
             if (!builder) return { ok: false, detail: "Builder session unavailable" };
@@ -340,8 +346,13 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
               await builder.close(); builder = await opts.createBuilder(worktreePath);
             }
             if (opts.beforeBuilderTurn) builder = await opts.beforeBuilderTurn(builder, fixInstruction, worktreePath);
-            const fixed = await builder.sendTurn(fixInstruction);
-            const fixedStatus = parseStepStatus(fixed.text);
+            let fixed = await builder.sendTurn(fixInstruction);
+            let fixedStatus = parseStepStatus(fixed.text);
+            if (!fixed.isError && fixedStatus.kind === "blocked") {
+              const resolved = await foreman.resolveBlocker(builder, fixedStatus.reason ?? "Builder QA fix reported an unspecified blocker");
+              fixed = resolved.result;
+              fixedStatus = resolved.status;
+            }
             const fixedSessionId = builder.sessionId();
             const fixedSessionRef = builder.sessionRef?.();
             if (fixedSessionId) builderStream = { sessionId: fixedSessionId, ...(fixedSessionRef ? { sessionRef: fixedSessionRef } : {}), worktreePath };

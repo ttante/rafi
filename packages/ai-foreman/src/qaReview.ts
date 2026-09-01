@@ -25,6 +25,8 @@ export interface IsolatedQaOptions {
   maxCycles: number;
   evidence?: (entry: { cycle: number; outcome: string; detail: string; qaDiff?: string[] }) => void;
   onNonconvergence?: (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision>;
+  /** Resolve a QA blocker with the same still-open QA session before disposal. */
+  resolveBlocked?: (adapter: BuilderAdapter, reason: string) => Promise<{ result: import("./adapters/types.js").TurnResult; status: import("./foreman.js").StepStatus }>;
 }
 
 export interface IsolatedQaResult { outcome: "passed" | "blocked" | "needs-human" | "nonconverged" | "waived"; detail?: string; summary?: string }
@@ -64,8 +66,14 @@ async function oneReview(opts: IsolatedQaOptions, cycle: number): Promise<Isolat
     // continuity/checkpoint stream; an old provider session is never moved
     // into a newly-created /tmp/rafi-qa-* directory.
     qa = await opts.createQa(snapshot.path);
-    const turn = await qa.sendTurn(handoff); const status = parseStepStatus(turn.text);
+    let turn = await qa.sendTurn(handoff); let status = parseStepStatus(turn.text);
     await opts.observeNativeCompactions?.(qa);
+    if (!turn.isError && status.kind === "blocked" && opts.resolveBlocked) {
+      const resolved = await opts.resolveBlocked(qa, status.reason ?? "QA reported an unspecified blocker");
+      turn = resolved.result;
+      status = resolved.status;
+      await opts.observeNativeCompactions?.(qa);
+    }
     opts.state.reviews += 1; opts.state.sessionId = qa.sessionId(); opts.state.sessionRef = qa.sessionRef?.();
     const changes = await withActivityPhase("checking QA file changes", () => snapshot.qaChanges());
     if (changes.length) {
@@ -76,6 +84,7 @@ async function oneReview(opts: IsolatedQaOptions, cycle: number): Promise<Isolat
     }
     opts.state.modificationViolations = 0;
     if (turn.isError) return { outcome: "blocked", detail: turn.text.slice(0, 500) };
+    if (status.kind === "blocked") return { outcome: "blocked", detail: status.reason ?? "QA reported blocked" };
     if (status.kind === "qa_pass") { opts.evidence?.({ cycle, outcome: "passed", detail: status.summary ?? "qa_pass" }); return { outcome: "passed", summary: status.summary }; }
     if (status.kind === "qa_fail") { const detail = status.issues ?? "QA reported no issue text"; opts.evidence?.({ cycle, outcome: "failed", detail }); return { outcome: "failed", detail }; }
     return { outcome: "needs-human", detail: status.error ?? `QA returned ${status.kind}` };

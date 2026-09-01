@@ -337,7 +337,7 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
   const { builder, effort, roleBundle, skills } = roleBuilder;
   const viewer = printEvents(builder.events());
   const config = loadConfig(join(opts.projectDir, "foreman.yaml"));
-  const foreman = new Foreman(builder, log, config.notifications.enabled, false, 3, opts.projectDir);
+  const foreman = new Foreman(builder, log, { desktop: config.notifications.enabled, terminalBell: config.notifications.terminal_bell }, false, 3, opts.projectDir);
 
   try {
     const turn = await foreman.runInstruction(opts.instruction);

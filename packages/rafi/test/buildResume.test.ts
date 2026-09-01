@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stringify } from "yaml";
 
-import { createBuildRun, persistBuildSession, projectBuildRecovery, releaseBuildLease } from "ai-foreman/build-runs.js";
+import { createBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease } from "ai-foreman/build-runs.js";
 import { createProviderSessionRef } from "ai-foreman/session-identity.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
 import { buildBuildResumeCommand } from "../src/buildResume.js";
@@ -69,7 +69,6 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
       resolve(dir),
       "--steps",
       "1",
-      "--yes",
       "--recover-run",
       run.runId,
       "--recovery-mode",
@@ -84,6 +83,7 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
       "high",
       "--fast",
     ]);
+    assert.equal(readBuildRuns(dir).find((candidate) => candidate.runId === run.runId)?.recoveryDecision?.planUpdateApproval, "auto");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -152,7 +152,7 @@ test("build:resume supports explicit fresh-session recovery", async () => {
     await command.parseAsync([dir, "--run", run.runId, "--yes", "--fresh-session"], { from: "user" });
 
     assert.deepEqual(invoked, [
-      "start", resolve(dir), "--steps", "1", "--yes", "--recover-run", run.runId,
+      "start", resolve(dir), "--steps", "1", "--recover-run", run.runId,
       "--recovery-mode", "fresh-recovery-only", "--agent", "claude",
     ]);
   } finally {
@@ -185,7 +185,6 @@ test("build:resume recovers shared and mixed modes with isolated-branch flags", 
         resolve(dir),
         "--steps",
         "1",
-        "--yes",
         "--recover-run",
         run.runId,
         "--recovery-mode",
@@ -199,5 +198,82 @@ test("build:resume recovers shared and mixed modes with isolated-branch flags", 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test("build:resume --no is explicit review mode and refuses non-interactive mutation", async () => {
+  const dir = initializedProject();
+  try {
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T007"], builder: {
+      role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false,
+    } });
+    run = releaseBuildLease(dir, run, "recoverable");
+    let invoked = false;
+    const command = buildBuildResumeCommand({ executeStart: () => { invoked = true; return 0; } });
+
+    await assert.rejects(
+      command.parseAsync([dir, "--run", run.runId, "--no", "--fresh-session"], { from: "user" }),
+      /--no requires an interactive TTY/,
+    );
+    assert.equal(invoked, false);
+    assert.equal(readBuildRuns(dir).find((candidate) => candidate.runId === run.runId)?.recoveryDecision, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("build:resume rejects conflicting plan-update approval flags", async () => {
+  const dir = initializedProject();
+  try {
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T008"] });
+    run = releaseBuildLease(dir, run, "recoverable");
+    const command = buildBuildResumeCommand({ executeStart: () => 0 });
+    await assert.rejects(
+      command.parseAsync([dir, "--run", run.runId, "--yes", "--no", "--fresh-session"], { from: "user" }),
+      /--yes and --no are mutually exclusive/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("build:resume without an approval flag records the interactive review choice only for this resume", async () => {
+  const dir = initializedProject();
+  try {
+    const settings = { role: "builder" as const, source: "project" as const, make: "codex" as const, model: "default", reasoning: "default", fast: false };
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T009"], builder: settings });
+    run = persistBuildSession(dir, run, "builder", scopedSession(dir, "session-review"));
+    run = releaseBuildLease(dir, run, "recoverable");
+    let invoked: string[] = [];
+    const command = buildBuildResumeCommand({
+      executeStart: (args) => { invoked = args; return 0; },
+      resolveProjection: availableProjection,
+      resolvePlanUpdateApproval: async () => "review",
+    });
+
+    await command.parseAsync([dir, "--run", run.runId], { from: "user" });
+
+    assert.equal(invoked.includes("--yes"), false);
+    assert.equal(readBuildRuns(dir).find((candidate) => candidate.runId === run.runId)?.recoveryDecision?.planUpdateApproval, "review");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("build:resume propagates the child status without adding a redundant wrapper failure", async () => {
+  const dir = initializedProject();
+  const priorExitCode = process.exitCode;
+  try {
+    const settings = { role: "builder" as const, source: "project" as const, make: "codex" as const, model: "default", reasoning: "default", fast: false };
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T010"], builder: settings });
+    run = releaseBuildLease(dir, run, "recoverable");
+    const command = buildBuildResumeCommand({ executeStart: () => 2 });
+
+    await command.parseAsync([dir, "--run", run.runId, "--yes", "--fresh-session"], { from: "user" });
+
+    assert.equal(process.exitCode, 2);
+  } finally {
+    process.exitCode = priorExitCode;
+    rmSync(dir, { recursive: true, force: true });
   }
 });

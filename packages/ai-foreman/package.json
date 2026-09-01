@@ -1,6 +1,6 @@
 {
   "name": "ai-foreman",
-  "version": "1.7.11",
+  "version": "1.7.12",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
   "license": "Apache-2.0",
   "type": "module",
@@ -159,7 +159,7 @@
   },
   "dependencies": {
     "special-agents": "0.8.7",
-    "rafi-spec": "0.8.7",
+    "rafi-spec": "0.8.8",
     "@clack/prompts": "^1.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",

@@ -7,7 +7,7 @@ import { stringify } from "yaml";
 
 import { Foreman } from "../src/foreman.js";
 import { Log } from "../src/log.js";
-import { cmdInit, cmdUpdate } from "../src/tickets/commands.js";
+import { cmdBlock, cmdInit, cmdUpdate } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
 import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/types.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
@@ -37,6 +37,7 @@ function makeDef(id: string): TicketDef {
 
 class FakeBuilder implements BuilderAdapter {
   readonly agent = "claude" as const;
+  readonly instructions: string[] = [];
   private index = 0;
 
   constructor(
@@ -44,7 +45,8 @@ class FakeBuilder implements BuilderAdapter {
     private readonly beforeTurn?: (index: number) => void,
   ) {}
 
-  async sendTurn(_text: string): Promise<TurnResult> {
+  async sendTurn(instruction: string): Promise<TurnResult> {
+    this.instructions.push(instruction);
     this.beforeTurn?.(this.index);
     const text = this.turns[this.index++] ?? "";
     return { text, isError: false, numTurns: 1, costUsd: 0 };
@@ -58,6 +60,25 @@ class FakeBuilder implements BuilderAdapter {
 
   async close(): Promise<void> {}
 }
+
+test("reported blockers are converted into multiple approaches before a non-interactive safe pause", async () => {
+  const dir = makeTmpDir();
+  try {
+    const builder = new FakeBuilder([
+      'STEP_STATUS: needs_input | question="How should Rafi unblock this work?" choices="Safe retry (Recommended)|Use fallback|Wait for access"',
+    ]);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir);
+
+    const resolved = await foreman.resolveBlocker(builder, "missing deployment credential");
+
+    assert.equal(resolved.status.kind, "blocked");
+    assert.match(resolved.status.reason ?? "", /input required in an interactive terminal/);
+    assert.match(builder.instructions[0] ?? "", /two or three safe, materially different approaches/);
+    assert.match(builder.instructions[0] ?? "", /recommended approach and consequence \(Recommended\)/);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
 
 test("runBatch completes ticket only after QA passes", async () => {
   const dir = makeTmpDir();
@@ -150,6 +171,29 @@ test("runBatch pins recovery to the requested in-progress ticket", async () => {
     } finally {
       db.close();
     }
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("explicit recovery reopens a safely paused blocked ticket", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
+    cmdBlock(dir, "T001", { summary: "user chose safe pause", actor: "test" });
+    const builder = new FakeBuilder([
+      'resumed\nSTEP_STATUS: done | ticket="T001" summary="finished after guidance"',
+      'checked\nSTEP_STATUS: qa_pass | summary="tests passed"',
+    ]);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir);
+
+    const result = await foreman.runBatch(1, undefined, undefined, "T001");
+
+    assert.equal(result.outcome, "all-done");
+    const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try { assert.equal(db.getState("T001")?.status, "done"); }
+    finally { db.close(); }
   } finally {
     rmSync(dir, { recursive: true });
   }

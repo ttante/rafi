@@ -17,6 +17,8 @@ export interface PermissionConfig {
 export interface NotificationsConfig {
   /** Fire a desktop notification when the builder needs user input. Default: false. */
   enabled: boolean;
+  /** Ring the terminal bell when user attention is required or a run finishes. Default: true. */
+  terminal_bell: boolean;
 }
 
 export interface QaConfig {
@@ -95,7 +97,7 @@ export const DEFAULT_CONFIG: ForemanConfig = {
     ],
     escalateTools: ["WebFetch", "WebSearch"],
   },
-  notifications: { enabled: false },
+  notifications: { enabled: false, terminal_bell: true },
   qa: { enabled: true },
 };
 
@@ -139,6 +141,10 @@ function validateConfig(raw: unknown, path: string): asserts raw is {
   }
   if (cfg.notifications !== undefined) {
     validateBooleanObject(cfg.notifications, "notifications", path);
+    const terminalBell = (cfg.notifications as Record<string, unknown>).terminal_bell;
+    if (terminalBell !== undefined && typeof terminalBell !== "boolean") {
+      throw new Error(`${path}: notifications.terminal_bell must be a boolean`);
+    }
   }
   if (cfg.qa !== undefined) {
     validateBooleanObject(cfg.qa, "qa", path);

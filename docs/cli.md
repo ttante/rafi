@@ -864,7 +864,10 @@ Options:
   --run <id>            run ID or unique prefix
   --ticket <id>         narrow mutation scope to one ticket while retaining run-wide context
   --inspect             show recovery state and planned actions without mutation
-  --yes                 accept the recovery preview (requires --run or --ticket)
+  --yes                 auto-approve the implementation plan and later plan updates for this
+                        resumed process
+  --no                  review the implementation plan and later plan updates for this resumed
+                        process
   --fresh-with-handoff  start a genuinely fresh session from validated cumulative context
   --fresh-session       compatibility mode: ordinary fresh recovery without cumulative handoff
   --guided-recovery     repair a degraded role checkpoint interactively, then start a validated

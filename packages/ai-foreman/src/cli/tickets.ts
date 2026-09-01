@@ -1096,7 +1096,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     }));
     builder = roleBuilder.builder;
     viewer = printEvents(builder.events());
-    const foreman = new Foreman(builder, log, config.notifications.enabled, false, 3, dir);
+    const foreman = new Foreman(builder, log, { desktop: config.notifications.enabled, terminalBell: config.notifications.terminal_bell }, false, 3, dir);
 
     console.log(`foreman tickets: populating tickets with ${roleBuilder.runtime}`);
     console.log(`foreman tickets: project ${dir}`);

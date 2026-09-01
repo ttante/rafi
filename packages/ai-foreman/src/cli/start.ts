@@ -41,6 +41,7 @@ import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig
 import { loadDeliveryConfig, selectDeliveryUnitForRun, selectStacksForRun, updateStackDeliveryState, type DeliveryConfig, type DeliveryStack, type DeliveryUnitProgress } from "../tickets/delivery.js";
 import { AgentStatusReporter, RoleStatusAdapter } from "../statusReporter.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
+import { fireTerminalBell } from "../notify.js";
 import { WorkflowDb, readCurrentWorkflowLease } from "../workflowDb.js";
 import { makeLogPath as makeRoleLogPath, readOnlyPermissionConfig, runRoleInstruction } from "../agentRun.js";
 import type { QaNonconvergenceContext, QaNonconvergenceDecision } from "../qaReview.js";
@@ -49,7 +50,7 @@ import { BUILTIN_BRANCH_PREFIX, validateBranchPrefix } from "../branch/prefix.js
 import { captureCurrentWorkflowSessionIdentity, CurrentWorkflowChangedError, CurrentWorkflowGuardAdapter } from "../branch/currentGuard.js";
 import { ContinuityAdapter, ContinuityRecoveryRequiredError, SessionUnavailableContinuityError } from "../continuity.js";
 import { ContextCapabilityError, RoleSessionController, ThresholdCompactionController } from "../sessionLifecycle.js";
-import { HandoffLoopError, HandoffService, parseBuilderHandoffRequest } from "../handoffs.js";
+import { HandoffAcceptanceError, HandoffLoopError, HandoffRecoveryPausedError, HandoffService, parseBuilderHandoffRequest } from "../handoffs.js";
 import { captureWorkspaceIdentity, createProviderSessionRef, resolveUniqueSessionBinding } from "../sessionIdentity.js";
 import { SessionUnavailableError } from "../adapters/sessionFailure.js";
 import { resolveProviderSessionAvailability } from "../sessionAvailability.js";
@@ -414,6 +415,9 @@ export function buildStartCommand(): Command {
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
       const recoveryRecord = opts.recoverRun ? readBuildRuns(cwd).find((run) => run.runId === opts.recoverRun) : undefined;
       if (opts.recoverRun && !recoveryRecord) fail(`recoverable build run not found: ${opts.recoverRun}`);
+      const autoApprovePlanUpdates = recoveryRecord
+        ? recoveryRecord.recoveryDecision?.planUpdateApproval === "auto"
+        : Boolean(opts.yes);
       if (opts.recoveryMode) {
         const allowed = ["exact-session", "fresh-with-handoff", "fresh-recovery-only", "guided-recovery"];
         if (!allowed.includes(String(opts.recoveryMode))) fail(`unknown frozen recovery mode ${String(opts.recoveryMode)}`);
@@ -689,6 +693,44 @@ export function buildStartCommand(): Command {
         };
       };
 
+      const settingsForRequestedRuntime = (
+        base: ResolvedAgentSettings,
+        requestedRuntime?: "claude" | "codex",
+      ): ResolvedAgentSettings => requestedRuntime && requestedRuntime !== base.make
+        ? { ...base, make: requestedRuntime, model: "default", source: "cli" }
+        : base;
+
+      const handoffRecoveryOptions = (role: "builder" | "qa") => ({
+        allowProviderSwitch: true,
+        desktopNotifications: config.notifications.enabled,
+        terminalBell: config.notifications.terminal_bell,
+        onAccepted: (accepted: { successor: BuilderAdapter }) => {
+          if (role === "builder" && accepted.successor.agent !== agent) {
+            agent = accepted.successor.agent;
+            model = undefined;
+            agentExecutable = undefined;
+          }
+          if (role === "qa" && accepted.successor.agent !== qaAgent) {
+            qaAgent = accepted.successor.agent;
+            qaModel = undefined;
+            qaExecutable = undefined;
+          }
+        },
+      });
+
+      const acceptedRuntimeSettings = (
+        current: ResolvedAgentSettings,
+        make: "claude" | "codex",
+        acceptedModel: string | undefined,
+      ): ResolvedAgentSettings => current.make === make && current.model === (acceptedModel ?? "default")
+        ? current
+        : { ...current, make, model: acceptedModel ?? "default", source: "cli" };
+      const withRunLocalAcceptedRuntimes = (run: BuildRunRecordV2): BuildRunRecordV2 => ({
+        ...run,
+        ...(run.builder ? { builder: { ...run.builder, settings: acceptedRuntimeSettings(run.builder.settings, agent, model) } } : {}),
+        ...(run.qa ? { qa: { ...run.qa, settings: acceptedRuntimeSettings(run.qa.settings, qaAgent, qaModel) } } : {}),
+      });
+
       const createBuilderForSettings = async (builderCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
         const ready = await ensureRuntimeReadyForCommand(builderCwd, settings.make, {
           label: "live Builder settings",
@@ -772,7 +814,7 @@ export function buildStartCommand(): Command {
           initial,
           runtime: agent,
           label: "builder turn",
-          enabled: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY),
+          enabled: Boolean(process.stdin.isTTY && process.stdout.isTTY),
           allowSwitch: !(opts.resume || opts.continue),
           recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
             const nextReady = await ensureRuntimeReadyForCommand(builderCwd, nextRuntime, {
@@ -824,7 +866,7 @@ export function buildStartCommand(): Command {
             } } : {}),
             compactionCount, compactMaximum: effectiveSettings.compact_maximum,
             resources: [{ label: "continuity-reconstruction", content: reconstruction, authoritative: true }],
-          }, () => createBuilderForSettings(builderCwd, effectiveSettings));
+          }, (_handoff, runtime) => createBuilderForSettings(builderCwd, settingsForRequestedRuntime(effectiveSettings, runtime)), handoffRecoveryOptions("builder"));
           log.write("handoff-transfer", {
             role: "builder", reason, recovery: "double-invalid-continuity", generation: transfer.manifest.generation,
             predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
@@ -869,7 +911,7 @@ export function buildStartCommand(): Command {
             compactionCount,
             compactMaximum: effectiveSettings.compact_maximum,
             resources: [{ label: "frozen-action", content: frozenAction, authoritative: true }],
-          }, () => createBuilderForSettings(builderCwd, effectiveSettings));
+          }, (_handoff, runtime) => createBuilderForSettings(builderCwd, settingsForRequestedRuntime(effectiveSettings, runtime)), handoffRecoveryOptions("builder"));
           log.write("handoff-transfer", {
             requestedByBuilder: true, reason: request.reason, generation: transfer.manifest.generation,
             predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
@@ -885,7 +927,13 @@ export function buildStartCommand(): Command {
         let adapter = await createRecoveringBuilder(builderCwd, effectiveSessionId, effectiveSessionId ? sessionRef : undefined);
         if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "builder" && activeContinuityRunId === recoveryRecord?.runId) {
           const service = new HandoffService(cwd);
-          const accepted = await service.acceptStaged(service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration), adapter);
+          const staged = service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration);
+          const accepted = await service.acceptStagedWithRecovery(
+            staged,
+            adapter,
+            (_handoff, runtime) => createBuilderForSettings(builderCwd, settingsForRequestedRuntime(resolvedContinuitySettings("builder"), runtime)),
+            handoffRecoveryOptions("builder"),
+          );
           adapter = accepted.successor;
           pendingHandoffGeneration = undefined;
           log.write("recovery-handoff-accepted", { role: "builder", generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest });
@@ -927,7 +975,7 @@ export function buildStartCommand(): Command {
           } } : {}),
           compactionCount, compactMaximum: input.next.compact_maximum,
           resources: [{ label: "frozen-action", content: input.frozenAction, authoritative: true }],
-        }, () => createBuilderForSettings(builderCwd, input.next));
+        }, (_handoff, runtime) => createBuilderForSettings(builderCwd, settingsForRequestedRuntime(input.next, runtime)), handoffRecoveryOptions("builder"));
         log.write("handoff-transfer", {
           role: "builder", reason, settingsRevision: input.next.settings_revision, generation: transfer.manifest.generation,
           predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
@@ -985,7 +1033,7 @@ export function buildStartCommand(): Command {
           initial,
           runtime: qaAgent,
           label: "QA turn",
-          enabled: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY),
+          enabled: Boolean(process.stdin.isTTY && process.stdout.isTTY),
           allowSwitch: !sessionRef,
           recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
             const nextReady = await ensureRuntimeReadyForCommand(qaCwd, nextRuntime, {
@@ -1046,7 +1094,7 @@ export function buildStartCommand(): Command {
               } } : {}),
               compactionCount, compactMaximum: effectiveSettings.compact_maximum,
               resources: [{ label: "continuity-reconstruction", content: reconstruction, authoritative: true }],
-            }, () => createQaForSettings(qaCwd, effectiveSettings));
+            }, (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(effectiveSettings, runtime)), handoffRecoveryOptions("qa"));
             log.write("handoff-transfer", {
               role: "qa", reason, recovery: "double-invalid-continuity", generation: transfer.manifest.generation,
               predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
@@ -1083,7 +1131,13 @@ export function buildStartCommand(): Command {
         let explicitRecoveryAccepted = false;
         if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "qa" && activeContinuityRunId === recoveryRecord?.runId) {
           const service = new HandoffService(cwd);
-          const accepted = await service.acceptStaged(service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration), adapter);
+          const staged = service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration);
+          const accepted = await service.acceptStagedWithRecovery(
+            staged,
+            adapter,
+            (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(resolvedContinuitySettings("qa"), runtime)),
+            handoffRecoveryOptions("qa"),
+          );
           adapter = accepted.successor;
           pendingHandoffGeneration = undefined;
           explicitRecoveryAccepted = true;
@@ -1117,7 +1171,12 @@ export function buildStartCommand(): Command {
               compactionCount,
               compactMaximum: resolvedContinuitySettings("qa").compact_maximum,
             });
-            const accepted = await service.acceptStaged(staged, adapter);
+            const accepted = await service.acceptStagedWithRecovery(
+              staged,
+              adapter,
+              (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(resolvedContinuitySettings("qa"), runtime)),
+              handoffRecoveryOptions("qa"),
+            );
             adapter = accepted.successor;
             log.write("handoff-transfer", {
               role: "qa", reason: staged.manifest.reason, generation: accepted.manifest.generation,
@@ -1157,7 +1216,7 @@ export function buildStartCommand(): Command {
           } } : {}),
           compactionCount, compactMaximum: input.next.compact_maximum,
           resources: [{ label: "frozen-qa-action", content: input.frozenAction, authoritative: true }],
-        }, () => createQaForSettings(qaCwd, input.next));
+        }, (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(input.next, runtime)), handoffRecoveryOptions("qa"));
         log.write("handoff-transfer", {
           role: "qa", reason, settingsRevision: input.next.settings_revision, generation: transfer.manifest.generation,
           predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
@@ -1205,7 +1264,7 @@ export function buildStartCommand(): Command {
               } } : {}),
               compactionCount, compactMaximum: settings.compact_maximum ?? 10,
               resources: [{ label: "frozen-qa-action", content: frozenAction, authoritative: true }],
-            }, () => createQaForSettings(qaCwd, settings));
+            }, (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(settings, runtime)), handoffRecoveryOptions("qa"));
             log.write("handoff-transfer", { role: "qa", generation: transfer.manifest.generation, predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId, acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest });
             await predecessor.close().catch(() => {});
             return decorateQa(transfer.successor, qaCwd, undefined, settings);
@@ -1225,7 +1284,7 @@ export function buildStartCommand(): Command {
         });
         await controller.observeNativeCompactions(adapter);
       };
-      const qaNonconvergence = createQaNonconvergenceHandler(cwd, Boolean(opts.yes), roleDefaults.planner);
+      const qaNonconvergence = createQaNonconvergenceHandler(cwd, !process.stdin.isTTY || !process.stdout.isTTY, roleDefaults.planner);
 
       if (branchMode) {
         const ticketsConfig = loadTicketsConfig(cwd);
@@ -1402,7 +1461,7 @@ export function buildStartCommand(): Command {
         }
         console.log();
 
-        if (!opts.yes && plan.issues.every((issue) => !issue.blocking)) {
+        if (!autoApprovePlanUpdates && plan.issues.every((issue) => !issue.blocking)) {
           const action = await select({
             message: branchPresentation.prompt,
             options: [
@@ -1477,7 +1536,7 @@ export function buildStartCommand(): Command {
                 ...(nativeUsage ? { sessionUsage: { version: 1 as const, runId: masterRun.runId, role: "builder" as const, provider: adapter.agent, providerSessionId: adapter.sessionId(), observedAt: nativeUsage.observedAt, source: nativeUsage.source, cumulativeInputTokens: nativeUsage.inputTokens, cumulativeOutputTokens: nativeUsage.outputTokens, cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd } } : {}),
                 compactionCount, compactMaximum: settings.compact_maximum ?? 10,
                 resources: [{ label: "frozen-action", content: frozenAction, authoritative: true }],
-              }, () => createBuilderForSettings(worktreePath, settings));
+              }, (_handoff, runtime) => createBuilderForSettings(worktreePath, settingsForRequestedRuntime(settings, runtime)), handoffRecoveryOptions("builder"));
               log.write("handoff-transfer", { worktreePath, generation: transfer.manifest.generation, predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId, acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest });
               if (adapter instanceof ContinuityAdapter) {
                 await adapter.adoptValidatedSuccessor(transfer.successor);
@@ -1492,7 +1551,9 @@ export function buildStartCommand(): Command {
         };
         const branchHeartbeat = setInterval(() => { masterRun = heartbeatBuildRun(cwd, masterRun); }, 10_000); branchHeartbeat.unref();
         let branchSessionFailure: SessionUnavailableError | SessionUnavailableContinuityError | undefined;
-        const summaries = await runBranchPlan({
+        let summaries;
+        try {
+          summaries = await runBranchPlan({
           projectDir: cwd,
           runId: masterRun.runId,
           plan,
@@ -1502,6 +1563,7 @@ export function buildStartCommand(): Command {
           effort: builderEffort,
           fast: builderFast,
           notificationsEnabled: config.notifications.enabled,
+          terminalBellEnabled: config.notifications.terminal_bell,
           qaEnabled,
           createPr: branchDefaults.createReview,
           completionMode: branchDefaults.completionMode,
@@ -1551,7 +1613,20 @@ export function buildStartCommand(): Command {
           builderSessionBoundary: async (adapter, frozenAction, strategy, worktreePath) => (await branchContextController(worktreePath).atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter,
           qaSessionBoundary,
           observeQaNativeCompactions,
-        });
+          });
+        } catch (error) {
+          if (!(error instanceof HandoffAcceptanceError) && !(error instanceof HandoffRecoveryPausedError)) throw error;
+          const summary = error.message.slice(0, 1000);
+          masterRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, masterRun, "handoff-recovery-required", {
+            status: "recoverable",
+            failure: { category: "unknown", summary, at: new Date().toISOString() },
+          }), "recoverable");
+          clearInterval(branchHeartbeat);
+          log.write("safe-boundary-paused", { runId: masterRun.runId, message: summary, handoff: true });
+          console.error(`foreman: handoff paused at a recoverable checkpoint: ${summary}`);
+          console.error(`foreman: resume this run with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(masterRun.runId)}`);
+          process.exit(2);
+        }
         if (branchSessionFailure) {
           const failure = branchSessionFailure;
           const guided = failure instanceof SessionUnavailableContinuityError ? failure.guidedRecovery : failure.failure.dispatchState === "unknown";
@@ -1588,6 +1663,7 @@ export function buildStartCommand(): Command {
           }
           console.log(allComplete ? "foreman: stack publication complete; delivery is awaiting_review (no merges were attempted)" : "foreman: partial stack prefix published; resume point is preserved");
         }
+        masterRun = withRunLocalAcceptedRuntimes(masterRun);
         masterRun = summaries.every((row) => row.buildStatus === "done")
           ? completeBuildRun(cwd, masterRun)
           : releaseBuildLease(cwd, checkpointBuildRun(cwd, masterRun, "branch-run-interrupted", { status: "recoverable" }), "recoverable");
@@ -1616,6 +1692,7 @@ export function buildStartCommand(): Command {
         if (masterRun.status === "completed") printHandoffPruneCommand(masterRun.runId);
 
         const failed = summaries.some((row) => row.buildStatus === "blocked" || row.buildStatus === "needs-human");
+        fireTerminalBell(config.notifications.terminal_bell);
         process.exit(failed ? 2 : 0);
       }
 
@@ -1719,7 +1796,7 @@ export function buildStartCommand(): Command {
             compactionCount,
             compactMaximum: settings.compact_maximum ?? 10,
             resources: [{ label: "frozen-action", content: frozenAction, authoritative: true }],
-          }, () => createBuilderForSettings(cwd, settings));
+          }, (_handoff, runtime) => createBuilderForSettings(cwd, settingsForRequestedRuntime(settings, runtime)), handoffRecoveryOptions("builder"));
           log.write("handoff-transfer", { generation: transfer.manifest.generation, predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId, acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest });
           if (adapter instanceof ContinuityAdapter) {
             await adapter.adoptValidatedSuccessor(transfer.successor);
@@ -1730,7 +1807,7 @@ export function buildStartCommand(): Command {
         },
       });
       const foreman = new Foreman(
-        builder, log, config.notifications.enabled, qaEnabled, 3, cwd, undefined,
+        builder, log, { desktop: config.notifications.enabled, terminalBell: config.notifications.terminal_bell }, qaEnabled, 3, cwd, undefined,
         qaEnabled ? createQa : undefined, capturedQa.session_strategy,
         createBuilder, capturedBuilder.session_strategy,
         qaNonconvergence,
@@ -1776,11 +1853,12 @@ export function buildStartCommand(): Command {
         console.log("ai-foreman: asking builder to plan the next tickets or steps...\n");
         buildRun = checkpointBuildRun(cwd, buildRun, "before-preflight");
         await foreman.runPreflight(steps, ticketsContent, preferredTicket);
+        buildRun = withRunLocalAcceptedRuntimes(buildRun);
         if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
         if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
         buildRun = checkpointBuildRun(cwd, buildRun, "preflight-complete");
 
-        if (!opts.yes) {
+        if (!autoApprovePlanUpdates) {
           while (true) {
             console.log();
             const action = await select({
@@ -1851,7 +1929,8 @@ export function buildStartCommand(): Command {
             console.log(line);
           }
         }
-        process.exit(result.outcome === "needs-human" ? 2 : 0);
+        fireTerminalBell(config.notifications.terminal_bell);
+        process.exit(result.outcome === "needs-human" || result.outcome === "blocked" ? 2 : 0);
       } catch (err) {
         clearInterval(heartbeat);
         statusReporter.stop();
@@ -1880,6 +1959,18 @@ export function buildStartCommand(): Command {
           console.error(guided
             ? `foreman: continue with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --guided-recovery`
             : `foreman: inspect recovery with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --inspect`);
+          process.exit(2);
+        }
+        if (err instanceof HandoffAcceptanceError || err instanceof HandoffRecoveryPausedError) {
+          const summary = err.message.slice(0, 1000);
+          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "handoff-recovery-required", {
+            status: "recoverable",
+            failure: { category: "unknown", summary, at: new Date().toISOString() },
+          }), "recoverable");
+          await foreman.close().catch(() => {});
+          log.write("safe-boundary-paused", { runId: buildRun.runId, message: summary, handoff: true });
+          console.error(`foreman: handoff paused at a recoverable checkpoint: ${summary}`);
+          console.error(`foreman: resume this run with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)}`);
           process.exit(2);
         }
         if (err instanceof HandoffLoopError || err instanceof ContinuityRecoveryRequiredError) {

@@ -75,6 +75,10 @@ permissions:
     - WebSearch
 
 notifications:
+  # Ring once when input is required and once when a master run finishes.
+  # Default: true.
+  terminal_bell: true
+
   # When enabled, a desktop notification fires whenever the builder emits
   # STEP_STATUS: needs_input — useful if you've walked away and need a nudge
   # to come back to the terminal to answer.

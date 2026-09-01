@@ -17,6 +17,11 @@ const policy = new PermissionPolicy(DEFAULT_CONFIG.permissions, CWD);
 const readOnlyPolicy = new PermissionPolicy(readOnlyPermissionConfig(), CWD);
 const currentWorkflowPolicy = new PermissionPolicy(DEFAULT_CONFIG.permissions, CWD, { currentBranchWorkflow: true });
 
+test("terminal attention bell is enabled by default while desktop notifications remain opt-in", () => {
+  assert.equal(DEFAULT_CONFIG.notifications.terminal_bell, true);
+  assert.equal(DEFAULT_CONFIG.notifications.enabled, false);
+});
+
 test("allows routine bash commands", () => {
   assert.equal(
     policy.classify({ toolName: "Bash", input: { command: "npm test" } }).decision,

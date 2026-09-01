@@ -51,3 +51,15 @@ export function fireNotification(title: string, body: string): void {
     // best-effort — never crash the run
   }
 }
+
+/** Ring one best-effort terminal bell for a user-attention boundary. */
+export function fireTerminalBell(enabled = true): void {
+  if (!enabled || !process.stderr.isTTY) return;
+  try { process.stderr.write("\u0007"); } catch { /* best-effort */ }
+}
+
+/** Notify through the terminal by default and through the desktop when opted in. */
+export function signalAttention(title: string, body: string, desktop = false, terminalBell = true): void {
+  fireTerminalBell(terminalBell);
+  if (desktop) fireNotification(title, body);
+}

@@ -1,4 +1,4 @@
-import { select, isCancel } from "@clack/prompts";
+import { select, text, isCancel } from "@clack/prompts";
 import { MARKER_SPEC, QA_MARKER_SPEC } from "./markers.js";
 import type {
   BuilderAdapter,
@@ -11,9 +11,10 @@ import type {
 import type { PermissionPolicy } from "./permissions/policy.js";
 import { countProviderQuestions, handleProviderQuestionTool, type AnsweredProviderQuestion } from "./providerQuestions.js";
 import type { Log } from "./log.js";
-import { fireNotification } from "./notify.js";
+import { signalAttention } from "./notify.js";
+import { pauseActivityForInput } from "./activity.js";
 import { isTicketsInitialized, loadTicketsConfig } from "./tickets/config.js";
-import { cmdUpdate, cmdComplete, cmdBlock, cmdImplementationQueue } from "./tickets/commands.js";
+import { cmdUpdate, cmdComplete, cmdBlock, cmdUnblock, cmdImplementationQueue } from "./tickets/commands.js";
 import { loadTickets } from "./tickets/ticketLoader.js";
 import type { TicketDef } from "./tickets/ticketSchema.js";
 import { runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaStreamState } from "./qaReview.js";
@@ -270,16 +271,23 @@ export interface BatchResult {
   detail?: string;
 }
 
+export interface ForemanNotificationOptions {
+  desktop: boolean;
+  terminalBell: boolean;
+}
+
 /** Drives one builder through a batch of N steps via the STEP_STATUS protocol. */
 export class Foreman {
   private readonly ticketsEnabled: boolean;
+  private readonly notificationsEnabled: boolean;
+  private readonly terminalBellEnabled: boolean;
   private readonly qaStream: QaStreamState = { reviews: 0, modificationViolations: 0 };
   private builderWorkSessions = 0;
 
   constructor(
     private builder: BuilderAdapter,
     private readonly log: Log,
-    private readonly notificationsEnabled = false,
+    notifications: boolean | ForemanNotificationOptions = false,
     private readonly qaEnabled = true,
     private readonly qaMaxCycles = 3,
     private readonly projectDir?: string,
@@ -296,6 +304,8 @@ export class Foreman {
     /** Persist a Builder's provider-native event immediately after every turn. */
     private readonly observeBuilderNativeCompactions?: (adapter: BuilderAdapter) => Promise<void>,
   ) {
+    this.notificationsEnabled = typeof notifications === "boolean" ? notifications : notifications.desktop;
+    this.terminalBellEnabled = typeof notifications === "boolean" ? true : notifications.terminalBell;
     this.ticketsEnabled = !!(projectDir && isTicketsInitialized(projectDir));
   }
 
@@ -374,38 +384,70 @@ export class Foreman {
       }
     }
 
-    while (status.kind === "needs_input") {
-      const question = status.question ?? "The builder has a question";
-      const choices = status.choices?.length
-        ? status.choices
-        : ["Continue", "Cancel"];
+    while (true) {
+      while (status.kind === "needs_input") {
+        const question = status.question ?? "The builder has a question";
+        const choices = status.choices?.length ? status.choices : ["Continue"];
+        this.log.write("needs_input", { question, choices });
+        signalAttention("Foreman needs your input", question, this.notificationsEnabled, this.terminalBellEnabled);
 
-      this.log.write("needs_input", { question, choices });
+        if (!process.stdin.isTTY || !process.stdout.isTTY) {
+          console.error(`foreman: input required: ${question}`);
+          console.error("foreman: resume this run in an interactive terminal, or provide explicit guidance through the printed resume command");
+          result = { text: result.text, isError: false, numTurns: result.numTurns, costUsd: result.costUsd };
+          status = { kind: "blocked", reason: `input required in an interactive terminal: ${question}` };
+          break;
+        }
 
-      if (this.notificationsEnabled) {
-        fireNotification("Foreman needs your input", question);
+        const answer = await pauseActivityForInput(async () => {
+          console.log();
+          const selected = await select<string>({
+            message: question,
+            options: [
+              ...choices.map((choice) => ({ value: choice, label: choice })),
+              { value: "__rafi_custom__", label: "Custom response", hint: "Type a different answer" },
+              { value: "__rafi_pause__", label: "Pause safely", hint: "Keep the run recoverable and return to the terminal" },
+            ],
+          });
+          if (isCancel(selected) || selected === "__rafi_pause__") return undefined;
+          if (selected !== "__rafi_custom__") return selected;
+          const custom = await text({ message: "Custom response:", validate: (value) => String(value ?? "").trim() ? undefined : "Enter a response" });
+          return isCancel(custom) ? undefined : String(custom);
+        });
+        console.log();
+
+        if (answer === undefined) {
+          result = { text: "", isError: false, numTurns: 0, costUsd: 0 };
+          status = { kind: "blocked", reason: "user chose safe pause at an input prompt" };
+          break;
+        }
+
+        if (adapter === this.builder && this.beforeBuilderTurn) {
+          this.builder = await this.beforeBuilderTurn(this.builder, answer);
+          adapter = this.builder;
+        }
+        result = await adapter.sendTurn(answer);
+        await this.observeBuilderNative(adapter);
+        status = parseStepStatus(result.text);
       }
 
-      console.log();
-      const answer = await select({
-        message: question,
-        options: choices.map((c) => ({ value: c, label: c })),
-      });
-      console.log();
+      if (status.kind !== "blocked" || status.reason?.startsWith("user chose safe pause") || !process.stdin.isTTY || !process.stdout.isTTY) break;
 
-      if (isCancel(answer)) {
-        result = { text: "", isError: false, numTurns: 0, costUsd: 0 };
-        status = { kind: "blocked", reason: "user cancelled at input prompt" };
-        break;
-      }
-
+      const reason = status.reason ?? "the agent reported an unspecified blocker";
+      this.log.write("blocked-recovery", { reason, role: adapter === this.builder ? "builder" : "qa" });
+      const recoveryInstruction = buildBlockerRecoveryInstruction(reason);
       if (adapter === this.builder && this.beforeBuilderTurn) {
-        this.builder = await this.beforeBuilderTurn(this.builder, String(answer));
+        this.builder = await this.beforeBuilderTurn(this.builder, recoveryInstruction);
         adapter = this.builder;
       }
-      result = await adapter.sendTurn(String(answer));
+      result = await adapter.sendTurn(recoveryInstruction);
       await this.observeBuilderNative(adapter);
       status = parseStepStatus(result.text);
+      if (status.kind === "unknown") {
+        result = await adapter.sendTurn('Protocol correction only: return the blocker approaches now using exactly one final STEP_STATUS: needs_input marker with question="..." and choices="recommended (Recommended)|alternative|alternative". Do not repeat tools or implementation.');
+        await this.observeBuilderNative(adapter);
+        status = parseStepStatus(result.text);
+      }
     }
 
     return { result, status };
@@ -440,6 +482,14 @@ export class Foreman {
     instruction: string,
   ): Promise<{ result: TurnResult; status: StepStatus }> {
     return this.doTurn(instruction);
+  }
+
+  /** Ask an already-active role session to propose choices for its reported blocker. */
+  async resolveBlocker(
+    adapter: BuilderAdapter,
+    reason: string,
+  ): Promise<{ result: TurnResult; status: StepStatus }> {
+    return this.doTurnWith(adapter, buildBlockerRecoveryInstruction(reason));
   }
 
   private async observeBuilderNative(adapter: BuilderAdapter): Promise<void> {
@@ -478,6 +528,7 @@ export class Foreman {
         },
         evidence: ({ cycle, outcome, detail, qaDiff }) => this.log.write("qa", { stepIndex, cycle, outcome, detail, qaDiff, disposable: true }),
         onNonconvergence: this.qaNonconvergence,
+        resolveBlocked: (adapter, reason) => this.resolveBlocker(adapter, reason),
       });
       if (review.outcome === "nonconverged") return { outcome: "needs-human", detail: review.detail };
       return { outcome: review.outcome, detail: review.detail, summary: review.summary };
@@ -603,7 +654,9 @@ export class Foreman {
             detail = `recovery ticket ${preferredTicketId} is no longer available in the implementation queue`;
             break;
           }
-          if (i === 1 && preferredTicketId && next && next.status !== "next" && next.status !== "in_progress") {
+          if (i === 1 && preferredTicketId && next?.status === "blocked") {
+            cmdUnblock(this.projectDir, preferredTicketId, { actor: "foreman", summary: "Reopened by explicit build recovery" });
+          } else if (i === 1 && preferredTicketId && next && next.status !== "next" && next.status !== "in_progress") {
             outcome = "needs-human";
             detail = `recovery ticket ${preferredTicketId} cannot resume while its status is ${next.status}`;
             break;
@@ -740,6 +793,17 @@ export class Foreman {
 function lastLine(text: string): string {
   const lines = text.trim().split("\n");
   return (lines[lines.length - 1] ?? "").slice(0, 200);
+}
+
+function buildBlockerRecoveryInstruction(reason: string): string {
+  return [
+    `You reported this blocker: ${reason}`,
+    "Do not end the run. Analyze the durable state and propose two or three safe, materially different approaches the user can choose from.",
+    "Put your recommended approach first and end its label with (Recommended). Include the important consequence or tradeoff in every choice label.",
+    "Do not perform more implementation or QA work until the user chooses. End exactly with:",
+    'STEP_STATUS: needs_input | question="How should Rafi unblock this work?" choices="recommended approach and consequence (Recommended)|alternative and consequence|another alternative and consequence"',
+    "After the user answers, apply that guidance in this same session. If still blocked, report blocked again so Rafi can offer a new set of approaches.",
+  ].join("\n\n");
 }
 
 function fingerprintProtectedTree(root: string): Map<string, string> {

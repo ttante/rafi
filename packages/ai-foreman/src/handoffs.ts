@@ -5,6 +5,8 @@ import type { ContinuityDelta, HandoffLineage, HandoffManifestV1, ProviderSessio
 import type { BuilderAdapter } from "./adapters/types.js";
 import { continuityInstruction, mergeContinuityDeltas, parseContinuityDelta } from "./continuity.js";
 import { WorkflowDb } from "./workflowDb.js";
+import { pauseActivityForInput } from "./activity.js";
+import { signalAttention } from "./notify.js";
 
 export const HANDOFF_CACHE_RETENTION_DAYS = 30;
 export const HANDOFF_ACCEPTED = "HANDOFF_ACCEPTED";
@@ -82,6 +84,44 @@ export class HandoffLoopError extends Error {
   constructor(readonly runId: string) {
     super(`third consecutive Builder-requested handoff for run ${runId} has been paused; record a useful verified action or use guided recovery`);
   }
+}
+
+export type HandoffAcceptanceFailureCode =
+  | "missing-acknowledgement"
+  | "invalid-continuity-delta"
+  | "missing-successor-session"
+  | "missing-scoped-successor-session"
+  | "reused-predecessor-session";
+
+export class HandoffAcceptanceError extends Error {
+  constructor(
+    readonly code: HandoffAcceptanceFailureCode,
+    readonly runId: string,
+    readonly generation: number,
+    detail: string,
+  ) {
+    super(`handoff acceptance rejected (${code}): ${detail}; predecessor retains the lease`);
+    this.name = "HandoffAcceptanceError";
+  }
+}
+
+export class HandoffRecoveryPausedError extends Error {
+  constructor(readonly runId: string, readonly generation: number, detail: string) {
+    super(`handoff recovery paused safely: ${detail}`);
+    this.name = "HandoffRecoveryPausedError";
+  }
+}
+
+export type HandoffRecoveryChoice = "retry" | "switch" | "custom" | "pause";
+export interface HandoffRecoveryOptions {
+  /** Enables the provider-switch choice. The callback must honor the requested runtime. */
+  allowProviderSwitch?: boolean;
+  choose?: (error: HandoffAcceptanceError, currentRuntime: "claude" | "codex") => Promise<HandoffRecoveryChoice>;
+  customGuidance?: () => Promise<string | undefined>;
+  desktopNotifications?: boolean;
+  terminalBell?: boolean;
+  /** Persist run-local provider selection only after validated acceptance. */
+  onAccepted?: (result: HandoffTransferResult) => void | Promise<void>;
 }
 
 /** Durable, validated ownership transfer; cache copies are never authoritative. */
@@ -162,44 +202,116 @@ export class HandoffService {
     } finally { db.close(); }
   }
 
-  async transfer(input: CreateHandoffInput, createSuccessor: (handoff: StagedHandoff) => Promise<BuilderAdapter>): Promise<HandoffTransferResult> {
+  async transfer(
+    input: CreateHandoffInput,
+    createSuccessor: (handoff: StagedHandoff, requestedRuntime?: "claude" | "codex") => Promise<BuilderAdapter>,
+    recovery: HandoffRecoveryOptions = {},
+  ): Promise<HandoffTransferResult> {
     const staged = this.stage(input);
     const successor = await createSuccessor(staged);
-    return this.acceptStaged(staged, successor);
+    return this.acceptStagedWithRecovery(staged, successor, createSuccessor, recovery);
   }
 
-  async acceptStaged(staged: StagedHandoff, successor: BuilderAdapter): Promise<HandoffTransferResult> {
+  async acceptStagedWithRecovery(
+    staged: StagedHandoff,
+    initialSuccessor: BuilderAdapter,
+    createSuccessor: (handoff: StagedHandoff, requestedRuntime?: "claude" | "codex") => Promise<BuilderAdapter>,
+    recovery: HandoffRecoveryOptions = {},
+  ): Promise<HandoffTransferResult> {
+    let successor = initialSuccessor;
+    let guidance: string | undefined;
+    while (true) {
+      try {
+        const accepted = await this.acceptStaged(staged, successor, { finalizeFailure: false, guidance });
+        await recovery.onAccepted?.(accepted);
+        return accepted;
+      } catch (error) {
+        if (!(error instanceof HandoffAcceptanceError)) {
+          this.failStaged(staged, error instanceof Error ? error.message : String(error));
+          throw error;
+        }
+        if ((!process.stdin.isTTY || !process.stdout.isTTY) && !recovery.choose) {
+          this.failStaged(staged, error.message);
+          throw error;
+        }
+        signalAttention("Rafi handoff needs input", error.message, recovery.desktopNotifications, recovery.terminalBell);
+        const currentRuntime = successor.agent;
+        const choice = recovery.choose
+          ? await recovery.choose(error, currentRuntime)
+          : await promptHandoffRecovery(error, currentRuntime, Boolean(recovery.allowProviderSwitch));
+        if (choice === "pause") {
+          this.failStaged(staged, `user paused after ${error.code}`);
+          throw new HandoffRecoveryPausedError(staged.manifest.runId, staged.manifest.generation, error.message);
+        }
+        guidance = undefined;
+        let requestedRuntime: "claude" | "codex" | undefined;
+        if (choice === "switch") requestedRuntime = currentRuntime === "claude" ? "codex" : "claude";
+        if (choice === "custom") {
+          guidance = recovery.customGuidance ? await recovery.customGuidance() : await promptCustomHandoffGuidance();
+          if (!guidance) {
+            successor = await createSuccessor(staged);
+            continue;
+          }
+        }
+        successor = await createSuccessor(staged, requestedRuntime);
+        if (requestedRuntime && successor.agent !== requestedRuntime) {
+          await successor.close().catch(() => {});
+          console.warn(`foreman: ${requestedRuntime} was not available from the successor factory; choose another handoff recovery option`);
+          successor = await createSuccessor(staged);
+        }
+      }
+    }
+  }
+
+  async acceptStaged(
+    staged: StagedHandoff,
+    successor: BuilderAdapter,
+    options: { finalizeFailure?: boolean; guidance?: string } = {},
+  ): Promise<HandoffTransferResult> {
     const db = new WorkflowDb(this.projectDir);
     try {
-      const response = await successor.sendTurn([
+      const acceptancePrompt = [
         "Accept this validated Rafi handoff. Do not repeat completed work and reconcile host receipts before side effects.",
         staged.markdown,
         `Manifest JSON: ${JSON.stringify(staged.manifest)}`,
+        ...(options.guidance ? [`Human recovery guidance: ${options.guidance}`] : []),
         `Reply with ${HANDOFF_ACCEPTED} on the first line, then ${continuityInstruction()}`,
-      ].join("\n\n"));
+      ].join("\n\n");
+      let response = await successor.sendTurn(acceptancePrompt);
+      let validation = validateHandoffAcceptance(staged, successor, response.text);
+      if (validation && (validation.code === "missing-acknowledgement" || validation.code === "invalid-continuity-delta")) {
+        response = await successor.sendTurn([
+          `Your handoff acknowledgement was rejected: ${validation.message}.`,
+          "Correction only: do not use tools, repeat completed work, or perform implementation.",
+          `Reply with ${HANDOFF_ACCEPTED} on the first line, then ${continuityInstruction()}`,
+        ].join("\n\n"));
+        validation = validateHandoffAcceptance(staged, successor, response.text);
+      }
+      if (validation) throw new HandoffAcceptanceError(validation.code, staged.manifest.runId, staged.manifest.generation, validation.message);
       const parsed = parseContinuityDelta(response.text);
       const sessionId = successor.sessionId();
       const observedSuccessorRef = successor.sessionRef?.();
       const successorRef = observedSuccessorRef ? { ...observedSuccessorRef, generation: staged.manifest.generation, validatedAt: new Date().toISOString() } : undefined;
-      if (!response.text.trimStart().startsWith(HANDOFF_ACCEPTED) || !parsed.delta || !sessionId || (staged.manifest.predecessorSessionRef && !successorRef)) {
-        db.failHandoff(staged.manifest.runId, staged.manifest.generation, "successor did not provide HANDOFF_ACCEPTED, a valid continuity delta, and a fresh session identity");
-        await successor.close().catch(() => {});
-        throw new Error("fresh successor failed validated handoff acceptance; predecessor retains the lease");
-      }
-      if (staged.manifest.predecessorSessionId && sessionId === staged.manifest.predecessorSessionId) {
-        db.failHandoff(staged.manifest.runId, staged.manifest.generation, "successor reused predecessor session ID");
-        await successor.close().catch(() => {});
-        throw new Error("handoff successor must be a genuinely fresh provider session");
-      }
+      if (!parsed.delta || !sessionId) throw new Error("validated handoff acceptance lost its parsed continuity state");
       if (successorRef) successor.adoptSessionRef?.(successorRef);
       db.appendContinuityEvent({ runId: staged.manifest.runId, role: staged.manifest.role, kind: "handoff_successor_accepted", payload: { generation: staged.manifest.generation, sessionId, sessionRef: successorRef, delta: parsed.delta }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
       const checkpoint = db.publishContinuityCheckpoint({ runId: staged.manifest.runId, role: staged.manifest.role, delta: parsed.delta, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
       const lineage = db.acceptHandoff(staged.manifest.runId, staged.manifest.generation, successorRef ?? sessionId);
       return { ...staged, lineage, successor, successorSessionId: sessionId, acceptanceCheckpointDigest: checkpoint.digest };
     } catch (error) {
+      if (error instanceof HandoffAcceptanceError) await successor.close().catch(() => {});
       const current = db.handoff(staged.manifest.runId, staged.manifest.generation);
-      if (current?.state === "staged") db.failHandoff(staged.manifest.runId, staged.manifest.generation, error instanceof Error ? error.message : String(error));
+      if (options.finalizeFailure !== false && current?.state === "staged") db.failHandoff(staged.manifest.runId, staged.manifest.generation, error instanceof Error ? error.message : String(error));
       throw error;
+    } finally { db.close(); }
+  }
+
+  private failStaged(staged: StagedHandoff, detail: string): void {
+    const db = new WorkflowDb(this.projectDir);
+    try {
+      if (db.handoff(staged.manifest.runId, staged.manifest.generation)?.state === "staged") {
+        db.failHandoff(staged.manifest.runId, staged.manifest.generation, detail);
+      }
     } finally { db.close(); }
   }
 
@@ -290,6 +402,62 @@ export class HandoffService {
     }
     return count;
   }
+}
+
+function validateHandoffAcceptance(
+  staged: StagedHandoff,
+  successor: BuilderAdapter,
+  text: string,
+): { code: HandoffAcceptanceFailureCode; message: string } | undefined {
+  if (!text.trimStart().startsWith(HANDOFF_ACCEPTED)) {
+    return { code: "missing-acknowledgement", message: `the first non-whitespace line must begin with ${HANDOFF_ACCEPTED}` };
+  }
+  const parsed = parseContinuityDelta(text);
+  if (!parsed.delta) {
+    return { code: "invalid-continuity-delta", message: parsed.error?.problems.join("; ") ?? "the continuity delta is missing or malformed" };
+  }
+  const sessionId = successor.sessionId();
+  if (!sessionId) return { code: "missing-successor-session", message: "the provider did not expose a successor session ID" };
+  if (staged.manifest.predecessorSessionRef && !successor.sessionRef?.()) {
+    return { code: "missing-scoped-successor-session", message: "the provider did not expose a location-scoped successor session reference" };
+  }
+  if (staged.manifest.predecessorSessionId && sessionId === staged.manifest.predecessorSessionId) {
+    return { code: "reused-predecessor-session", message: `successor reused predecessor session ${sessionId}; a genuinely fresh session is required` };
+  }
+  return undefined;
+}
+
+async function promptHandoffRecovery(
+  error: HandoffAcceptanceError,
+  runtime: "claude" | "codex",
+  allowProviderSwitch: boolean,
+): Promise<HandoffRecoveryChoice> {
+  const { select, isCancel } = await import("@clack/prompts");
+  return pauseActivityForInput(async () => {
+    console.error(`foreman: ${error.message}`);
+    const other = runtime === "claude" ? "codex" : "claude";
+    const answer = await select<HandoffRecoveryChoice>({
+      message: "How should Rafi recover the rejected successor handoff?",
+      options: [
+        { value: "retry", label: `Retry ${runtime} with a fresh successor (Recommended)`, hint: "The rejected successor is closed; the predecessor keeps its lease" },
+        ...(allowProviderSwitch ? [{ value: "switch" as const, label: `Switch to verified ${other}`, hint: "Use a fresh provider session without changing project defaults" }] : []),
+        { value: "custom", label: "Add custom guidance and retry", hint: "Give the next fresh successor an explicit correction" },
+        { value: "pause", label: "Pause safely", hint: "Keep the predecessor lease and return recovery instructions" },
+      ],
+    });
+    return isCancel(answer) ? "pause" : answer;
+  });
+}
+
+async function promptCustomHandoffGuidance(): Promise<string | undefined> {
+  const { text, isCancel } = await import("@clack/prompts");
+  return pauseActivityForInput(async () => {
+    const answer = await text({
+      message: "Guidance for the next fresh successor:",
+      validate: (value) => String(value ?? "").trim() ? undefined : "Enter guidance",
+    });
+    return isCancel(answer) ? undefined : String(answer);
+  });
 }
 
 export function renderHandoffMarkdown(manifest: HandoffManifestV1): string {

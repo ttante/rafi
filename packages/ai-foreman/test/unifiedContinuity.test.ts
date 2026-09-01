@@ -7,7 +7,7 @@ import { stringify } from "yaml";
 import type { ContinuityDelta, ProviderSessionRefV1, ResolvedAgentSettings } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, TurnResult } from "../src/adapters/types.js";
 import { ContinuityAdapter } from "../src/continuity.js";
-import { HANDOFF_ACCEPTED, HandoffLoopError, HandoffService } from "../src/handoffs.js";
+import { HANDOFF_ACCEPTED, HandoffAcceptanceError, HandoffLoopError, HandoffService } from "../src/handoffs.js";
 import { ThresholdCompactionController } from "../src/sessionLifecycle.js";
 import { applyTicketPopulation, recoverTicketPublications } from "../src/ticketPopulation.js";
 import { cmdInit } from "../src/tickets/commands.js";
@@ -331,6 +331,88 @@ test("validated handoff moves the sole role lease only after a fresh successor a
   assert.equal(after.roleMutationLease("run-1", "builder")?.generation, 1);
   assert.equal(after.roleMutationLease("run-1", "builder")?.providerSessionId, "session-2");
   assert.equal(after.roleMutationLease("run-1", "builder")?.sessionRef?.generation, 1);
+  after.close();
+});
+
+test("handoff acceptance gives a malformed acknowledgement one bounded correction turn", async () => {
+  const projectDir = root("rafi-handoff-correction-");
+  const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1");
+  db.appendContinuityEvent({ runId: "run-1", role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+  db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 });
+  db.claimInitialRoleLease("run-1", "builder", "session-1");
+  db.close();
+  const successor = new FakeAdapter("session-2", [
+    { text: "I accept, but used the wrong protocol", isError: false, numTurns: 1, costUsd: 0 },
+    { text: `${HANDOFF_ACCEPTED}\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 },
+  ]);
+
+  const transfer = await new HandoffService(projectDir).transfer({
+    runId: "run-1", role: "builder", reason: "fresh boundary", predecessorSessionId: "session-1", compactionCount: 0, compactMaximum: 10,
+  }, async () => successor);
+
+  assert.equal(transfer.successorSessionId, "session-2");
+  assert.equal(successor.closed, false);
+});
+
+test("handoff rejection reports the precise typed cause and retains the predecessor lease", async () => {
+  const projectDir = root("rafi-handoff-rejection-");
+  const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1");
+  db.appendContinuityEvent({ runId: "run-1", role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+  db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 });
+  db.claimInitialRoleLease("run-1", "builder", "session-1");
+  db.close();
+  const service = new HandoffService(projectDir);
+  const staged = service.stage({ runId: "run-1", role: "builder", reason: "fresh boundary", predecessorSessionId: "session-1", compactionCount: 0, compactMaximum: 10 });
+  const successor = new FakeAdapter("session-2", [
+    { text: "wrong", isError: false, numTurns: 1, costUsd: 0 },
+    { text: "still wrong", isError: false, numTurns: 1, costUsd: 0 },
+  ]);
+
+  await assert.rejects(
+    service.acceptStaged(staged, successor),
+    (error: unknown) => error instanceof HandoffAcceptanceError && error.code === "missing-acknowledgement" && /predecessor retains the lease/.test(error.message),
+  );
+  const after = new WorkflowDb(projectDir);
+  assert.equal(after.roleMutationLease("run-1", "builder")?.providerSessionId, "session-1");
+  assert.equal(after.handoff("run-1", staged.manifest.generation)?.state, "failed");
+  after.close();
+  assert.equal(successor.closed, true);
+});
+
+test("handoff recovery can switch to a verified provider and records it only after acceptance", async () => {
+  const projectDir = root("rafi-handoff-switch-");
+  const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1");
+  db.appendContinuityEvent({ runId: "run-1", role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+  db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 });
+  db.claimInitialRoleLease("run-1", "builder", "session-1");
+  db.close();
+  const rejected = new FakeAdapter("session-2", [
+    { text: "wrong", isError: false, numTurns: 1, costUsd: 0 },
+    { text: "still wrong", isError: false, numTurns: 1, costUsd: 0 },
+  ], undefined, undefined, "codex");
+  const accepted = new FakeAdapter("session-3", [], undefined, undefined, "claude");
+  let acceptedProvider: string | undefined;
+  const requested: Array<string | undefined> = [];
+
+  const transfer = await new HandoffService(projectDir).transfer({
+    runId: "run-1", role: "builder", reason: "fresh boundary", predecessorSessionId: "session-1", compactionCount: 0, compactMaximum: 10,
+  }, async (_staged, runtime) => {
+    requested.push(runtime);
+    return runtime === "claude" ? accepted : rejected;
+  }, {
+    allowProviderSwitch: true,
+    choose: async () => "switch",
+    onAccepted: (result) => { acceptedProvider = result.successor.agent; },
+  });
+
+  assert.deepEqual(requested, [undefined, "claude"]);
+  assert.equal(transfer.successor.agent, "claude");
+  assert.equal(acceptedProvider, "claude");
+  const after = new WorkflowDb(projectDir);
+  assert.equal(after.roleMutationLease("run-1", "builder")?.providerSessionId, "session-3");
   after.close();
 });
 

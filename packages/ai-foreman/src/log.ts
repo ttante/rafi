@@ -32,6 +32,7 @@ export interface LogRecord {
     | "permission"
     | "escalation"
     | "needs_input"
+    | "blocked-recovery"
     | "preflight"
     | "rafi-plan"
     | "ticket-populate"
