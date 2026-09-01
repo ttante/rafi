@@ -1,6 +1,6 @@
 {
   "name": "@rafi-ai/cli",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "description": "Interactive AI app engineering for Claude and Codex: interview, plan, ticket, and build with QA.",
   "preferGlobal": true,
   "license": "Apache-2.0",
@@ -31,7 +31,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts test/*.test.mjs"
+    "test": "tsx --test test/*.test.ts test/*.test.mjs",
+    "prepack": "pnpm build",
+    "prepublishOnly": "pnpm test && pnpm typecheck"
   },
   "engines": {
     "node": ">=20"

@@ -20,18 +20,37 @@ const specPackageJson = JSON.parse(
   readFileSync(join(PKG_DIR, "..", "spec", "package.json"), "utf8"),
 ) as { version: string };
 
+let packedFiles: string[] | undefined;
+
 function packList(): string[] {
+  if (packedFiles) return packedFiles;
   const out = execSync("npm pack --dry-run --json 2>/dev/null", {
     cwd: PKG_DIR,
     encoding: "utf8",
   });
-  const parsed = JSON.parse(out) as Array<{ files: Array<{ path: string }> }>;
-  return parsed[0].files.map((f) => f.path);
+  // npm prints lifecycle-script output before its JSON result. The final JSON
+  // array is the authoritative pack manifest.
+  const json = out.match(/(\[\s*\{[\s\S]*\]\s*)$/)?.[1];
+  assert.ok(json, `npm pack did not emit a JSON manifest:\n${out}`);
+  const parsed = JSON.parse(json) as Array<{ files: Array<{ path: string }> }>;
+  packedFiles = parsed[0].files.map((f) => f.path);
+  return packedFiles;
 }
 
 test("@rafi-ai/cli pack includes dist/ output", () => {
   const files = packList();
   assert.ok(files.some((f) => f.startsWith("dist/")), "no dist/ files in pack");
+});
+
+test("@rafi-ai/cli packed CLI includes the Builder and QA compaction interview", () => {
+  const files = packList();
+  assert.ok(files.includes("dist/agents.js"), "packed CLI is missing dist/agents.js");
+  const compiledAgents = readFileSync(join(PKG_DIR, "dist", "agents.js"), "utf8");
+  assert.match(compiledAgents, /const \{ multiselect, select, confirm, text, isCancel \} = prompts;/);
+  assert.match(compiledAgents, /role !== "builder" && role !== "qa"/);
+  assert.match(compiledAgents, /automatic compaction threshold \(1-99\):/);
+  assert.match(compiledAgents, /maximum successful compactions per provider session:/);
+  assert.match(compiledAgents, /Automatic compaction settings/);
 });
 
 test("@rafi-ai/cli pack excludes test/ files", () => {

@@ -15,9 +15,9 @@ Loop Claude Code or Codex through tickets.
 - **Rich ticket system** — tickets carry acceptance criteria, required tests, dependencies, priority, size, and risk level. The agent reads the full context before starting each step.
 - **Future work tracking** — when the builder discovers out-of-scope work during a run, `ai-foreman tickets discover` captures it without derailing the current ticket. Discovered items live in a separate inbox until you promote them.
 - **QA that actually gates** — QA runs after every completed ticket and checks code quality, test passing, and regression protection. The ticket only closes after QA passes. QA turns do not count against `--steps`.
-- **Visible long-running work** — one elapsed-time activity line identifies provider, phase, tools, retries, and quiet periods; redirected output receives timestamped heartbeats instead of ANSI animation.
+- **Visible long-running work** — semantic activity rows identify provider, phase, tools, retries, and quiet periods; cursor-capable terminals update changing counters in place, while record-oriented terminals coalesce them.
 
-Provider-managed retries are reported immediately as durable lines. A quiet-provider warning appears after 60 seconds without a signal, but Foreman does not add retries, abort the provider, or change provider retry limits. Non-TTY output receives a heartbeat every 30 seconds while work remains pending.
+Provider-managed retries are reported immediately as durable lines. A quiet-provider warning appears after 60 seconds without a signal, but Foreman does not add retries, abort the provider, or change provider retry limits. Non-TTY output receives a heartbeat every 30 seconds while work remains pending. TTY rendering defaults to automatic detection: Codex, CI, and `TERM=dumb` use newline records and suppress spinner- or number-only repeats; other terminals redraw those changes in place and retain a row when the textual status changes. Use `RAFI_ACTIVITY_RENDER_MODE=auto|cursor|records` to override detection.
 
 ## Install
 
@@ -146,7 +146,7 @@ Saved `tickets.build` defaults in `rafi-config.yaml` can enable branch-per-ticke
 
 With the saved `current` strategy, Foreman works in the active branch while the user owns Git. It may edit, test, run QA, and update tracker/recovery state, but all branch/worktree, commit, push, merge, rebase, and review lifecycle commands are fenced. An unexpected active ref or worktree change pauses the run. Explicit isolated flags are reported as run overrides.
 
-The active terminal line always includes the current role/provider, activity, truthful context state, successful compaction count, and handoff generation. At the Builder threshold, Foreman settles the in-flight action, verifies native compaction plus a fresh provider usage sample, and resumes the frozen action. The configured maximum defaults to ten successful compactions per location-scoped provider session; the next crossing uses a validated fresh handoff instead of exceeding it. Disposable QA snapshots never reuse a prior QA conversation in a new `/tmp/rafi-qa-*` worktree; they transfer cumulative state through an accepted handoff.
+The current terminal status includes the role/provider, activity, truthful context state, successful compaction count, and handoff generation. At the Builder threshold, Foreman settles the in-flight action, verifies native compaction plus a fresh provider usage sample, and resumes the frozen action. The configured maximum defaults to ten successful compactions per location-scoped provider session; the next crossing uses a validated fresh handoff instead of exceeding it. Disposable QA snapshots never reuse a prior QA conversation in a new `/tmp/rafi-qa-*` worktree; they transfer cumulative state through an accepted handoff.
 
 ### GitHub PR Failure Recovery
 

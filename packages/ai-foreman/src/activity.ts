@@ -14,7 +14,11 @@ export interface ActivityReporterOptions {
   tickMs?: number;
   heartbeatMs?: number;
   quietWarningMs?: number;
+  /** Override automatic TTY capability detection for tests or embedding hosts. */
+  ttyMode?: ActivityTtyMode;
 }
+
+export type ActivityTtyMode = "auto" | "cursor" | "records";
 
 interface ActivePhase { id: number; label: string; startedAt: number }
 
@@ -28,6 +32,7 @@ export class ActivityReporter {
   private readonly tickMs: number;
   private readonly heartbeatMs: number;
   private readonly quietWarningMs: number;
+  private readonly ttyMode: Exclude<ActivityTtyMode, "auto">;
   private readonly commandStartedAt: number;
   private readonly phases = new Map<number, ActivePhase>();
   private nextPhaseId = 1;
@@ -40,6 +45,7 @@ export class ActivityReporter {
   private quietWarningPrinted = false;
   private lastHeartbeatAt = 0;
   private lineVisible = false;
+  private lastSemanticKey?: string;
   private paused = 0;
   private agentStatusLine?: string;
 
@@ -53,6 +59,7 @@ export class ActivityReporter {
     this.tickMs = options.tickMs ?? 1_000;
     this.heartbeatMs = options.heartbeatMs ?? 30_000;
     this.quietWarningMs = options.quietWarningMs ?? 60_000;
+    this.ttyMode = resolveTtyMode(options.ttyMode);
     this.commandStartedAt = this.now();
   }
 
@@ -108,7 +115,7 @@ export class ActivityReporter {
     this.render(true);
   }
 
-  /** Keep role/provider/context state in the single bottom-most TTY line. */
+  /** Keep role/provider/context state attached to the current activity status. */
   setAgentStatus(line: string | undefined): void {
     this.agentStatusLine = line ? clean(line, 500) : undefined;
     if (this.agentStatusLine && !this.timer) {
@@ -149,7 +156,6 @@ export class ActivityReporter {
 
   private idle(): void {
     if (this.agentStatusLine) {
-      this.clearLine();
       this.detail = undefined;
       this.provider = undefined;
       this.model = undefined;
@@ -163,6 +169,7 @@ export class ActivityReporter {
     this.provider = undefined;
     this.model = undefined;
     this.agentStatusLine = undefined;
+    this.lastSemanticKey = undefined;
   }
 
   private currentPhase(): ActivePhase | undefined {
@@ -186,8 +193,20 @@ export class ActivityReporter {
     const body = [phase?.label, provider || undefined, phase ? quiet : undefined, this.agentStatusLine].filter(Boolean).join(" — ");
     if (this.output.isTTY) {
       const line = `${FRAMES[this.frame++ % FRAMES.length]} RAFI working: ${body} (${formatDuration(now - this.commandStartedAt)})`;
+      const semanticKey = semanticStatusKey(body);
+      if (this.ttyMode === "records") {
+        if (semanticKey === this.lastSemanticKey) return;
+        this.output.write(`${line}\n`);
+        this.lastSemanticKey = semanticKey;
+        return;
+      }
+      if (this.lineVisible && semanticKey !== this.lastSemanticKey) {
+        this.output.write("\n");
+        this.lineVisible = false;
+      }
       this.output.write(`\r\x1b[2K${line}`);
       this.lineVisible = true;
+      this.lastSemanticKey = semanticKey;
       return;
     }
     if (force || now - this.lastHeartbeatAt >= this.heartbeatMs) {
@@ -263,6 +282,29 @@ function briefInput(input: unknown): string | undefined {
 
 function clean(value: string, maximum: number): string {
   return value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, maximum);
+}
+
+function semanticStatusKey(body: string): string {
+  return body.replace(/\p{Number}+(?:[.,]\p{Number}+)*/gu, "#");
+}
+
+function resolveTtyMode(requested?: ActivityTtyMode): Exclude<ActivityTtyMode, "auto"> {
+  const configured = requested ?? configuredTtyMode(process.env.RAFI_ACTIVITY_RENDER_MODE);
+  if (configured === "cursor" || configured === "records") return configured;
+  return truthyEnvironmentValue(process.env.CODEX_CI)
+    || truthyEnvironmentValue(process.env.CI)
+    || process.env.TERM?.toLowerCase() === "dumb"
+    ? "records"
+    : "cursor";
+}
+
+function configuredTtyMode(value: string | undefined): ActivityTtyMode {
+  return value === "cursor" || value === "records" || value === "auto" ? value : "auto";
+}
+
+function truthyEnvironmentValue(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  return !["", "0", "false"].includes(value.trim().toLowerCase());
 }
 
 function formatDuration(milliseconds: number): string {

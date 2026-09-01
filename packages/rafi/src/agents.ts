@@ -281,8 +281,25 @@ export async function waitForLiveSettingsAcknowledgments(
   }));
 }
 
-async function promptAgentSettings(root: string): Promise<{ selected: ConfigurableAgentRole[]; settings: AgentRoleDefaultsV1; roleSettings?: Partial<Record<ConfigurableAgentRole, AgentRoleDefaultsV1>> }> {
-  const { multiselect, select, confirm, text, isCancel } = await import("@clack/prompts");
+export interface AgentSettingsPrompts {
+  multiselect(options: unknown): Promise<unknown>;
+  select(options: unknown): Promise<unknown>;
+  confirm(options: unknown): Promise<unknown>;
+  text(options: unknown): Promise<unknown>;
+  isCancel(value: unknown): boolean;
+  log?: { info(message: string): void };
+}
+
+/**
+ * Interactive settings collection is exported so the Builder/QA-specific
+ * questions can be exercised without a terminal or a live provider.
+ */
+export async function promptAgentSettings(
+  root: string,
+  suppliedPrompts?: AgentSettingsPrompts,
+): Promise<{ selected: ConfigurableAgentRole[]; settings: AgentRoleDefaultsV1; roleSettings?: Partial<Record<ConfigurableAgentRole, AgentRoleDefaultsV1>> }> {
+  const prompts = suppliedPrompts ?? await import("@clack/prompts");
+  const { multiselect, select, confirm, text, isCancel } = prompts;
   const roleAnswer = await multiselect({
     message: "Which roles should share these settings?",
     initialValues: [...CONFIGURABLE_ROLES],
@@ -337,6 +354,13 @@ async function promptAgentSettings(root: string): Promise<{ selected: Configurab
     if (isCancel(maximum)) throw new Error("agent configuration cancelled; nothing was saved");
     roleSettings[role] = { auto_compact_threshold_percent: Number(threshold), compact_maximum: Number(maximum) };
   }
+  const compactionSummary = (roleAnswer as ConfigurableAgentRole[])
+    .filter((role): role is "builder" | "qa" => role === "builder" || role === "qa")
+    .map((role) => {
+      const values = roleSettings[role]!;
+      return `${role === "builder" ? "Builder" : "QA"}: compact at ${values.auto_compact_threshold_percent}%, maximum ${values.compact_maximum} per provider session`;
+    });
+  if (compactionSummary.length) prompts.log?.info(`Automatic compaction settings\n${compactionSummary.join("\n")}`);
   const ok = await confirm({ message: `Apply to ${(roleAnswer as string[]).join(", ")} in ${root}?`, initialValue: false });
   if (isCancel(ok) || !ok) throw new Error("agent configuration cancelled; nothing was saved");
   return {
