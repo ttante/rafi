@@ -4,20 +4,23 @@ import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
-import type { BuildRunRecord, BuildRunRecordV1, BuildRunRecordV2, ProviderSessionRefV1, ResolvedAgentSettings, SessionAvailabilityV1 } from "rafi-spec";
-import { WorkflowDb, type WorkflowRunStatus } from "./workflowDb.js";
+import type { AutonomyProfile, BuildRunRecord, BuildRunRecordV1, BuildRunRecordV2, BuildRunRecordV3, ProviderSessionRefV1, ResolvedAgentSettings, ResolvedAutonomyPolicy, SessionAvailabilityV1 } from "rafi-spec";
+import { WorkflowDb, heartbeatCurrentWorkflowLease, readCurrentWorkflowLease, type WorkflowRunStatus } from "./workflowDb.js";
+import { WorkflowReader } from "./workflowReader.js";
 import { canonicalSessionPath, captureWorkspaceIdentity, createProviderSessionRef, latestSessionBinding, upsertSessionBinding } from "./sessionIdentity.js";
 import { resolveProviderSessionAvailability, type ResolveSessionAvailabilityOptions } from "./sessionAvailability.js";
 import { captureCurrentWorkflowSessionIdentity, currentWorkflowIdentityKey } from "./branch/currentGuard.js";
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
 import { loadTickets } from "./tickets/ticketLoader.js";
+import { loadProjectAutonomyConfig, resolveAutonomyPolicy } from "./recoveryPolicy.js";
 
-export const BUILD_RUN_VERSION = 2;
+export const BUILD_RUN_VERSION = 3;
 export const BUILD_RUN_DIRECTORY = ".foreman/runs";
 export const BUILD_HEARTBEAT_MS = 10_000;
 export const BUILD_LEASE_STALE_MS = 45_000;
 
 export interface CreateBuildRunInput {
+  runId?: string;
   tickets: string[];
   deliveryUnit?: string;
   branchMode?: BuildRunRecordV2["branchMode"];
@@ -30,17 +33,25 @@ export interface CreateBuildRunInput {
   builder?: LegacyResolvedAgentSettings;
   qa?: LegacyResolvedAgentSettings;
   runDecisions?: BuildRunRecordV2["runDecisions"];
+  autonomyProfile?: AutonomyProfile;
+  frozenPolicy?: ResolvedAutonomyPolicy;
+  qaEnabled?: boolean;
   now?: Date;
 }
 
 export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
   const now = input.now ?? new Date();
+  // Complete the one-time legacy import before the new mutable build snapshot
+  // exists, so a brand-new run is never mistaken for legacy input.
+  const migration = new WorkflowDb(input.repositoryRoot);
+  migration.close();
   const stamp = now.toISOString();
   const worktree = resolve(input.worktree ?? input.repositoryRoot);
   const snapshot = captureGitSnapshot(worktree, input);
-  const run: BuildRunRecordV2 = {
-    version: 2,
-    runId: randomUUID(),
+  const frozenPolicy = input.frozenPolicy ?? resolveAutonomyPolicy(loadProjectAutonomyConfig(input.repositoryRoot), input.autonomyProfile, now);
+  const run: BuildRunRecordV3 = {
+    version: 3,
+    runId: input.runId ?? randomUUID(),
     status: "running",
     tickets: [...input.tickets],
     deliveryUnit: input.deliveryUnit,
@@ -59,6 +70,13 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
       baselineComplete: Boolean(snapshot.baselineHead && snapshot.startHead && snapshot.branch),
     },
     progress: { completedTickets: [], completedOperations: [], remainingTickets: [...input.tickets], nextAction: input.tickets[0] ? `Start ${input.tickets[0]}` : "Plan next work" },
+    frozenPolicy,
+    phase: "created",
+    qaEnabled: input.qaEnabled ?? Boolean(input.qa),
+    recoveryAttempts: [],
+    supervisor: { status: frozenPolicy.supervisorEnabled ? "starting" : "disabled", generation: 0, workerGeneration: 0, checkpointRestarts: 0, runRestarts: 0 },
+    pendingDecisions: [],
+    deferredTickets: [],
     runDecisions: input.runDecisions,
     receipts: {},
     lease: currentLease(now),
@@ -106,18 +124,17 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
   validateBuildRun(run);
   const directory = join(resolve(projectDir), BUILD_RUN_DIRECTORY);
   mkdirSync(directory, { recursive: true });
-  const completedOperations = Object.keys(run.receipts).sort();
-  const next: BuildRunRecordV2 = {
-    ...run,
+  const upgraded = upgradeBuildRun(run, projectDir, now);
+  const completedOperations = Object.keys(upgraded.receipts).sort();
+  let next: BuildRunRecordV3 = {
+    ...upgraded,
     progress: { ...run.progress, completedOperations, remainingTickets: remainingTickets(run) },
     updatedAt: now.toISOString(),
   };
-  const target = join(directory, `${run.runId}.json`);
-  const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  renameSync(temp, target);
   const workflow = new WorkflowDb(projectDir);
   try {
+    const frozenPolicy = workflow.freezeAutonomyPolicy(next.runId, next.frozenPolicy, now);
+    next = { ...next, frozenPolicy, recoveryAttempts: workflow.recoveryAttempts(next.runId), pendingDecisions: workflow.pendingHumanDecisions(next.runId), supervisor: workflow.supervisorState(next.runId) ?? next.supervisor };
     const existing = workflow.getRun(next.runId);
     if (!existing) workflow.createRun({
       runId: next.runId, kind: "build", checkpoint: next.checkpoint,
@@ -131,6 +148,10 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
     if (next.builder?.sessionId) workflow.recordSession(next.runId, "builder", "builder", latestSessionBinding(next.sessionBindings, "builder", next.builder.sessionId) ?? next.builder.sessionId, "checkpoint", next.builder.settings, now);
     if (next.qa?.sessionId) workflow.recordSession(next.runId, "qa", "qa", latestSessionBinding(next.sessionBindings, "qa", next.qa.sessionId) ?? next.qa.sessionId, "checkpoint", next.qa.settings, now);
   } finally { workflow.close(); }
+  const target = join(directory, `${run.runId}.json`);
+  const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(temp, target);
   return next;
 }
 
@@ -201,9 +222,10 @@ export function recordBuildReceipt(
 }
 
 export function heartbeatBuildRun(projectDir: string, run: BuildRunRecordV2, now = new Date()): BuildRunRecordV2 {
-  const saved = saveBuildRun(projectDir, { ...run, lease: { ...(run.lease ?? currentLease(now)), heartbeatAt: now.toISOString() } }, now);
-  const workflow = new WorkflowDb(projectDir); try { const lease = workflow.currentLease(); if (lease?.runId === run.runId) workflow.heartbeatLease(lease, now); } finally { workflow.close(); }
-  return saved;
+  const lease = readCurrentWorkflowLease(projectDir);
+  if (!lease || lease.runId !== run.runId) throw new Error("workflow lease ownership changed");
+  const next = heartbeatCurrentWorkflowLease(projectDir, lease, now);
+  return { ...run, lease: { hostname: next.host, pid: next.pid, processStart: next.processStart, heartbeatAt: next.heartbeatAt } };
 }
 
 export function releaseBuildLease(projectDir: string, run: BuildRunRecordV2, status: BuildRunRecordV2["status"] = "interrupted"): BuildRunRecordV2 {
@@ -217,21 +239,34 @@ export function completeBuildRun(projectDir: string, run: BuildRunRecordV2, now 
 export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
   const directory = join(resolve(projectDir), BUILD_RUN_DIRECTORY);
   if (!existsSync(directory)) return [];
-  return readdirSync(directory).filter((name) => name.endsWith(".json")).flatMap((name) => {
+  const workflow = existsSync(join(resolve(projectDir), ".rafi", "recovery.sqlite3")) ? new WorkflowDb(projectDir) : undefined;
+  const runs = readdirSync(directory).filter((name) => name.endsWith(".json")).flatMap((name) => {
     try {
-      const run = JSON.parse(readFileSync(join(directory, name), "utf8")) as BuildRunRecord;
-      validateBuildRun(run);
-      return [upgradeBuildRun(run)];
+      const projection = JSON.parse(readFileSync(join(directory, name), "utf8")) as BuildRunRecord;
+      validateBuildRun(projection);
+      const authoritative = workflow?.getRun(projection.runId)?.state as unknown as BuildRunRecord | undefined;
+      const run = authoritative?.runId ? authoritative : projection;
+      const upgraded = upgradeBuildRun(run, projectDir);
+      return [{ ...upgraded, frozenPolicy: workflow?.autonomyPolicy(run.runId) ?? upgraded.frozenPolicy, recoveryAttempts: workflow?.recoveryAttempts(run.runId) ?? upgraded.recoveryAttempts, pendingDecisions: workflow?.pendingHumanDecisions(run.runId) ?? upgraded.pendingDecisions, supervisor: workflow?.supervisorState(run.runId) ?? upgraded.supervisor }];
     } catch {
       return [];
     }
   }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  workflow?.close();
+  return runs;
 }
 
 export function recoverableBuildRuns(projectDir: string, now = new Date()): Array<BuildRunRecordV2 & { active: boolean }> {
+  const databaseLease = readCurrentWorkflowLease(projectDir);
   return readBuildRuns(projectDir)
     .filter((run) => run.status !== "completed")
-    .map((run) => ({ ...inferLegacyRunTickets(projectDir, run), active: isLeaseActive(run, now) }));
+    .map((run) => ({ ...inferLegacyRunTickets(projectDir, run), active: databaseLease?.runId === run.runId ? workflowLeaseLooksLive(databaseLease, now) : isLeaseActive(run, now) }));
+}
+
+function workflowLeaseLooksLive(lease: NonNullable<ReturnType<typeof readCurrentWorkflowLease>>, now: Date): boolean {
+  if (now.getTime() - new Date(lease.heartbeatAt).getTime() > BUILD_LEASE_STALE_MS) return false;
+  if (lease.host !== hostname()) return true;
+  try { process.kill(lease.pid, 0); return lease.processStart === processStartIdentity(lease.pid); } catch { return false; }
 }
 
 /**
@@ -321,7 +356,7 @@ export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, 
   let issues: string[] = [];
   let workflowState: Record<string, unknown> = {};
   if (existsSync(join(resolve(projectDir), ".rafi", "recovery.sqlite3"))) {
-    const workflow = new WorkflowDb(projectDir);
+    const workflow = new WorkflowReader(projectDir);
     try {
       operationNames = workflow.operations(run.runId).filter((operation) => operation.status === "confirmed").map((operation) => operation.kind);
       issues = workflow.issues(run.runId).map((issue) => issue.detail);
@@ -446,7 +481,7 @@ function processStartIdentity(pid: number): string {
 }
 
 function validateBuildRun(run: BuildRunRecord): void {
-  if (![1, 2].includes(run.version) || !run.runId || !run.repository?.root || !run.repository.worktree || !run.createdAt || !run.updatedAt) {
+  if (![1, 2, 3].includes(run.version) || !run.runId || !run.repository?.root || !run.repository.worktree || !run.createdAt || !run.updatedAt) {
     throw new Error("invalid build run record");
   }
 }
@@ -508,13 +543,18 @@ function relativeTime(value: string, now: Date): string {
   return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
-function upgradeBuildRun(run: BuildRunRecord): BuildRunRecordV2 {
-  if (run.version === 2) return run;
+function upgradeBuildRun(run: BuildRunRecord, projectDir = run.repository.root, now = new Date()): BuildRunRecordV3 {
+  if (run.version === 3) return run as BuildRunRecordV3;
+  const policy = resolveAutonomyPolicy(loadProjectAutonomyConfig(projectDir), undefined, new Date(run.createdAt || now));
+  if (run.version === 2) return {
+    ...run, version: 3, frozenPolicy: policy, phase: run.checkpoint, qaEnabled: Boolean(run.qa), recoveryAttempts: [],
+    supervisor: { status: policy.supervisorEnabled ? "stopped" : "disabled", generation: 0, workerGeneration: 0, checkpointRestarts: 0, runRestarts: 0 }, pendingDecisions: [], deferredTickets: [], legacy: true,
+  };
   const legacy = run as BuildRunRecordV1;
   const remaining = legacy.status === "completed" ? [] : legacy.tickets.slice(Math.max(0, legacy.currentTicket ? legacy.tickets.indexOf(legacy.currentTicket) : 0));
   return {
     ...legacy,
-    version: 2,
+    version: 3,
     legacy: true,
     repository: {
       ...legacy.repository,
@@ -534,6 +574,13 @@ function upgradeBuildRun(run: BuildRunRecord): BuildRunRecordV2 {
       lastSuccessfulAction: legacy.checkpoint,
       nextAction: remaining[0] ? `Resume ${remaining[0]}` : "Inspect legacy run",
     },
+    frozenPolicy: policy,
+    phase: legacy.checkpoint,
+    qaEnabled: Boolean(legacy.qa),
+    recoveryAttempts: [],
+    supervisor: { status: policy.supervisorEnabled ? "stopped" : "disabled", generation: 0, workerGeneration: 0, checkpointRestarts: 0, runRestarts: 0 },
+    pendingDecisions: [],
+    deferredTickets: [],
   };
 }
 

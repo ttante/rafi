@@ -15,12 +15,19 @@ import type {
   HandoffManifestV1,
   LiveSettingsAcknowledgment,
   OperationLifecycle,
+  PendingHumanDecision,
   ProviderSessionRefV1,
+  RecoveryAttemptOutcome,
+  RecoveryAttemptReceipt,
+  ResolvedAutonomyPolicy,
   ResolvedAgentSettings,
   SessionUsageSample,
+  StructuredInterruption,
+  SupervisorState,
   WorkflowIssue,
 } from "rafi-spec";
 import { providerSessionKey } from "./sessionIdentity.js";
+import type { BranchResumeSession } from "./branch/resume.js";
 
 export const WORKFLOW_DB_FILE = ".rafi/recovery.sqlite3";
 export type WorkflowKind = "plan" | "ticket-plan" | "ticket-populate" | "uninstall" | "build" | "qa-remediation" | "recovery" | "legacy";
@@ -78,6 +85,20 @@ export function readCurrentWorkflowLease(projectDir: string): ProjectLease | und
   } finally {
     db?.close();
   }
+}
+
+/** Heartbeat-only writer: one conditional UPDATE and no migrations, imports, events, or snapshots. */
+export function heartbeatCurrentWorkflowLease(projectDir: string, lease: ProjectLease, now = new Date()): ProjectLease {
+  const path = join(resolve(projectDir), WORKFLOW_DB_FILE);
+  if (!existsSync(path)) throw new Error("workflow recovery database not found");
+  const db = new Database(path, { fileMustExist: true });
+  try {
+    const at = now.toISOString();
+    const result = db.prepare("UPDATE project_lease SET heartbeat_at=? WHERE singleton=1 AND owner=? AND generation=? AND run_id=?")
+      .run(at, lease.owner, lease.generation, lease.runId);
+    if (result.changes !== 1) throw new Error("workflow lease ownership changed");
+    return { ...lease, heartbeatAt: at };
+  } finally { db.close(); }
 }
 export interface PublicationTransaction { transactionId: string; runId: string; status: "prepared" | "staged" | "tracker_committed" | "published" | "committed" | "rolled_back"; intent: unknown; previousDigests: unknown; createdAt: string; updatedAt: string }
 export interface CompactionAttemptRecord {
@@ -340,6 +361,10 @@ export class WorkflowDb {
     this.ensureRun(runId, "build", now);
     const scoped = sessionParts(typeof session === "object" ? session : undefined, typeof session === "string" ? session : undefined);
     if (scoped.ref) this.recordProviderSessionBinding(scoped.ref, now);
+    const duplicate = this.db.prepare(`SELECT 1 FROM provider_sessions WHERE run_id=? AND role=? AND stream=? AND provider=? AND model=?
+      AND COALESCE(session_id,'')=COALESCE(?,'') AND COALESCE(session_key,'')=COALESCE(?,'') AND transition=? AND settings_revision=? ORDER BY id DESC LIMIT 1`)
+      .get(runId, role, stream, settings.make, settings.model, scoped.id, scoped.key, transition, settings.settings_revision);
+    if (duplicate) return;
     this.db.prepare(`INSERT INTO provider_sessions(run_id,role,stream,provider,model,session_id,session_key,session_ref_json,transition,settings_revision,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(runId, role, stream, settings.make, settings.model, scoped.id, scoped.key, scoped.refJson, transition, settings.settings_revision, now.toISOString());
   }
@@ -380,6 +405,118 @@ export class WorkflowDb {
     return (this.db.prepare("SELECT issue_json FROM workflow_issues WHERE run_id=? ORDER BY issue_id").all(runId) as Array<{ issue_json: string }>).map((row) => parseJson(row.issue_json) as WorkflowIssue);
   }
 
+  freezeAutonomyPolicy(runId: string, policy: ResolvedAutonomyPolicy, now = new Date()): ResolvedAutonomyPolicy {
+    this.ensureRun(runId, "build", now);
+    this.db.prepare("INSERT INTO run_autonomy_policy(run_id,digest,policy_json,frozen_at) VALUES(?,?,?,?) ON CONFLICT(run_id) DO NOTHING")
+      .run(runId, policy.digest, json(policy), now.toISOString());
+    return this.autonomyPolicy(runId)!;
+  }
+
+  autonomyPolicy(runId: string): ResolvedAutonomyPolicy | undefined {
+    const row = this.db.prepare("SELECT policy_json FROM run_autonomy_policy WHERE run_id=?").get(runId) as { policy_json: string } | undefined;
+    return row ? parseJson(row.policy_json) as ResolvedAutonomyPolicy : undefined;
+  }
+
+  recordInterruption(interruption: StructuredInterruption): StructuredInterruption {
+    this.ensureRun(interruption.runId);
+    this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO recovery_interruptions(interruption_id,run_id,code,domain,phase,cause,dispatch_state,operation_key,interruption_json,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(interruption_id) DO NOTHING`).run(
+        interruption.id, interruption.runId, interruption.code, interruption.domain, interruption.phase, interruption.cause,
+        interruption.dispatchState, interruption.operation?.idempotencyKey ?? null, json(interruption), interruption.occurredAt,
+      );
+      this.insertEvent(interruption.runId, "recovery_interruption", interruption.phase, { interruptionId: interruption.id, code: interruption.code, domain: interruption.domain }, interruption.occurredAt);
+    })();
+    return interruption;
+  }
+
+  interruptions(runId: string): StructuredInterruption[] {
+    return (this.db.prepare("SELECT interruption_json FROM recovery_interruptions WHERE run_id=? ORDER BY created_at,interruption_id").all(runId) as Array<{ interruption_json: string }>)
+      .map((row) => parseJson(row.interruption_json) as StructuredInterruption);
+  }
+
+  recoveryAttemptCount(runId: string, ticket: string | undefined, phase: string, cause: string, operationKey: string): number {
+    const row = this.db.prepare(`SELECT COUNT(*) AS count FROM recovery_attempts
+      WHERE run_id=? AND ticket IS ? AND phase=? AND cause=? AND operation_key=? AND outcome IN ('intended','started','succeeded','failed')`)
+      .get(runId, ticket ?? null, phase, cause, operationKey) as { count: number };
+    return row.count;
+  }
+
+  recordRecoveryAttempt(receipt: RecoveryAttemptReceipt): RecoveryAttemptReceipt {
+    this.ensureRun(receipt.runId);
+    this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO recovery_attempts(attempt_id,run_id,ticket,phase,cause,operation_key,attempt,disposition,action,outcome,receipt_json,intended_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(receipt.attemptId, receipt.runId, receipt.ticket ?? null, receipt.phase, receipt.cause,
+        receipt.operationKey, receipt.attempt, receipt.disposition, receipt.action, receipt.outcome, json(receipt), receipt.intendedAt, receipt.intendedAt);
+      this.insertEvent(receipt.runId, "recovery_attempt_intended", receipt.phase, { attemptId: receipt.attemptId, attempt: receipt.attempt, action: receipt.action }, receipt.intendedAt);
+    })();
+    return receipt;
+  }
+
+  updateRecoveryAttempt(attemptId: string, outcome: RecoveryAttemptOutcome, detail?: string, now = new Date()): RecoveryAttemptReceipt {
+    const row = this.db.prepare("SELECT receipt_json FROM recovery_attempts WHERE attempt_id=?").get(attemptId) as { receipt_json: string } | undefined;
+    if (!row) throw new Error(`recovery attempt not found: ${attemptId}`);
+    const prior = parseJson(row.receipt_json) as RecoveryAttemptReceipt;
+    const at = now.toISOString();
+    const next: RecoveryAttemptReceipt = { ...prior, outcome, ...(outcome === "started" ? { startedAt: at } : {}), ...(["succeeded", "failed", "cancelled"].includes(outcome) ? { completedAt: at } : {}), ...(detail ? { detail } : {}) };
+    this.db.prepare("UPDATE recovery_attempts SET outcome=?,receipt_json=?,updated_at=? WHERE attempt_id=?").run(outcome, json(next), at, attemptId);
+    this.insertEvent(next.runId, `recovery_attempt_${outcome}`, next.phase, { attemptId, detail }, at);
+    return next;
+  }
+
+  recoveryAttempts(runId: string): RecoveryAttemptReceipt[] {
+    return (this.db.prepare("SELECT receipt_json FROM recovery_attempts WHERE run_id=? ORDER BY intended_at,attempt_id").all(runId) as Array<{ receipt_json: string }>)
+      .map((row) => parseJson(row.receipt_json) as RecoveryAttemptReceipt);
+  }
+
+  ensureHumanDecision(input: { decisionKey: string; runId: string; interruptionId: string; prompt: string; choices: PendingHumanDecision["choices"]; evidence?: PendingHumanDecision["evidence"] }, now = new Date()): PendingHumanDecision {
+    this.ensureRun(input.runId);
+    const existing = this.db.prepare("SELECT decision_json FROM human_decisions WHERE decision_key=?").get(input.decisionKey) as { decision_json: string } | undefined;
+    if (existing) return parseJson(existing.decision_json) as PendingHumanDecision;
+    const decision: PendingHumanDecision = { decisionId: randomUUID(), runId: input.runId, interruptionId: input.interruptionId, prompt: input.prompt, choices: input.choices, status: "pending", createdAt: now.toISOString(), ...(input.evidence ? { evidence: input.evidence } : {}) };
+    this.db.transaction(() => {
+      this.db.prepare("INSERT INTO human_decisions(decision_id,decision_key,run_id,status,decision_json,created_at,updated_at) VALUES(?,?,?,'pending',?,?,?)")
+        .run(decision.decisionId, input.decisionKey, input.runId, json(decision), decision.createdAt, decision.createdAt);
+      this.insertEvent(input.runId, "human_decision_pending", "waiting-for-human", { decisionId: decision.decisionId, choices: decision.choices.map((choice) => choice.id) }, decision.createdAt);
+    })();
+    return decision;
+  }
+
+  humanDecision(decisionId: string): PendingHumanDecision | undefined {
+    const row = this.db.prepare("SELECT decision_json FROM human_decisions WHERE decision_id=?").get(decisionId) as { decision_json: string } | undefined;
+    return row ? parseJson(row.decision_json) as PendingHumanDecision : undefined;
+  }
+
+  pendingHumanDecisions(runId: string): PendingHumanDecision[] {
+    return (this.db.prepare("SELECT decision_json FROM human_decisions WHERE run_id=? AND status='pending' ORDER BY created_at").all(runId) as Array<{ decision_json: string }>)
+      .map((row) => parseJson(row.decision_json) as PendingHumanDecision);
+  }
+
+  answerHumanDecision(runId: string, decisionId: string, choiceId: string, now = new Date()): PendingHumanDecision {
+    const decision = this.humanDecision(decisionId);
+    if (!decision || decision.runId !== runId) throw new Error(`pending decision not found for run ${runId}: ${decisionId}`);
+    if (decision.status !== "pending") throw new Error(`decision ${decisionId} has already been answered`);
+    if (!decision.choices.some((choice) => choice.id === choiceId)) throw new Error(`invalid choice ${choiceId} for decision ${decisionId}`);
+    const at = now.toISOString();
+    const next: PendingHumanDecision = { ...decision, status: "answered", answeredAt: at, selectedChoiceId: choiceId };
+    this.db.prepare("UPDATE human_decisions SET status='answered',decision_json=?,updated_at=? WHERE decision_id=? AND status='pending'").run(json(next), at, decisionId);
+    this.insertEvent(runId, "human_decision_answered", "decision-received", { decisionId, choiceId }, at);
+    return next;
+  }
+
+  putSupervisorState(runId: string, state: SupervisorState, now = new Date()): SupervisorState {
+    this.ensureRun(runId);
+    this.db.prepare(`INSERT INTO supervisor_leases(run_id,status,pid,generation,heartbeat_at,state_json,updated_at)
+      VALUES(?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,pid=excluded.pid,generation=excluded.generation,heartbeat_at=excluded.heartbeat_at,state_json=excluded.state_json,updated_at=excluded.updated_at`)
+      .run(runId, state.status, state.pid ?? null, state.generation, state.heartbeatAt ?? null, json(state), now.toISOString());
+    return state;
+  }
+
+  supervisorState(runId: string): SupervisorState | undefined {
+    const row = this.db.prepare("SELECT state_json FROM supervisor_leases WHERE run_id=?").get(runId) as { state_json: string } | undefined;
+    return row ? parseJson(row.state_json) as SupervisorState : undefined;
+  }
+
   planOperation(input: { runId: string; idempotencyKey: string; kind: string; intent: unknown }, now = new Date()): OperationRecord {
     const at = now.toISOString();
     this.db.prepare(`INSERT INTO operation_journal(idempotency_key,run_id,kind,status,intent_json,created_at,updated_at)
@@ -407,7 +544,7 @@ export class WorkflowDb {
     return (this.db.prepare("SELECT * FROM operation_journal WHERE run_id=? ORDER BY created_at,idempotency_key").all(runId) as DbOperation[]).map(operationFromRow);
   }
 
-  putEvidence(kind: "handoff" | "diff" | "test", value: string | Buffer, now = new Date()): string {
+  putEvidence(kind: "handoff" | "diff" | "test" | "qa", value: string | Buffer, now = new Date()): string {
     const bytes = Buffer.isBuffer(value) ? value : Buffer.from(sanitizeText(value));
     const digest = createHash("sha256").update(bytes).digest("hex");
     this.db.prepare("INSERT OR IGNORE INTO content_refs(digest,kind,content,created_at) VALUES(?,?,?,?)").run(digest, kind, bytes, now.toISOString());
@@ -701,23 +838,60 @@ export class WorkflowDb {
     return row ? { owner: row.owner, generation: row.generation, pid: row.pid, host: row.host, processStart: row.process_start, heartbeatAt: row.heartbeat_at, runId: row.run_id } : undefined;
   }
 
+  recordBranchResumeSession(runId: string, session: BranchResumeSession, now = new Date()): void {
+    this.ensureRun(runId, "build", now);
+    this.db.prepare(`INSERT INTO branch_resume_sessions(run_id,ticket,status,session_json,updated_at)
+      VALUES(?,?,'active',?,?) ON CONFLICT(run_id,ticket) DO UPDATE SET status='active',session_json=excluded.session_json,updated_at=excluded.updated_at`)
+      .run(runId, session.ticket, json(sanitizeContinuityValue(session)), now.toISOString());
+  }
+
+  completeBranchResumeSession(runId: string, ticket: string, status: "completed" | "superseded" = "completed", now = new Date()): void {
+    this.db.prepare("UPDATE branch_resume_sessions SET status=?,updated_at=? WHERE run_id=? AND ticket=?").run(status, now.toISOString(), runId, ticket);
+  }
+
+  branchResumeSessions(activeOnly = true): BranchResumeSession[] {
+    const rows = this.db.prepare(`SELECT session_json FROM branch_resume_sessions${activeOnly ? " WHERE status='active'" : ""} ORDER BY updated_at,ticket`).all() as Array<{ session_json: string }>;
+    return rows.map(row => parseJson(row.session_json) as BranchResumeSession);
+  }
+
+  pruneTerminalTelemetry(retentionDays: number, now = new Date()): number {
+    const cutoff = new Date(now.getTime() - Math.max(1, retentionDays) * 86_400_000).toISOString();
+    const result = this.db.prepare(`DELETE FROM workflow_telemetry
+      WHERE run_id IN (SELECT run_id FROM workflow_runs WHERE status IN ('completed','failed','cancelled','superseded') AND updated_at<?)
+      AND id NOT IN (SELECT MAX(id) FROM workflow_telemetry GROUP BY run_id)`).run(cutoff);
+    this.db.pragma("incremental_vacuum(200)");
+    return result.changes;
+  }
+
+  compactStorage(): void {
+    const lease = this.currentLease();
+    if (lease && Date.now() - new Date(lease.heartbeatAt).getTime() <= 45_000) throw new Error("refusing recovery database compaction while a live project lease exists");
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
+    this.db.exec("VACUUM");
+  }
+
   importLegacyOnce(now = new Date()): number {
+    const migration = "legacy-files-v1";
+    if (this.db.prepare("SELECT 1 FROM recovery_schema_migrations WHERE migration=?").get(migration)) return 0;
     const sources = [join(this.projectDir, ".foreman", "runs"), join(this.projectDir, ".rafi", "interviews"), join(this.projectDir, ".tickets", "delivery-sessions")];
     let count = 0;
-    for (const directory of sources) {
+    this.db.transaction(() => { for (const directory of sources) {
       if (!existsSync(directory) || !statSync(directory).isDirectory()) continue;
       for (const name of readdirSync(directory).filter((entry) => entry.endsWith(".json"))) {
         const path = join(directory, name); const digest = createHash("sha256").update(readFileSync(path)).digest("hex");
         if (this.db.prepare("SELECT 1 FROM legacy_imports WHERE source_path=? AND digest=?").get(path, digest)) continue;
         let parsed: unknown; try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch { parsed = { unreadable: true }; }
-        const runId = `legacy_${digest.slice(0, 24)}`;
+        const record = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
+        const isBuild = (record?.version === 1 || record?.version === 2) && typeof record.runId === "string";
+        const runId = isBuild ? String(record!.runId) : `legacy_${digest.slice(0, 24)}`;
         if (!this.getRun(runId)) {
-          this.createRun({ runId, kind: "legacy", checkpoint: "legacy-imported", originalWork: { source: path }, remainingWork: {}, state: { source: path, record: parsed }, legacy: true }, now);
-          this.transition(runId, { status: "superseded", checkpoint: "legacy-imported", remainingWork: {}, event: "legacy_record_preserved" }, now);
+          this.createRun({ runId, kind: isBuild ? "build" : "legacy", checkpoint: isBuild && typeof record?.checkpoint === "string" ? record.checkpoint : "legacy-imported", originalWork: isBuild ? { tickets: record?.tickets ?? [] } : { source: path }, remainingWork: isBuild ? { tickets: record?.tickets ?? [] } : {}, state: isBuild ? record! : { source: path, record: parsed }, legacy: true }, now);
+          if (!isBuild) this.transition(runId, { status: "superseded", checkpoint: "legacy-imported", remainingWork: {}, event: "legacy_record_preserved" }, now);
         }
         this.db.prepare("INSERT INTO legacy_imports(source_path,digest,run_id,imported_at) VALUES(?,?,?,?)").run(path, digest, runId, now.toISOString()); count += 1;
       }
     }
+    this.db.prepare("INSERT INTO recovery_schema_migrations(migration,completed_at) VALUES(?,?)").run(migration, now.toISOString()); })();
     return count;
   }
 
@@ -745,6 +919,13 @@ export class WorkflowDb {
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS workflow_runs(run_id TEXT PRIMARY KEY,kind TEXT NOT NULL,status TEXT NOT NULL,checkpoint TEXT NOT NULL,original_work_json TEXT NOT NULL,remaining_work_json TEXT NOT NULL,state_json TEXT NOT NULL,lease_generation INTEGER,legacy INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS recovery_schema_migrations(migration TEXT PRIMARY KEY,completed_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS branch_resume_sessions(run_id TEXT NOT NULL,ticket TEXT NOT NULL,status TEXT NOT NULL,session_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(run_id,ticket));
+      CREATE TABLE IF NOT EXISTS run_autonomy_policy(run_id TEXT PRIMARY KEY REFERENCES workflow_runs(run_id),digest TEXT NOT NULL,policy_json TEXT NOT NULL,frozen_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS recovery_interruptions(interruption_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),code TEXT NOT NULL,domain TEXT NOT NULL,phase TEXT NOT NULL,cause TEXT NOT NULL,dispatch_state TEXT NOT NULL,operation_key TEXT,interruption_json TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS recovery_attempts(attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket TEXT,phase TEXT NOT NULL,cause TEXT NOT NULL,operation_key TEXT NOT NULL,attempt INTEGER NOT NULL,disposition TEXT NOT NULL,action TEXT NOT NULL,outcome TEXT NOT NULL,receipt_json TEXT NOT NULL,intended_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS human_decisions(decision_id TEXT PRIMARY KEY,decision_key TEXT NOT NULL UNIQUE,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),status TEXT NOT NULL,decision_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS supervisor_leases(run_id TEXT PRIMARY KEY REFERENCES workflow_runs(run_id),status TEXT NOT NULL,pid INTEGER,generation INTEGER NOT NULL,heartbeat_at TEXT,state_json TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workflow_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),event_type TEXT NOT NULL,checkpoint TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS role_settings(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,boundary INTEGER NOT NULL,revision INTEGER NOT NULL,settings_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(run_id,role,boundary));
       CREATE TABLE IF NOT EXISTS project_settings_revisions(revision INTEGER PRIMARY KEY,defaults_json TEXT NOT NULL,created_at TEXT NOT NULL);
@@ -769,6 +950,8 @@ export class WorkflowDb {
       CREATE TABLE IF NOT EXISTS recovery_decisions(decision_id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),decided_at TEXT NOT NULL,mode TEXT NOT NULL,digest TEXT NOT NULL UNIQUE,session_key TEXT,session_ref_json TEXT,receipt_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS workflow_events_run ON workflow_events(run_id,sequence);
       CREATE INDEX IF NOT EXISTS operations_run ON operation_journal(run_id,status);
+      CREATE INDEX IF NOT EXISTS recovery_attempt_scope ON recovery_attempts(run_id,ticket,phase,cause,operation_key,outcome);
+      CREATE INDEX IF NOT EXISTS human_decisions_run ON human_decisions(run_id,status,created_at);
       CREATE INDEX IF NOT EXISTS context_samples_run_role ON context_samples(run_id,role,sample_id);
       CREATE INDEX IF NOT EXISTS continuity_events_run ON continuity_events(run_id,sequence);
       CREATE INDEX IF NOT EXISTS continuity_checkpoints_run_role ON continuity_checkpoints(run_id,role,checkpoint_id);
@@ -799,7 +982,6 @@ export class WorkflowDb {
 
   private ensureColumn(table: string, column: string, definition: string): void {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-    if (!columns.some((entry) => entry.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 

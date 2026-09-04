@@ -54,11 +54,12 @@ export interface LogRecord {
 
 /** Append-only JSONL logger. One line per record, plus an echo to the console. */
 export class Log {
-  constructor(private readonly path: string) {
-    mkdirSync(dirname(path), { recursive: true });
+  constructor(private readonly path?: string) {
+    if (path) mkdirSync(dirname(path), { recursive: true });
   }
 
   write(event: LogRecord["event"], fields: Record<string, unknown>): void {
+    if (!this.path) return;
     const record: LogRecord = {
       ts: new Date().toISOString(),
       event,

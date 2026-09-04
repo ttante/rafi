@@ -13,7 +13,7 @@ import { CONTENT_DIR } from "./content.js";
 export const AGENTS_DIR = join(CONTENT_DIR, "agents");
 
 /** The roles Rafi ships, each mapping to an ai-foreman turn-type/command. */
-export const AGENT_ROLES: AgentRole[] = ["builder", "qa", "planner", "ticket-maker", "uninstaller"];
+export const AGENT_ROLES: AgentRole[] = ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager"];
 
 /** Parse an agent-manifest YAML string into a validated AgentManifest. */
 export function parseAgentManifest(raw: string): AgentManifest {

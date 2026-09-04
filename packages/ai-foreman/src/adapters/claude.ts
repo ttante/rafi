@@ -5,6 +5,7 @@ import type {
   SDKUserMessage,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
+import { createHash, randomUUID } from "node:crypto";
 
 /** Lazy-load the Claude Agent SDK. Throws an actionable error if not installed. */
 export async function requireClaudeSDK() {
@@ -213,9 +214,15 @@ export class ClaudeAdapter implements BuilderAdapter {
   private nativeCompactions: NativeCompaction[] = [];
   private nativeCompactionSequence = 0;
   private cumulativeUsage: ProviderSessionUsage = { observedAt: new Date(0).toISOString(), source: "provider" };
+  private priorTurnUsage: { inputTokens?: number; outputTokens?: number; costUsd?: number } = {};
+  private activeProviderTurnId?: string;
+  private activeProviderTurnSpanId?: string;
+  private readonly toolSpans = new Map<string, string>();
   private pending?: {
     resolve: (r: TurnResult) => void;
     reject: (e: Error) => void;
+    instruction: string;
+    turnId: string;
   };
   private terminalResult?: TurnResult;
   private streamEnded = false;
@@ -343,13 +350,27 @@ export class ClaudeAdapter implements BuilderAdapter {
       }
       for (const block of msg.message.content) {
         if (block.type === "text" && block.text) {
-          this.eventQueue.push({ kind: "text", text: block.text });
+          this.eventQueue.push({ kind: "text", text: block.text, byteCount: Buffer.byteLength(block.text), digest: createHash("sha256").update(block.text).digest("hex"), eventId: randomUUID(), observedAt: new Date().toISOString() });
+          this.opts.observer?.signal(true);
         } else if (block.type === "tool_use") {
+          const callId = block.id;
           this.eventQueue.push({
             kind: "tool",
             name: block.name,
             input: block.input,
+            inputCompleteness: "complete",
+            lifecycle: "started",
+            callId,
+            completionKnown: false,
+            providerTurnId: this.activeProviderTurnId,
+            eventId: randomUUID(),
+            observedAt: new Date().toISOString(),
           });
+          if (this.opts.observer) {
+            const spanId = this.opts.observer.store.startSpan(this.observationContext(), { kind: "tool", name: block.name, providerTurnId: this.activeProviderTurnId, attributes: { callId, input: block.input } });
+            this.toolSpans.set(callId, spanId);
+            this.opts.observer.signal(true);
+          }
         }
       }
     } else if (msg.type === "auth_status") {
@@ -368,9 +389,22 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.structuredError = msg.error;
       this.apiErrorStatus = msg.error_status;
       this.turnSignals.push(`API retry ${msg.attempt}/${msg.max_retries}: ${msg.error}${msg.error_status === null ? "" : ` (HTTP ${msg.error_status})`}`);
-      this.eventQueue.push(claudeApiRetryEvent(msg));
+      const retryEvent = { ...claudeApiRetryEvent(msg), retryId: randomUUID(), providerTurnId: this.activeProviderTurnId, observedAt: new Date().toISOString() };
+      this.eventQueue.push(retryEvent);
+      if (this.opts.observer) {
+        const attributes = { provider: "claude", attempt: msg.attempt, maximum: msg.max_retries, reportedDelayMs: msg.retry_delay_ms, reasonDigest: createHash("sha256").update(msg.error).digest("hex") };
+        const retrySpanId = this.opts.observer.store.startSpan(this.observationContext(), { spanId: retryEvent.retryId, kind: "retry", name: "Claude provider retry", providerTurnId: this.activeProviderTurnId, attributes });
+        this.opts.observer.store.recordEvent(this.observationContext(), "retry", { eventId: retryEvent.retryId, spanId: retrySpanId, severity: "warning", attributes });
+        this.opts.observer.store.finishSpan(retrySpanId, { outcome: "reported" });
+      }
     } else if (msg.type === "tool_progress") {
       this.eventQueue.push({ kind: "activity", provider: "claude", state: "running tool", detail: `${msg.tool_name} (${Math.floor(msg.elapsed_time_seconds)}s)`, transient: true });
+      const progress = msg as unknown as Record<string, unknown>;
+      const callId = typeof progress.tool_use_id === "string" ? progress.tool_use_id : typeof progress.toolUseID === "string" ? progress.toolUseID : undefined;
+      this.eventQueue.push({ kind: "tool", name: msg.tool_name, input: {}, lifecycle: "progress", callId, durationMs: Math.max(0, msg.elapsed_time_seconds * 1000), completionKnown: false, eventId: randomUUID(), observedAt: new Date().toISOString() });
+      this.opts.observer?.signal(false);
+    } else if ((msg as unknown as { type?: string }).type === "user") {
+      this.observeToolResults(msg as unknown as Record<string, unknown>);
     } else if (msg.type === "system") {
       const system = msg as unknown as Record<string, unknown>;
       if (system.subtype === "task_started" || system.subtype === "task_progress" || system.subtype === "task_updated") {
@@ -419,13 +453,20 @@ export class ClaudeAdapter implements BuilderAdapter {
         costUsd: msg.total_cost_usd,
         costAuthoritative: Number.isFinite(msg.total_cost_usd),
         failure,
+        turnId: this.pending?.turnId ?? this.activeProviderTurnId,
+        hostInstruction: this.pending?.instruction,
+        providerInstruction: this.pending?.instruction,
+        rawResponse: text,
+        cleanedResponse: failure ? formatClaudeFailure(failure) : text,
+        providerMetadata: { provider: "claude", sessionId: this._sessionId, sessionRef: this._sessionRef },
       };
       const rawResult = msg as unknown as Record<string, unknown>;
       const mergedUsage = mergeClaudeProviderSessionUsage(this.cumulativeUsage, rawResult);
       result.inputTokens = mergedUsage.inputTokens;
       result.outputTokens = mergedUsage.outputTokens;
+      result.usage = { scope: "session-cumulative", inputTokens: mergedUsage.sample.inputTokens, outputTokens: mergedUsage.sample.outputTokens, totalTokens: mergedUsage.sample.totalTokens, costUsd: mergedUsage.sample.authoritativeCostUsd };
       this.cumulativeUsage = mergedUsage.sample;
-      this.eventQueue.push({ kind: "turn-complete", result });
+      this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
       this.settlePending(result, false);
       this.turnSignals = [];
       this.structuredError = undefined;
@@ -434,8 +475,33 @@ export class ClaudeAdapter implements BuilderAdapter {
     }
   }
 
-  sendTurn(text: string): Promise<TurnResult> {
-    return withActivityPhase(`Claude ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(text));
+  async sendTurn(text: string): Promise<TurnResult> {
+    const turnId = randomUUID();
+    this.activeProviderTurnId = turnId;
+    const observer = this.opts.observer;
+    if (!observer) {
+      try { return await withActivityPhase(`Claude ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(text)); }
+      finally { this.activeProviderTurnId = undefined; }
+    }
+    const context = this.observationContext();
+    const spanId = observer.store.startSpan(context, { spanId: turnId, kind: "provider_turn", name: `Claude ${activityPhase(this.opts.runtimePhase)}`, providerTurnId: turnId, attributes: { provider: "claude" } });
+    this.activeProviderTurnSpanId = spanId;
+    observer.store.updateCurrentState({ runId: observer.runId, role: context.role ?? "host", stream: context.stream ?? "claude", executionId: observer.executionId, ticketId: context.ticketId, deliveryUnitId: context.deliveryUnitId, providerSessionId: context.providerSessionId, phase: "provider turn", activeSpanId: spanId, activeSpanKind: "provider_turn", lastSemanticProgressAt: new Date().toISOString() });
+    try {
+      const result = await withActivityPhase(`Claude ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(text));
+      const deltaInput = nonNegativeDelta(result.usage?.inputTokens, this.priorTurnUsage.inputTokens);
+      const deltaOutput = nonNegativeDelta(result.usage?.outputTokens, this.priorTurnUsage.outputTokens);
+      const deltaCost = nonNegativeDelta(result.usage?.costUsd, this.priorTurnUsage.costUsd);
+      this.priorTurnUsage = { inputTokens: result.usage?.inputTokens, outputTokens: result.usage?.outputTokens, costUsd: result.usage?.costUsd };
+      observer.store.finishSpan(spanId, { outcome: result.isError ? "failed" : "completed", attributes: { cumulativeUsage: result.usage, turnDelta: { inputTokens: deltaInput, outputTokens: deltaOutput, costUsd: deltaCost } } });
+      return result;
+    } catch (error) {
+      observer.store.finishSpan(spanId, { outcome: "failed", attributes: { error: String(error).slice(0, 500) } });
+      throw error;
+    } finally {
+      for (const [callId, toolSpanId] of this.toolSpans) { observer.store.finishSpan(toolSpanId, { outcome: "unknown", completionKnown: false, attributes: { callId } }); this.toolSpans.delete(callId); }
+      this.activeProviderTurnId = undefined; this.activeProviderTurnSpanId = undefined;
+    }
   }
 
   private sendTurnInternal(text: string): Promise<TurnResult> {
@@ -449,7 +515,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.turnSignals = [];
       this.structuredError = undefined;
       this.apiErrorStatus = undefined;
-      this.pending = { resolve, reject };
+      this.pending = { resolve, reject, instruction: text, turnId: this.activeProviderTurnId ?? randomUUID() };
       this.inbox.push({
         type: "user",
         message: { role: "user", content: text },
@@ -461,6 +527,33 @@ export class ClaudeAdapter implements BuilderAdapter {
   private captureStderr(data: string): void {
     this.stderrChunks.push(data);
     while (this.stderrChunks.join("").length > 8 * 1024) this.stderrChunks.shift();
+  }
+
+  private observationContext() {
+    const observer = this.opts.observer!;
+    const inherited = observer.context();
+    return { ...inherited, runId: observer.runId, executionId: observer.executionId, role: this.opts.sessionRole ?? inherited.role ?? "builder" as const,
+      stream: this.opts.sessionStream ?? inherited.stream ?? this.opts.sessionRole ?? "builder", providerSessionId: this._sessionId,
+      ticketId: this.opts.ticketId ?? inherited.ticketId, deliveryUnitId: this.opts.deliveryUnitId ?? inherited.deliveryUnitId,
+      parentSpanId: this.activeProviderTurnSpanId ?? inherited.parentSpanId, providerTurnId: this.activeProviderTurnId ?? inherited.providerTurnId };
+  }
+
+  private observeToolResults(message: Record<string, unknown>): void {
+    const body = message.message as { content?: unknown } | undefined;
+    if (!Array.isArray(body?.content)) return;
+    for (const block of body.content as Array<Record<string, unknown>>) {
+      if (block.type !== "tool_result") continue;
+      const callId = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
+      if (!callId) continue;
+      const spanId = this.toolSpans.get(callId);
+      const text = typeof block.content === "string" ? block.content : JSON.stringify(block.content ?? "");
+      const sanitized = text.replace(/\b(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[REDACTED]");
+      const failed = block.is_error === true;
+      const outputDigest = createHash("sha256").update(text).digest("hex");
+      this.eventQueue.push({ kind: "tool", name: "tool_result", input: {}, inputCompleteness: "unavailable", lifecycle: "completed", callId, status: failed ? "failed" : "completed", outputSummary: sanitized.slice(0, 1000), outputDigest, outputCompleteness: block.is_truncated === true ? "truncated" : "complete", rawOutputBytes: Buffer.byteLength(text), completionKnown: true, providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
+      if (spanId && this.opts.observer) { this.opts.observer.store.finishSpan(spanId, { outcome: failed ? "failed" : "completed", completionKnown: true, attributes: { callId, outputSummary: sanitized.slice(0, 1000), outputDigest } }); this.toolSpans.delete(callId); }
+      this.opts.observer?.signal(true);
+    }
   }
 
   sessionId(): string | undefined {
@@ -487,6 +580,12 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   async compact(): Promise<CompactResult> {
+    return this.opts.observer
+      ? this.opts.observer.span("compaction", "Claude context compaction", () => this.compactInternal())
+      : this.compactInternal();
+  }
+
+  private async compactInternal(): Promise<CompactResult> {
     this.compactResult = undefined;
     this.manualCompactionInFlight = true;
     let result: TurnResult;
@@ -602,7 +701,12 @@ export class ClaudeAdapter implements BuilderAdapter {
     const pending = this.pending;
     if (!pending) return;
     this.pending = undefined;
-    if (emit) this.eventQueue.push({ kind: "turn-complete", result });
+    if (!result.turnId) {
+      result.turnId = pending.turnId; result.hostInstruction = pending.instruction; result.providerInstruction = pending.instruction;
+      result.rawResponse = result.text; result.cleanedResponse = result.text;
+      result.providerMetadata = { provider: "claude", sessionId: this._sessionId, sessionRef: this._sessionRef };
+    }
+    if (emit) this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
     pending.resolve(result);
   }
 
@@ -626,6 +730,11 @@ export class ClaudeAdapter implements BuilderAdapter {
 
 function finiteNumber(value: unknown): number | undefined { const parsed = Number(value); return value !== null && value !== undefined && value !== "" && Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined; }
 
+function nonNegativeDelta(current: number | undefined, prior: number | undefined): number | undefined {
+  if (current === undefined) return undefined;
+  return prior === undefined ? current : Math.max(0, current - prior);
+}
+
 function validThreshold(value: number): number {
   if (!Number.isInteger(value) || value < 1 || value > 99) throw new Error("automatic compaction threshold must be an integer from 1 to 99");
   return value;
@@ -644,6 +753,7 @@ function activityPhase(phase: BuilderAdapterOptions["runtimePhase"]): string {
   if (phase === "ticket-population") return "populating tickets";
   if (phase === "qa") return "reviewing with QA";
   if (phase === "uninstaller") return "planning uninstall";
+  if (phase === "manager") return "analyzing diagnostics";
   return "building";
 }
 

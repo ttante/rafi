@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
+import { DEFAULT_OBSERVABILITY_CONFIG, type ObservabilityConfig } from "./observability.js";
 
 export interface PermissionConfig {
   /** Bash command prefixes that are auto-approved when every segment matches. */
@@ -30,6 +31,7 @@ export interface ForemanConfig {
   permissions: PermissionConfig;
   notifications: NotificationsConfig;
   qa: QaConfig;
+  observability: ObservabilityConfig;
 }
 
 /** Built-in defaults; foreman.yaml overrides any field present. */
@@ -99,6 +101,7 @@ export const DEFAULT_CONFIG: ForemanConfig = {
   },
   notifications: { enabled: false, terminal_bell: true },
   qa: { enabled: true },
+  observability: DEFAULT_OBSERVABILITY_CONFIG,
 };
 
 /** Load foreman.yaml if present and deep-merge it over the defaults. */
@@ -113,6 +116,7 @@ export function loadConfig(path = "foreman.yaml"): ForemanConfig {
       ...(raw.notifications ?? {}),
     } as NotificationsConfig,
     qa: { ...DEFAULT_CONFIG.qa, ...(raw.qa ?? {}) } as QaConfig,
+    observability: { ...DEFAULT_CONFIG.observability, ...(raw.observability ?? {}) } as ObservabilityConfig,
   };
 }
 
@@ -120,6 +124,7 @@ function validateConfig(raw: unknown, path: string): asserts raw is {
   permissions?: Partial<PermissionConfig>;
   notifications?: Partial<NotificationsConfig>;
   qa?: Partial<QaConfig>;
+  observability?: Partial<ObservabilityConfig>;
 } {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`${path}: expected a YAML object`);
@@ -149,6 +154,20 @@ function validateConfig(raw: unknown, path: string): asserts raw is {
   if (cfg.qa !== undefined) {
     validateBooleanObject(cfg.qa, "qa", path);
   }
+  if (cfg.observability !== undefined) validateObservability(cfg.observability, path);
+}
+
+function validateObservability(value: unknown, path: string): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path}: observability must be an object`);
+  const input = value as Record<string, unknown>;
+  const keys = ["enabled", "sample_interval_seconds", "detail_retention_days", "log_retention_days", "detail_soft_limit_mb", "detail_hard_limit_mb", "log_limit_mb"] as const;
+  for (const key of Object.keys(input)) if (!(keys as readonly string[]).includes(key)) throw new Error(`${path}: unknown observability setting ${key}`);
+  if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw new Error(`${path}: observability.enabled must be a boolean`);
+  for (const key of keys.filter((key) => key !== "enabled")) {
+    if (input[key] !== undefined && (!Number.isInteger(input[key]) || Number(input[key]) <= 0)) throw new Error(`${path}: observability.${key} must be a positive integer`);
+  }
+  const merged = { ...DEFAULT_OBSERVABILITY_CONFIG, ...input } as ObservabilityConfig;
+  if (merged.detail_soft_limit_mb >= merged.detail_hard_limit_mb) throw new Error(`${path}: observability.detail_soft_limit_mb must be less than detail_hard_limit_mb`);
 }
 
 function validateBooleanObject(value: unknown, name: string, path: string): void {

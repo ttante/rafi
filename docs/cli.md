@@ -38,6 +38,26 @@ Runtime behavior not fully expressible in Commander help:
 - Build recovery is preview-first. `build:resume` warns without blocking on unexpected changes. `build:start-over` archives local work or creates a new/revert branch according to pushed, reviewed, merged, and legacy-baseline state; it never force-pushes or deletes/closes remote state.
 - Uninstall moves selected bytes into indefinite `.rafi-uninstall/<id>` bundles. Restore backs up collisions; only `uninstall:cleanup` permanently removes a bundle.
 
+### Complete ticket handoffs
+
+`tickets queue` is a compact summary of unfinished work and can apply view limits. Use `tickets show --all` when an agent handoff needs every current canonical ticket in full, including planned, active, blocked, done, canceled, and obsolete tickets. The complete view does not apply queue or history limits.
+
+```bash
+# One complete ticket
+rafi tickets show T123
+
+# Every canonical ticket in readable form
+rafi tickets show --all
+
+# Every canonical ticket in a versioned JSON envelope
+rafi tickets show --all --json
+
+# Append the complete handoff to an accumulated context file
+rafi tickets show --all --output agent-context.txt
+```
+
+`--output` creates missing parent directories and appends rather than replacing existing content. When `--json` is appended after existing text, the new payload remains a pretty-printed, multi-line JSON block. The surrounding file is intentionally agent-readable accumulated context; Rafi does not parse or rewrite it as one JSON document.
+
 ## `rafi`
 
 ### `rafi --help`
@@ -67,6 +87,11 @@ Commands:
                                                       project.
   start [options] <project>                           Enlist a builder and drive it through a batch
                                                       of N steps.
+  build:attach [options] [project]                    Attach to a supervised build and show its
+                                                      durable recovery state.
+  build:decide [options] [project]                    Answer a durable supervised-build decision.
+  build:stop [options] [project]                      Request graceful termination of a supervised
+                                                      build.
   build:resume [options] [project]                    Inspect and resume one interrupted
                                                       implementation run using an exact recovery
                                                       mode.
@@ -78,6 +103,8 @@ Commands:
   agents [options] [project]                          Configure persistent runtime, model,
                                                       reasoning, fast, and session defaults for
                                                       Rafi roles.
+  manager [options] [project]                         Ask a read-only Manager about all retained
+                                                      builds in a project.
   uninstall [options] [project]                       Preview and safely remove selected
                                                       project-local Rafi material.
   uninstall:restore [options] <recoveryId> [project]  Restore files from an indefinite
@@ -196,8 +223,8 @@ Commands:
   populate [options]                           Ask the ticket-maker role to populate
                                                .tickets/tickets.yaml from existing project
                                                ticket/backlog docs.
-  show [options] <ticketId>                    Show the complete canonical ticket, active state,
-                                               validation, delivery, and history.
+  show [options] [ticketId]                    Show one or all complete canonical tickets,
+                                               including state, validation, delivery, and history.
   groups                                       List and repair durable ticket creation groups.
   reset [options] [ticketId]                   Reset one ticket or an explicit ticket scope to
                                                pristine active state while retaining history.
@@ -612,6 +639,9 @@ Options:
   --effort <level>                    reasoning effort level (low|medium|high|xhigh)
   --fast                              fast mode — lower latency (maps to effort=low for codex)
   --no-qa                             disable per-ticket QA review (enabled by default)
+  --autonomy <profile>                autonomy profile (supervised | balanced | unattended)
+  --detach                            return after launching the durable supervisor
+  --no-supervisor                     run the compatibility worker directly without supervision
   --branch-per-ticket                 run each selected structured ticket in an isolated git
                                       worktree and branch
   --no-branch-per-ticket              disable saved branch-per-ticket defaults for this run
@@ -666,12 +696,14 @@ Usage: rafi doctor [options] [project]
 Check Foreman, agent CLIs, config, and optional ticket tracker readiness.
 
 Arguments:
-  project        path to the project directory (default: ".")
+  project            path to the project directory (default: ".")
 
 Options:
-  --github       run GitHub PR readiness checks
-  --live-claude  run a bounded no-tools Claude adapter request (uses account quota)
-  -h, --help     display help for command
+  --github           run GitHub PR readiness checks
+  --live-claude      run a bounded no-tools Claude adapter request (uses account quota)
+  --storage          report recovery, observability, and JSONL storage without writing
+  --cleanup-storage  prune expired observability detail and fully compact storage
+  -h, --help         display help for command
 ```
 
 ## Standalone `ai-foreman`
@@ -686,18 +718,20 @@ Usage: ai-foreman [options] [command]
 Keep Codex / Claude Code builders moving through their step list.
 
 Options:
-  -h, --help                  display help for command
+  -h, --help                   display help for command
 
 Commands:
-  tickets                     Manage the structured ticket tracker for a
-                              project.
-  start [options] <project>   Enlist a builder and drive it through a batch of
-                              N steps.
-  status <project>            Summarize the most recent foreman run for a
-                              project.
-  doctor [options] [project]  Check Foreman, agent CLIs, config, and optional
-                              ticket tracker readiness.
-  help [command]              display help for command
+  tickets                      Manage the structured ticket tracker for a
+                               project.
+  start [options] <project>    Enlist a builder and drive it through a batch of
+                               N steps.
+  status <project>             Summarize the most recent foreman run for a
+                               project.
+  doctor [options] [project]   Check Foreman, agent CLIs, config, and optional
+                               ticket tracker readiness.
+  manager [options] <project>  Ask a read-only Manager about all retained
+                               builds in a project.
+  help [command]               display help for command
 ```
 
 ### `ai-foreman tickets --help`
@@ -715,7 +749,7 @@ Commands:
   setup:update [options]                       Update selected ticket setup sections in rafi-config.yaml.
   init [options]                               Initialize .tickets/ structure in a project directory.
   populate [options]                           Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
-  show [options] <ticketId>                    Show the complete canonical ticket, active state, validation, delivery, and history.
+  show [options] [ticketId]                    Show one or all complete canonical tickets, including state, validation, delivery, and history.
   groups                                       List and repair durable ticket creation groups.
   reset [options] [ticketId]                   Reset one ticket or an explicit ticket scope to pristine active state while retaining history.
   update [options] <ticketId>                  Update ticket status or progress fields.
@@ -773,6 +807,12 @@ Options:
                                       effort=low for codex)
   --no-qa                             disable per-ticket QA review (enabled by
                                       default)
+  --autonomy <profile>                autonomy profile (supervised | balanced |
+                                      unattended)
+  --detach                            return after launching the durable
+                                      supervisor
+  --no-supervisor                     run the compatibility worker directly
+                                      without supervision
   --branch-per-ticket                 run each selected structured ticket in an
                                       isolated git worktree and branch
   --no-branch-per-ticket              disable saved branch-per-ticket defaults
@@ -841,13 +881,17 @@ Usage: ai-foreman doctor [options] [project]
 Check Foreman, agent CLIs, config, and optional ticket tracker readiness.
 
 Arguments:
-  project        path to the project directory (default: ".")
+  project            path to the project directory (default: ".")
 
 Options:
-  --github       run GitHub PR readiness checks
-  --live-claude  run a bounded no-tools Claude adapter request (uses account
-                 quota)
-  -h, --help     display help for command
+  --github           run GitHub PR readiness checks
+  --live-claude      run a bounded no-tools Claude adapter request (uses
+                     account quota)
+  --storage          report recovery, observability, and JSONL storage without
+                     writing
+  --cleanup-storage  prune expired observability detail and fully compact
+                     storage
+  -h, --help         display help for command
 ```
 
 ### `rafi build:resume --help`
@@ -858,23 +902,25 @@ Usage: rafi build:resume [options] [project]
 Inspect and resume one interrupted implementation run using an exact recovery mode.
 
 Arguments:
-  project               project directory (default: ".")
+  project                      project directory (default: ".")
 
 Options:
-  --run <id>            run ID or unique prefix
-  --ticket <id>         narrow mutation scope to one ticket while retaining run-wide context
-  --inspect             show recovery state and planned actions without mutation
-  --yes                 auto-approve the implementation plan and later plan updates for this
-                        resumed process
-  --no                  review the implementation plan and later plan updates for this resumed
-                        process
-  --fresh-with-handoff  start a genuinely fresh session from validated cumulative context
-  --fresh-session       compatibility mode: ordinary fresh recovery without cumulative handoff
-  --guided-recovery     repair a degraded role checkpoint interactively, then start a validated
-                        successor
-  --agent <runtime>     fresh-mode provider (claude | codex)
-  --model <model>       fresh-mode model override
-  -h, --help            display help for command
+  --run <id>                   run ID or unique prefix
+  --ticket <id>                narrow mutation scope to one ticket while retaining run-wide context
+  --inspect                    show recovery state and planned actions without mutation
+  --yes                        auto-approve the implementation plan and later plan updates for this
+                               resumed process
+  --no                         review the implementation plan and later plan updates for this
+                               resumed process
+  --fresh-with-handoff         start a genuinely fresh session from validated cumulative context
+  --fresh-session              compatibility mode: ordinary fresh recovery without cumulative
+                               handoff
+  --guided-recovery            repair a degraded role checkpoint interactively, then start a
+                               validated successor
+  --legacy-qa-recovery <mode>  V1 packet handling: restart | historical
+  --agent <runtime>            fresh-mode provider (claude | codex)
+  --model <model>              fresh-mode model override
+  -h, --help                   display help for command
 ```
 
 ### `rafi agents --help`
@@ -888,7 +934,8 @@ Arguments:
   project                             project directory (default: ".")
 
 Options:
-  --agent-type <role>                 planner | builder | qa | ticket-maker | uninstaller | all
+  --agent-type <role>                 planner | builder | qa | ticket-maker | uninstaller | manager
+                                      | all
   --agent-make <runtime>              claude | codex
   --model <model>                     provider model ID or default
   --reasoning <level>                 provider reasoning level or default
@@ -1105,4 +1152,77 @@ Options:
   --yes            confirm irreversible durable history deletion
   --project <dir>  project directory (default: ".")
   -h, --help       display help for command
+```
+
+### `rafi manager --help`
+
+```text
+Usage: rafi manager [options] [project]
+
+Ask a read-only Manager about all retained builds in a project.
+
+Arguments:
+  project            project directory
+
+Options:
+  --run <run-id>     set the initial focused build run
+  --ask <question>   ask one question and exit
+  --agent <runtime>  claude | codex
+  --model <model>    provider model ID
+  --effort <level>   low | medium | high | xhigh
+  --fast             use the provider fast mode
+  --external <mode>  auto | on | off (default: "auto")
+  -h, --help         display help for command
+```
+
+### `ai-foreman manager --help`
+
+```text
+Usage: ai-foreman manager [options] <project>
+
+Ask a read-only Manager about all retained builds in a project.
+
+Arguments:
+  project            project directory
+
+Options:
+  --run <run-id>     set the initial focused build run
+  --ask <question>   ask one question and exit
+  --agent <runtime>  claude | codex
+  --model <model>    provider model ID
+  --effort <level>   low | medium | high | xhigh
+  --fast             use the provider fast mode
+  --external <mode>  auto | on | off (default: "auto")
+  -h, --help         display help for command
+```
+
+### `rafi tickets show --help`
+
+```text
+Usage: rafi tickets show [options] [ticketId]
+
+Show one or all complete canonical tickets, including state, validation, delivery, and history.
+
+Options:
+  -p, --project <dir>  project directory (default: cwd)
+  --all                show every canonical ticket, including terminal tickets
+  --json               write the complete stable record as JSON
+  --output <file>      append the rendered output to a file
+  -h, --help           display help for command
+```
+
+### `ai-foreman tickets show --help`
+
+```text
+Usage: ai-foreman tickets show [options] [ticketId]
+
+Show one or all complete canonical tickets, including state, validation,
+delivery, and history.
+
+Options:
+  -p, --project <dir>  project directory (default: cwd)
+  --all                show every canonical ticket, including terminal tickets
+  --json               write the complete stable record as JSON
+  --output <file>      append the rendered output to a file
+  -h, --help           display help for command
 ```

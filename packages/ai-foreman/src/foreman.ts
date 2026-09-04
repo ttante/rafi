@@ -17,12 +17,15 @@ import { isTicketsInitialized, loadTicketsConfig } from "./tickets/config.js";
 import { cmdUpdate, cmdComplete, cmdBlock, cmdUnblock, cmdImplementationQueue } from "./tickets/commands.js";
 import { loadTickets } from "./tickets/ticketLoader.js";
 import type { TicketDef } from "./tickets/ticketSchema.js";
-import { runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaStreamState } from "./qaReview.js";
+import { buildDurableQaFixHandoff, runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaReportRecoveryHandler, type QaSessionBoundaryRecovery, type QaSessionHandle, type QaStreamState } from "./qaReview.js";
+import { changeManifestAsync, deterministicChangeSummaryAsync } from "./qaSnapshot.js";
 import type { SessionStrategy } from "rafi-spec";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { SessionUnavailableError, sessionUnavailableErrorFromFailure } from "./adapters/sessionFailure.js";
+import type { RunObserver } from "./observability.js";
+import type { QaRecoveryPacket } from "./qaRecovery.js";
 
 /** Parsed STEP_STATUS marker from a builder's turn. */
 export interface StepStatus {
@@ -61,7 +64,8 @@ const QUESTION_HINTS = [
  * Format: `STEP_STATUS: <kind> | key="value" key="value"`.
  */
 export function parseStepStatus(text: string): StepStatus {
-  const markerCount = (text.match(/STEP_STATUS:/g) ?? []).length;
+  const markerLines = text.split(/\r?\n/).filter((line) => /^\s*STEP_STATUS:/.test(line));
+  const markerCount = markerLines.length;
   if (markerCount > 1) {
     return { kind: "unknown", error: "builder emitted multiple STEP_STATUS markers" };
   }
@@ -190,7 +194,7 @@ export function buildQaInstruction(): string {
 Triple-check. Do not rubber-stamp your own work. Be skeptical.
 
 If everything is solid, end with STEP_STATUS: qa_pass.
-If anything is off, end with STEP_STATUS: qa_fail and list every concrete issue in the issues="..." field. Do NOT fix issues on this turn — just report them. Foreman will instruct you to fix them next.
+If anything is off, return the required RAFI_QA_FAILURE_REPORT_START/RAFI_QA_FAILURE_REPORT_END JSON envelope immediately before STEP_STATUS: qa_fail. The report must contain every check, every blocking finding, and all nonblocking observations. Do NOT fix issues on this turn — just report them. Foreman will instruct the Builder to fix them next.
 
 ${QA_MARKER_SPEC}`;
 }
@@ -283,6 +287,7 @@ export class Foreman {
   private readonly terminalBellEnabled: boolean;
   private readonly qaStream: QaStreamState = { reviews: 0, modificationViolations: 0 };
   private builderWorkSessions = 0;
+  private readonly fallbackQaRunId = `qa-${randomUUID()}`;
 
   constructor(
     private builder: BuilderAdapter,
@@ -291,22 +296,45 @@ export class Foreman {
     private readonly qaEnabled = true,
     private readonly qaMaxCycles = 3,
     private readonly projectDir?: string,
-    private readonly qaReviewer?: BuilderAdapter,
-    private readonly qaFactory?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>,
+    /** @deprecated QA must be created by qaFactory in a disposable snapshot. */
+    _deprecatedSameSessionReviewer?: BuilderAdapter,
+    private readonly qaFactory?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter | QaSessionHandle>,
     private readonly qaSessionStrategy: SessionStrategy = "compact",
     private readonly builderFactory?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>,
     private readonly builderSessionStrategy: SessionStrategy = "compact",
     private readonly qaNonconvergence?: (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision>,
     private readonly beforeBuilderTurn?: (adapter: BuilderAdapter, frozenAction: string) => Promise<BuilderAdapter>,
     private readonly builderSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy) => Promise<BuilderAdapter>,
-    private readonly qaSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>,
+    private readonly qaSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string, recovery?: QaSessionBoundaryRecovery) => Promise<BuilderAdapter>,
     private readonly observeQaNativeCompactions?: (adapter: BuilderAdapter) => Promise<void>,
     /** Persist a Builder's provider-native event immediately after every turn. */
     private readonly observeBuilderNativeCompactions?: (adapter: BuilderAdapter) => Promise<void>,
+    private readonly observer?: RunObserver,
+    private readonly qaRuntimeContext?: unknown,
+    private readonly qaContinuityManaged = false,
+    private readonly qaReportRecovery?: QaReportRecoveryHandler,
+    private qaResumedRecovery?: QaRecoveryPacket,
   ) {
+    void _deprecatedSameSessionReviewer;
     this.notificationsEnabled = typeof notifications === "boolean" ? notifications : notifications.desktop;
     this.terminalBellEnabled = typeof notifications === "boolean" ? true : notifications.terminalBell;
     this.ticketsEnabled = !!(projectDir && isTicketsInitialized(projectDir));
+  }
+
+  private async waitForUserInput<T>(operation: () => Promise<T>): Promise<T> {
+    const paused = () => pauseActivityForInput(operation);
+    if (!this.observer) return paused();
+    return this.observer.withContext({ role: "builder", stream: "user-input" }, async () => {
+      const spanId = this.observer!.store.startSpan(this.observer!.context(), { kind: "user_wait", name: "Builder input prompt" });
+      try {
+        const value = await paused();
+        this.observer!.store.finishSpan(spanId, { outcome: value === undefined ? "paused" : "answered" });
+        return value;
+      } catch (error) {
+        this.observer!.store.finishSpan(spanId, { outcome: "error" });
+        throw error;
+      }
+    });
   }
 
   /**
@@ -357,6 +385,7 @@ export class Foreman {
   private async doTurnWith(
     adapter: BuilderAdapter,
     instruction: string,
+    mode: "builder" | "qa" = "builder",
   ): Promise<{ result: TurnResult; status: StepStatus }> {
     if (adapter === this.builder && this.beforeBuilderTurn) {
       this.builder = await this.beforeBuilderTurn(this.builder, instruction);
@@ -370,12 +399,11 @@ export class Foreman {
       if (!status.error && looksLikeQuestion(result.text)) {
         status = { kind: "needs_input", question: lastLine(result.text), choices: ["Continue", "Cancel"] };
       } else {
-        const qa = /\bQA\b|qa_pass|qa_fail/i.test(instruction);
         if (adapter === this.builder && this.beforeBuilderTurn) {
           this.builder = await this.beforeBuilderTurn(this.builder, instruction);
           adapter = this.builder;
         }
-        result = await adapter.sendTurn(qa
+        result = await adapter.sendTurn(mode === "qa"
           ? "Protocol correction only: based on the review already completed, return exactly one final STEP_STATUS: qa_pass or STEP_STATUS: qa_fail marker. Do not repeat QA, tests, tools, or compaction."
           : "Protocol correction only: based on the work already completed, return exactly one final STEP_STATUS: done, plan_complete, blocked, or needs_input marker. Do not repeat implementation, tools, or compaction.");
         await this.observeBuilderNative(adapter);
@@ -399,7 +427,7 @@ export class Foreman {
           break;
         }
 
-        const answer = await pauseActivityForInput(async () => {
+        const answer = await this.waitForUserInput(async () => {
           console.log();
           const selected = await select<string>({
             message: question,
@@ -488,8 +516,9 @@ export class Foreman {
   async resolveBlocker(
     adapter: BuilderAdapter,
     reason: string,
+    mode: "builder" | "qa" = "builder",
   ): Promise<{ result: TurnResult; status: StepStatus }> {
-    return this.doTurnWith(adapter, buildBlockerRecoveryInstruction(reason));
+    return this.doTurnWith(adapter, buildBlockerRecoveryInstruction(reason), mode);
   }
 
   private async observeBuilderNative(adapter: BuilderAdapter): Promise<void> {
@@ -501,114 +530,64 @@ export class Foreman {
    * Loops on qa_fail → fix → re-QA until qa_pass or the cycle cap is reached.
    * QA turns are free — they do not advance the step counter.
    */
-  private async runQa(stepIndex: number, ticketId?: string): Promise<{
+  private async runQa(stepIndex: number, ticketId?: string, builderResult?: string): Promise<{
     outcome: "passed" | "blocked" | "needs-human" | "waived";
     detail?: string;
     summary?: string;
   }> {
     if (this.projectDir && this.qaFactory) {
+      const resumedRecovery = this.qaResumedRecovery;
+      this.qaResumedRecovery = undefined;
       const review = await runIsolatedQa({
         ticket: this.ticketForQa(stepIndex, ticketId),
         builderWorktree: this.projectDir,
-        builderSummary: `Builder completed step ${stepIndex}`,
+        builderSummary: builderResult ?? "Builder result unavailable at this explicit QA-only API boundary",
         qaStrategy: this.qaSessionStrategy,
         state: this.qaStream,
         createQa: this.qaFactory,
         sessionBoundary: this.qaSessionBoundary,
         observeNativeCompactions: this.observeQaNativeCompactions,
         maxCycles: this.qaMaxCycles,
-        fix: async (issues) => {
-          const instruction = buildQaFixInstruction(issues);
+        recovery: { projectDir: this.projectDir, runId: this.observer?.runId ?? this.fallbackQaRunId },
+        observer: this.observer,
+        qaRuntimeContext: this.qaRuntimeContext,
+        continuityManaged: this.qaContinuityManaged,
+        onReportRecovery: this.qaReportRecovery,
+        resumedRecovery,
+        fix: async (request) => {
+          const manifest = await changeManifestAsync(this.projectDir!);
+          const changeSummary = await deterministicChangeSummaryAsync(this.projectDir!);
+          const instruction = buildDurableQaFixHandoff(this.ticketForQa(stepIndex, ticketId), request, this.projectDir!, request.latestBuilderResult, manifest.diffDigest, changeSummary);
           await this.prepareBuilderBoundary(instruction); this.builderWorkSessions += 1;
           const fix = await this.doTurn(instruction);
           this.log.write("qa-fix", { stepIndex, statusKind: fix.status.kind, costUsd: fix.result.costUsd, isError: fix.result.isError });
           return fix.result.isError || fix.status.kind !== "done"
             ? { ok: false, detail: fix.status.reason ?? fix.status.error ?? fix.result.text.slice(0, 200) }
-            : { ok: true };
+            : { ok: true, response: fix.result.text, summary: fix.status.summary ?? fix.result.text };
         },
         evidence: ({ cycle, outcome, detail, qaDiff }) => this.log.write("qa", { stepIndex, cycle, outcome, detail, qaDiff, disposable: true }),
         onNonconvergence: this.qaNonconvergence,
-        resolveBlocked: (adapter, reason) => this.resolveBlocker(adapter, reason),
+        resolveBlocked: (adapter, reason) => this.resolveBlocker(adapter, reason, "qa"),
       });
       if (review.outcome === "nonconverged") return { outcome: "needs-human", detail: review.detail };
       return { outcome: review.outcome, detail: review.detail, summary: review.summary };
     }
-    for (let cycle = 1; cycle <= this.qaMaxCycles; cycle++) {
-      const before = this.qaReviewer && this.projectDir ? fingerprintProtectedTree(this.projectDir) : undefined;
-      const qa = await this.doTurnWith(this.qaReviewer ?? this.builder, buildQaInstruction());
-      if (before && this.projectDir) {
-        const changes = changedProtectedFiles(before, fingerprintProtectedTree(this.projectDir));
-        if (changes.length > 0) {
-          this.log.write("qa-protected-files-changed", { stepIndex, cycle, paths: changes });
-          return { outcome: "needs-human", detail: `independent QA changed protected files: ${changes.join(", ")}` };
-        }
-      }
-      this.log.write("qa", {
-        stepIndex,
-        cycle,
-        statusKind: qa.status.kind,
-        issues: qa.status.issues,
-        costUsd: qa.result.costUsd,
-        isError: qa.result.isError,
-      });
-
-      if (qa.result.isError) {
-        return { outcome: "blocked", detail: `QA turn errored: ${qa.result.text.slice(0, 200)}` };
-      }
-      if (qa.status.kind === "qa_pass") {
-        return { outcome: "passed", summary: qa.status.summary };
-      }
-      if (qa.status.kind === "blocked") {
-        return { outcome: "blocked", detail: qa.status.reason ?? "QA reported blocked" };
-      }
-      if (qa.status.kind !== "qa_fail") {
-        return {
-          outcome: "needs-human",
-          detail: qa.status.error ?? `QA turn did not emit a valid marker (got ${qa.status.kind})`,
-        };
-      }
-
-      const fix = await this.doTurn(
-        buildQaFixInstruction(qa.status.issues ?? "(no issues listed)"),
-      );
-      this.log.write("qa-fix", {
-        stepIndex,
-        cycle,
-        statusKind: fix.status.kind,
-        costUsd: fix.result.costUsd,
-        isError: fix.result.isError,
-      });
-
-      if (fix.result.isError) {
-        return { outcome: "blocked", detail: `QA fix turn errored: ${fix.result.text.slice(0, 200)}` };
-      }
-      if (fix.status.kind === "blocked") {
-        return { outcome: "blocked", detail: fix.status.reason ?? "QA fix reported blocked" };
-      }
-      if (fix.status.kind !== "done") {
-        return {
-          outcome: "needs-human",
-          detail: fix.status.error ?? `QA fix turn did not emit done (got ${fix.status.kind})`,
-        };
-      }
-      // loop back into QA
-    }
     return {
       outcome: "needs-human",
-      detail: `QA could not converge after ${this.qaMaxCycles} cycles`,
+      detail: "QA is enabled but no fresh disposable QA factory and durable session boundary were configured",
     };
   }
 
-  async runQaReview(stepIndex: number): Promise<{
+  async runQaReview(stepIndex: number, builderResult: string): Promise<{
     outcome: "passed" | "blocked" | "needs-human" | "waived";
     detail?: string;
     summary?: string;
   }> {
-    return this.runQa(stepIndex);
+    return this.runQa(stepIndex, undefined, builderResult);
   }
 
-  qaSessionId(): string | undefined { return this.qaStream.sessionId ?? this.qaReviewer?.sessionId(); }
-  qaSessionRef(): import("rafi-spec").ProviderSessionRefV1 | undefined { return this.qaStream.sessionRef ?? this.qaReviewer?.sessionRef?.(); }
+  qaSessionId(): string | undefined { return this.qaStream.sessionId; }
+  qaSessionRef(): import("rafi-spec").ProviderSessionRefV1 | undefined { return this.qaStream.sessionRef; }
   builderSessionId(): string | undefined { return this.builder.sessionId(); }
   builderAdapter(): BuilderAdapter { return this.builder; }
   async close(): Promise<void> { await this.builder.close(); }
@@ -682,7 +661,10 @@ export class Foreman {
         : buildNextStepInstruction(i, n);
       if (i > 1) await this.prepareBuilderBoundary(instruction);
       this.builderWorkSessions += 1;
-      const { result, status } = await this.doTurn(instruction);
+      const turn = () => this.doTurn(instruction);
+      const { result, status } = this.observer
+        ? await this.observer.withContext({ role: "builder", stream: "builder", ticketId: pendingTicketId }, turn)
+        : await turn();
 
       this.log.write("step", {
         index: i,
@@ -705,7 +687,7 @@ export class Foreman {
         let qaSummary: string | undefined;
         let qaWaived = false;
         if (this.qaEnabled) {
-          const qa = await this.runQa(i, status.ticket ?? pendingTicketId);
+          const qa = await this.runQa(i, status.ticket ?? pendingTicketId, result.text);
           if (qa.outcome === "blocked") {
             outcome = "blocked";
             detail = qa.detail;

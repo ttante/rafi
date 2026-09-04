@@ -146,7 +146,8 @@ export class ContinuityAdapter implements BuilderAdapter {
       db.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "turn_started", payload: { role: this.options.role, instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) }, authoritativeStateRevision: this.revision() });
     } finally { db.close(); }
 
-    const original = await this.adapter.sendTurn(`${instruction}\n\n${continuityInstruction()}`);
+    const providerInstruction = `${instruction}\n\n${continuityInstruction()}`;
+    const original = await this.adapter.sendTurn(providerInstruction);
     const activeSession = this.adapter.sessionRef?.() ?? this.adapter.sessionId();
     if (activeSession) {
       const leaseDb = new WorkflowDb(this.options.projectDir);
@@ -169,7 +170,8 @@ export class ContinuityAdapter implements BuilderAdapter {
           instruction,
         ].join("\n\n"));
       }
-      return { ...original, text: parsed.cleanText };
+      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction,
+        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
     }
 
     const repair = await this.adapter.sendTurn([
@@ -182,7 +184,8 @@ export class ContinuityAdapter implements BuilderAdapter {
     if (repaired.delta) {
       this.publish(repaired.delta, "turn_completed_after_repair", original);
       this.moveRecoveryLeaseAfterCheckpoint();
-      return { ...original, text: parsed.cleanText };
+      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction,
+        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
     }
 
     const invalidDb = new WorkflowDb(this.options.projectDir);
@@ -211,7 +214,8 @@ export class ContinuityAdapter implements BuilderAdapter {
         throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "validated recovery callback did not return a genuinely fresh successor");
       }
       await this.adoptValidatedSuccessor(successor);
-      return { ...original, text: parsed.cleanText };
+      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction,
+        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
     }
     if (!this.options.createSuccessor) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "continuity repair failed in the original session and no validated successor is configured");
 
@@ -227,7 +231,8 @@ export class ContinuityAdapter implements BuilderAdapter {
     const leaseDb = new WorkflowDb(this.options.projectDir);
     try { leaseDb.moveRoleLeaseAfterValidatedRecovery(this.options.runId, this.options.role, successor.sessionRef?.() ?? successor.sessionId()!, "double-invalid continuity recovery"); }
     finally { leaseDb.close(); }
-    return { ...original, text: parsed.cleanText };
+    return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction,
+      rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
   }
 
   sessionId(): string | undefined { return this.adapter.sessionId(); }
@@ -320,12 +325,12 @@ export class ContinuityAdapter implements BuilderAdapter {
     this.sourcePump = (async () => {
       try { for await (const event of source.events()) {
         this.queue.push(event);
-        if (event.kind === "tool" || event.kind === "session-transition" || event.kind === "context-usage") {
+        // Continuity stores only recovery-relevant transitions. High-rate tool
+        // and context telemetry belongs exclusively to observability.
+        if (event.kind === "session-transition") {
           const db = new WorkflowDb(this.options.projectDir);
           try {
-            const payload = event.kind === "tool"
-              ? { name: event.name, inputDigest: sha(JSON.stringify(event.input ?? null)) }
-              : event;
+            const payload = event;
             db.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: `provider_${event.kind.replace(/-/g, "_")}`, payload, authoritativeStateRevision: this.revision() });
           } finally { db.close(); }
         }

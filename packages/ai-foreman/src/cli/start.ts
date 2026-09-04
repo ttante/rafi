@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { resolve, join, relative } from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { select, text, isCancel } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
@@ -27,7 +27,7 @@ import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
 import { branchPlanLogMetadata, presentBranchPlan } from "../branch/presentation.js";
 import { buildRunSessionBinding, checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
-import type { BuildRunRecordV2, ProviderSessionRefV1, ResolvedAgentSettings, SessionStrategy } from "rafi-spec";
+import type { AutonomyProfile, BuildRunRecordV2, BuildRunRecordV3, ProviderSessionRefV1, ResolvedAgentSettings, SessionStrategy } from "rafi-spec";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
 import { parse as parseYaml } from "yaml";
 import {
@@ -36,7 +36,7 @@ import {
   formatBranchSummaryFollowupCommands,
 } from "../branch/resume.js";
 import type { BranchResumeSession } from "../branch/resume.js";
-import type { BranchPlan, BranchPlanNode, CompletionMode, MergeMethod, ReviewProvider } from "../branch/types.js";
+import type { BranchPlan, BranchPlanNode, BranchRunSummary, CompletionMode, MergeMethod, ReviewProvider } from "../branch/types.js";
 import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig.js";
 import { loadDeliveryConfig, selectDeliveryUnitForRun, selectStacksForRun, updateStackDeliveryState, type DeliveryConfig, type DeliveryStack, type DeliveryUnitProgress } from "../tickets/delivery.js";
 import { AgentStatusReporter, RoleStatusAdapter } from "../statusReporter.js";
@@ -44,7 +44,7 @@ import { currentActivity, withActivityPhase } from "../activity.js";
 import { fireTerminalBell } from "../notify.js";
 import { WorkflowDb, readCurrentWorkflowLease } from "../workflowDb.js";
 import { makeLogPath as makeRoleLogPath, readOnlyPermissionConfig, runRoleInstruction } from "../agentRun.js";
-import type { QaNonconvergenceContext, QaNonconvergenceDecision } from "../qaReview.js";
+import type { QaNonconvergenceContext, QaNonconvergenceDecision, QaReportRecoveryHandler, QaSessionHandle } from "../qaReview.js";
 import { eligibleTickets, evaluateTicketEligibility } from "../tickets/eligibility.js";
 import { BUILTIN_BRANCH_PREFIX, validateBranchPrefix } from "../branch/prefix.js";
 import { captureCurrentWorkflowSessionIdentity, CurrentWorkflowChangedError, CurrentWorkflowGuardAdapter } from "../branch/currentGuard.js";
@@ -54,10 +54,29 @@ import { HandoffAcceptanceError, HandoffLoopError, HandoffRecoveryPausedError, H
 import { captureWorkspaceIdentity, createProviderSessionRef, resolveUniqueSessionBinding } from "../sessionIdentity.js";
 import { SessionUnavailableError } from "../adapters/sessionFailure.js";
 import { resolveProviderSessionAvailability } from "../sessionAvailability.js";
+import { ObservabilityStore, RunObserver } from "../observability.js";
+import { loadProjectAutonomyConfig, resolveAutonomyPolicy, resolveQaEnablement } from "../recoveryPolicy.js";
+import { loadQaRecoveryPacket, type QaRecoveryPacket } from "../qaRecovery.js";
+import { loadSkill } from "special-agents";
+
+const FOREMAN_VERSION = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 function fail(message: string): never {
   console.error(`foreman: ${message}`);
   process.exit(1);
+}
+
+function pendingQaRecoveryPacket(projectDir: string, runId: string): QaRecoveryPacket | undefined {
+  const db = new WorkflowDb(projectDir);
+  try {
+    const pending = db.getRun(runId)?.state.qaReportRecovery;
+    if (!pending || typeof pending !== "object") return undefined;
+    const state = pending as Record<string, unknown>;
+    if (state.pendingAction !== "operator-menu" || typeof state.packetPath !== "string" || typeof state.packetDigest !== "string") return undefined;
+    const packet = loadQaRecoveryPacket(state.packetPath);
+    if (packet.manifest.packetDigest !== state.packetDigest || packet.manifest.runId !== runId) throw new Error("saved QA recovery packet does not match its durable pending-decision state");
+    return packet;
+  } finally { db.close(); }
 }
 
 function findLastSessionId(dir: string): string | undefined {
@@ -362,6 +381,9 @@ export function buildStartCommand(): Command {
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--fast", "fast mode — lower latency (maps to effort=low for codex)")
     .option("--no-qa", "disable per-ticket QA review (enabled by default)")
+    .option("--autonomy <profile>", "autonomy profile (supervised | balanced | unattended)")
+    .option("--detach", "return after launching the durable supervisor")
+    .option("--no-supervisor", "run the compatibility worker directly without supervision")
     .option("--branch-per-ticket", "run each selected structured ticket in an isolated git worktree and branch")
     .option("--no-branch-per-ticket", "disable saved branch-per-ticket defaults for this run")
     .option("--create-pr", "push each successful ticket branch and create a GitHub PR (implies --branch-per-ticket)")
@@ -415,6 +437,11 @@ export function buildStartCommand(): Command {
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
       const recoveryRecord = opts.recoverRun ? readBuildRuns(cwd).find((run) => run.runId === opts.recoverRun) : undefined;
       if (opts.recoverRun && !recoveryRecord) fail(`recoverable build run not found: ${opts.recoverRun}`);
+      const autonomyProfile = opts.autonomy as AutonomyProfile | undefined;
+      if (autonomyProfile && !["supervised", "balanced", "unattended"].includes(autonomyProfile)) fail("--autonomy must be supervised, balanced, or unattended");
+      const frozenPolicy = recoveryRecord && "frozenPolicy" in recoveryRecord
+        ? (recoveryRecord as BuildRunRecordV3).frozenPolicy
+        : resolveAutonomyPolicy(loadProjectAutonomyConfig(cwd), autonomyProfile);
       const autoApprovePlanUpdates = recoveryRecord
         ? recoveryRecord.recoveryDecision?.planUpdateApproval === "auto"
         : Boolean(opts.yes);
@@ -617,7 +644,37 @@ export function buildStartCommand(): Command {
       const logPath = join(cwd, ".foreman", `${stamp}.jsonl`);
       const log = new Log(logPath);
 
-      const qaEnabled = opts.qa !== false && config.qa.enabled !== false;
+      const qaResolution = resolveQaEnablement({
+        cli: command.getOptionValueSource("qa") === "cli" ? Boolean(opts.qa) : undefined,
+        frozen: recoveryRecord && "qaEnabled" in recoveryRecord ? Boolean(recoveryRecord.qaEnabled) : undefined,
+        projectDir: cwd,
+        legacyForeman: config.qa.enabled,
+      });
+      const qaEnabled = qaResolution.enabled;
+      if (qaResolution.deprecationWarning) console.error(`rafi: warning: ${qaResolution.deprecationWarning}`);
+      const invocationRunId = recoveryRecord?.runId ?? randomUUID();
+      let observabilityStore: ObservabilityStore | undefined;
+      if (config.observability.enabled) {
+        try { observabilityStore = new ObservabilityStore(cwd, { config: config.observability }); }
+        catch (error) { console.error(`rafi: observability unavailable; build will continue: ${String(error).replace(/\s+/g, " ").slice(0, 300)}`); }
+      }
+      let activeObserver = observabilityStore ? new RunObserver(observabilityStore, invocationRunId) : undefined;
+      const finishObservationOnExit = (): void => {
+        if (!activeObserver) return;
+        activeObserver.finish("interrupted");
+        observabilityStore?.closeLogFile(logPath, "interrupted");
+        observabilityStore?.close();
+        activeObserver = undefined;
+      };
+      process.once("exit", finishObservationOnExit);
+      activeObserver?.startResourceSampling();
+      observabilityStore?.recordCapabilities(invocationRunId, {
+        provider_turns: { source: "provider_turns", state: "available", observedAt: new Date().toISOString() },
+        tools: { source: "tools", state: "available", observedAt: new Date().toISOString() },
+        process_resources: { source: "process_resources", state: "available", observedAt: new Date().toISOString() },
+        child_process_resources: { source: "child_process_resources", state: "unavailable", observedAt: new Date().toISOString(), detail: "provider child-process attribution is unsupported" },
+      }, FOREMAN_VERSION);
+      observabilityStore?.indexLogFile(logPath, invocationRunId);
 
       const createRawBuilder = async (builderCwd: string, sessionId?: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
         const builderPolicy = new PermissionPolicy(config.permissions, builderCwd, { currentBranchWorkflow: !branchMode });
@@ -641,6 +698,7 @@ export function buildStartCommand(): Command {
           systemPromptAppend: roleBundle.system || undefined,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
           autoCompactThresholdPercent: thresholdOverride ?? roleDefaults.builder?.auto_compact_threshold_percent ?? 50,
+          observer: activeObserver,
         };
         const adapter: BuilderAdapter = agent === "codex"
           ? new CodexAdapter(adapterOpts)
@@ -755,6 +813,7 @@ export function buildStartCommand(): Command {
           systemPromptAppend: roleBundle.system || undefined,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
           autoCompactThresholdPercent: settings.auto_compact_threshold_percent,
+          observer: activeObserver,
         };
         const created = settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
         await prepareNativeAutoCompaction(created);
@@ -784,6 +843,7 @@ export function buildStartCommand(): Command {
           systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
           autoCompactThresholdPercent: settings.auto_compact_threshold_percent,
+          observer: activeObserver,
         };
         const created = settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
         await prepareNativeAutoCompaction(created);
@@ -814,6 +874,7 @@ export function buildStartCommand(): Command {
           initial,
           runtime: agent,
           label: "builder turn",
+          observer: activeObserver,
           enabled: Boolean(process.stdin.isTTY && process.stdout.isTTY),
           allowSwitch: !(opts.resume || opts.continue),
           recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
@@ -1019,6 +1080,7 @@ export function buildStartCommand(): Command {
           systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
           skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
           autoCompactThresholdPercent: qaSettings.auto_compact_threshold_percent,
+          observer: activeObserver,
         };
         const created = qaSettings.make === "codex"
           ? new CodexAdapter(adapterOpts)
@@ -1033,6 +1095,7 @@ export function buildStartCommand(): Command {
           initial,
           runtime: qaAgent,
           label: "QA turn",
+          observer: activeObserver,
           enabled: Boolean(process.stdin.isTTY && process.stdout.isTTY),
           allowSwitch: !sessionRef,
           recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
@@ -1121,7 +1184,7 @@ export function buildStartCommand(): Command {
         });
       };
 
-      const createQa = async (qaCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
+      const createQa = async (qaCwd: string, sessionId?: string): Promise<QaSessionHandle> => {
         const recoveryMode = String(opts.recoveryMode ?? "");
         // A disposable QA cwd is never eligible for exact reuse, even when a
         // compatibility caller still supplies the previous raw ID.
@@ -1129,6 +1192,7 @@ export function buildStartCommand(): Command {
         void sessionId;
         let adapter = await createRecoveringQa(qaCwd, effectiveSessionId);
         let explicitRecoveryAccepted = false;
+        let handoffReceipt: unknown = { unavailable: "no predecessor handoff was required" };
         if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "qa" && activeContinuityRunId === recoveryRecord?.runId) {
           const service = new HandoffService(cwd);
           const staged = service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration);
@@ -1141,6 +1205,7 @@ export function buildStartCommand(): Command {
           adapter = accepted.successor;
           pendingHandoffGeneration = undefined;
           explicitRecoveryAccepted = true;
+          handoffReceipt = { generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest };
           log.write("recovery-handoff-accepted", { role: "qa", generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest });
         }
         // A new disposable QA worktree always means a new provider session.
@@ -1178,6 +1243,7 @@ export function buildStartCommand(): Command {
               handoffRecoveryOptions("qa"),
             );
             adapter = accepted.successor;
+            handoffReceipt = { generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest };
             log.write("handoff-transfer", {
               role: "qa", reason: staged.manifest.reason, generation: accepted.manifest.generation,
               predecessorSessionId: staged.manifest.predecessorSessionId, successorSessionId: accepted.successorSessionId,
@@ -1185,7 +1251,34 @@ export function buildStartCommand(): Command {
             });
           }
         }
-        return decorateQa(adapter, qaCwd, effectiveSessionId);
+        const decorated = decorateQa(adapter, qaCwd, effectiveSessionId);
+        const settings = resolvedContinuitySettings("qa");
+        const bundle = loadRoleBundle("qa", { projectDir: qaCwd });
+        const effectiveRoleInstructions = `${bundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`;
+        return {
+          adapter: decorated,
+          sessionIdentity: decorated.sessionRef?.() ?? decorated.sessionId(),
+          effectiveRoleInstructions,
+          runtimeContext: settings,
+          skills: bundle.skills.map((name) => {
+            const path = [join(qaCwd, ".agents", "skills", name, "SKILL.md"), join(qaCwd, ".claude", "skills", name, "SKILL.md"), join(qaCwd, ".codex", "skills", name, "SKILL.md")].find(existsSync);
+            if (path) {
+              const dispatchedContent = `## ${name}\n${readFileSync(path, "utf8").trim()}`;
+              return { name, path, digest: createHash("sha256").update(dispatchedContent).digest("hex") };
+            }
+            if (settings.make === "codex") {
+              try {
+                const bundled = loadSkill(name);
+                if (bundled.body?.trim()) {
+                  const dispatchedContent = `## ${bundled.name}\n${bundled.body.trim()}`;
+                  return { name, path: `special-agents:${name}`, digest: createHash("sha256").update(dispatchedContent).digest("hex") };
+                }
+              } catch { /* explicit unavailable result below */ }
+            }
+            return { name, digest: "unavailable" as const, reason: "runtime skill name had no resolvable loaded skill content" };
+          }),
+          handoffReceipt,
+        };
       };
 
       const applyQaSettingsBoundary = async (
@@ -1231,6 +1324,7 @@ export function buildStartCommand(): Command {
         frozenAction: string,
         strategy: SessionStrategy,
         qaCwd: string,
+        recovery?: import("../qaReview.js").QaSessionBoundaryRecovery,
       ): Promise<BuilderAdapter> => {
         if (!activeContinuityRunId) throw new Error("QA session boundary requires an active durable run");
         const qaSettings = resolvedContinuitySettings("qa");
@@ -1249,13 +1343,13 @@ export function buildStartCommand(): Command {
           }),
           report: (event) => {
             currentActivity()?.update(event.kind, event.detail, { provider: qaSettings.make, model: qaSettings.model });
-            log.write("context-lifecycle", { role: "qa", ...event, sample: event.sample });
           },
           handoff: async ({ reason, adapter: predecessor, sample, settings, compactionCount }) => {
             const nativeUsage = await predecessor.sessionUsage?.().catch(() => undefined);
             const transfer = await new HandoffService(cwd).transfer({
               runId: activeContinuityRunId!, role: "qa", reason, predecessorSessionId: predecessor.sessionId(), predecessorSessionRef: predecessor.sessionRef?.(),
-              roleState: { frozenActionDigest: createHash("sha256").update(frozenAction).digest("hex"), contextSample: sample },
+              roleState: { frozenActionDigest: createHash("sha256").update(frozenAction).digest("hex"), contextSample: sample,
+                ...(recovery ? { recoveryPacketDigest: recovery.packetDigest, reviewedStateDigest: recovery.reviewedStateDigest } : {}) },
               ...(nativeUsage ? { sessionUsage: {
                 version: 1 as const, runId: activeContinuityRunId!, role: "qa" as const, provider: predecessor.agent,
                 providerSessionId: predecessor.sessionId(), observedAt: nativeUsage.observedAt, source: nativeUsage.source,
@@ -1263,7 +1357,10 @@ export function buildStartCommand(): Command {
                 cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
               } } : {}),
               compactionCount, compactMaximum: settings.compact_maximum ?? 10,
-              resources: [{ label: "frozen-qa-action", content: frozenAction, authoritative: true }],
+              resources: [{ label: "frozen-qa-action", content: frozenAction, authoritative: true }, ...(recovery ? [
+                { label: "qa-recovery-packet", digest: recovery.packetDigest, authoritative: true, requiredForRecovery: true, mediaType: "application/vnd.rafi.qa-recovery+json", path: recovery.packetPath },
+                { label: "qa-reviewed-state", digest: recovery.reviewedStateDigest, authoritative: true, requiredForRecovery: true, mediaType: "application/vnd.rafi.reviewed-state", path: "reviewed-state/" },
+              ] : [])],
             }, (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(settings, runtime)), handoffRecoveryOptions("qa"));
             log.write("handoff-transfer", { role: "qa", generation: transfer.manifest.generation, predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId, acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest });
             await predecessor.close().catch(() => {});
@@ -1284,7 +1381,8 @@ export function buildStartCommand(): Command {
         });
         await controller.observeNativeCompactions(adapter);
       };
-      const qaNonconvergence = createQaNonconvergenceHandler(cwd, !process.stdin.isTTY || !process.stdout.isTTY, roleDefaults.planner);
+      const qaNonconvergence = createQaNonconvergenceHandler(cwd, !process.stdin.isTTY || !process.stdout.isTTY, roleDefaults.planner, () => activeObserver);
+      const qaReportRecovery = createQaReportRecoveryHandler(!process.stdin.isTTY || !process.stdout.isTTY, () => activeObserver);
 
       if (branchMode) {
         const ticketsConfig = loadTicketsConfig(cwd);
@@ -1462,13 +1560,13 @@ export function buildStartCommand(): Command {
         console.log();
 
         if (!autoApprovePlanUpdates && plan.issues.every((issue) => !issue.blocking)) {
-          const action = await select({
+          const action = await withObservedUserWait(activeObserver, "branch plan approval", () => select({
             message: branchPresentation.prompt,
             options: [
               { value: "proceed", label: "Proceed" },
               { value: "cancel", label: "Cancel" },
             ],
-          });
+          }));
           if (isCancel(action) || action === "cancel") {
             console.log("ai-foreman: cancelled");
             process.exit(0);
@@ -1508,11 +1606,15 @@ export function buildStartCommand(): Command {
         };
         const firstResumeRef = plan.nodes[0] ? resumeSessionByTicket.get(plan.nodes[0].ticket.id)?.sessionRef : undefined;
         let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null }) : createBuildRun({
+          runId: invocationRunId,
           tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
           repositoryRoot: cwd, branchMode: branchPresentation.allocationMode, baseRef: plan.baseRef, builder: capturedBranchBuilder, qa: capturedBranchQa,
+          frozenPolicy, autonomyProfile, qaEnabled,
           runDecisions: { workMode: "branch-per-ticket", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBranchBuilder.auto_compact_threshold_percent ?? 50, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
         });
         activeContinuityRunId = masterRun.runId;
+        const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, masterRun.runId) : undefined;
+        activeObserver?.store.attachExecutionLease(activeObserver.executionId, readCurrentWorkflowLease(cwd)?.generation);
         const branchContextControllers = new Map<string, RoleSessionController>();
         const branchContextController = (worktreePath: string): RoleSessionController => {
           const existing = branchContextControllers.get(worktreePath);
@@ -1527,7 +1629,7 @@ export function buildStartCommand(): Command {
               adapter: active, settingsRevision: settings.settings_revision, displaySessionCost: settings.display_session_cost,
               sessionTransition: "adopted live settings",
             }),
-            report: (event) => { currentActivity()?.update(event.kind, event.detail, { provider: capturedBranchBuilder.make, model: capturedBranchBuilder.model }); log.write("context-lifecycle", { worktreePath, ...event, sample: event.sample }); },
+            report: (event) => { currentActivity()?.update(event.kind, event.detail, { provider: capturedBranchBuilder.make, model: capturedBranchBuilder.model }); },
             handoff: async ({ reason, adapter, sample, settings, compactionCount, frozenAction }) => {
               const nativeUsage = await adapter.sessionUsage?.().catch(() => undefined);
               const transfer = await new HandoffService(cwd).transfer({
@@ -1565,6 +1667,12 @@ export function buildStartCommand(): Command {
           notificationsEnabled: config.notifications.enabled,
           terminalBellEnabled: config.notifications.terminal_bell,
           qaEnabled,
+          qaRuntimeContext: capturedBranchQa,
+          qaContinuityManaged: true,
+          qaReportRecovery,
+          qaResumedRecovery,
+          qaMaxFixAttempts: frozenPolicy.limits.builderQaFixesPerTicket,
+          observer: activeObserver,
           createPr: branchDefaults.createReview,
           completionMode: branchDefaults.completionMode,
           reviewProvider: branchDefaults.reviewProvider,
@@ -1601,8 +1709,8 @@ export function buildStartCommand(): Command {
             }, (line, snapshot) => {
               const activity = currentActivity();
               if (activity && process.stdout.isTTY) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, "")); else console.log(line);
-              log.write("agent-status", { ...snapshot });
-              const db = new WorkflowDb(cwd); try { db.recordTelemetry(masterRun.runId, snapshot); db.recordContextSample(snapshot.contextSample); if (snapshot.sessionUsage) db.recordSessionUsage(snapshot.sessionUsage); } finally { db.close(); }
+              activeObserver?.store.updateCurrentState({ runId: masterRun.runId, role: "builder", stream: "builder", executionId: activeObserver.executionId, ticketId: masterRun.currentTicket, providerSessionId: snapshot.contextSample.providerSessionId, phase: "builder ticket session", lastSignalAt: snapshot.contextSample.observedAt });
+              if (snapshot.contextSample.used !== undefined) activeObserver?.store.recordMetric({ runId: masterRun.runId, executionId: activeObserver.executionId, role: "builder", stream: "builder", providerSessionId: snapshot.contextSample.providerSessionId }, "context_used_tokens", snapshot.contextSample.used, { unit: "tokens" });
             });
             reporter.start();
             try { await printEvents(builder.events()); } finally { reporter.stop(); }
@@ -1667,6 +1775,14 @@ export function buildStartCommand(): Command {
         masterRun = summaries.every((row) => row.buildStatus === "done")
           ? completeBuildRun(cwd, masterRun)
           : releaseBuildLease(cwd, checkpointBuildRun(cwd, masterRun, "branch-run-interrupted", { status: "recoverable" }), "recoverable");
+        activeObserver?.finish(masterRun.status, observationSummaryMetadata(cwd, masterRun, qaEnabled, capturedBranchBuilder.make, summaries.find(row => row.pr?.url)));
+        observabilityStore?.closeLogFile(logPath, masterRun.status);
+        observabilityStore?.enforceLimits();
+        observabilityStore?.maintainLogs(cwd);
+        observabilityStore?.close();
+        pruneRecoveryTelemetryAtCompletion(cwd, config.observability.detail_retention_days);
+        activeObserver = undefined;
+        process.off("exit", finishObservationOnExit);
 
         console.log("foreman: branch run summary");
         console.log("ticket\tbranch\tbase\tstatus\tcommit\tpush\tcompletion");
@@ -1734,10 +1850,14 @@ export function buildStartCommand(): Command {
       };
       const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false, auto_compact_threshold_percent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50, compact_maximum: roleDefaults.qa?.compact_maximum ?? 10, settings_revision: settingsRevision };
       let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null }) : createBuildRun({
+        runId: invocationRunId,
         tickets: [], repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
+        frozenPolicy, autonomyProfile, qaEnabled,
         runDecisions: { workMode: "current", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBuilder.auto_compact_threshold_percent ?? 50, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
       });
+      activeObserver?.store.attachExecutionLease(activeObserver.executionId, readCurrentWorkflowLease(cwd)?.generation);
       activeContinuityRunId = buildRun.runId;
+      const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, buildRun.runId) : undefined;
       const heartbeat = setInterval(() => { buildRun = heartbeatBuildRun(cwd, buildRun); }, 10_000);
       heartbeat.unref();
       const checkpointSignal = (): void => {
@@ -1776,7 +1896,6 @@ export function buildStartCommand(): Command {
         }),
         report: (event) => {
           currentActivity()?.update(event.kind, event.detail, { provider: capturedBuilder.make, model: capturedBuilder.model });
-          log.write("context-lifecycle", { ...event, sample: event.sample });
         },
         handoff: async ({ reason, adapter, sample, settings, compactionCount, frozenAction }) => {
           const nativeUsage = await adapter.sessionUsage?.().catch(() => undefined);
@@ -1807,7 +1926,7 @@ export function buildStartCommand(): Command {
         },
       });
       const foreman = new Foreman(
-        builder, log, { desktop: config.notifications.enabled, terminalBell: config.notifications.terminal_bell }, qaEnabled, 3, cwd, undefined,
+        builder, log, { desktop: config.notifications.enabled, terminalBell: config.notifications.terminal_bell }, qaEnabled, frozenPolicy.limits.builderQaFixesPerTicket, cwd, undefined,
         qaEnabled ? createQa : undefined, capturedQa.session_strategy,
         createBuilder, capturedBuilder.session_strategy,
         qaNonconvergence,
@@ -1816,6 +1935,11 @@ export function buildStartCommand(): Command {
         qaSessionBoundary,
         observeQaNativeCompactions,
         async (adapter) => { await contextController.observeNativeCompactions(adapter); },
+        activeObserver,
+        capturedQa,
+        true,
+        qaReportRecovery,
+        qaResumedRecovery,
       );
       activeBuilderForStatus = () => foreman.builderAdapter();
       const statusReporter = liveStatusReporter = new AgentStatusReporter({
@@ -1831,8 +1955,8 @@ export function buildStartCommand(): Command {
         const activity = currentActivity();
         if (activity && process.stdout.isTTY) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, ""));
         else console.log(line);
-        log.write("agent-status", { ...snapshot });
-        const db = new WorkflowDb(cwd); try { db.recordTelemetry(buildRun.runId, snapshot); db.recordContextSample(snapshot.contextSample); if (snapshot.sessionUsage) db.recordSessionUsage(snapshot.sessionUsage); } finally { db.close(); }
+        activeObserver?.store.updateCurrentState({ runId: buildRun.runId, role: "builder", stream: "builder", executionId: activeObserver.executionId, ticketId: buildRun.currentTicket, providerSessionId: snapshot.contextSample.providerSessionId, phase: "builder work session", lastSignalAt: snapshot.contextSample.observedAt });
+        if (snapshot.contextSample.used !== undefined) activeObserver?.store.recordMetric({ runId: buildRun.runId, executionId: activeObserver.executionId, role: "builder", stream: "builder", providerSessionId: snapshot.contextSample.providerSessionId }, "context_used_tokens", snapshot.contextSample.used, { unit: "tokens" });
       });
       statusReporter.start();
 
@@ -1852,7 +1976,7 @@ export function buildStartCommand(): Command {
       try {
         console.log("ai-foreman: asking builder to plan the next tickets or steps...\n");
         buildRun = checkpointBuildRun(cwd, buildRun, "before-preflight");
-        await foreman.runPreflight(steps, ticketsContent, preferredTicket);
+        await (activeObserver ? activeObserver.span("preflight", "Builder preflight", () => foreman.runPreflight(steps, ticketsContent, preferredTicket)) : foreman.runPreflight(steps, ticketsContent, preferredTicket));
         buildRun = withRunLocalAcceptedRuntimes(buildRun);
         if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
         if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
@@ -1861,14 +1985,14 @@ export function buildStartCommand(): Command {
         if (!autoApprovePlanUpdates) {
           while (true) {
             console.log();
-            const action = await select({
+            const action = await withObservedUserWait(activeObserver, "build plan decision", () => select({
               message: "How does this plan look?",
               options: [
                 { value: "proceed", label: "Proceed — start implementing" },
                 { value: "feedback", label: "Give feedback — revise the plan" },
                 { value: "cancel", label: "Cancel" },
               ],
-            });
+            }));
 
             if (isCancel(action) || action === "cancel") {
               console.log("ai-foreman: cancelled");
@@ -1882,10 +2006,10 @@ export function buildStartCommand(): Command {
               break;
             }
 
-            const fb = await text({
+            const fb = await withObservedUserWait(activeObserver, "build plan feedback", () => text({
               message: "Your feedback:",
               validate: (v) => (v?.trim() ? undefined : "Please enter some feedback"),
-            });
+            }));
             if (isCancel(fb)) {
               console.log("ai-foreman: cancelled");
               statusReporter.stop();
@@ -1898,7 +2022,7 @@ export function buildStartCommand(): Command {
           }
         }
 
-        const result = await foreman.runBatch(steps, trackerRelPath, (ticketId) => {
+        const result = await (activeObserver ? activeObserver.span("builder_work", "Builder and QA batch", () => foreman.runBatch(steps, trackerRelPath, (ticketId) => {
           const tickets = buildRun.tickets.includes(ticketId)
             ? buildRun.tickets
             : [...buildRun.tickets, ticketId];
@@ -1906,7 +2030,10 @@ export function buildStartCommand(): Command {
             tickets,
             currentTicket: ticketId,
           });
-        }, preferredTicket);
+        }, preferredTicket)) : foreman.runBatch(steps, trackerRelPath, (ticketId) => {
+          const tickets = buildRun.tickets.includes(ticketId) ? buildRun.tickets : [...buildRun.tickets, ticketId];
+          buildRun = checkpointBuildRun(cwd, buildRun, "ticket-selected", { tickets, currentTicket: ticketId });
+        }, preferredTicket));
         if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted; recovery mode was not substituted`);
         if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
         if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
@@ -1917,6 +2044,14 @@ export function buildStartCommand(): Command {
         statusReporter.stop();
         await foreman.close();
         await viewer;
+        activeObserver?.finish(buildRun.status, observationSummaryMetadata(cwd, buildRun, qaEnabled, capturedBuilder.make));
+        observabilityStore?.closeLogFile(logPath, buildRun.status);
+        observabilityStore?.enforceLimits();
+        observabilityStore?.maintainLogs(cwd);
+        observabilityStore?.close();
+        pruneRecoveryTelemetryAtCompletion(cwd, config.observability.detail_retention_days);
+        activeObserver = undefined;
+        process.off("exit", finishObservationOnExit);
 
         console.log(`\nforeman: ${result.completed}/${result.requested} step(s) completed`);
         console.log(`foreman: outcome — ${result.outcome}`);
@@ -1993,6 +2128,58 @@ export function buildStartCommand(): Command {
     });
 }
 
+function withObservedUserWait<T>(observer: RunObserver | undefined, label: string, operation: () => Promise<T>): Promise<T> {
+  return observer ? observer.span("user_wait", label, operation) : operation();
+}
+
+function ticketSizeBucket(projectDir: string, ticketIds: readonly string[]): string | undefined {
+  if (!ticketIds.length || !isTicketsInitialized(projectDir)) return undefined;
+  try {
+    const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);
+    const ranks = new Map([["XS", 0], ["S", 1], ["M", 2], ["L", 3], ["XL", 4]]);
+    return loadTickets(paths.tickets).filter(ticket => ticketIds.includes(ticket.id))
+      .sort((left, right) => (ranks.get(right.size) ?? -1) - (ranks.get(left.size) ?? -1))[0]?.size;
+  } catch { return undefined; }
+}
+
+function observationSummaryMetadata(projectDir: string, run: BuildRunRecordV2, qaEnabled: boolean, provider: "claude" | "codex", reviewRun?: BranchRunSummary) {
+  const worktree = run.repository.worktree;
+  const terminalHead = reviewRun?.commit ?? diagnosticGit(worktree, ["rev-parse", "HEAD"]);
+  const base = run.repository.git.baselineHead ?? run.repository.baseHead;
+  const commitCount = base ? Number(diagnosticGit(worktree, ["rev-list", "--count", `${base}..HEAD`])) : undefined;
+  const status = diagnosticGit(worktree, ["status", "--porcelain=v1"]);
+  const numstat = base ? diagnosticGit(worktree, ["diff", "--numstat", `${base}..HEAD`]) : undefined;
+  let additions = 0; let deletions = 0;
+  for (const line of numstat?.split("\n").filter(Boolean) ?? []) {
+    const [added, deleted] = line.split("\t");
+    if (/^\d+$/.test(added ?? "")) additions += Number(added);
+    if (/^\d+$/.test(deleted ?? "")) deletions += Number(deleted);
+  }
+  const receipt = Object.entries(run.receipts).find(([key, value]) => /(?:pull|merge|pr|mr)/i.test(`${key} ${value.externalId ?? ""}`));
+  const review = reviewRun?.pr;
+  const reviewId = review?.url?.match(/\/(?:pull|merge_requests)\/(\d+)(?:\D|$)/)?.[1] ?? receipt?.[1].externalId;
+  return {
+    branchMode: run.branchMode, qaEnabled, primaryProvider: provider, model: run.builder?.settings.model,
+    ticketCount: run.tickets.length, ticketIds: run.tickets, deliveryUnit: run.deliveryUnit, checkpoint: run.checkpoint,
+    failureCategory: run.failure?.category ?? run.interruption?.category, ticketSizeBucket: ticketSizeBucket(projectDir, run.tickets),
+    createdAt: run.createdAt, updatedAt: run.updatedAt, completedAt: run.completedAt,
+    git: { branch: reviewRun?.branch ?? run.repository.git.branch ?? run.repository.branch, terminalHead, ...(Number.isFinite(commitCount) ? { commitCount } : {}),
+      changedPathCount: status?.split("\n").filter(Boolean).length, ...(numstat !== undefined ? { additions, deletions } : {}),
+      ...(reviewId ? { pullRequest: { provider: /merge_requests\//.test(review?.url ?? "") || /mr|gitlab/i.test(receipt?.[0] ?? "") ? "gitlab" as const : "github" as const, id: reviewId, state: review?.status, url: review?.url } } : {}),
+      observedAt: new Date().toISOString(), historical: true as const },
+  };
+}
+
+function diagnosticGit(cwd: string, args: string[]): string | undefined {
+  try { return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000, maxBuffer: 1024 * 1024 }).trim(); }
+  catch { return undefined; }
+}
+
+function pruneRecoveryTelemetryAtCompletion(projectDir: string, retentionDays: number): void {
+  try { const db = new WorkflowDb(projectDir); try { db.pruneTerminalTelemetry(retentionDays); } finally { db.close(); } }
+  catch (error) { console.error(`rafi: recovery telemetry maintenance skipped: ${String(error).replace(/\s+/g, " ").slice(0, 300)}`); }
+}
+
 async function prepareNativeAutoCompaction(adapter: BuilderAdapter): Promise<void> {
   if (!adapter.prepareAutoCompaction) {
     await adapter.close().catch(() => {});
@@ -2013,22 +2200,22 @@ async function prepareNativeAutoCompaction(adapter: BuilderAdapter): Promise<voi
   }
 }
 
-function createQaNonconvergenceHandler(projectDir: string, noninteractive: boolean, planner?: AgentRoleDefaultsV1): (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision> {
+function createQaNonconvergenceHandler(projectDir: string, noninteractive: boolean, planner?: AgentRoleDefaultsV1, observer?: () => RunObserver | undefined): (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision> {
   return async (context) => {
     if (noninteractive || !process.stdin.isTTY || !process.stdout.isTTY) return { action: "pause" };
     while (true) {
-      const choice = await select({ message: `QA did not converge for ${context.ticket.id}. What next?`, options: [
+      const choice = await withObservedUserWait(observer?.(), "QA nonconvergence decision", () => select({ message: `QA did not converge for ${context.ticket.id}. What next?`, options: [
         { value: "retry", label: "Retry another Builder fix" },
         { value: "pause", label: "Pause at this checkpoint" },
         { value: "waive", label: "Explicitly waive QA" },
         { value: "planner", label: "Discuss with read-only Planner" },
-      ] });
+      ] }));
       if (isCancel(choice) || choice === "pause") return { action: "pause" };
       if (choice === "retry") return { action: "retry" };
       if (choice === "waive") {
-        const approved = await select({ message: "Waive QA and record validation_result=failed with all unresolved issues?", options: [
+        const approved = await withObservedUserWait(observer?.(), "QA waiver confirmation", () => select({ message: "Waive QA and record validation_result=failed with all unresolved issues?", options: [
           { value: "no", label: "No (Recommended)" }, { value: "yes", label: "Yes, waive and continue" },
-        ] });
+        ] }));
         if (approved === "yes") {
           const db = new WorkflowDb(projectDir);
           try {
@@ -2044,17 +2231,25 @@ function createQaNonconvergenceHandler(projectDir: string, noninteractive: boole
         }
         continue;
       }
-      const discussion = await text({ message: "What should the Planner focus on?", defaultValue: "Explain the QA failures and propose the safest concrete remediation." });
+      const discussion = await withObservedUserWait(observer?.(), "QA remediation guidance", () => text({ message: "What should the Planner focus on?", defaultValue: "Explain the QA failures and propose the safest concrete remediation." }));
       if (isCancel(discussion)) continue;
-      const diff = execFileSync("git", ["-C", context.builderWorktree, "diff", "--binary", "HEAD"], { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
+      const rawDiff = execFileSync("git", ["-C", context.builderWorktree, "diff", "--binary", "HEAD"], { encoding: "buffer", maxBuffer: 128 * 1024 * 1024 });
+      const diffLimit = 128 * 1024;
+      const diffTruncated = rawDiff.length > diffLimit;
+      const diff = rawDiff.subarray(0, diffLimit).toString("utf8");
+      const changeSummary = execFileSync("git", ["-C", context.builderWorktree, "status", "--short", "--untracked-files=all"], { encoding: "utf8" }).split("\n").filter(Boolean).sort().join("\n");
+      const untracked = execFileSync("git", ["-C", context.builderWorktree, "ls-files", "--others", "--exclude-standard"], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
       let instruction = [
         "You are the read-only Planner mediating QA nonconvergence. Do not edit files or run mutating tools.",
         `Ticket: ${context.ticket.id} — ${context.ticket.title}`,
         `Requirements: ${context.ticket.acceptance.join("; ")}`,
         `Required tests: ${context.ticket.required_tests.join("; ")}`,
+        `Builder worktree: ${context.builderWorktree}`,
+        `Deterministic change summary:\n${changeSummary || "(clean)"}`,
+        `Untracked-file inventory:\n${untracked.join("\n") || "(none)"}`,
         `User discussion: ${String(discussion)}`,
         `Complete QA history:\n${JSON.stringify(context.history, null, 2)}`,
-        `Full Builder diff:\n${diff || "(no tracked diff)"}`,
+        `${diffTruncated ? "Builder diff (TRUNCATED at 128 KiB; inspect the actual worktree before relying on it)" : "Full Builder diff"}:\n${diff || "(no tracked diff)"}`,
         "Return RAFI_QA_REMEDIATION_START, then one JSON object {\"summary\":\"...\",\"fix_instructions\":[\"...\"]}, then RAFI_QA_REMEDIATION_END.",
         "End with STEP_STATUS: plan_complete | summary=\"QA remediation proposed\"",
       ].join("\n\n");
@@ -2072,15 +2267,46 @@ function createQaNonconvergenceHandler(projectDir: string, noninteractive: boole
         const proposal = JSON.parse(match[1]!.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")) as { summary?: string; fix_instructions?: string[] };
         if (!proposal.summary || !Array.isArray(proposal.fix_instructions) || !proposal.fix_instructions.every((item) => typeof item === "string")) throw new Error("Planner remediation proposal is malformed");
         console.log(`\nPlanner remediation: ${proposal.summary}\n${proposal.fix_instructions.map((item) => `- ${item}`).join("\n")}`);
-        const decision = await select({ message: "Use this remediation for a new Builder fix session?", options: [
+        const decision = await withObservedUserWait(observer?.(), "QA remediation approval", () => select({ message: "Use this remediation for a new Builder fix session?", options: [
           { value: "approve", label: "Approve (Recommended)" }, { value: "revise", label: "Discuss/revise" }, { value: "cancel", label: "Cancel and return to choices" },
-        ] });
+        ] }));
         if (decision === "approve") return { action: "remediate", remediation: [proposal.summary, ...proposal.fix_instructions].join("\n") };
         if (isCancel(decision) || decision === "cancel") break;
-        const feedback = await text({ message: "Planner revision feedback:" }); if (isCancel(feedback)) break;
+        const feedback = await withObservedUserWait(observer?.(), "QA Planner revision feedback", () => text({ message: "Planner revision feedback:" })); if (isCancel(feedback)) break;
         resumeSessionId = run.sessionId; instruction = `Revise the complete QA remediation proposal using this feedback: ${String(feedback)}. Keep the exact structured envelope and final plan_complete marker.`;
       }
     }
+  };
+}
+
+function createQaReportRecoveryHandler(noninteractive: boolean, observer?: () => RunObserver | undefined): QaReportRecoveryHandler {
+  return async ({ packet, originalIssues, liveSession, contextUsage }) => {
+    if (noninteractive || !process.stdin.isTTY || !process.stdout.isTTY) {
+      console.error(`foreman: QA report recovery requires input; saved packet ${packet.directory}`);
+      console.error(`foreman: resume with the run ID recorded in ${join(packet.directory, "manifest.json")}`);
+      return { action: "pause" };
+    }
+    const choice = await withObservedUserWait(observer?.(), "QA report recovery decision", () => select({
+      message: "QA report recovery:",
+      options: [
+        { value: "fresh", label: "Try another fresh QA." },
+        { value: "plain", label: "Use plain issues fallback.", hint: originalIssues ? originalIssues.slice(0, 120) : "Unavailable: original issues synopsis was empty" },
+        { value: "manual", label: "Manually fix saved JSON.", hint: join(packet.directory, "report.json") },
+        { value: "guidance", label: "Give QA specific instructions." },
+        { value: "pause", label: "Pause." },
+      ],
+    }));
+    if (isCancel(choice) || choice === "pause") return { action: "pause" };
+    if (choice === "fresh") return { action: "fresh" };
+    if (choice === "plain") return { action: "plain" };
+    if (choice === "manual") return { action: "manual" };
+    console.log(`foreman: current QA context usage: ${JSON.stringify(contextUsage).slice(0, 500)}`);
+    const guidance = await withObservedUserWait(observer?.(), "QA recovery guidance", () => text({ message: "Specific QA report-recovery instructions:" }));
+    if (isCancel(guidance) || !String(guidance).trim()) return { action: "pause" };
+    const route = await withObservedUserWait(observer?.(), "QA recovery session choice", () => select<"current" | "compact" | "fresh">({ message: "Use which QA session route?", options: liveSession ? [
+      { value: "current", label: "Current session" }, { value: "compact", label: "Compact current session" }, { value: "fresh", label: "Fresh validated handoff" },
+    ] : [{ value: "fresh", label: "Fresh validated handoff (resumed recovery)" }] }));
+    return isCancel(route) ? { action: "pause" } : { action: "guidance", instructions: String(guidance), route };
   };
 }
 

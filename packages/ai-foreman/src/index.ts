@@ -5,6 +5,8 @@ import { buildTicketsCommand } from "./cli/tickets.js";
 import { buildStartCommand } from "./cli/start.js";
 import { buildStatusCommand } from "./cli/status.js";
 import { buildDoctorCommand } from "./cli/doctor.js";
+import { buildManagerCommand } from "./cli/manager.js";
+import { buildAttachCommand, buildDecideCommand, buildStopCommand } from "./cli/recovery.js";
 import { withActivityContext } from "./activity.js";
 
 const PACKAGE_VERSION = JSON.parse(
@@ -21,6 +23,10 @@ program.addCommand(buildTicketsCommand());
 program.addCommand(buildStartCommand());
 program.addCommand(buildStatusCommand());
 program.addCommand(buildDoctorCommand());
+program.addCommand(buildManagerCommand({ requireProject: true }));
+program.addCommand(buildAttachCommand());
+program.addCommand(buildDecideCommand());
+program.addCommand(buildStopCommand());
 
 // pnpm passes its `--` separator through to the script; strip it so Commander
 // sees the subcommand args correctly.

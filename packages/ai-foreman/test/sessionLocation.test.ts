@@ -344,7 +344,7 @@ test("compactWithRetry converts thrown adapter failures into an explicit result"
   let calls = 0;
   adapter.compact = async () => { calls += 1; throw new Error("transport exploded"); };
   assert.deepEqual(await compactWithRetry(adapter), { ok: false, error: "transport exploded" });
-  assert.equal(calls, 2);
+  assert.equal(calls, 1, "QA recovery performs one bounded compaction attempt");
 });
 
 test("session loss during compaction degrades continuity and never hands off automatically", async () => {
@@ -406,6 +406,7 @@ test("each disposable QA cycle creates a fresh provider session in a different s
     },
     builderWorktree: projectDir,
     builderSummary: "implemented",
+    recovery: { projectDir, runId: "qa-fresh-test" },
     qaStrategy: "compact",
     state,
     maxCycles: 2,
@@ -414,11 +415,11 @@ test("each disposable QA cycle creates a fresh provider session in a different s
       cws.push(cwd);
       resumeIds.push(resumeId);
       return new StaticAdapter(`qa-${created}`, {
-        text: created === 1 ? 'STEP_STATUS: qa_fail | issues="retry"' : 'STEP_STATUS: qa_pass | summary="clean"',
+        text: created === 1 ? `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify({ version: 1, summary: "retry", checks_run: [{ check: "review", outcome: "failed", evidence: "retry needed" }], findings: [{ id: "QA-1", requirement: "isolated", locations: ["README.md"], problem: "retry", evidence: "review evidence", expected: "clean", fix_direction: "fix it", verification: ["review again"] }], observations: [] })}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="retry"` : 'STEP_STATUS: qa_pass | summary="clean"',
         isError: false, numTurns: 1, costUsd: 0,
       });
     },
-    fix: async () => ({ ok: true }),
+    fix: async () => ({ ok: true, response: 'STEP_STATUS: done | summary="fixed"', summary: "fixed" }),
     observeNativeCompactions: async (adapter) => { if (adapter.sessionId()) observedQaSessions.push(adapter.sessionId()!); },
   });
   assert.equal(result.outcome, "passed");

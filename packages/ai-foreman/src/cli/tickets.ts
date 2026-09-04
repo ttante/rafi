@@ -73,7 +73,8 @@ import {
 import { applyTicketPopulation, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, recoverTicketPublications, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
 import { loadTickets } from "../tickets/ticketLoader.js";
 import { resolveTicketPaths } from "../tickets/config.js";
-import { formatTicketDetails, getTicketDetails } from "../tickets/details.js";
+import { formatAllTicketDetails, formatTicketDetails, getAllTicketDetails, getTicketDetails } from "../tickets/details.js";
+import { appendTicketOutput } from "../tickets/output.js";
 import { applyResolvedTicketReset, previewTicketReset, recoverTicketResetPublications, resetTickets, resolveTicketResetSelection, TicketResetDependencyConflictError, type TicketResetScope } from "../tickets/reset.js";
 import { validateBranchPrefix } from "../branch/prefix.js";
 import { listTicketGroups, previewTicketGroupRepair, repairTicketGroups } from "../tickets/groups.js";
@@ -1420,15 +1421,31 @@ export function buildTicketsCommand(options: {
   // ── update ──────────────────────────────────────────────────────────────────
 
   tickets
-    .command("show <ticketId>")
-    .description("Show the complete canonical ticket, active state, validation, delivery, and history.")
+    .command("show [ticketId]")
+    .description("Show one or all complete canonical tickets, including state, validation, delivery, and history.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("--all", "show every canonical ticket, including terminal tickets")
     .option("--json", "write the complete stable record as JSON")
-    .action((ticketId: string, opts) => {
+    .option("--output <file>", "append the rendered output to a file")
+    .action((ticketId: string | undefined, opts) => {
       try {
-        const details = getTicketDetails(cwd(opts), ticketId);
-        if (opts.json) process.stdout.write(`${JSON.stringify(details, null, 2)}\n`);
-        else for (const line of formatTicketDetails(details)) console.log(line);
+        if (ticketId && opts.all) throw new Error("choose either a ticket ID or --all, not both");
+        if (!ticketId && !opts.all) {
+          throw new Error("select one ticket: `rafi tickets show T123` or `rafi tickets show --all`");
+        }
+        const projectDir = cwd(opts);
+        const details = opts.all ? getAllTicketDetails(projectDir) : getTicketDetails(projectDir, ticketId!);
+        const lines = opts.all ? formatAllTicketDetails(details as ReturnType<typeof getAllTicketDetails>) : formatTicketDetails(details as ReturnType<typeof getTicketDetails>);
+        const payload = opts.json ? `${JSON.stringify(details, null, 2)}\n` : `${lines.join("\n")}\n`;
+        if (opts.output) {
+          const result = appendTicketOutput(projectDir, resolve(String(opts.output)), payload);
+          const count = opts.all ? (details as ReturnType<typeof getAllTicketDetails>).ticket_count : 1;
+          console.log(`rafi tickets show: ${result.disposition} ${count} ${count === 1 ? "ticket" : "tickets"} as ${opts.json ? "json" : "text"} to ${result.path}`);
+        } else if (opts.json) {
+          process.stdout.write(payload);
+        } else {
+          for (const line of lines) console.log(line);
+        }
       } catch (err) {
         fail(String(err instanceof Error ? err.message : err));
       }

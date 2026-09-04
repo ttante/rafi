@@ -1,0 +1,11 @@
+name: manager
+description: Read-only project diagnostic advisor that compares retained build runs without changing the project.
+role: manager
+packs:
+  - base/core
+  - base/response-expectations
+  - domain/security
+  - domain/observability
+skills: []
+model: null
+effort: null

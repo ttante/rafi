@@ -7,6 +7,7 @@ import { stringify } from "yaml";
 
 import { createBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease } from "ai-foreman/build-runs.js";
 import { createProviderSessionRef } from "ai-foreman/session-identity.js";
+import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
 import { buildBuildResumeCommand } from "../src/buildResume.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
@@ -31,6 +32,21 @@ function scopedSession(dir: string, sessionId: string, provider: "claude" | "cod
     configRoot: dir,
     source: "observed",
   });
+}
+
+function attachLegacyQaRecovery(dir: string, runId: string): string {
+  const packet = join(dir, ".foreman", "qa-report-recovery", "legacy-v1");
+  mkdirSync(packet, { recursive: true });
+  writeFileSync(join(packet, "manifest.json"), JSON.stringify({ version: 1, packetId: "legacy-packet", packetDigest: "0".repeat(64), runId, ticketId: "T011", resources: [] }));
+  const db = new WorkflowDb(dir);
+  const run = db.getRun(runId)!;
+  db.transition(runId, {
+    status: run.status, checkpoint: run.checkpoint, remainingWork: run.remainingWork,
+    state: { ...run.state, qaReportRecovery: { packetPath: packet, packetDigest: "0".repeat(64), pendingAction: "operator-menu", ticketId: "T011" } },
+    event: "legacy_qa_packet_fixture", payload: { packet },
+  });
+  db.close();
+  return packet;
 }
 
 async function availableProjection(projectDir: string, run: BuildRunRecordV2, now = new Date(), ticket?: string) {
@@ -157,6 +173,48 @@ test("build:resume supports explicit fresh-session recovery", async () => {
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("build:resume refuses to treat a V1 QA packet as authoritative without an explicit legacy choice", async () => {
+  const dir = initializedProject();
+  try {
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T011"] });
+    run = releaseBuildLease(dir, run, "recoverable");
+    attachLegacyQaRecovery(dir, run.runId);
+    const command = buildBuildResumeCommand({ executeStart: () => 0 });
+    await assert.rejects(
+      command.parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" }),
+      /--legacy-qa-recovery restart[\s\S]*--legacy-qa-recovery historical/,
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("legacy QA restart and historical modes both use a fresh validated Builder handoff", async () => {
+  for (const legacyMode of ["restart", "historical"] as const) {
+    const dir = initializedProject();
+    try {
+      let run = createBuildRun({ repositoryRoot: dir, tickets: ["T011"], builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
+      run = persistBuildSession(dir, run, "builder", scopedSession(dir, `legacy-${legacyMode}`));
+      run = releaseBuildLease(dir, run, "recoverable");
+      const db = new WorkflowDb(dir);
+      db.appendContinuityEvent({ runId: run.runId, role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+      db.publishContinuityCheckpoint({ runId: run.runId, role: "builder", authoritativeStateRevision: 1, delta: { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: ["perform full QA"], nextAction: "resume Builder and create a fresh protected QA review" } });
+      db.close();
+      attachLegacyQaRecovery(dir, run.runId);
+      let invoked: string[] | undefined;
+      const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; }, resolveProjection: availableProjection });
+      await command.parseAsync([dir, "--run", run.runId, "--yes", "--legacy-qa-recovery", legacyMode, "--fresh-with-handoff"], { from: "user" });
+      assert.ok(invoked);
+      assert.equal(invoked.includes("--accept-handoff-role"), true);
+      assert.equal(invoked[invoked.indexOf("--accept-handoff-role") + 1], "builder");
+      const after = new WorkflowDb(dir);
+      const pending = after.getRun(run.runId)?.state.qaReportRecovery as Record<string, unknown>;
+      after.close();
+      assert.equal(pending.authoritative, false);
+      assert.equal(pending.pendingAction, legacyMode === "restart" ? "legacy-clean-review" : "legacy-historical-full-review");
+      if (legacyMode === "historical") assert.equal(typeof pending.historicalContextPath, "string");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   }
 });
 

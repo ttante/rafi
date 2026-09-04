@@ -17,6 +17,9 @@ follow-up instruction asking you to triple-check accuracy, tests, and ticket sat
 
 export const QA_MARKER_SPEC = `End EVERY turn with exactly one marker line as the LAST line, nothing after it:
   STEP_STATUS: qa_pass | summary="confirmed everything checks out"
-  STEP_STATUS: qa_fail | issues="bullet-list of concrete problems found"
+  RAFI_QA_FAILURE_REPORT_START
+  {"version":1,"summary":"...","checks_run":[...],"findings":[...],"observations":[...]}
+  RAFI_QA_FAILURE_REPORT_END
+  STEP_STATUS: qa_fail | issues="short plain-text synopsis"
   STEP_STATUS: blocked | reason="why QA itself cannot proceed"
   STEP_STATUS: needs_input | question="..." choices="..."`;

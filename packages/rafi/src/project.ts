@@ -1,6 +1,6 @@
 import { loadDefaults } from "special-agents";
 import { assertProjectConfig } from "rafi-spec";
-import type { AgentDefaultsV1, ProjectConfig, HarnessTarget, RuntimeArtifactConfig, TicketBuildBranchStrategy } from "rafi-spec";
+import type { AgentDefaultsV1, AutonomyConfig, ProjectConfig, HarnessTarget, RuntimeArtifactConfig, TicketBuildBranchStrategy } from "rafi-spec";
 import { existsSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { CreateGitignoreSelection } from "./gitignore.js";
@@ -12,6 +12,16 @@ export const RUNTIME_SELECTIONS = ["both", "claude", "codex"] as const;
 export const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT = 50;
 export const DEFAULT_COMPACT_MAXIMUM = 10;
 export const DEFAULT_BRANCH_PREFIX = "feature";
+export const DEFAULT_AUTONOMY_CONFIG: AutonomyConfig = {
+  profile: "balanced",
+  continue_independent_tickets: true,
+  rules: {
+    "qa.nonconvergence": { action: "retry_builder", max_attempts: 3 },
+    "runtime.transient": { action: "retry", max_attempts: 3 },
+    "plan.material_change": { action: "human_required" },
+  },
+  supervisor: { enabled: true, max_worker_restarts_per_checkpoint: 3, max_worker_restarts_per_run: 10 },
+};
 export type RuntimeSelection = typeof RUNTIME_SELECTIONS[number];
 
 export interface WalkthroughAnswers {
@@ -80,7 +90,7 @@ export function resolveExplicitRafiProject(project: string): DiscoveredRafiProje
   return undefined;
 }
 
-export const RAFI_AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker", "uninstaller"] as const;
+export const RAFI_AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager"] as const;
 export const RAFI_SKILL_NAMES = [
   "better-sqlite3-rebuild",
   "grill-me",
@@ -200,6 +210,7 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
       root: answers.docsRoot ?? DEFAULT_DOCS_ROOT,
     },
     agent_defaults: normalizeProjectAgentDefaults(answers.agentDefaults),
+    autonomy: cloneAutonomyConfig(DEFAULT_AUTONOMY_CONFIG),
     ...(normalizePlanningSources(answers.planningSources).length > 0
       ? { sources: {
         version: 1 as const,
@@ -232,6 +243,7 @@ export function normalizeProjectConfig(raw: unknown): ProjectConfig {
       ? { planning: { sources: normalizePlanningSources(cfg.planning?.sources) } }
       : {}),
     agent_defaults: normalizeProjectAgentDefaults(cfg.agent_defaults),
+    autonomy: cfg.autonomy ? cloneAutonomyConfig(cfg.autonomy) : cloneAutonomyConfig(DEFAULT_AUTONOMY_CONFIG),
     ...(cfg.tickets ? {
       tickets: {
         ...cfg.tickets,
@@ -245,6 +257,14 @@ export function normalizeProjectConfig(raw: unknown): ProjectConfig {
   return normalized;
 }
 
+function cloneAutonomyConfig(config: AutonomyConfig): AutonomyConfig {
+  return {
+    ...config,
+    rules: Object.fromEntries(Object.entries(config.rules ?? {}).map(([key, value]) => [key, { ...value }])),
+    supervisor: { ...config.supervisor },
+  };
+}
+
 /** Fill runtime defaults in memory without causing a config write. */
 export function normalizeProjectAgentDefaults(defaults?: AgentDefaultsV1): AgentDefaultsV1 {
   const sessionDefaults = {
@@ -253,6 +273,7 @@ export function normalizeProjectAgentDefaults(defaults?: AgentDefaultsV1): Agent
     "ticket-maker": "compact",
     planner: "fresh",
     uninstaller: "fresh",
+    manager: "fresh",
   } as const;
   const roles = { ...(defaults?.roles ?? {}) } as AgentDefaultsV1["roles"];
   for (const [role, sessionStrategy] of Object.entries(sessionDefaults)) {

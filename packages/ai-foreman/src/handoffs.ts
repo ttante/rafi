@@ -61,7 +61,7 @@ export interface CreateHandoffInput {
   sessionUsage?: SessionUsageSample;
   compactionCount: number;
   compactMaximum: number;
-  resources?: Array<{ label: string; content: string | Buffer; authoritative: boolean }>;
+  resources?: Array<{ label: string; content?: string | Buffer; digest?: string; authoritative: boolean; requiredForRecovery?: boolean; mediaType?: string; path?: string }>;
   requestedByBuilder?: boolean;
   /** Internal recovery path: use the last valid checkpoint while its head is marked degraded/invalid. */
   allowNonCurrentContinuity?: boolean;
@@ -158,8 +158,11 @@ export class HandoffService {
       const generation = (prior?.generation ?? 0) + 1;
       const resources = (input.resources ?? []).map((resource) => ({
         label: resource.label,
-        digest: digest(resource.content),
+        digest: resource.digest && /^[a-f0-9]{64}$/.test(resource.digest) ? resource.digest : digest(resource.content ?? ""),
         authoritative: resource.authoritative,
+        ...(resource.requiredForRecovery !== undefined ? { requiredForRecovery: resource.requiredForRecovery } : {}),
+        ...(resource.mediaType ? { mediaType: resource.mediaType } : {}),
+        ...(resource.path ? { path: resource.path } : {}),
       }));
       resources.unshift(
         { label: "continuity-checkpoint", digest: head.digest, authoritative: true },

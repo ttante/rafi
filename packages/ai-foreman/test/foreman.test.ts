@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify } from "yaml";
@@ -13,8 +14,16 @@ import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/t
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 
 function makeTmpDir(): string {
-  return mkdtempSync(join(tmpdir(), "foreman-runner-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "foreman-runner-test-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "qa@example.test"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "QA Test"], { cwd: dir });
+  execFileSync("git", ["commit", "--allow-empty", "-qm", "base"], { cwd: dir });
+  return dir;
 }
+
+const qaPass = 'checked\nSTEP_STATUS: qa_pass | summary="tests passed"';
+const qaFail = `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify({ version: 1, summary: "missing test", checks_run: [{ check: "unit test", outcome: "failed", evidence: "not found" }], findings: [{ id: "QA-1", requirement: "Unit test", locations: ["repository-wide"], problem: "missing test", evidence: "no matching test", expected: "test exists", fix_direction: "add the test", verification: ["run the test"] }], observations: [] })}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="missing test"`;
 
 function makeDef(id: string): TicketDef {
   return {
@@ -86,11 +95,8 @@ test("runBatch completes ticket only after QA passes", async () => {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
 
-    const builder = new FakeBuilder([
-      'implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"',
-      'checked\nSTEP_STATUS: qa_pass | summary="tests passed"',
-    ]);
-    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir);
+    const builder = new FakeBuilder(['implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"']);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async () => new FakeBuilder([qaPass]));
     const startedTickets: string[] = [];
 
     const result = await foreman.runBatch(1, undefined, (ticketId) => {
@@ -122,10 +128,9 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
 
     const builder = new FakeBuilder([
       'implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"',
-      'bad\nSTEP_STATUS: qa_fail | issues="missing test"',
       'fixed\nSTEP_STATUS: done | ticket="T001" summary="fixed"',
     ]);
-    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 1, dir);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 1, dir, undefined, async () => new FakeBuilder([qaFail]));
 
     const result = await foreman.runBatch(1);
     assert.equal(result.outcome, "needs-human");
@@ -155,11 +160,8 @@ test("runBatch pins recovery to the requested in-progress ticket", async () => {
     cmdUpdate(dir, "T001", { status: "next", actor: "test" });
     cmdUpdate(dir, "T002", { status: "in_progress", actor: "test" });
 
-    const builder = new FakeBuilder([
-      'continued T002\nSTEP_STATUS: done | ticket="T002" summary="finished recovery"',
-      'checked T002\nSTEP_STATUS: qa_pass | summary="tests passed"',
-    ]);
-    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir);
+    const builder = new FakeBuilder(['continued T002\nSTEP_STATUS: done | ticket="T002" summary="finished recovery"']);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async () => new FakeBuilder([qaPass]));
 
     const result = await foreman.runBatch(1, undefined, undefined, "T002");
 
@@ -182,11 +184,8 @@ test("explicit recovery reopens a safely paused blocked ticket", async () => {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
     cmdBlock(dir, "T001", { summary: "user chose safe pause", actor: "test" });
-    const builder = new FakeBuilder([
-      'resumed\nSTEP_STATUS: done | ticket="T001" summary="finished after guidance"',
-      'checked\nSTEP_STATUS: qa_pass | summary="tests passed"',
-    ]);
-    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir);
+    const builder = new FakeBuilder(['resumed\nSTEP_STATUS: done | ticket="T001" summary="finished after guidance"']);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async () => new FakeBuilder([qaPass]));
 
     const result = await foreman.runBatch(1, undefined, undefined, "T001");
 
@@ -205,14 +204,6 @@ test("independent QA may write Foreman's own .foreman runtime files", async () =
     const builder = new FakeBuilder([
       'implemented\nSTEP_STATUS: done | summary="implemented"',
     ]);
-    const qa = new FakeBuilder(
-      ['checked\nSTEP_STATUS: qa_pass | summary="tests passed"'],
-      () => {
-        writeFileSync(join(dir, ".foreman/qa-runtime.jsonl"), "runtime output\n", "utf8");
-        mkdirSync(join(dir, ".rafi/cache"), { recursive: true });
-        writeFileSync(join(dir, ".rafi/cache/qa-runtime.json"), "{}\n", "utf8");
-      },
-    );
     const foreman = new Foreman(
       builder,
       new Log(join(dir, ".foreman/test.jsonl")),
@@ -220,7 +211,13 @@ test("independent QA may write Foreman's own .foreman runtime files", async () =
       true,
       3,
       dir,
-      qa,
+      undefined,
+      async (cwd) => new FakeBuilder([qaPass], () => {
+        mkdirSync(join(cwd, ".foreman"), { recursive: true });
+        writeFileSync(join(cwd, ".foreman/qa-runtime.jsonl"), "runtime output\n", "utf8");
+        mkdirSync(join(cwd, ".rafi/cache"), { recursive: true });
+        writeFileSync(join(cwd, ".rafi/cache/qa-runtime.json"), "{}\n", "utf8");
+      }),
     );
 
     const result = await foreman.runBatch(1);
@@ -239,10 +236,6 @@ test("independent QA source changes still require human review", async () => {
     const builder = new FakeBuilder([
       'implemented\nSTEP_STATUS: done | summary="implemented"',
     ]);
-    const qa = new FakeBuilder(
-      ['checked\nSTEP_STATUS: qa_pass | summary="tests passed"'],
-      () => writeFileSync(join(dir, "source.ts"), "after\n", "utf8"),
-    );
     const foreman = new Foreman(
       builder,
       new Log(join(dir, ".foreman/test.jsonl")),
@@ -250,13 +243,14 @@ test("independent QA source changes still require human review", async () => {
       true,
       3,
       dir,
-      qa,
+      undefined,
+      async (cwd) => new FakeBuilder([qaPass], () => writeFileSync(join(cwd, "source.ts"), "after\n", "utf8")),
     );
 
     const result = await foreman.runBatch(1);
 
     assert.equal(result.outcome, "needs-human");
-    assert.match(result.detail ?? "", /independent QA changed protected files: source\.ts/);
+    assert.match(result.detail ?? "", /QA modified files twice|source\.ts/);
   } finally {
     rmSync(dir, { recursive: true });
   }

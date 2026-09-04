@@ -4,6 +4,8 @@ import { AsyncQueue } from "../util/asyncQueue.js";
 import { pauseActivityForInput, reportBuilderEvent } from "../activity.js";
 import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, ProviderSessionUsage, TurnResult } from "./types.js";
 import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
+import type { RunObserver } from "../observability.js";
+import { randomUUID } from "node:crypto";
 
 export type TurnRecoveryChoice = "retry" | "switch" | "cancel";
 
@@ -17,6 +19,7 @@ export interface RecoveringAdapterOptions {
   choose?: (result: TurnResult, runtime: AgentRuntime, otherRuntime: AgentRuntime) => Promise<TurnRecoveryChoice>;
   onRuntimeChange?: (runtime: AgentRuntime) => void;
   onSessionRef?: (ref: ProviderSessionRefV1) => void;
+  observer?: RunObserver;
 }
 
 /** Adds interactive recovery around structured runtime turn failures. */
@@ -55,7 +58,9 @@ export class RecoveringAdapter implements BuilderAdapter {
       const otherRuntime = this.runtime === "claude" ? "codex" : "claude";
       const choice = this.opts.choose
         ? await this.opts.choose(result, this.runtime, otherRuntime)
-        : await pauseActivityForInput(() => promptTurnRecovery(result, this.opts.label, this.runtime, otherRuntime, this.opts.allowSwitch));
+        : await (this.opts.observer
+          ? this.opts.observer.span("user_wait", "runtime recovery choice", () => pauseActivityForInput(() => promptTurnRecovery(result, this.opts.label, this.runtime, otherRuntime, this.opts.allowSwitch)))
+          : pauseActivityForInput(() => promptTurnRecovery(result, this.opts.label, this.runtime, otherRuntime, this.opts.allowSwitch)));
       if (choice === "cancel") return result;
       if (choice === "switch" && !this.opts.allowSwitch) return result;
 
@@ -64,6 +69,13 @@ export class RecoveringAdapter implements BuilderAdapter {
         : { kind: "activity", provider: otherRuntime, state: `switching to ${otherRuntime}`, detail: "starting a fresh provider session" };
       this.eventQueue.push(recoveryEvent);
       reportBuilderEvent(recoveryEvent);
+      if (choice === "retry" && this.opts.observer) {
+        const retryId = randomUUID();
+        const context = this.opts.observer.context();
+        const spanId = this.opts.observer.store.startSpan(context, { spanId: retryId, kind: "retry", name: "Rafi recovery retry", attributes: { provider: this.runtime, managedBy: "rafi" } });
+        this.opts.observer.store.recordEvent(context, "retry", { eventId: retryId, spanId, severity: "warning", attributes: { provider: this.runtime, managedBy: "rafi" } });
+        this.opts.observer.store.finishSpan(spanId, { outcome: "scheduled" });
+      }
 
       const nextRuntime = choice === "switch" ? otherRuntime : this.runtime;
       const resumeSessionId = choice === "retry" ? this.adapter.sessionId() : undefined;

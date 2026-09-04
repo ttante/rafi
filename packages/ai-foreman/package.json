@@ -1,6 +1,6 @@
 {
   "name": "ai-foreman",
-  "version": "1.7.12",
+  "version": "1.7.13",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
   "license": "Apache-2.0",
   "type": "module",
@@ -53,6 +53,34 @@
       "types": "./dist/workflowDb.d.ts",
       "default": "./dist/workflowDb.js"
     },
+    "./workflow-reader.js": {
+      "types": "./dist/workflowReader.d.ts",
+      "default": "./dist/workflowReader.js"
+    },
+    "./ticket-history-reader.js": {
+      "types": "./dist/ticketHistoryReader.d.ts",
+      "default": "./dist/ticketHistoryReader.js"
+    },
+    "./observability.js": {
+      "types": "./dist/observability.d.ts",
+      "default": "./dist/observability.js"
+    },
+    "./diagnostics.js": {
+      "types": "./dist/diagnostics.d.ts",
+      "default": "./dist/diagnostics.js"
+    },
+    "./manager-packet.js": {
+      "types": "./dist/managerPacket.d.ts",
+      "default": "./dist/managerPacket.js"
+    },
+    "./project-diagnostics.js": {
+      "types": "./dist/projectDiagnostics.d.ts",
+      "default": "./dist/projectDiagnostics.js"
+    },
+    "./cli/manager.js": {
+      "types": "./dist/cli/manager.d.ts",
+      "default": "./dist/cli/manager.js"
+    },
     "./continuity.js": {
       "types": "./dist/continuity.d.ts",
       "default": "./dist/continuity.js"
@@ -80,6 +108,26 @@
     "./operation-recovery.js": {
       "types": "./dist/operationRecovery.d.ts",
       "default": "./dist/operationRecovery.js"
+    },
+    "./recovery-policy.js": {
+      "types": "./dist/recoveryPolicy.d.ts",
+      "default": "./dist/recoveryPolicy.js"
+    },
+    "./qa-recovery.js": {
+      "types": "./dist/qaRecovery.d.ts",
+      "default": "./dist/qaRecovery.js"
+    },
+    "./supervisor.js": {
+      "types": "./dist/supervisor.d.ts",
+      "default": "./dist/supervisor.js"
+    },
+    "./plan-changes.js": {
+      "types": "./dist/planChanges.d.ts",
+      "default": "./dist/planChanges.js"
+    },
+    "./cli/recovery.js": {
+      "types": "./dist/cli/recovery.d.ts",
+      "default": "./dist/cli/recovery.js"
     },
     "./ticket-planning.js": {
       "types": "./dist/ticketPlanning.d.ts",
@@ -158,8 +206,8 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.148"
   },
   "dependencies": {
-    "special-agents": "0.8.7",
-    "rafi-spec": "0.8.8",
+    "special-agents": "0.8.8",
+    "rafi-spec": "0.8.9",
     "@clack/prompts": "^1.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",

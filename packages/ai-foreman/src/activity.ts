@@ -242,7 +242,9 @@ export async function withActivityPhase<T>(label: string, operation: () => Promi
   finally { end?.(); }
 }
 
-export async function pauseActivityForInput<T>(operation: () => Promise<T>): Promise<T> {
+export interface ActivityInputPauseMetadata { label?: string; context?: Record<string, unknown> }
+
+export async function pauseActivityForInput<T>(operation: () => Promise<T>, _metadata: ActivityInputPauseMetadata = {}): Promise<T> {
   const resume = currentActivity()?.pause();
   try { return await operation(); }
   finally { resume?.(); }

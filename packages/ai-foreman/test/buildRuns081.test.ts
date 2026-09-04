@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildRecoveryPreview, completeBuildRun, createBuildRun, persistBuildSession, readBuildRuns, recordBuildReceipt, recoverableBuildRuns, releaseBuildLease } from "../src/buildRuns.js";
+import Database from "better-sqlite3";
+import { BUILD_RUN_DIRECTORY, buildRecoveryPreview, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, readBuildRuns, recordBuildReceipt, recoverableBuildRuns, releaseBuildLease } from "../src/buildRuns.js";
 import { cmdInit } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
 
@@ -29,6 +30,29 @@ test("released build leases become recoverable without deleting partial state", 
     run = releaseBuildLease(dir, run, "recoverable");
     assert.equal(run.lease, undefined);
     assert.equal(readBuildRuns(dir)[0]?.checkpoint, "created");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("pure heartbeats update only the authoritative lease row", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-build-heartbeat-"));
+  try {
+    const created = createBuildRun({ runId: "heartbeat-run", tickets: ["T001"], repositoryRoot: dir, now: new Date("2025-01-01T00:00:00.000Z") });
+    const snapshot = join(dir, BUILD_RUN_DIRECTORY, `${created.runId}.json`);
+    const beforeMtime = statSync(snapshot).mtimeMs;
+    const db = new Database(join(dir, ".rafi", "recovery.sqlite3"), { readonly: true });
+    const count = (table: string): number => Number((db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count);
+    const before = { events: count("workflow_events"), sessions: count("provider_sessions"), imports: count("legacy_imports") };
+    db.close();
+
+    const next = heartbeatBuildRun(dir, created, new Date("2025-01-01T00:00:10.000Z"));
+    assert.equal(next.lease?.heartbeatAt, "2025-01-01T00:00:10.000Z");
+    assert.equal(statSync(snapshot).mtimeMs, beforeMtime);
+    const afterDb = new Database(join(dir, ".rafi", "recovery.sqlite3"), { readonly: true });
+    const afterCount = (table: string): number => Number((afterDb.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count);
+    assert.deepEqual({ events: afterCount("workflow_events"), sessions: afterCount("provider_sessions"), imports: afterCount("legacy_imports") }, before);
+    assert.equal((afterDb.prepare("SELECT heartbeat_at FROM project_lease WHERE singleton=1").get() as { heartbeat_at: string }).heartbeat_at, "2025-01-01T00:00:10.000Z");
+    assert.equal((afterDb.prepare("SELECT legacy FROM workflow_runs WHERE run_id=?").get(created.runId) as { legacy: number }).legacy, 0);
+    afterDb.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

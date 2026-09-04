@@ -102,3 +102,12 @@ qa:
   #
   # Default: true.
   enabled: true
+
+observability:
+  enabled: true
+  sample_interval_seconds: 60
+  detail_retention_days: 30
+  log_retention_days: 30
+  detail_soft_limit_mb: 192
+  detail_hard_limit_mb: 256
+  log_limit_mb: 128

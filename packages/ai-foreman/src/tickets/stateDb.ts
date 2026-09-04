@@ -414,6 +414,12 @@ export class StateDb {
       .all(ticketId) as TicketEvent[];
   }
 
+  getAllTicketEvents(): TicketEvent[] {
+    return this.db
+      .prepare("SELECT * FROM ticket_events WHERE ticket_id IS NOT NULL ORDER BY timestamp, id")
+      .all() as TicketEvent[];
+  }
+
   // ── validation_snapshots ──────────────────────────────────────────────────
 
   insertValidationSnapshot(snap: Omit<ValidationSnapshot, "id">): void {

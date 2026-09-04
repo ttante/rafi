@@ -29,6 +29,7 @@ test("--defaults produces a config that validates against ProjectConfig schema",
     "ticket-maker": { session_strategy: "compact", display_session_cost: false },
     planner: { session_strategy: "fresh", display_session_cost: false },
     uninstaller: { session_strategy: "fresh", display_session_cost: false },
+    manager: { session_strategy: "fresh", display_session_cost: false },
   });
 });
 

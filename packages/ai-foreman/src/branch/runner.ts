@@ -1,7 +1,8 @@
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
+import type { RunObserver } from "../observability.js";
 import type { ProviderSessionRefV1, SessionStrategy } from "rafi-spec";
-import { buildDurableQaFixHandoff, compactWithRetry, runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaStreamState } from "../qaReview.js";
-import { changeManifestAsync } from "../qaSnapshot.js";
+import { buildDurableQaFixHandoff, compactWithRetry, runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaReportRecoveryHandler, type QaSessionBoundaryRecovery, type QaSessionHandle, type QaStreamState } from "../qaReview.js";
+import { changeManifestAsync, deterministicChangeSummaryAsync } from "../qaSnapshot.js";
 import { Foreman, MARKER_SPEC, parseStepStatus } from "../foreman.js";
 import type { Log } from "../log.js";
 import { fireNotification } from "../notify.js";
@@ -29,6 +30,7 @@ import { WorkflowDb } from "../workflowDb.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
 import { SessionUnavailableError } from "../adapters/sessionFailure.js";
 import { SessionUnavailableContinuityError } from "../continuity.js";
+import type { QaRecoveryPacket } from "../qaRecovery.js";
 
 export interface DeliveryUnitSession { unitId: string; branch: string; worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1; ticket: string; }
 export type BaseWorktreePolicy = "enforce" | "warn" | "skip";
@@ -55,6 +57,7 @@ export interface BranchRunnerOptions {
   notificationsEnabled: boolean;
   terminalBellEnabled?: boolean;
   qaEnabled: boolean;
+  qaMaxFixAttempts?: number;
   createPr: boolean;
   completionMode?: CompletionMode;
   reviewProvider?: ReviewProvider;
@@ -74,7 +77,7 @@ export interface BranchRunnerOptions {
   recordQaSession?: (session: string | ProviderSessionRefV1, ticketId: string, worktreePath: string) => void;
   /** Notify the host and stop the branch plan without discarding its worktree. */
   onSessionUnavailable?: (error: SessionUnavailableError | SessionUnavailableContinuityError) => void;
-  createQa?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>;
+  createQa?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter | QaSessionHandle>;
   builderSessionStrategy?: SessionStrategy;
   qaSessionStrategy?: SessionStrategy;
   observeBuilder?: (builder: BuilderAdapter) => Promise<void>;
@@ -83,10 +86,16 @@ export interface BranchRunnerOptions {
   qaNonconvergence?: (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision>;
   beforeBuilderTurn?: (adapter: BuilderAdapter, frozenAction: string, cwd: string) => Promise<BuilderAdapter>;
   builderSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>;
-  qaSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string) => Promise<BuilderAdapter>;
+  qaSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string, recovery?: QaSessionBoundaryRecovery) => Promise<BuilderAdapter>;
+  observer?: RunObserver;
+  qaRuntimeContext?: unknown;
+  qaContinuityManaged?: boolean;
+  qaReportRecovery?: QaReportRecoveryHandler;
+  qaResumedRecovery?: QaRecoveryPacket;
 }
 
 export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRunSummary[]> {
+  let qaResumedRecovery = opts.qaResumedRecovery;
   const baseWorktreePolicy = opts.baseWorktreePolicy ?? "enforce";
   if (baseWorktreePolicy !== "skip") {
     try {
@@ -192,7 +201,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
     const resumeSession = opts.resumeSessions?.get(node.ticket.id);
     const worktreePath = resumeSession?.worktreePath
       ?? (sharedUnit ? findWorktreeForBranch(opts.projectDir, node.branch) : undefined)
-      ?? createTicketWorktree(opts.projectDir, opts.runId, node.branch, node.baseBranch);
+      ?? await observeNode(opts, node, "git", "creating ticket worktree", () => createTicketWorktree(opts.projectDir, opts.runId, node.branch, node.baseBranch));
     node.worktreePath = worktreePath;
     let builder: BuilderAdapter | undefined;
     let viewer: Promise<void> | undefined;
@@ -257,7 +266,10 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         async (adapter) => opts.observeBuilderNativeCompactions?.(adapter, worktreePath),
       );
 
-      const { result, status } = await foreman.runInstruction(ticketInstruction);
+      const turn = () => foreman.runInstruction(ticketInstruction);
+      const { result, status } = opts.observer
+        ? await opts.observer.withContext({ role: "builder", stream: "builder", ticketId: node.ticket.id, deliveryUnitId: node.deliveryUnitId }, turn)
+        : await turn();
       builder = foreman.builderAdapter();
       workflowCheckpoint(opts.projectDir, opts.runId, "builder-after", node.ticket.id, { status: status.kind, sessionId: builder.sessionId(), worktree: worktreePath });
       const sessionId = builder.sessionId();
@@ -268,7 +280,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         workflowCheckpoint(opts.projectDir, opts.runId, "builder-session-scoped", node.ticket.id, { sessionId, sessionRef, worktree: worktreePath, branch: node.branch });
       }
       if (sessionId) {
-        opts.log.write("branch-session", {
+        const resumeSession = {
           ticket: node.ticket.id,
           branch: node.branch,
           base: node.baseBranch,
@@ -287,7 +299,11 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           keepWorktrees: opts.keepWorktrees,
           deliveryUnitId: node.deliveryUnitId,
           deliveryUnitFinal: node.deliveryUnitFinal,
-        });
+          logPath: "structured-recovery",
+          ts: new Date().toISOString(),
+        };
+        opts.log.write("branch-session", resumeSession);
+        const resumeDb = new WorkflowDb(opts.projectDir); try { resumeDb.recordBranchResumeSession(opts.runId, resumeSession); } finally { resumeDb.close(); }
         if (node.deliveryUnitId) {
           const path = deliverySessionPath(opts.projectDir, node.deliveryUnitId);
           mkdirSync(join(opts.projectDir, ".foreman", "delivery-sessions"), { recursive: true });
@@ -321,13 +337,19 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         if (!opts.createQa) throw new Error("independent disposable QA factory is required when QA is enabled");
         workflowCheckpoint(opts.projectDir, opts.runId, "qa-before", node.ticket.id, { worktree: worktreePath });
         const qa = await runIsolatedQa({
-          ticket: node.ticket, builderWorktree: worktreePath, builderSummary: status.summary ?? result.text,
-          qaStrategy: opts.qaSessionStrategy ?? "compact", state: qaStream, createQa: opts.createQa, maxCycles: 3,
+          ticket: node.ticket, builderWorktree: worktreePath, builderSummary: result.text,
+          qaStrategy: opts.qaSessionStrategy ?? "compact", state: qaStream, createQa: opts.createQa, maxCycles: opts.qaMaxFixAttempts ?? 3,
+          recovery: { projectDir: opts.projectDir, runId: opts.runId },
+          observer: opts.observer,
+          qaRuntimeContext: opts.qaRuntimeContext,
+          continuityManaged: opts.qaContinuityManaged,
+          onReportRecovery: opts.qaReportRecovery,
+          resumedRecovery: qaResumedRecovery,
           sessionBoundary: opts.qaSessionBoundary,
           observeNativeCompactions: opts.observeQaNativeCompactions,
-          resolveBlocked: (adapter, reason) => foreman.resolveBlocker(adapter, reason),
+          resolveBlocked: (adapter, reason) => foreman.resolveBlocker(adapter, reason, "qa"),
           evidence: (entry) => opts.log.write("qa-evidence", { ticket: node.ticket.id, ...entry }),
-          fix: async (issues) => {
+          fix: async (request) => {
             if (!builder) return { ok: false, detail: "Builder session unavailable" };
             builderWorkSessions += 1;
             const digest = (await withActivityPhase("recording QA fix changes", () => changeManifestAsync(
@@ -335,7 +357,8 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
               (state, detail) => currentActivity()?.update(state, detail),
               "recording QA fix changes",
             ))).diffDigest;
-            const fixInstruction = buildDurableQaFixHandoff(node.ticket, issues, worktreePath, result.text, digest);
+            const changeSummary = await deterministicChangeSummaryAsync(worktreePath);
+            const fixInstruction = buildDurableQaFixHandoff(node.ticket, request, worktreePath, request.latestBuilderResult, digest, changeSummary);
             const strategy = opts.builderSessionStrategy ?? "compact";
             if (opts.builderSessionBoundary) {
               builder = await opts.builderSessionBoundary(builder, fixInstruction, strategy, worktreePath);
@@ -360,10 +383,11 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
               opts.recordBuilderSession?.(fixedSessionRef ?? fixedSessionId, node.ticket.id, worktreePath);
               workflowCheckpoint(opts.projectDir, opts.runId, "builder-session-scoped", node.ticket.id, { sessionId: fixedSessionId, sessionRef: fixedSessionRef, worktree: worktreePath, branch: node.branch });
             }
-            return { ok: !fixed.isError && fixedStatus.kind === "done", detail: fixedStatus.error ?? fixed.text.slice(0, 500) };
+            return { ok: !fixed.isError && fixedStatus.kind === "done", detail: fixedStatus.error, response: fixed.text, summary: fixedStatus.summary ?? fixed.text };
           },
           onNonconvergence: opts.qaNonconvergence,
         });
+        qaResumedRecovery = undefined;
         if (qaStream.sessionId) opts.recordQaSession?.(qaStream.sessionRef ?? qaStream.sessionId, node.ticket.id, worktreePath);
         workflowCheckpoint(opts.projectDir, opts.runId, "qa-after", node.ticket.id, { outcome: qa.outcome, detail: qa.detail });
         if (qa.outcome !== "passed" && qa.outcome !== "waived") {
@@ -397,7 +421,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         workflowCheckpoint(opts.projectDir, opts.runId, "commit-before", node.ticket.id, { branch: node.branch });
         const operation = `${opts.runId}:commit:${node.ticket.id}`;
         planJournal(opts.projectDir, opts.runId, operation, "commit", { ticket: node.ticket.id, branch: node.branch, worktreePath });
-        try { commit = commitAll(worktreePath, `${node.ticket.id}: ${node.ticket.title}`); confirmJournal(opts.projectDir, operation, commit, { sha: commit }); workflowCheckpoint(opts.projectDir, opts.runId, "commit-after", node.ticket.id, { sha: commit }); }
+        try { commit = await observeNode(opts, node, "git", "committing ticket changes", () => commitAll(worktreePath, `${node.ticket.id}: ${node.ticket.title}`)); confirmJournal(opts.projectDir, operation, commit, { sha: commit }); workflowCheckpoint(opts.projectDir, opts.runId, "commit-after", node.ticket.id, { sha: commit }); }
         catch (error) { failJournal(opts.projectDir, operation, error, false); throw error; }
       }
       if (!commit && (createsReviewForNode || (completionMode === "direct-merge" && completesSharedUnit))) {
@@ -411,12 +435,12 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         workflowCheckpoint(opts.projectDir, opts.runId, "push-before", node.ticket.id, { branch: node.branch, sha: commit });
         const pushOperation = `${opts.runId}:push:${node.branch}`;
         planJournal(opts.projectDir, opts.runId, pushOperation, "push", { branch: node.branch, sha: commit, remote: "origin" });
-        const push = await withActivityPhase(`pushing ${node.branch}`, async () => {
+        const push = await observeNode(opts, node, "git", `pushing ${node.branch}`, () => withActivityPhase(`pushing ${node.branch}`, async () => {
           currentActivity()?.update(`pushing ${node.branch}`, `publishing ${node.ticket.id}`);
           return reviewProvider === "gitlab"
             ? pushBranchForMr(worktreePath, node.branch)
             : pushBranchForPr(worktreePath, node.branch);
-        });
+        }));
         if (push.ok) {
           confirmJournal(opts.projectDir, pushOperation, node.branch, { sha: commit });
           opts.log.write("branch-push", { ticket: node.ticket.id, branch: node.branch, status: "pushed" });
@@ -453,7 +477,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         workflowCheckpoint(opts.projectDir, opts.runId, "review-creation-before", node.ticket.id, { provider: reviewProvider, head: node.branch, base: node.baseBranch });
         const reviewOperation = `${opts.runId}:${reviewProvider === "gitlab" ? "mr" : "pr"}:${node.branch}:${node.baseBranch}`;
         planJournal(opts.projectDir, opts.runId, reviewOperation, reviewProvider === "gitlab" ? "mr-create" : "pr-create", { head: node.branch, base: node.baseBranch, sha: commit });
-        const pr = await withActivityPhase(`creating ${reviewProvider === "gitlab" ? "merge request" : "pull request"}`, async () => {
+        const pr = await observeNode(opts, node, "external_check", `creating ${reviewProvider === "gitlab" ? "merge request" : "pull request"}`, () => withActivityPhase(`creating ${reviewProvider === "gitlab" ? "merge request" : "pull request"}`, async () => {
           currentActivity()?.update(`creating ${reviewProvider === "gitlab" ? "merge request" : "pull request"}`, node.ticket.id);
           return reviewProvider === "gitlab"
             ? createOrReuseMr(opts.projectDir, {
@@ -473,7 +497,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
               qaEvidence: qaSummary,
               commit,
             });
-        });
+        }));
         summary.pr = pr;
         if (pr.status === "created" || pr.status === "existing") { confirmJournal(opts.projectDir, reviewOperation, pr.url, { head: node.branch, base: node.baseBranch, url: pr.url }); workflowCheckpoint(opts.projectDir, opts.runId, "review-creation-after", node.ticket.id, { provider: reviewProvider, head: node.branch, base: node.baseBranch, url: pr.url }); }
         else if (pr.status === "failed") failJournal(opts.projectDir, reviewOperation, pr.message ?? pr.error ?? "review creation failed", pr.code === "network_or_timeout");
@@ -493,10 +517,10 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           continue;
         }
         if (completionMode === "auto-merge" && reviewProvider === "github") {
-          const autoMerge = await withActivityPhase("enabling GitHub auto-merge", async () => {
+          const autoMerge = await observeNode(opts, node, "external_check", "enabling GitHub auto-merge", () => withActivityPhase("enabling GitHub auto-merge", async () => {
             currentActivity()?.update("enabling GitHub auto-merge", node.branch);
             return enableGitHubAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true, opts.mergeMethod ?? "squash");
-          });
+          }));
           summary.pr = autoMerge.status === "failed" ? autoMerge : { ...pr, status: "auto_merge_enabled", url: autoMerge.url ?? pr.url };
           if (autoMerge.status === "failed") {
             opts.log.write("pr-auto-merge-failed", failureLogFields(node, autoMerge));
@@ -513,10 +537,10 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           }
           opts.log.write("pr-auto-merge-enabled", { ticket: node.ticket.id, branch: node.branch, url: summary.pr.url });
         } else if (completionMode === "auto-merge" && reviewProvider === "gitlab") {
-          const autoMerge = await withActivityPhase("enabling GitLab auto-merge", async () => {
+          const autoMerge = await observeNode(opts, node, "external_check", "enabling GitLab auto-merge", () => withActivityPhase("enabling GitLab auto-merge", async () => {
             currentActivity()?.update("enabling GitLab auto-merge", node.branch);
             return enableGitLabAutoMerge(opts.projectDir, node.branch, opts.cleanupBranches ?? true, opts.mergeMethod ?? "squash");
-          });
+          }));
           summary.pr = autoMerge.status === "failed" ? autoMerge : { ...pr, status: "auto_merge_enabled", url: autoMerge.url ?? pr.url };
           if (autoMerge.status === "failed") {
             opts.log.write("mr-auto-merge-failed", failureLogFields(node, autoMerge));
@@ -538,13 +562,13 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         summary.pr = { status: "skipped", error: commit ? undefined : "no_changes" };
       } else if (commit && completionMode === "direct-merge" && completesSharedUnit) {
         if (!opts.keepWorktrees) removeTicketWorktree(opts.projectDir, worktreePath);
-        const mergeCommit = mergeBranchToLocalBase(
+        const mergeCommit = await observeNode(opts, node, "git", "merging ticket branch to local base", () => mergeBranchToLocalBase(
           opts.projectDir,
           node.branch,
           node.baseBranch,
           `${node.ticket.id}: ${node.ticket.title}`,
           opts.mergeMethod ?? "squash",
-        );
+        ));
         summary.pr = { status: "merged", url: mergeCommit };
         opts.log.write("branch-direct-merge", {
           ticket: node.ticket.id,
@@ -577,10 +601,11 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         status: "done",
         detail: summary.detail,
       });
+      const resumeDb = new WorkflowDb(opts.projectDir); try { resumeDb.completeBranchResumeSession(opts.runId, node.ticket.id); } finally { resumeDb.close(); }
 
       if (node.deliveryUnitId && node.deliveryUnitFinal) rmSync(deliverySessionPath(opts.projectDir, node.deliveryUnitId), { force: true });
 
-      if (!opts.keepWorktrees && completionMode !== "direct-merge" && completesSharedUnit) removeTicketWorktree(opts.projectDir, worktreePath);
+      if (!opts.keepWorktrees && completionMode !== "direct-merge" && completesSharedUnit) await observeNode(opts, node, "cleanup", "removing ticket worktree", () => removeTicketWorktree(opts.projectDir, worktreePath));
     } catch (err) {
       if (err instanceof SessionUnavailableError || err instanceof SessionUnavailableContinuityError) {
         const message = err.message;
@@ -663,14 +688,18 @@ async function waitForAutoMergeDependenciesInternal(
     ? null
     : opts.autoMergeTimeoutMinutes * 60_000;
   const deadline = opts.autoMergeWait && timeoutMs !== null ? Date.now() + timeoutMs : null;
+  let waitSpanId: string | undefined;
+  let waitOutcome = "completed";
+  let waitLogged = false;
 
-  while (true) {
+  try { while (true) {
     const pending: string[] = [];
     for (const dep of dependencyNodes) {
       const status = provider === "gitlab"
         ? checkGitLabMrMerged(opts.projectDir, dep.branch)
         : checkGitHubPrMerged(opts.projectDir, dep.branch);
       if (!status.ok) {
+        waitOutcome = "failed";
         return {
           ok: false,
           code: status.code,
@@ -693,7 +722,20 @@ async function waitForAutoMergeDependenciesInternal(
         message: `${message}; rerun after it merges or enable auto-merge wait in ticket setup`,
       };
     }
+    if (!waitSpanId && opts.observer) {
+      waitSpanId = opts.observer.store.startSpan({ runId: opts.runId, executionId: opts.observer.executionId, role: "host", stream: "dependency", ticketId: node.ticket.id }, { kind: "dependency_wait", name: "waiting for dependency merge", attributes: { dependencies: pending } });
+      opts.observer.store.updateCurrentState({ runId: opts.runId, role: "host", stream: "dependency", executionId: opts.observer.executionId, ticketId: node.ticket.id, phase: "waiting for dependency merge", activeSpanId: waitSpanId, activeSpanKind: "dependency_wait", lastSemanticProgressAt: new Date().toISOString() });
+    }
+    if (!waitLogged) {
+      opts.log.write("branch-auto-merge-wait", {
+        ticket: node.ticket.id,
+        pending,
+        timeoutMinutes: opts.autoMergeTimeoutMinutes ?? null,
+      });
+      waitLogged = true;
+    }
     if (deadline !== null && Date.now() >= deadline) {
+      waitOutcome = "timed_out";
       return {
         ok: false,
         code: "dependency_unavailable",
@@ -701,12 +743,10 @@ async function waitForAutoMergeDependenciesInternal(
       };
     }
 
-    opts.log.write("branch-auto-merge-wait", {
-      ticket: node.ticket.id,
-      pending,
-      timeoutMinutes: opts.autoMergeTimeoutMinutes ?? null,
-    });
     await sleep(autoMergePollMs());
+  } } finally {
+    if (waitSpanId && opts.observer) opts.observer.store.finishSpan(waitSpanId, { outcome: waitOutcome });
+    if (waitLogged) opts.log.write("branch-auto-merge-wait", { ticket: node.ticket.id, outcome: waitOutcome, terminal: true });
   }
 }
 
@@ -719,6 +759,12 @@ function autoMergePollMs(): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function observeNode<T>(opts: BranchRunnerOptions, node: BranchPlanNode, kind: string, name: string, operation: () => Promise<T> | T): Promise<T> {
+  if (!opts.observer) return Promise.resolve().then(operation);
+  return opts.observer.withContext({ role: "host", stream: kind, ticketId: node.ticket.id, deliveryUnitId: node.deliveryUnitId },
+    () => opts.observer!.span(kind, name, operation));
 }
 
 function canonical(path: string): string {

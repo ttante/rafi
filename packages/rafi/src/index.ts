@@ -43,6 +43,8 @@ import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { runStatus } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
 import { buildHandoffsCommand } from "ai-foreman/cli/handoffs.js";
+import { buildManagerCommand } from "ai-foreman/cli/manager.js";
+import { buildAttachCommand, buildDecideCommand, buildStopCommand } from "ai-foreman/cli/recovery.js";
 import { withActivityContext } from "ai-foreman/activity.js";
 import { buildPlanCommand, runPlanWorkflow } from "./plan.js";
 import { buildTicketPlanCommand } from "./ticketPlan.js";
@@ -988,10 +990,23 @@ const ticketsCommand = buildTicketsCommand({
 ticketsCommand.addCommand(buildTicketPlanCommand());
 program.addCommand(ticketsCommand);
 program.addCommand(buildStartCommand());
+program.addCommand(buildAttachCommand());
+program.addCommand(buildDecideCommand());
+program.addCommand(buildStopCommand());
 program.addCommand(buildBuildResumeCommand({ executeStart: (args) => runSelfCommandStatus(args) }));
 program.addCommand(buildBuildStartOverCommand());
 program.addCommand(buildHandoffsCommand());
 program.addCommand(buildAgentsCommand());
+program.addCommand(buildManagerCommand({ resolveProject: (project) => {
+  const discovered = project ? resolveExplicitRafiProject(project) : findNearestRafiProject(process.cwd());
+  if (!discovered) {
+    const where = project ? resolve(project) : process.cwd();
+    throw new Error(project
+      ? `no ${RAFI_CONFIG_FILE} found in explicit project directory ${where}`
+      : `no Rafi project found from ${where}; expected ${RAFI_CONFIG_FILE} in this directory or an ancestor`);
+  }
+  return discovered.root;
+} }));
 program.addCommand(buildUninstallCommand({ interpret: interpretUninstallInstruction }));
 program.addCommand(buildUninstallRestoreCommand());
 program.addCommand(buildUninstallCleanupCommand());

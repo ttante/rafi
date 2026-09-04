@@ -60,7 +60,7 @@ export interface SkillManifest {
 // ───────────────────────────── Agents (roles) ─────────────────────────────
 
 /** The role an agent fills, mapped to an ai-foreman turn-type or command. */
-export type AgentRole = "builder" | "qa" | "planner" | "ticket-maker" | "uninstaller";
+export type AgentRole = "builder" | "qa" | "planner" | "ticket-maker" | "uninstaller" | "manager";
 
 /** Reasoning effort levels accepted by the builders. */
 export type EffortLevel = "low" | "medium" | "high" | "xhigh";
@@ -119,6 +119,146 @@ export interface ProjectFlags {
 export interface HarnessConfig {
   targets: HarnessTarget[];
   qa: boolean;
+}
+
+// ───────────────────────────── Autonomy and recovery ─────────────────────────────
+
+export type AutonomyProfile = "supervised" | "balanced" | "unattended";
+export type RecoveryRuleId = "qa.nonconvergence" | "runtime.transient" | "plan.material_change";
+export type RecoveryRuleAction = "retry_builder" | "retry" | "human_required";
+
+export interface AutonomyRuleOverride {
+  action: RecoveryRuleAction;
+  /** Total automatic attempts for this operation/cause scope. */
+  max_attempts?: number;
+}
+
+export interface AutonomyConfig {
+  profile: AutonomyProfile;
+  continue_independent_tickets: boolean;
+  rules?: Partial<Record<RecoveryRuleId, AutonomyRuleOverride>>;
+  supervisor: {
+    enabled: boolean;
+    max_worker_restarts_per_checkpoint: number;
+    max_worker_restarts_per_run: number;
+  };
+}
+
+export interface ResolvedAutonomyPolicy {
+  version: 1;
+  profile: AutonomyProfile;
+  continueIndependentTickets: boolean;
+  limits: {
+    builderQaFixesPerTicket: number;
+    transientPreDispatchRetries: number;
+    protocolCorrections: number;
+    reconciledOperationRetries: number;
+    workerRestartsPerCheckpoint: number;
+    workerRestartsPerRun: number;
+  };
+  providerFallback: "never" | "safe-boundaries";
+  planChanges: "review-all" | "review-material" | "auto-bounded";
+  rules: Record<RecoveryRuleId, AutonomyRuleOverride>;
+  supervisorEnabled: boolean;
+  resolvedAt: string;
+  digest: string;
+}
+
+export type InterruptionDomain =
+  | "gate/plan" | "qa" | "agent-protocol" | "runtime" | "continuity"
+  | "permissions" | "workspace-integrity" | "tracker/dependency" | "delivery"
+  | "process" | "unknown";
+export type DispatchState = "not_dispatched" | "dispatched" | "idempotent" | "unknown";
+
+export interface RecoveryOperationIdentity {
+  idempotencyKey: string;
+  kind: string;
+  runId: string;
+  ticket?: string;
+  phase: string;
+}
+
+export interface InterruptionEvidence {
+  kind: string;
+  summary: string;
+  observedAt: string;
+  source?: string;
+  digest?: string;
+}
+
+export interface StructuredInterruption {
+  id: string;
+  runId: string;
+  code: string;
+  domain: InterruptionDomain;
+  phase: string;
+  cause: string;
+  evidence: InterruptionEvidence[];
+  dispatchState: DispatchState;
+  operation?: RecoveryOperationIdentity;
+  ticket?: string;
+  occurredAt: string;
+}
+
+export type RecoveryDispositionKind =
+  | "auto_retry" | "reconcile_then_retry" | "configured_decision" | "human_required" | "terminal";
+
+export interface RecoveryDisposition {
+  kind: RecoveryDispositionKind;
+  action: string;
+  reason: string;
+  maxAttempts: number;
+  attemptsUsed: number;
+  rule?: RecoveryRuleId;
+}
+
+export type RecoveryAttemptOutcome = "intended" | "started" | "succeeded" | "failed" | "cancelled";
+export interface RecoveryAttemptReceipt {
+  attemptId: string;
+  runId: string;
+  ticket?: string;
+  phase: string;
+  cause: string;
+  operationKey: string;
+  attempt: number;
+  disposition: RecoveryDispositionKind;
+  action: string;
+  outcome: RecoveryAttemptOutcome;
+  intendedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  detail?: string;
+}
+
+export interface HumanDecisionChoice {
+  id: string;
+  label: string;
+  requiresConfirmation?: boolean;
+}
+
+export interface PendingHumanDecision {
+  decisionId: string;
+  runId: string;
+  interruptionId: string;
+  prompt: string;
+  choices: HumanDecisionChoice[];
+  status: "pending" | "answered" | "cancelled";
+  createdAt: string;
+  answeredAt?: string;
+  selectedChoiceId?: string;
+  evidence?: InterruptionEvidence[];
+}
+
+export interface SupervisorState {
+  status: "disabled" | "starting" | "running" | "waiting_for_human" | "stopping" | "stopped" | "failed";
+  pid?: number;
+  generation: number;
+  heartbeatAt?: string;
+  workerPid?: number;
+  workerGeneration: number;
+  checkpointRestarts: number;
+  runRestarts: number;
+  stopRequestedAt?: string;
 }
 
 /** How Rafi should handle existing root instruction files. */
@@ -265,7 +405,7 @@ export interface ProjectLifecycleState {
 export type RuntimeProbePhase =
   | "sdk-load" | "authentication" | "compiler-update" | "capability-discovery"
   | "planning" | "ticket-planning" | "ticket-population" | "builder" | "qa"
-  | "recovery" | "uninstaller" | "readiness";
+  | "recovery" | "uninstaller" | "manager" | "readiness";
 export type RuntimeProbeCategory =
   | "ready" | "missing-executable" | "sdk-load" | "authentication" | "authorization"
   | "configuration" | "rate-limit" | "network" | "timeout" | "malformed-protocol"
@@ -459,7 +599,8 @@ export interface BuildGitSnapshotV2 {
 }
 
 export interface BuildRunRecordV2 extends Omit<BuildRunRecordV1, "version" | "repository" | "legacy"> {
-  version: 2;
+  /** Version 3 is structurally compatible and adds frozen recovery state. */
+  version: 2 | 3;
   repository: BuildRunRecordV1["repository"] & { git: BuildGitSnapshotV2; baselineComplete: boolean };
   progress: {
     completedTickets: string[];
@@ -487,7 +628,17 @@ export interface BuildRunRecordV2 extends Omit<BuildRunRecordV1, "version" | "re
   /** Canonical provider conversations observed for this run. Raw role sessionIds remain compatibility mirrors only. */
   sessionBindings?: ProviderSessionRefV1[];
 }
-export type BuildRunRecord = BuildRunRecordV1 | BuildRunRecordV2;
+export interface BuildRunRecordV3 extends BuildRunRecordV2 {
+  version: 3;
+  frozenPolicy: ResolvedAutonomyPolicy;
+  phase: string;
+  qaEnabled: boolean;
+  recoveryAttempts: RecoveryAttemptReceipt[];
+  supervisor: SupervisorState;
+  pendingDecisions: PendingHumanDecision[];
+  deferredTickets: string[];
+}
+export type BuildRunRecord = BuildRunRecordV1 | BuildRunRecordV2 | BuildRunRecordV3;
 
 export type InstallOwnershipMode = "created" | "managed-block" | "modified" | "generated" | "runtime-produced";
 export interface InstallManifestEntryV1 {
@@ -553,6 +704,7 @@ export interface PlanningAssessment {
   verification: PlanningAssessmentArea;
 }
 
+/** @deprecated Use the structured QA handoff/report V1 protocol. */
 export interface BuilderQaHandoff {
   ticket: string;
   requirements: string[];
@@ -562,9 +714,39 @@ export interface BuilderQaHandoff {
   tests: string[];
   evidence: string[];
 }
+/** @deprecated Use {@link QaFailureReportV1} for rejected QA reviews. */
 export interface QaResult {
   outcome: "approve" | "reject" | "needs_input";
   findings: Array<{ severity: "blocking" | "warning" | "note"; message: string; evidence?: string }>;
+}
+
+/** One validation command or review check performed by QA. */
+export interface QaCheckResultV1 {
+  check: string;
+  command?: string;
+  outcome: "passed" | "failed" | "not_run";
+  evidence: string;
+}
+
+/** One blocking, independently addressable QA finding. */
+export interface QaFailureFindingV1 {
+  id: string;
+  requirement: string;
+  locations: string[];
+  problem: string;
+  evidence: string;
+  expected: string;
+  fix_direction: string;
+  verification: string[];
+}
+
+/** Complete machine-readable result for a failed QA review. */
+export interface QaFailureReportV1 {
+  version: 1;
+  summary: string;
+  checks_run: QaCheckResultV1[];
+  findings: QaFailureFindingV1[];
+  observations: string[];
 }
 
 export interface UninstallProposal {
@@ -675,8 +857,321 @@ export interface ProjectConfig {
   sources?: SourceRegistryConfig;
   tickets?: TicketsSetupConfig;
   agent_defaults?: AgentDefaultsV1;
+  autonomy?: AutonomyConfig;
   agents: Record<string, RuntimeArtifactConfig>;
   skills: Record<string, RuntimeArtifactConfig>;
+}
+
+// ───────────────────────────── Observability ─────────────────────────────
+
+export type DiagnosticCapabilityState =
+  | "available" | "partial" | "unavailable" | "timed_out" | "not_applicable";
+export type DiagnosticConfidence = "observed" | "derived" | "limited";
+
+export interface ObservabilityCapabilitiesV1 {
+  version: 1;
+  rafiVersion?: string;
+  sources: Record<string, DiagnosticSourceResultV1>;
+}
+
+export interface DiagnosticSourceResultV1 {
+  source: string;
+  state: DiagnosticCapabilityState;
+  observedAt: string;
+  detail?: string;
+}
+
+export interface RunSpanV1 {
+  version: 1;
+  spanId: string;
+  runId: string;
+  executionId?: string;
+  parentSpanId?: string;
+  providerTurnId?: string;
+  ticketId?: string;
+  deliveryUnitId?: string;
+  role?: ConfigurableAgentRole | "host";
+  stream?: string;
+  providerSessionId?: string;
+  kind: string;
+  name: string;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+  outcome?: string;
+  completionKnown: boolean;
+  attributes?: Record<string, unknown>;
+}
+
+export interface RunCurrentStateV1 {
+  version: 1;
+  runId: string;
+  role: ConfigurableAgentRole | "host";
+  stream: string;
+  executionId?: string;
+  ticketId?: string;
+  deliveryUnitId?: string;
+  providerSessionId?: string;
+  phase?: string;
+  activeSpanId?: string;
+  activeSpanKind?: string;
+  lastSignalAt?: string;
+  lastSemanticProgressAt?: string;
+  updatedAt: string;
+}
+
+export interface RunRollupV1 {
+  version: 1;
+  runId: string;
+  projectId?: string;
+  status: string;
+  branchMode?: string;
+  qaEnabled?: boolean;
+  primaryProvider?: "claude" | "codex";
+  ticketCount?: number;
+  ticketCountBucket?: string;
+  ticketSizeBucket?: string;
+  createdAt: string;
+  completedAt?: string;
+  calendarMs: number;
+  activeExecutionMs: number;
+  explicitWaitMs: number;
+  attributedMs: number;
+  unattributedMs: number;
+  totals: Record<string, number>;
+}
+
+export interface DiagnosticEvidenceV1 {
+  evidenceId: string;
+  source: string;
+  kind: string;
+  summary: string;
+  observedAt?: string;
+  durationMs?: number;
+  spanId?: string;
+}
+
+export interface DiagnosticFindingV1 {
+  code: string;
+  title: string;
+  summary: string;
+  confidence: DiagnosticConfidence;
+  evidenceIds: string[];
+}
+
+export interface ManagerDiagnosticReportV1 {
+  version: 1;
+  observabilitySchemaVersion: 1 | 2;
+  generatedAt: string;
+  runId: string;
+  runStatus: string;
+  legacy: boolean;
+  capabilities: ObservabilityCapabilitiesV1;
+  currentState: RunCurrentStateV1[];
+  timing: {
+    calendarAgeMs: number;
+    activeExecutionMs: number;
+    pausedOfflineMs: number;
+    explicitWaitMs: number;
+    attributedMs: number;
+    unattributedMs: number;
+    byKind: Record<string, number>;
+    inclusiveByKind: Record<string, number>;
+    exclusiveByKind: Record<string, number>;
+    observedRetryMs: number;
+    reportedRetryDelayMs: number;
+    topContributors: Array<{ kind: string; durationMs: number }>;
+  };
+  counts: { qaAttempts: number; qaFailures: number; fixes: number; retries: number; waits: number };
+  comparisons?: {
+    cohort: Record<string, string | number | boolean>;
+    sampleSize: number;
+    medianMs: number;
+    p75Ms: number;
+    p90Ms: number;
+  };
+  findings: DiagnosticFindingV1[];
+  evidence: DiagnosticEvidenceV1[];
+  detail: { spans: RunSpanV1[]; omittedSpans: number };
+  digest: string;
+}
+
+export type ManagerRunDetailLevel = "detailed" | "rollup" | "legacy";
+export type ManagerRunActiveState = "verified_active" | "stale_recovery" | "recoverable" | "inactive";
+export type ManagerMetricState = "available" | "partial" | "unavailable";
+
+export interface ManagerMetricCoverageV1 {
+  eligibleRuns: number;
+  coveredRuns: number;
+  missingRuns: number;
+  state: ManagerMetricState;
+}
+
+export interface ManagerGitSummaryV1 {
+  branch?: string;
+  terminalHead?: string;
+  commitCount?: number;
+  changedPathCount?: number;
+  additions?: number;
+  deletions?: number;
+  pullRequest?: { provider: "github" | "gitlab"; id: string; state?: string; url?: string };
+  observedAt?: string;
+  historical: boolean;
+}
+
+/** Permanent, sanitized facts for one logical build run. It never contains conversation content. */
+export interface ManagerRunSummaryV1 {
+  version: 1;
+  runId: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  checkpoint?: string;
+  activeState: ManagerRunActiveState;
+  ticketIds: string[];
+  deliveryUnit?: string;
+  branchMode?: string;
+  qaEnabled?: boolean;
+  provider?: "claude" | "codex";
+  model?: string;
+  timing: {
+    calendarMs?: number;
+    activeExecutionMs?: number;
+    pausedOfflineMs?: number;
+    explicitWaitMs?: number;
+    attributedMs?: number;
+    unattributedMs?: number;
+    inclusiveByKind: Record<string, number>;
+    exclusiveByKind: Record<string, number>;
+  };
+  counts: {
+    byKind: Record<string, number>;
+    byOutcome: Record<string, number>;
+    qaAttempts?: number;
+    qaFailures?: number;
+    fixes?: number;
+    retries?: number;
+    tools?: number;
+    providerTurns?: number;
+    waits?: number;
+    executions?: number;
+  };
+  usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    authoritativeCostUsd?: number;
+    scope: "turn-deltas" | "session-cumulative-deduplicated" | "mixed" | "unavailable";
+  };
+  retry: { observedMs?: number; reportedDelayMs?: number };
+  failureCategory?: string;
+  topOperations: Array<{ kind: string; name: string; durationMs: number; outcome?: string; evidenceId: string }>;
+  git?: ManagerGitSummaryV1;
+  detailLevel: ManagerRunDetailLevel;
+  metricCoverage: Record<string, ManagerMetricState>;
+  capabilities: ObservabilityCapabilitiesV1;
+  evidenceIds: string[];
+  digest: string;
+}
+
+export type ManagerAggregateMetric =
+  | "calendarMs" | "activeExecutionMs" | "pausedOfflineMs" | "explicitWaitMs"
+  | "attributedMs" | "unattributedMs" | "observedRetryMs" | "reportedRetryDelayMs"
+  | "qaAttempts" | "qaFailures" | "fixes" | "retries" | "tools" | "providerTurns"
+  | "waits" | "executions" | "inputTokens" | "outputTokens" | "totalTokens" | "authoritativeCostUsd";
+export type ManagerAggregateOperation = "sum" | "count" | "minimum" | "maximum" | "average" | "median" | "p75" | "p90";
+export type ManagerAggregateGroupDimension = "status" | "provider" | "model" | "branchMode" | "qaEnabled" | "ticket" | "detailLevel";
+
+export interface ManagerAggregateQueryV1 {
+  version: 1;
+  filters?: {
+    runIds?: string[];
+    statuses?: string[];
+    createdFrom?: string;
+    createdTo?: string;
+    completedFrom?: string;
+    completedTo?: string;
+    providers?: Array<"claude" | "codex">;
+    models?: string[];
+    branchModes?: string[];
+    qaEnabled?: boolean;
+    ticketIds?: string[];
+    detailLevels?: ManagerRunDetailLevel[];
+  };
+  groupBy?: ManagerAggregateGroupDimension[];
+  metrics: ManagerAggregateMetric[];
+  operations: ManagerAggregateOperation[];
+}
+
+export interface ManagerAggregateResultV1 {
+  version: 1;
+  query: ManagerAggregateQueryV1;
+  matchedRunCount: number;
+  groups: Array<{
+    key: Record<string, string | number | boolean>;
+    runCount: number;
+    values: Partial<Record<ManagerAggregateMetric, Partial<Record<ManagerAggregateOperation, number>>>>;
+    coverage: Partial<Record<ManagerAggregateMetric, ManagerMetricCoverageV1>>;
+    evidenceIds: string[];
+    omittedEvidenceCount?: number;
+  }>;
+  omittedGroupCount: number;
+  digest: string;
+}
+
+export type ManagerEvidenceOperationV1 =
+  | { kind: "list_runs"; filters?: ManagerAggregateQueryV1["filters"]; limit?: number; cursor?: string }
+  | { kind: "get_run_details"; runIds: string[]; maxSpans?: number }
+  | { kind: "aggregate_runs"; query: ManagerAggregateQueryV1 }
+  | { kind: "compare_runs"; runIds: string[]; metrics: ManagerAggregateMetric[] };
+
+export interface ManagerEvidenceRequestV1 {
+  version: 1;
+  requestId: string;
+  operations: ManagerEvidenceOperationV1[];
+}
+
+export interface ManagerEvidenceResponseV1 {
+  version: 1;
+  requestId: string;
+  results: Array<{
+    kind: ManagerEvidenceOperationV1["kind"];
+    status: "ok" | "limited" | "invalid" | "unavailable";
+    data?: unknown;
+    limitation?: string;
+  }>;
+  lookupRound: number;
+  remainingRounds: number;
+  digest: string;
+}
+
+export interface ManagerCrossRunFindingV1 extends DiagnosticFindingV1 {
+  runIds: string[];
+  excludedRunCount: number;
+}
+
+export interface ManagerProjectDiagnosticReportV1 {
+  version: 1;
+  generatedAt: string;
+  projectDigest: string;
+  totalRunCount: number;
+  dateRange?: { earliestCreatedAt: string; latestCreatedAt: string; latestCompletedAt?: string };
+  statusDistribution: Record<string, number>;
+  capabilityDistribution: Record<string, number>;
+  verifiedActiveRunId?: string;
+  staleRecoveryRunIds: string[];
+  initialFocusRunId: string;
+  currentFocusRunId: string;
+  allRuns: ManagerAggregateResultV1;
+  successfulCompletedRuns: ManagerAggregateResultV1;
+  topRuns: Partial<Record<"activeTime" | "waitTime" | "qaTime" | "retryTime" | "unattributedTime", Array<{ runId: string; value: number; evidenceIds: string[] }>>>;
+  runCatalog: ManagerRunSummaryV1[];
+  omittedRunCount: number;
+  focusedReports: ManagerDiagnosticReportV1[];
+  findings: ManagerCrossRunFindingV1[];
+  sourceCoverage: Record<string, ManagerMetricCoverageV1>;
+  digest: string;
 }
 
 // ───────────────────────── Ticket creation groups ─────────────────────────
@@ -903,7 +1398,7 @@ export interface HandoffManifestV1 {
   sessionUsage?: SessionUsageSample;
   compactionCount: number;
   compactMaximum: number;
-  resources: Array<{ label: string; digest: string; authoritative: boolean }>;
+  resources: Array<{ label: string; digest: string; authoritative: boolean; requiredForRecovery?: boolean; mediaType?: string; path?: string }>;
   createdAt: string;
 }
 export interface HandoffLineage {

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -55,6 +56,9 @@ export class CodexAdapter implements BuilderAdapter {
   private nativeCompactionSequence = 0;
   private manualCompactionInFlight = false;
   private observedToolCalls = 0;
+  private activeProviderTurnId?: string;
+  private activeProviderTurnSpanId?: string;
+  private readonly toolSpans = new Map<string, string>();
 
   constructor(private readonly opts: BuilderAdapterOptions) {
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
@@ -87,13 +91,35 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   async sendTurn(instruction: string): Promise<TurnResult> {
-    return withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction));
+    const turnId = randomUUID();
+    this.activeProviderTurnId = turnId;
+    const observer = this.opts.observer;
+    if (!observer) {
+      try { return await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction)); }
+      finally { this.activeProviderTurnId = undefined; }
+    }
+    const context = this.observationContext();
+    const spanId = observer.store.startSpan(context, { spanId: turnId, kind: "provider_turn", name: `Codex ${activityPhase(this.opts.runtimePhase)}`, providerTurnId: turnId, attributes: { provider: "codex" } });
+    this.activeProviderTurnSpanId = spanId;
+    observer.store.updateCurrentState({ runId: observer.runId, role: context.role ?? "host", stream: context.stream ?? "codex", executionId: observer.executionId, ticketId: context.ticketId, deliveryUnitId: context.deliveryUnitId, providerSessionId: context.providerSessionId, phase: "provider turn", activeSpanId: spanId, activeSpanKind: "provider_turn", lastSemanticProgressAt: new Date().toISOString() });
+    try {
+      const result = await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction));
+      observer.store.finishSpan(spanId, { outcome: result.isError ? "failed" : "completed", attributes: { usage: result.usage } });
+      return result;
+    } catch (error) {
+      observer.store.finishSpan(spanId, { outcome: "failed", attributes: { error: String(error).slice(0, 500) } });
+      throw error;
+    } finally {
+      for (const [callId, toolSpanId] of this.toolSpans) { observer.store.finishSpan(toolSpanId, { outcome: "unknown", completionKnown: false }); this.toolSpans.delete(callId); }
+      this.activeProviderTurnId = undefined; this.activeProviderTurnSpanId = undefined;
+    }
   }
 
   private async sendTurnInternal(instruction: string): Promise<TurnResult> {
     if (this.closed) throw new Error("builder is closed");
     this.eventQueue.push({ kind: "activity", state: "starting Codex turn", provider: "codex", model: this.opts.model });
     let turnStartDispatched = false;
+    const providerInstruction = this.buildInstruction(instruction);
     try {
       await this.ensureThread();
       this.activeText = [];
@@ -102,7 +128,7 @@ export class CodexAdapter implements BuilderAdapter {
       turnStartDispatched = true;
       await this.request("turn/start", {
         threadId: this._sessionId,
-        input: [{ type: "text", text: this.buildInstruction(instruction), text_elements: [] }],
+        input: [{ type: "text", text: providerInstruction, text_elements: [] }],
         cwd: this.opts.cwd,
         model: this.opts.model ?? null,
         effort: this.opts.effort ?? (this.opts.fast ? "low" : null),
@@ -115,15 +141,23 @@ export class CodexAdapter implements BuilderAdapter {
       const result: TurnResult = {
         text: failed ? normalizeRuntimeErrorText("codex", String(error?.message ?? text), null, "app-server turn") : text,
         isError: failed, numTurns: 1, costUsd: 0, costAuthoritative: false,
+        turnId: this.activeProviderTurnId, hostInstruction: instruction, providerInstruction,
+        rawResponse: text, cleanedResponse: failed ? normalizeRuntimeErrorText("codex", String(error?.message ?? text), null, "app-server turn") : text,
+        providerMetadata: { provider: "codex", sessionId: this._sessionId, sessionRef: this._sessionRef },
         ...(this.lastTurnTokens ?? {}),
       };
-      this.eventQueue.push({ kind: "turn-complete", result });
+      result.usage = { scope: "turn-delta", inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+        ...(result.inputTokens !== undefined || result.outputTokens !== undefined ? { totalTokens: (result.inputTokens ?? 0) + (result.outputTokens ?? 0) } : {}) };
+      this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
       return result;
     } catch (error) {
       if (error instanceof SessionUnavailableError) {
         const result = sessionUnavailableResult(error);
         this.eventQueue.push({ kind: "error", message: result.text });
-        this.eventQueue.push({ kind: "turn-complete", result });
+        result.turnId = this.activeProviderTurnId; result.hostInstruction = instruction; result.providerInstruction = providerInstruction;
+        result.rawResponse = result.text; result.cleanedResponse = result.text;
+        result.providerMetadata = { provider: "codex", sessionId: this._sessionId, sessionRef: this._sessionRef };
+        this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
         return result;
       }
       const detail = [error instanceof Error ? error.message : String(error), this.stderr].filter(Boolean).join("\n");
@@ -138,12 +172,21 @@ export class CodexAdapter implements BuilderAdapter {
         }))
         : { text, isError: true, numTurns: 1, costUsd: 0, costAuthoritative: false };
       this.eventQueue.push({ kind: "error", message: text });
-      this.eventQueue.push({ kind: "turn-complete", result });
+      result.turnId = this.activeProviderTurnId; result.hostInstruction = instruction; result.providerInstruction = providerInstruction;
+      result.rawResponse = result.text; result.cleanedResponse = result.text;
+      result.providerMetadata = { provider: "codex", sessionId: this._sessionId, sessionRef: this._sessionRef };
+      this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
       return result;
     }
   }
 
   async compact(): Promise<CompactResult> {
+    return this.opts.observer
+      ? this.opts.observer.span("compaction", "Codex context compaction", () => this.compactInternal())
+      : this.compactInternal();
+  }
+
+  private async compactInternal(): Promise<CompactResult> {
     try {
       await this.ensureThread();
       this.eventQueue.push({ kind: "session-transition", transition: "compacting" });
@@ -392,14 +435,38 @@ export class CodexAdapter implements BuilderAdapter {
     const params = message.params ?? {};
     if (message.method === "item/started") {
       const item = params.item as Record<string, unknown> | undefined;
-      if (isCodexToolItem(item)) this.observedToolCalls += 1;
+      if (isCodexToolItem(item)) {
+        this.observedToolCalls += 1;
+        const callId = codexItemId(item) ?? randomUUID();
+        const name = codexToolName(item);
+        this.eventQueue.push({ kind: "tool", name, input: exactToolInput(item), inputCompleteness: "complete", lifecycle: "started", callId, completionKnown: false, providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
+        if (this.opts.observer) {
+          const spanId = this.opts.observer.store.startSpan(this.observationContext(), { kind: "tool", name, providerTurnId: this.activeProviderTurnId, attributes: { callId, input: boundedToolInput(item) } });
+          this.toolSpans.set(callId, spanId);
+          this.opts.observer.signal(true);
+        }
+      }
       const activity = codexItemActivity(item);
       if (activity) this.eventQueue.push({ kind: "activity", provider: "codex", ...activity });
     } else if (message.method === "item/completed") {
       const item = params.item as Record<string, unknown> | undefined;
-      if (item?.type === "agentMessage" && typeof item.text === "string") { this.activeText.push(item.text); this.eventQueue.push({ kind: "text", text: item.text }); }
-      else if (item?.type === "commandExecution") {
-        this.eventQueue.push({ kind: "tool", name: "command_execution", input: { command: item.command } });
+      if (isCodexToolItem(item)) {
+        const callId = codexItemId(item);
+        const spanId = callId ? this.toolSpans.get(callId) : undefined;
+        const status = typeof item?.status === "string" ? item.status : undefined;
+        const exitCode = finiteNumber(item?.exitCode ?? item?.exit_code);
+        const durationMs = finiteNumber(item?.durationMs ?? item?.duration_ms);
+        const output = codexOutputSummary(item);
+        this.eventQueue.push({ kind: "tool", name: codexToolName(item), input: exactToolInput(item), inputCompleteness: "complete", lifecycle: "completed", callId, status, durationMs, exitCode, outputSummary: output?.summary, outputDigest: output?.digest, outputCompleteness: output?.completeness ?? "unavailable", rawOutputBytes: output?.bytes, completionKnown: true, providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
+        if (spanId && this.opts.observer) { this.opts.observer.store.finishSpan(spanId, { outcome: status ?? (exitCode === undefined || exitCode === 0 ? "completed" : "failed"), completionKnown: true, attributes: { callId, providerDurationMs: durationMs, exitCode, outputSummary: output?.summary, outputDigest: output?.digest } }); this.toolSpans.delete(callId!); }
+        this.opts.observer?.signal(true);
+      }
+      if (item?.type === "agentMessage" && typeof item.text === "string") {
+        this.activeText.push(item.text);
+        this.eventQueue.push({ kind: "text", text: item.text, byteCount: Buffer.byteLength(item.text), digest: createHash("sha256").update(item.text).digest("hex"), eventId: randomUUID(), observedAt: new Date().toISOString() });
+        this.opts.observer?.signal(true);
+      }
+      else if (item?.type === "commandExecution") { /* tool completion was emitted above */
       } else if (item?.type === "contextCompaction" && !this.manualCompactionInFlight) {
         // Completion is the provider's authoritative confirmation. Token-usage
         // notifications may arrive before or after it, so do not make durable
@@ -447,13 +514,33 @@ export class CodexAdapter implements BuilderAdapter {
     } else if (message.method === "error") {
       const error = params.error as Record<string, unknown> | undefined;
       const reason = String(error?.message ?? params.message ?? "Codex app-server error");
-      if (params.willRetry === true) this.eventQueue.push({ kind: "retry", provider: "codex", reason, managedBy: "provider" });
+      if (params.willRetry === true) {
+        const retryId = randomUUID();
+        this.eventQueue.push(this.opts.observer
+          ? { kind: "retry", provider: "codex", reason, managedBy: "provider", retryId, providerTurnId: this.activeProviderTurnId, eventId: retryId, observedAt: new Date().toISOString() }
+          : { kind: "retry", provider: "codex", reason, managedBy: "provider" });
+        if (this.opts.observer) {
+          const retrySpanId = this.opts.observer.store.startSpan(this.observationContext(), { spanId: retryId, kind: "retry", name: "Codex provider retry", providerTurnId: this.activeProviderTurnId,
+            attributes: { provider: "codex", reasonDigest: createHash("sha256").update(reason).digest("hex") } });
+          this.opts.observer.store.recordEvent(this.observationContext(), "retry", { eventId: retryId, spanId: retrySpanId, severity: "warning", attributes: { provider: "codex", reasonDigest: createHash("sha256").update(reason).digest("hex") } });
+          this.opts.observer.store.finishSpan(retrySpanId, { outcome: "reported" });
+        }
+      }
       else this.eventQueue.push({ kind: "error", message: reason });
     }
     const waiters = this.notificationWaiters.get(message.method) ?? [];
     const remaining: Waiter[] = [];
     for (const waiter of waiters) waiter.predicate(params) ? waiter.resolve(params) : remaining.push(waiter);
     this.notificationWaiters.set(message.method, remaining);
+  }
+
+  private observationContext() {
+    const observer = this.opts.observer!;
+    const inherited = observer.context();
+    return { ...inherited, runId: observer.runId, executionId: observer.executionId, role: this.opts.sessionRole ?? inherited.role ?? "builder" as const,
+      stream: this.opts.sessionStream ?? inherited.stream ?? this.opts.sessionRole ?? "builder", providerSessionId: this._sessionId,
+      ticketId: this.opts.ticketId ?? inherited.ticketId, deliveryUnitId: this.opts.deliveryUnitId ?? inherited.deliveryUnitId,
+      parentSpanId: this.activeProviderTurnSpanId ?? inherited.parentSpanId, providerTurnId: this.activeProviderTurnId ?? inherited.providerTurnId };
   }
 
   private waitFor(method: string, predicate: Waiter["predicate"], timeoutMs?: number): Promise<Record<string, unknown>> {
@@ -522,6 +609,7 @@ function activityPhase(phase: BuilderAdapterOptions["runtimePhase"]): string {
   if (phase === "ticket-population") return "populating tickets";
   if (phase === "qa") return "reviewing with QA";
   if (phase === "uninstaller") return "planning uninstall";
+  if (phase === "manager") return "analyzing diagnostics";
   return "building";
 }
 
@@ -541,6 +629,13 @@ function codexItemActivity(item: Record<string, unknown> | undefined, completed 
 function isCodexToolItem(item: Record<string, unknown> | undefined): boolean {
   return item?.type === "commandExecution" || item?.type === "mcpToolCall" || item?.type === "dynamicToolCall" || item?.type === "webSearch" || item?.type === "fileChange";
 }
+
+function codexItemId(item: Record<string, unknown> | undefined): string | undefined { const value = item?.id ?? item?.itemId ?? item?.callId; return typeof value === "string" && value ? value : undefined; }
+function codexToolName(item: Record<string, unknown> | undefined): string { return String(item?.tool ?? item?.name ?? item?.type ?? "tool"); }
+function exactToolInput(item: Record<string, unknown> | undefined): Record<string, unknown> { if (!item) return {}; return Object.fromEntries(Object.entries(item).filter(([key]) => ["command", "tool", "name", "type", "path", "query", "arguments", "input"].includes(key))); }
+function boundedToolInput(item: Record<string, unknown> | undefined): Record<string, unknown> { if (!item) return {}; return Object.fromEntries(Object.entries(exactToolInput(item)).map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 1000) : value])); }
+function codexOutputSummary(item: Record<string, unknown> | undefined): { summary: string; digest: string; completeness: "complete" | "truncated"; bytes: number } | undefined { const value = item?.aggregatedOutput ?? item?.output ?? item?.stdout; if (typeof value !== "string" || !value) return undefined; const sanitized = value.replace(/\b(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[REDACTED]"); const providerTruncated = item?.outputTruncated === true || item?.truncated === true; return { summary: sanitized.slice(0, 1000), digest: createHash("sha256").update(value).digest("hex"), completeness: providerTruncated ? "truncated" : "complete", bytes: Buffer.byteLength(value) }; }
+function finiteNumber(value: unknown): number | undefined { const result = Number(value); return Number.isFinite(result) ? result : undefined; }
 
 function loadSkillMarkdown(cwd: string, skill: string): string | undefined {
   const projectPath = join(cwd, ".agents", "skills", skill, "SKILL.md");

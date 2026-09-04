@@ -8,6 +8,7 @@ import {
   agentDefaultsSchema,
   buildRunRecordSchema,
   installManifestSchema,
+  qaFailureReportV1Schema,
 } from "./schemas.js";
 import type {
   RulePackFrontmatter,
@@ -15,6 +16,7 @@ import type {
   AgentManifest,
   ProjectConfig,
   AgentDefaultsV1,
+  QaFailureReportV1,
 } from "./types.js";
 
 const ajv = new Ajv({ allErrors: true, allowUnionTypes: true });
@@ -42,6 +44,7 @@ const vProject = ajv.compile(projectConfigSchema);
 const vAgentDefaults = ajv.compile(agentDefaultsSchema);
 const vBuildRun = ajv.compile(buildRunRecordSchema);
 const vInstallManifest = ajv.compile(installManifestSchema);
+const vQaFailureReport = ajv.compile(qaFailureReportV1Schema);
 
 export const validateRulePack = (d: unknown): ValidationResult => run(vRulePack, d);
 export const validateSkillManifest = (d: unknown): ValidationResult => run(vSkill, d);
@@ -50,6 +53,26 @@ export const validateProjectConfig = (d: unknown): ValidationResult => run(vProj
 export const validateAgentDefaults = (d: unknown): ValidationResult => run(vAgentDefaults, d);
 export const validateBuildRunRecord = (d: unknown): ValidationResult => run(vBuildRun, d);
 export const validateInstallManifest = (d: unknown): ValidationResult => run(vInstallManifest, d);
+export const validateQaFailureReport = (d: unknown): ValidationResult => {
+  const result = run(vQaFailureReport, d);
+  if (!result.valid || !d || typeof d !== "object") return result;
+  const serialized = JSON.stringify(d);
+  if (Buffer.byteLength(serialized, "utf8") > 64 * 1024) return { valid: false, errors: ["(root) serialized report exceeds 65536 bytes"] };
+  const blankPaths: string[] = [];
+  const visit = (value: unknown, path: string): void => {
+    if (typeof value === "string" && !value.trim()) blankPaths.push(path || "(root)");
+    else if (Array.isArray(value)) value.forEach((item, index) => visit(item, `${path}/${index}`));
+    else if (value && typeof value === "object") Object.entries(value as Record<string, unknown>).forEach(([key, item]) => visit(item, `${path}/${key}`));
+  };
+  visit(d, "");
+  if (blankPaths.length) return { valid: false, errors: blankPaths.map((path) => `${path} must not be blank`) };
+  const ids = (d as QaFailureReportV1).findings.map((finding) => finding.id);
+  const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
+  return duplicates.length
+    ? { valid: false, errors: [`/findings duplicate finding id: ${[...new Set(duplicates)].join(", ")}`] }
+    : result;
+};
+export const validateQaFailureReportV1 = validateQaFailureReport;
 
 /** Validate and narrow, throwing on failure. */
 export function assertRulePack(d: unknown): asserts d is RulePackFrontmatter {
@@ -72,3 +95,8 @@ export function assertAgentDefaults(d: unknown): asserts d is AgentDefaultsV1 {
   const r = validateAgentDefaults(d);
   if (!r.valid) throw new Error(`Invalid agent defaults: ${r.errors.join("; ")}`);
 }
+export function assertQaFailureReport(d: unknown): asserts d is QaFailureReportV1 {
+  const r = validateQaFailureReport(d);
+  if (!r.valid) throw new Error(`Invalid QA failure report: ${r.errors.join("; ")}`);
+}
+export const assertQaFailureReportV1: (d: unknown) => asserts d is QaFailureReportV1 = assertQaFailureReport;

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse, stringify } from "yaml";
@@ -39,7 +39,8 @@ import {
 } from "../src/tickets/setupConfig.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import type { TicketState } from "../src/tickets/stateDb.js";
-import { formatTicketDetails, getTicketDetails } from "../src/tickets/details.js";
+import { formatAllTicketDetails, formatTicketDetails, getAllTicketDetails, getTicketDetails } from "../src/tickets/details.js";
+import { appendTicketOutput } from "../src/tickets/output.js";
 import { previewTicketReset, resetTickets } from "../src/tickets/reset.js";
 import { applyResolvedTicketReset, resolveTicketResetSelection, TicketResetDependencyConflictError } from "../src/tickets/groupReset.js";
 import { listTicketGroups } from "../src/tickets/groups.js";
@@ -128,6 +129,136 @@ test("ticket details retain unknown canonical fields and include complete state 
     assert.match(report, /Active validation and evidence/);
     assert.match(report, /History/);
     assert.throws(() => getTicketDetails(dir, "missing"), /rafi tickets queue/);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("all ticket details use one complete ordered snapshot across every canonical status", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "All details", timezone: "UTC" });
+    writeTrackerConfig(dir, { view_limit: 1 });
+    const definitions = [
+      { ...makeDef("T006", 6000), custom_forward_field: { retained: true } },
+      makeDef("T002", 2000, { depends_on: ["T001"] }),
+      makeDef("T004", 4000),
+      makeDef("T001", 1000),
+      makeDef("T005", 5000),
+      makeDef("T003", 3000),
+    ];
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: definitions }), "utf8");
+    writeFileSync(join(dir, ".tickets", "delivery.yaml"), stringify({
+      version: 1,
+      units: [{ id: "DU-1", tickets: ["T002"], branch_mode: "per-ticket", completion: "pr", provider: "github", dependency_mode: "stack" }],
+      stacks: [{ id: "DS-1", name: "Primary", units: ["DU-1"] }],
+    }), "utf8");
+    const db = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    for (const [ticketId, status] of [
+      ["T002", "in_progress"], ["T003", "blocked"], ["T004", "done"],
+      ["T005", "canceled"], ["T006", "obsolete"],
+    ] as const) db.upsertState(ticketId, { status }, "2026-01-01T00:00:00.000Z");
+    db.insertValidationSnapshot({ timestamp: "2026-01-01T01:00:00.000Z", scope: "T002", result: "passed", commands: "pnpm test", evidence: "ok", notes: null });
+    db.insertValidationSnapshot({ timestamp: "2026-01-01T01:00:00.000Z", scope: "global", result: "passed", commands: null, evidence: null, notes: null });
+    db.insertEvent({ timestamp: "2026-01-01T02:00:00.000Z", actor: "test", ticket_id: "T002", event_type: "updated", old_status: "planned", new_status: "in_progress", summary: "started", validation: null, evidence: null, payload_json: "{}" });
+    db.insertEvent({ timestamp: "2026-01-01T02:00:00.000Z", actor: "test", ticket_id: null, event_type: "global", old_status: null, new_status: null, summary: "global", validation: null, evidence: null, payload_json: "{}" });
+    db.insertEvent({ timestamp: "2026-01-01T02:00:00.000Z", actor: "test", ticket_id: "T999", event_type: "deleted", old_status: null, new_status: null, summary: "deleted", validation: null, evidence: null, payload_json: "{}" });
+    db.close();
+
+    const snapshot = getAllTicketDetails(dir, new Date("2026-02-03T04:05:06.000Z"));
+    assert.equal(snapshot.version, 1);
+    assert.equal(snapshot.generated_at, "2026-02-03T04:05:06.000Z");
+    assert.equal(snapshot.ticket_count, 6);
+    assert.deepEqual(snapshot.tickets.map((ticket) => ticket.definition.id), ["T001", "T002", "T003", "T004", "T005", "T006"]);
+    assert.deepEqual(snapshot.tickets.map((ticket) => ticket.state.status), ["planned", "in_progress", "blocked", "done", "canceled", "obsolete"]);
+    assert.equal(snapshot.tickets[0]?.state.updated_at, snapshot.generated_at);
+    assert.deepEqual(snapshot.tickets[1]?.effective_blockers, ["T001"]);
+    assert.equal(snapshot.tickets[1]?.validation_history.length, 1);
+    assert.equal(snapshot.tickets[1]?.events.length, 1);
+    assert.deepEqual(snapshot.tickets[1]?.delivery.units.map((unit) => unit.id), ["DU-1"]);
+    assert.deepEqual(snapshot.tickets[1]?.delivery.stacks.map((stack) => stack.id), ["DS-1"]);
+    assert.deepEqual(snapshot.tickets[5]?.definition.custom_forward_field, { retained: true });
+    assert.equal(snapshot.tickets.some((ticket) => ticket.definition.id === "T999"), false);
+
+    const report = formatAllTicketDetails(snapshot).join("\n");
+    assert.match(report, /^All tickets \(6\)\nSnapshot: 2026-02-03T04:05:06.000Z/);
+    assert.equal((report.match(/^Canonical ticket$/gm) ?? []).length, 6);
+    assert.equal((report.match(/^-{80}$/gm) ?? []).length, 5);
+    for (const section of ["Active state", "Active validation and evidence", "Historical validation", "Delivery", "History"]) {
+      assert.equal((report.match(new RegExp(`^${section}$`, "gm")) ?? []).length, 6);
+    }
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("all ticket details return a versioned empty snapshot", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Empty details", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [] }), "utf8");
+    const snapshot = getAllTicketDetails(dir, new Date("2026-02-03T04:05:06.000Z"));
+    assert.deepEqual(snapshot, { version: 1, generated_at: "2026-02-03T04:05:06.000Z", ticket_count: 0, tickets: [] });
+    assert.equal(formatAllTicketDetails(snapshot).join("\n"), "All tickets (0)\nSnapshot: 2026-02-03T04:05:06.000Z");
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("all ticket details use ticket ID as a deterministic order fallback and retain initialization errors", () => {
+  const missing = makeTmpDir();
+  const dir = makeTmpDir();
+  try {
+    assert.throws(() => getAllTicketDetails(missing), /ticket tracker is not initialized/);
+    cmdInit(dir, { appName: "Order fallback", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [makeDef("T002", 1000), makeDef("T001", 1000)] }), "utf8");
+    assert.deepEqual(getAllTicketDetails(dir).tickets.map((ticket) => ticket.definition.id), ["T001", "T002"]);
+  } finally {
+    rmSync(missing, { recursive: true });
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("ticket output creates private parented files and appends with one blank line", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Output", timezone: "UTC" });
+    const createdPath = join(dir, "nested", "agent-context.txt");
+    const created = appendTicketOutput(dir, createdPath, "first\n");
+    assert.deepEqual(created, { disposition: "created", path: createdPath });
+    assert.equal(readFileSync(createdPath, "utf8"), "first\n");
+    assert.equal(statSync(createdPath).mode & 0o777, 0o600);
+
+    chmodSync(createdPath, 0o640);
+    const appended = appendTicketOutput(dir, createdPath, "second\n");
+    assert.equal(appended.disposition, "appended");
+    assert.equal(readFileSync(createdPath, "utf8"), "first\n\nsecond\n");
+    assert.equal(statSync(createdPath).mode & 0o777, 0o640);
+
+    for (const [name, existing, expected] of [
+      ["zero.txt", "prefix", "prefix\n\npayload\n"],
+      ["one.txt", "prefix\n", "prefix\n\npayload\n"],
+      ["many.txt", "prefix\n\n\n", "prefix\n\n\npayload\n"],
+      ["empty.txt", "", "payload\n"],
+    ]) {
+      const path = join(dir, name);
+      writeFileSync(path, existing, "utf8");
+      appendTicketOutput(dir, path, "payload\n");
+      assert.equal(readFileSync(path, "utf8"), expected, name);
+    }
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("ticket output rejects directories and every protected tracker input", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Protected output", timezone: "UTC" });
+    const directory = join(dir, "destination");
+    mkdirSync(directory);
+    assert.throws(() => appendTicketOutput(dir, directory, "payload\n"), /destination is a directory/);
+    for (const path of [
+      join(dir, ".tickets", "tickets.yaml"),
+      join(dir, ".tickets", "ticket-state.sqlite"),
+      join(dir, ".tickets", "config.yaml"),
+      join(dir, ".tickets", "delivery.yaml"),
+    ]) assert.throws(() => appendTicketOutput(dir, path, "payload\n"), /protected tracker input/);
+    const alias = join(dir, "tickets-alias.yaml");
+    symlinkSync(join(dir, ".tickets", "tickets.yaml"), alias);
+    assert.throws(() => appendTicketOutput(dir, alias, "payload\n"), /protected tracker input/);
   } finally { rmSync(dir, { recursive: true }); }
 });
 

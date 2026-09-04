@@ -5,6 +5,50 @@
 
 const KEBAB = "^[a-z0-9]+(?:-[a-z0-9]+)*$";
 
+const qaString = { type: "string", minLength: 1, maxLength: 4096 } as const;
+
+export const qaFailureReportV1Schema = {
+  $id: "rafi/qaFailureReportV1",
+  type: "object",
+  additionalProperties: false,
+  required: ["version", "summary", "checks_run", "findings", "observations"],
+  properties: {
+    version: { const: 1 },
+    summary: qaString,
+    checks_run: {
+      type: "array", minItems: 1, maxItems: 25,
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["check", "outcome", "evidence"],
+        properties: {
+          check: qaString,
+          command: qaString,
+          outcome: { enum: ["passed", "failed", "not_run"] },
+          evidence: qaString,
+        },
+      },
+    },
+    findings: {
+      type: "array", minItems: 1, maxItems: 25,
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["id", "requirement", "locations", "problem", "evidence", "expected", "fix_direction", "verification"],
+        properties: {
+          id: qaString,
+          requirement: qaString,
+          locations: { type: "array", minItems: 1, maxItems: 10, items: qaString },
+          problem: qaString,
+          evidence: qaString,
+          expected: qaString,
+          fix_direction: qaString,
+          verification: { type: "array", minItems: 1, maxItems: 10, items: qaString },
+        },
+      },
+    },
+    observations: { type: "array", maxItems: 25, items: qaString },
+  },
+} as const;
+
 export const rulePackSchema = {
   $id: "rafi/rulePack",
   type: "object",
@@ -43,7 +87,7 @@ export const agentManifestSchema = {
   properties: {
     name: { type: "string", pattern: KEBAB },
     description: { type: "string", minLength: 1 },
-    role: { enum: ["builder", "qa", "planner", "ticket-maker", "uninstaller"] },
+    role: { enum: ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager"] },
     packs: { type: "array", items: { type: "string" } },
     skills: { type: "array", items: { type: "string" } },
     conditionalPacks: {
@@ -221,7 +265,7 @@ const agentDefaultsShape = {
     roles: {
       type: "object",
       additionalProperties: false,
-      properties: Object.fromEntries(["planner", "builder", "qa", "ticket-maker", "uninstaller"].map((role) => [role, {
+      properties: Object.fromEntries(["planner", "builder", "qa", "ticket-maker", "uninstaller", "manager"].map((role) => [role, {
         type: "object",
         additionalProperties: false,
         properties: {
@@ -263,6 +307,35 @@ const sourceRegistry = {
         } } },
       },
     } },
+  },
+} as const;
+
+const autonomyConfig = {
+  type: "object",
+  additionalProperties: false,
+  required: ["profile", "continue_independent_tickets", "supervisor"],
+  properties: {
+    profile: { enum: ["supervised", "balanced", "unattended"] },
+    continue_independent_tickets: { type: "boolean" },
+    rules: {
+      type: "object",
+      additionalProperties: false,
+      properties: Object.fromEntries(["qa.nonconvergence", "runtime.transient", "plan.material_change"].map((rule) => [rule, {
+        type: "object", additionalProperties: false, required: ["action"], properties: {
+          action: { enum: ["retry_builder", "retry", "human_required"] },
+          max_attempts: { type: "integer", minimum: 0, maximum: 100 },
+        },
+      }])),
+    },
+    supervisor: {
+      type: "object", additionalProperties: false,
+      required: ["enabled", "max_worker_restarts_per_checkpoint", "max_worker_restarts_per_run"],
+      properties: {
+        enabled: { type: "boolean" },
+        max_worker_restarts_per_checkpoint: { type: "integer", minimum: 0, maximum: 100 },
+        max_worker_restarts_per_run: { type: "integer", minimum: 0, maximum: 1000 },
+      },
+    },
   },
 } as const;
 
@@ -322,6 +395,7 @@ export const projectConfigSchema = {
     sources: sourceRegistry,
     tickets: ticketsSetupConfig,
     agent_defaults: agentDefaultsShape,
+    autonomy: autonomyConfig,
     agents: artifactPathMap,
     skills: artifactPathMap,
   },
@@ -359,7 +433,7 @@ const providerSessionRefV1 = {
   required: ["version", "provider", "sessionId", "role", "stream", "generation", "cwd", "configRoot", "source", "createdAt"],
   properties: {
     version: { const: 1 }, provider: { enum: ["claude", "codex"] }, sessionId: { type: "string", minLength: 1 },
-    role: { enum: ["builder", "qa", "planner", "ticket-maker", "uninstaller"] }, stream: { type: "string", minLength: 1 },
+    role: { enum: ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager"] }, stream: { type: "string", minLength: 1 },
     generation: { type: "integer", minimum: 0 }, cwd: { type: "string", minLength: 1 }, configRoot: { type: "string", minLength: 1 },
     workspaceIdentity: { type: "string", minLength: 1 }, ticketId: { type: "string", minLength: 1 }, deliveryUnitId: { type: "string", minLength: 1 },
     source: { enum: ["observed", "legacy-inferred"] }, createdAt: { type: "string", minLength: 1 }, validatedAt: { type: "string", minLength: 1 },
@@ -385,6 +459,23 @@ export const buildRunRecordSchema = {
           completedTickets: { type: "array", items: { type: "string" } }, completedOperations: { type: "array", items: { type: "string" } }, remainingTickets: { type: "array", items: { type: "string" } },
           currentStep: { type: "string" }, lastSuccessfulAction: { type: "string" }, nextAction: { type: "string" }, validation: { type: "object" },
         } },
+      },
+    },
+    {
+      type: "object", additionalProperties: true,
+      required: ["version", "runId", "status", "tickets", "branchMode", "checkpoint", "repository", "progress", "receipts", "createdAt", "updatedAt", "frozenPolicy", "phase", "qaEnabled", "recoveryAttempts", "supervisor", "pendingDecisions", "deferredTickets"],
+      properties: {
+        version: { const: 3 }, ...buildRunBaseProperties,
+        repository: { type: "object", additionalProperties: true, required: ["root", "worktree", "git", "baselineComplete"], properties: { root: { type: "string", minLength: 1 }, worktree: { type: "string", minLength: 1 }, git: buildGitSnapshotV2, baselineComplete: { type: "boolean" } } },
+        sessionBindings: { type: "array", items: providerSessionRefV1 },
+        progress: { type: "object", additionalProperties: false, required: ["completedTickets", "completedOperations", "remainingTickets"], properties: {
+          completedTickets: { type: "array", items: { type: "string" } }, completedOperations: { type: "array", items: { type: "string" } }, remainingTickets: { type: "array", items: { type: "string" } },
+          currentStep: { type: "string" }, lastSuccessfulAction: { type: "string" }, nextAction: { type: "string" }, validation: { type: "object" },
+        } },
+        frozenPolicy: { type: "object" }, phase: { type: "string", minLength: 1 }, qaEnabled: { type: "boolean" },
+        recoveryAttempts: { type: "array", items: { type: "object" } },
+        supervisor: { type: "object" }, pendingDecisions: { type: "array", items: { type: "object" } },
+        deferredTickets: { type: "array", items: { type: "string" } },
       },
     },
   ],

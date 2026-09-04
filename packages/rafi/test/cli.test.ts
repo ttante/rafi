@@ -60,6 +60,7 @@ test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nod
     { heading: "rafi tickets setup:init --help", command: commandByPath(["tickets", "setup:init"]) },
     { heading: "rafi tickets setup:update --help", command: commandByPath(["tickets", "setup:update"]) },
     { heading: "rafi tickets populate --help", command: commandByPath(["tickets", "populate"]) },
+    { heading: "rafi tickets show --help", command: commandByPath(["tickets", "show"]) },
     { heading: "rafi tickets queue --help", command: commandByPath(["tickets", "queue"]) },
     { heading: "rafi doctor --help", command: commandByPath(["doctor"]) },
   ];

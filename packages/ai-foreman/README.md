@@ -148,6 +148,21 @@ With the saved `current` strategy, Foreman works in the active branch while the 
 
 The current terminal status includes the role/provider, activity, truthful context state, successful compaction count, and handoff generation. At the Builder threshold, Foreman settles the in-flight action, verifies native compaction plus a fresh provider usage sample, and resumes the frozen action. The configured maximum defaults to ten successful compactions per location-scoped provider session; the next crossing uses a validated fresh handoff instead of exceeding it. Disposable QA snapshots never reuse a prior QA conversation in a new `/tmp/rafi-qa-*` worktree; they transfer cumulative state through an accepted handoff.
 
+Failed QA reviews use the versioned `RAFI_QA_FAILURE_REPORT_START` / `RAFI_QA_FAILURE_REPORT_END` JSON contract. Foreman validates the report before Builder remediation and preserves reports by digest. A malformed failing report receives two correction-only turns, a compacted pair, then five turns in a validated fresh successor. Recovery packets are owner-only, locally Git-excluded, and stored under `.foreman/qa-report-recovery/`; the successor must acknowledge the copied packet and reviewed-state digests before reporting.
+
+### `ai-foreman manager`
+
+Manager is a project-wide, read-only diagnostic conversation over every retained build run. It starts with a verified live run when one exists, otherwise the most recently updated run; `--run <id>` changes only that initial focus. Each question refreshes the catalog, active state, deterministic aggregates, and relevant run details.
+
+Permanent sanitized run summaries keep timing, counts, provider/model configuration, usage coverage, failure category, and terminal Git facts useful after detailed spans expire. Detailed spans retain the configured 30-day policy. Missing historical facts are reported as partial rather than reconstructed or treated as zero.
+
+When the initial bounded packet omits evidence needed for a question, Manager can request catalog rows, aggregates, comparisons, or details through a host-validated read-only lookup. Each question is limited to two rounds, six operations per round, five detailed runs per operation, and fifty catalog rows per list operation. Questions, answers, and lookup envelopes are not stored as project evidence.
+
+```bash
+ai-foreman manager ./my-project
+ai-foreman manager ./my-project --run <run-id> --ask "Compare this run with the last five successful runs"
+```
+
 ### GitHub PR Failure Recovery
 
 When `--create-pr` cannot prepare GitHub, push a branch, or create a PR, Foreman records a structured failure and blocks the affected ticket cleanly. Blocked worktrees are retained automatically so you can repair the environment and retry without losing the ticket session.

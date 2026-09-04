@@ -5,6 +5,7 @@ import { findResumableBranchSessions, formatBranchContinueCommand } from "../bra
 import type { GitHubFailureCode } from "../branch/types.js";
 import { recoverableBuildRuns } from "../buildRuns.js";
 import { WorkflowDb, WORKFLOW_DB_FILE } from "../workflowDb.js";
+import { WorkflowReader } from "../workflowReader.js";
 import { formatWorkflowIssue } from "../outcomes.js";
 
 type StatusGitHubFailureCode = GitHubFailureCode | "pr_failed";
@@ -37,7 +38,7 @@ export function runStatus(project: string): void {
       const dir = join(projectDir, ".foreman");
       const recoverable = recoverableBuildRuns(projectDir);
       const workflowPath = join(projectDir, WORKFLOW_DB_FILE);
-      const workflow = existsSync(workflowPath) ? new WorkflowDb(projectDir, workflowPath) : undefined;
+      const workflow = existsSync(workflowPath) ? new WorkflowReader(projectDir, workflowPath) : undefined;
       const activeWorkflows = workflow?.activeRuns() ?? [];
       if (!existsSync(dir) && activeWorkflows.length === 0) { workflow?.close(); fail(`no foreman runs found under ${dir}`); }
       const logs = readdirSync(dir)
@@ -104,12 +105,19 @@ export function runStatus(project: string): void {
       workflow?.close();
 }
 
-function printWorkflowIssues(workflow: WorkflowDb | undefined, runs: ReturnType<WorkflowDb["activeRuns"]>): void {
+function printWorkflowIssues(workflow: Pick<WorkflowDb, "issues"> | undefined, runs: ReturnType<WorkflowReader["activeRuns"]>): void {
   if (!workflow || runs.length === 0) return;
   console.log(`foreman: ${runs.length} active workflow record(s) in ${WORKFLOW_DB_FILE}`);
   for (const run of runs) {
     console.log(`  ${run.runId} ${run.kind} ${run.status} checkpoint=${run.checkpoint}`);
     for (const value of workflow.issues(run.runId)) console.log(`    ${formatWorkflowIssue(value).replace(/\n/g, " | ")}`);
+    if (workflow instanceof WorkflowReader) {
+      const supervisor = workflow.supervisorState(run.runId);
+      if (supervisor) console.log(`    supervisor=${supervisor.status} generation=${supervisor.generation} worker=${supervisor.workerPid ?? "none"} restarts=${supervisor.runRestarts}`);
+      const attempts = workflow.recoveryAttempts(run.runId);
+      if (attempts.length) console.log(`    recovery attempts=${attempts.length}; latest=${attempts.at(-1)?.action}:${attempts.at(-1)?.outcome}`);
+      for (const decision of workflow.pendingHumanDecisions(run.runId)) console.log(`    pending decision ${decision.decisionId}: ${decision.choices.map((choice) => choice.id).join(" | ")}`);
+    }
   }
 }
 

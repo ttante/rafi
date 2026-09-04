@@ -8,6 +8,7 @@ import type {
   RuntimeProbePhase,
   SessionAvailabilityV1,
 } from "rafi-spec";
+import type { RunObserver } from "../observability.js";
 
 /** A permission request surfaced by a builder before it runs a tool. */
 export interface PermissionRequest {
@@ -70,19 +71,43 @@ export interface TurnResult {
   costAuthoritative?: boolean;
   inputTokens?: number;
   outputTokens?: number;
+  /** Explicit counter semantics. Compatibility counters above must not be summed without this scope. */
+  usage?: {
+    scope: "turn-delta" | "session-cumulative";
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    costUsd?: number;
+  };
   failure?: RuntimeFailure;
+  /** Stable host/provider correlation ID for this turn. */
+  turnId?: string;
+  /** Exact instruction requested by the immediate host caller. */
+  hostInstruction?: string;
+  /** Exact instruction dispatched to the provider after all wrappers. */
+  providerInstruction?: string;
+  /** Exact provider response before continuity or contract cleanup. */
+  rawResponse?: string;
+  /** Effective response consumed by the host contract parser. */
+  cleanedResponse?: string;
+  providerMetadata?: {
+    provider: "claude" | "codex";
+    sessionId?: string;
+    sessionRef?: ProviderSessionRefV1;
+  };
 }
 
 /** Observability events emitted while a builder works. */
 export type BuilderEvent =
-  | { kind: "text"; text: string }
-  | { kind: "tool"; name: string; input: unknown }
+  (
+  | { kind: "text"; text: string; byteCount?: number; digest?: string }
+  | { kind: "tool"; name: string; input: unknown; inputCompleteness?: "complete" | "truncated" | "unavailable"; lifecycle?: "started" | "progress" | "completed"; callId?: string; status?: string; durationMs?: number; exitCode?: number; outputSummary?: string; outputDigest?: string; outputCompleteness?: "complete" | "truncated" | "unavailable"; rawOutputBytes?: number; completionKnown?: boolean; providerTurnId?: string }
   | { kind: "activity"; state: string; detail?: string; provider?: "claude" | "codex"; model?: string; transient?: boolean }
-  | { kind: "retry"; provider: "claude" | "codex"; reason: string; attempt?: number; maximum?: number; delayMs?: number; managedBy: "provider" | "rafi" }
-  | { kind: "turn-complete"; result: TurnResult }
+  | { kind: "retry"; provider: "claude" | "codex"; reason: string; attempt?: number; maximum?: number; delayMs?: number; managedBy: "provider" | "rafi"; retryId?: string; providerTurnId?: string }
+  | { kind: "turn-complete"; result: TurnResult; turnId?: string }
   | { kind: "session-transition"; transition: "started" | "resumed" | "compacting" | "compacted" | "fresh-fallback"; detail?: string }
   | { kind: "context-usage"; used: number; maximum?: number; percentage?: number; observedAt?: string; source?: "provider-event" | "provider-query" | "post-compact" }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }) & { eventId?: string; observedAt?: string };
 
 export interface ContextUsage {
   used: number;
@@ -171,6 +196,8 @@ export interface BuilderAdapterOptions {
   skills?: string[];
   /** Provider-native context ceiling, as a percentage of that provider's model window. */
   autoCompactThresholdPercent?: number;
+  /** Raw-adapter observability; wrapper adapters must not persist re-emitted events. */
+  observer?: RunObserver;
 }
 
 export interface BuilderAdapter {

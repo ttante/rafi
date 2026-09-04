@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { BranchRunSummary } from "./types.js";
 import type { ProviderSessionRefV1 } from "rafi-spec";
+import { WorkflowReader } from "../workflowReader.js";
 
 export interface BranchResumeSession {
   ticket: string;
@@ -28,6 +29,12 @@ export interface BranchResumeSession {
 
 export function findResumableBranchSessions(foremanDir: string): BranchResumeSession[] {
   if (!existsSync(foremanDir)) return [];
+
+  const reader = new WorkflowReader(dirname(foremanDir));
+  try {
+    const structured = reader.branchResumeSessions().filter(session => existsSync(session.worktreePath));
+    if (structured.length) return structured.sort((a, b) => a.ticket.localeCompare(b.ticket, undefined, { numeric: true }));
+  } finally { reader.close(); }
 
   const byTicket = new Map<string, BranchResumeSession>();
   const logs = readdirSync(foremanDir)

@@ -22,7 +22,7 @@ import {
   type LoadedPack,
 } from "./content.js";
 import { resolveAgentPacks, type ConditionFlags, type ResolvableManifest } from "./resolve.js";
-import { loadAgent, AGENT_ROLES } from "./agents.js";
+import { loadAgent, AGENT_ROLES, AGENTS_DIR } from "./agents.js";
 import { loadAllSkills, SKILLS_DIR } from "./skills.js";
 import type { AgentManifest, AgentRole, EffortLevel } from "rafi-spec";
 
@@ -101,14 +101,18 @@ export interface ComposedAgent {
 /** Load a role manifest and compose its full bundle (system text + metadata). */
 export function getAgent(role: string, opts: AgentComposeOptions = {}): ComposedAgent {
   const manifest = loadAgent(role);
+  const roleAppendix = role === "manager"
+    ? `\n${readFileSync(join(AGENTS_DIR, "manager-diagnostics.md"), "utf8")}`
+    : "";
   return {
     manifest,
-    system: composeAgentSystem(manifest, opts),
+    system: composeAgentSystem(manifest, opts) + roleAppendix,
     skills: manifest.skills,
     model: manifest.model ?? null,
     effort: manifest.effort ?? null,
   };
 }
+
 
 /**
  * Build the generated header comment that records which conditional pack groups

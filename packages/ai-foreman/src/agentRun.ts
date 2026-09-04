@@ -38,6 +38,8 @@ export interface RoleBuilderOptions {
   permissionConfig?: PermissionConfig;
   extraSkills?: string[];
   sandboxMode?: BuilderAdapterOptions["sandboxMode"];
+  /** Disable recovery-session persistence for isolated, non-recoverable roles such as Manager. */
+  persistSessionBindings?: boolean;
   resumeSessionId?: string;
   /** Location-scoped exact session. Raw IDs are resolved through durable project bindings or treated as legacy candidates. */
   resumeSessionRef?: ProviderSessionRefV1;
@@ -256,6 +258,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
   };
   const initial = await makeAdapter(runtime, opts.resumeSessionId, requestedResumeRef);
   const persistSessionRef = (ref: ProviderSessionRefV1): void => {
+    if (opts.persistSessionBindings === false) return;
     const bindingDb = new WorkflowDb(opts.projectDir);
     try { bindingDb.recordProviderSessionBinding(ref); }
     finally { bindingDb.close(); }
@@ -290,6 +293,7 @@ function phaseForRole(role: string): BuilderAdapterOptions["runtimePhase"] {
   if (role === "ticket-maker") return "ticket-population";
   if (role === "qa") return "qa";
   if (role === "uninstaller") return "uninstaller";
+  if (role === "manager") return "manager";
   return "builder";
 }
 
@@ -302,6 +306,7 @@ export function readRoleDefaultsForExecution(projectDir: string, role: string): 
       ? config.agent_defaults.roles[role as ConfigurableAgentRole]
       : undefined;
     if (!saved) return undefined;
+    if (role === "manager") return saved;
     if (isFullyInitializedTracker(projectDir)) return saved;
     const { make: _pendingMake, ...active } = saved;
     return active;
@@ -380,7 +385,7 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
 }
 
 function configurableRole(role: string): ConfigurableAgentRole {
-  return ["builder", "qa", "planner", "ticket-maker", "uninstaller"].includes(role)
+  return ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager"].includes(role)
     ? role as ConfigurableAgentRole
     : "builder";
 }

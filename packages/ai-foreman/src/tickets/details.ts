@@ -20,6 +20,13 @@ export interface TicketDetails {
   delivery: TicketDeliveryDetails;
 }
 
+export interface AllTicketDetails {
+  version: 1;
+  generated_at: string;
+  ticket_count: number;
+  tickets: TicketDetails[];
+}
+
 export function getTicketDetails(projectDir: string, ticketId: string, now = new Date()): TicketDetails {
   const config = loadTicketsConfig(projectDir);
   const paths = resolveTicketPaths(config, projectDir);
@@ -32,20 +39,77 @@ export function getTicketDetails(projectDir: string, ticketId: string, now = new
     const states = db.getAllStates();
     const state = states.get(ticketId) ?? pristineTicketState(ticketId, now.toISOString());
     const delivery = loadDeliveryConfig(projectDir);
-    const units = delivery?.units.filter((unit) => unit.tickets.includes(ticketId)) ?? [];
-    const unitIds = new Set(units.map((unit) => unit.id));
-    const stacks = delivery?.stacks?.filter((stack) => stack.units.some((unit) => unitIds.has(unit))) ?? [];
-    return {
+    return assembleTicketDetails(
       definition,
       state,
-      effective_blockers: resolveBlockers(definition, states),
-      validation_history: db.getValidationSnapshots(ticketId),
-      events: db.getTicketEvents(ticketId),
-      delivery: { units, stacks },
-    };
+      states,
+      db.getValidationSnapshots(ticketId),
+      db.getTicketEvents(ticketId),
+      delivery,
+    );
   } finally {
     db.close();
   }
+}
+
+export function getAllTicketDetails(projectDir: string, now = new Date()): AllTicketDetails {
+  const config = loadTicketsConfig(projectDir);
+  const paths = resolveTicketPaths(config, projectDir);
+  if (!existsSync(paths.tickets)) throw new Error("ticket tracker is not initialized; run `rafi tickets init`");
+  const definitions = (loadTickets(paths.tickets) as TicketDetails["definition"][])
+    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
+  const generatedAt = now.toISOString();
+  const db = new StateDb(paths.stateDb);
+  try {
+    const states = db.getAllStates();
+    const validations = groupByTicketId(db.getValidationSnapshots(), (snapshot) => snapshot.scope);
+    const events = groupByTicketId(db.getAllTicketEvents(), (event) => event.ticket_id);
+    const delivery = loadDeliveryConfig(projectDir);
+    const tickets = definitions.map((definition) => assembleTicketDetails(
+      definition,
+      states.get(definition.id) ?? pristineTicketState(definition.id, generatedAt),
+      states,
+      validations.get(definition.id) ?? [],
+      events.get(definition.id) ?? [],
+      delivery,
+    ));
+    return { version: 1, generated_at: generatedAt, ticket_count: tickets.length, tickets };
+  } finally {
+    db.close();
+  }
+}
+
+function assembleTicketDetails(
+  definition: TicketDetails["definition"],
+  state: TicketState,
+  states: Map<string, TicketState>,
+  validationHistory: ValidationSnapshot[],
+  events: TicketEvent[],
+  delivery: ReturnType<typeof loadDeliveryConfig>,
+): TicketDetails {
+  const units = delivery?.units.filter((unit) => unit.tickets.includes(definition.id)) ?? [];
+  const unitIds = new Set(units.map((unit) => unit.id));
+  const stacks = delivery?.stacks?.filter((stack) => stack.units.some((unit) => unitIds.has(unit))) ?? [];
+  return {
+    definition,
+    state,
+    effective_blockers: resolveBlockers(definition, states),
+    validation_history: validationHistory,
+    events,
+    delivery: { units, stacks },
+  };
+}
+
+function groupByTicketId<T>(records: T[], ticketId: (record: T) => string | null): Map<string, T[]> {
+  const grouped = new Map<string, T[]>();
+  for (const record of records) {
+    const id = ticketId(record);
+    if (id === null) continue;
+    const group = grouped.get(id);
+    if (group) group.push(record);
+    else grouped.set(id, [record]);
+  }
+  return grouped;
 }
 
 export function formatTicketDetails(details: TicketDetails): string[] {
@@ -72,6 +136,16 @@ export function formatTicketDetails(details: TicketDetails): string[] {
   lines.push(...formatField("stacks", details.delivery.stacks));
   lines.push("", "History");
   lines.push(...formatRecords(details.events));
+  return lines;
+}
+
+export function formatAllTicketDetails(details: AllTicketDetails): string[] {
+  const lines = [`All tickets (${details.ticket_count})`, `Snapshot: ${details.generated_at}`];
+  details.tickets.forEach((ticket, index) => {
+    lines.push("");
+    if (index > 0) lines.push("--------------------------------------------------------------------------------", "");
+    lines.push(...formatTicketDetails(ticket));
+  });
   return lines;
 }
 
