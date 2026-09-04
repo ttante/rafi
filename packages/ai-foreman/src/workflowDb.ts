@@ -982,6 +982,9 @@ export class WorkflowDb {
 
   private ensureColumn(table: string, column: string, definition: string): void {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((existing) => existing.name === column)) {
+      this.db.exec(`ALTER TABLE "${table}" ADD COLUMN "${column}" ${definition}`);
+    }
   }
 }
 
