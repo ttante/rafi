@@ -56,8 +56,10 @@ import { SessionUnavailableError } from "../adapters/sessionFailure.js";
 import { resolveProviderSessionAvailability } from "../sessionAvailability.js";
 import { ObservabilityStore, RunObserver } from "../observability.js";
 import { loadProjectAutonomyConfig, resolveAutonomyPolicy, resolveQaEnablement } from "../recoveryPolicy.js";
-import { loadQaRecoveryPacket, type QaRecoveryPacket } from "../qaRecovery.js";
+import { loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "../qaRecovery.js";
+import { qaDigest, type HandoffAcceptanceReceiptV2, type ProviderSessionRefV2 } from "../qaProtocolV2.js";
 import { loadSkill } from "special-agents";
+import { acceptQaRuntimeHandoff, describeQaRuntimeHandle, frozenQaRuntimeSettings, type QaRuntimeMetadata } from "../qaRuntime.js";
 
 const FOREMAN_VERSION = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
@@ -66,15 +68,36 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-function pendingQaRecoveryPacket(projectDir: string, runId: string): QaRecoveryPacket | undefined {
+function pendingQaRecoveryPacket(projectDir: string, runId: string, ticketId?: string): QaRecoveryPacket | undefined {
+  recoverPendingQaRecoveryPublications(projectDir, runId);
   const db = new WorkflowDb(projectDir);
   try {
-    const pending = db.getRun(runId)?.state.qaReportRecovery;
-    if (!pending || typeof pending !== "object") return undefined;
-    const state = pending as Record<string, unknown>;
-    if (state.pendingAction !== "operator-menu" || typeof state.packetPath !== "string" || typeof state.packetDigest !== "string") return undefined;
-    const packet = loadQaRecoveryPacket(state.packetPath);
-    if (packet.manifest.packetDigest !== state.packetDigest || packet.manifest.runId !== runId) throw new Error("saved QA recovery packet does not match its durable pending-decision state");
+    const pending = db.pendingQaRecoveryHeads(runId);
+    if (pending.length > 1 && !ticketId) throw new Error(`run ${runId} has multiple pending QA recovery packets; select one with --ticket`);
+    const selected = ticketId ? pending.find((item) => item.ticketId === ticketId) : pending[0];
+    if (!selected || selected.pendingAction === "resolved") return undefined;
+    const packet = loadQaRecoveryPacket(selected.packetPath);
+    const state = db.qaRecoveryHead(runId, packet.manifest.ticketId);
+    if (!state || packet.manifest.packetDigest !== state.packetDigest || packet.manifest.runId !== runId
+      || packet.manifest.ticketId !== state.ticketId || packet.manifest.packetId !== state.packetId
+      || packet.manifest.revision !== state.revision || packet.manifest.reviewedStateDigest !== state.reviewedStateDigest
+      || packet.manifest.correctionTurns !== state.correctionTurns || packet.manifest.pendingAction !== state.pendingAction) {
+      throw new Error("saved QA recovery packet does not match its durable recovery head");
+    }
+    const qaHead = db.qaTicketHead(runId, packet.manifest.ticketId);
+    const attempts = db.qaReviewAttempts(runId, packet.manifest.ticketId);
+    const attempt = attempts.find((item) => item.attemptId === packet.manifest.reviewAttemptId);
+    const packetMayLeadSource = qaHead.sourceStateDigest !== packet.manifest.reviewedStateDigest
+      && ["automatic-recovery", "successor-acknowledgement", "qa-correction", "qa-full-review", "operator-menu"].includes(packet.manifest.pendingAction);
+    const exactBinding = qaHead.reviewNumber === packet.manifest.reviewAttempt && attempt?.reviewNumber === packet.manifest.reviewAttempt
+      && attempt.sourceDigest === qaHead.sourceStateDigest && (qaHead.sourceStateDigest === packet.manifest.reviewedStateDigest || packetMayLeadSource);
+    const undispatchedSuccessor = attempts.find((item) => item.reviewNumber === qaHead.reviewNumber);
+    const packetMayLagOneUndispatchedReview = qaHead.state === "review-ready" && qaHead.reviewNumber === packet.manifest.reviewAttempt + 1
+      && attempt?.reviewNumber === packet.manifest.reviewAttempt && attempt.status === "interrupted" && undispatchedSuccessor?.status === "started"
+      && undispatchedSuccessor.sourceDigest === qaHead.sourceStateDigest && qaHead.sourceStateDigest === packet.manifest.reviewedStateDigest;
+    if (!exactBinding && !packetMayLagOneUndispatchedReview) {
+      throw new Error("saved QA recovery packet does not match its durable review/source binding");
+    }
     return packet;
   } finally { db.close(); }
 }
@@ -373,6 +396,8 @@ export function buildStartCommand(): Command {
     .option("-r, --resume <sessionId>", "resume a prior builder session")
     .option("--recover-run <id>", "continue an existing master recovery run ID")
     .option("--recovery-mode <mode>", "frozen build:resume mode (internal recovery receipt)")
+    .option("--recovery-decision-digest <digest>", "exact frozen build:resume decision digest (internal)")
+    .option("--qa-revision <number>", "exact durable QA protocol revision (internal recovery receipt)")
     .option("--accept-handoff <generation>", "accept a pre-staged cumulative handoff generation")
     .option("--accept-handoff-role <role>", "role owning the pre-staged handoff (builder | qa)", "builder")
     .option("--continue", "resume the most recent logged session for this project")
@@ -449,6 +474,7 @@ export function buildStartCommand(): Command {
         const allowed = ["exact-session", "fresh-with-handoff", "fresh-recovery-only", "guided-recovery"];
         if (!allowed.includes(String(opts.recoveryMode))) fail(`unknown frozen recovery mode ${String(opts.recoveryMode)}`);
         if (!recoveryRecord?.recoveryDecision || recoveryRecord.recoveryDecision.mode !== opts.recoveryMode) fail("recovery mode no longer matches the persisted decision receipt; Rafi will not substitute a path");
+        if (opts.recoveryDecisionDigest && createHash("sha256").update(JSON.stringify(recoveryRecord.recoveryDecision)).digest("hex") !== opts.recoveryDecisionDigest) fail("recovery decision digest no longer matches the persisted decision receipt");
       }
       if (opts.acceptHandoff && !recoveryRecord) fail("--accept-handoff requires --recover-run");
       let pendingHandoffGeneration = opts.acceptHandoff === undefined ? undefined : Number(opts.acceptHandoff);
@@ -789,6 +815,25 @@ export function buildStartCommand(): Command {
         ...(run.qa ? { qa: { ...run.qa, settings: acceptedRuntimeSettings(run.qa.settings, qaAgent, qaModel) } } : {}),
       });
 
+      const qaRuntimeMetadata = new WeakMap<BuilderAdapter, QaRuntimeMetadata>();
+      const resolveQaRuntimeMetadata = (qaCwd: string, settings: ResolvedAgentSettings): QaRuntimeMetadata => {
+        const bundle = loadRoleBundle("qa", { projectDir: qaCwd });
+        const effectiveRoleInstructions = `${bundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`;
+        const skills = bundle.skills.map((name) => {
+          const runtimeRoot = settings.make === "codex" ? ".codex" : ".claude";
+          const path = [join(qaCwd, runtimeRoot, "skills", name, "SKILL.md"), join(qaCwd, ".agents", "skills", name, "SKILL.md")].find(existsSync);
+          if (path) {
+            const content = `## ${name}\n${readFileSync(path, "utf8").trim()}`;
+            return { name, path, content, digest: createHash("sha256").update(content).digest("hex") };
+          }
+          const bundled = loadSkill(name);
+          if (!bundled.body?.trim()) throw new Error(`QA runtime ${settings.make} skill ${name} has no exact dispatchable content`);
+          const content = `## ${bundled.name}\n${bundled.body.trim()}`;
+          return { name, path: `special-agents:${name}`, content, digest: createHash("sha256").update(content).digest("hex") };
+        });
+        return { settings: structuredClone(settings), effectiveRoleInstructions, skills };
+      };
+
       const createBuilderForSettings = async (builderCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
         const ready = await ensureRuntimeReadyForCommand(builderCwd, settings.make, {
           label: "live Builder settings",
@@ -827,8 +872,8 @@ export function buildStartCommand(): Command {
           allowSwitch: false,
           model: settings.model === "default" ? undefined : settings.model,
         });
-        const policy = new PermissionPolicy(config.permissions, qaCwd);
-        const roleBundle = loadRoleBundle("qa", { projectDir: qaCwd });
+        const policy = new PermissionPolicy(readOnlyPermissionConfig(), qaCwd);
+        const metadata = resolveQaRuntimeMetadata(qaCwd, settings);
         const adapterOptions = {
           cwd: qaCwd,
           configRoot: cwd,
@@ -840,13 +885,18 @@ export function buildStartCommand(): Command {
           permission: createPermissionHandler(policy, log),
           effort: explicitEffort(settings.reasoning),
           fast: settings.fast,
-          systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
-          skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+          sandboxMode: "read-only" as const,
+          systemPromptAppend: metadata.effectiveRoleInstructions,
+          preloadedSkillContent: metadata.skills.map(({ name, content }) => ({ name, content })),
           autoCompactThresholdPercent: settings.auto_compact_threshold_percent,
+          allowAutoCompactionSetupTurn: false,
           observer: activeObserver,
         };
         const created = settings.make === "codex" ? new CodexAdapter(adapterOptions) : await ClaudeAdapter.create(adapterOptions);
+        if (!created.prepareSession) throw new Error(`QA runtime ${settings.make} cannot establish a durable session identity before review`);
+        await created.prepareSession();
         await prepareNativeAutoCompaction(created);
+        qaRuntimeMetadata.set(created, metadata);
         return created;
       };
 
@@ -1061,8 +1111,8 @@ export function buildStartCommand(): Command {
           allowSwitch: false,
           model: qaSettings.model === "default" ? undefined : qaSettings.model,
         });
-        const qaPolicy = new PermissionPolicy(config.permissions, qaCwd);
-        const roleBundle = loadRoleBundle("qa", { projectDir: qaCwd });
+        const qaPolicy = new PermissionPolicy(readOnlyPermissionConfig(), qaCwd);
+        const metadata = resolveQaRuntimeMetadata(qaCwd, qaSettings);
         const adapterOpts = {
           cwd: qaCwd,
           configRoot: cwd,
@@ -1077,27 +1127,35 @@ export function buildStartCommand(): Command {
           permission: createPermissionHandler(qaPolicy, log),
           effort: explicitEffort(qaSettings.reasoning),
           fast: qaSettings.fast,
-          systemPromptAppend: `${roleBundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`,
-          skills: roleBundle.skills.length > 0 ? roleBundle.skills : undefined,
+          sandboxMode: "read-only" as const,
+          systemPromptAppend: metadata.effectiveRoleInstructions,
+          preloadedSkillContent: metadata.skills.map(({ name, content }) => ({ name, content })),
           autoCompactThresholdPercent: qaSettings.auto_compact_threshold_percent,
+          allowAutoCompactionSetupTurn: false,
           observer: activeObserver,
         };
         const created = qaSettings.make === "codex"
           ? new CodexAdapter(adapterOpts)
           : await ClaudeAdapter.create(adapterOpts);
+        if (!created.prepareSession) throw new Error(`QA runtime ${qaSettings.make} cannot establish a durable session identity before review`);
+        await created.prepareSession();
         await prepareNativeAutoCompaction(created);
+        qaRuntimeMetadata.set(created, metadata);
         return created;
       };
 
       const createRecoveringQa = async (qaCwd: string, sessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
         const initial = await createRawQa(qaCwd, sessionRef);
-        return new RecoveringAdapter({
+        const recovering = new RecoveringAdapter({
           initial,
           runtime: qaAgent,
           label: "QA turn",
           observer: activeObserver,
-          enabled: Boolean(process.stdin.isTTY && process.stdout.isTTY),
-          allowSwitch: !sessionRef,
+          // QA retries and provider switches must cross the explicit durable
+          // QA recovery boundary; an adapter-local replay would reuse one turn
+          // intent for two different provider executions.
+          enabled: false,
+          allowSwitch: false,
           recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
             const nextReady = await ensureRuntimeReadyForCommand(qaCwd, nextRuntime, {
               label: "QA recovery",
@@ -1128,11 +1186,16 @@ export function buildStartCommand(): Command {
             return createRawQa(qaCwd, resumeRef);
           },
         });
+        const metadata = qaRuntimeMetadata.get(initial);
+        if (metadata) qaRuntimeMetadata.set(recovering, metadata);
+        return recovering;
       };
-      const decorateQa = (adapter: BuilderAdapter, qaCwd: string, sessionId?: string, settingsOverride?: ResolvedAgentSettings): BuilderAdapter => {
-        const qaSettings = settingsOverride ?? resolvedContinuitySettings("qa");
+      const decorateQa = (adapter: BuilderAdapter, qaCwd: string, sessionId?: string): BuilderAdapter => {
+        const metadata = qaRuntimeMetadata.get(adapter);
+        const qaSettings = frozenQaRuntimeSettings(adapter, metadata);
         const continuous = activeContinuityRunId ? new ContinuityAdapter({
           adapter, projectDir: cwd, runId: activeContinuityRunId, role: "qa", settings: qaSettings,
+          durableSingleTurn: true,
           authoritativeStateRevision: () => readAgentDefaults(cwd).revision ?? settingsRevision,
           createSuccessor: () => createRecoveringQa(qaCwd),
           replaceRecoveryLeaseAfterCheckpoint: String(opts.recoveryMode ?? "") === "fresh-recovery-only" && recoveryRecord?.recoveryDecision?.role === "qa",
@@ -1166,7 +1229,7 @@ export function buildStartCommand(): Command {
             return transfer.successor;
           },
         }) : adapter;
-        return new RoleStatusAdapter(continuous, (active) => liveStatusReporter?.updateState({
+        const decorated = new RoleStatusAdapter(continuous, (active) => liveStatusReporter?.updateState({
           role: "qa", provider: active.agent, model: qaSettings.model, reasoning: qaSettings.reasoning, fast: qaSettings.fast,
           phase: "QA review session", sessionTransition: sessionId ? "resumed QA session" : "QA session", adapter: active,
           settingsRevision: qaSettings.settings_revision, displaySessionCost: qaSettings.display_session_cost,
@@ -1182,6 +1245,51 @@ export function buildStartCommand(): Command {
             handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.handoffs(activeContinuityRunId).at(-1)?.generation ?? 0 : 0; } finally { db.close(); } },
           });
         });
+        qaRuntimeMetadata.set(continuous, metadata!); qaRuntimeMetadata.set(decorated, metadata!);
+        return decorated;
+      };
+
+      const describeQaHandle = (adapter: BuilderAdapter, _qaCwd: string, handoffReceipt: QaSessionHandle["handoffReceipt"]): QaSessionHandle =>
+        describeQaRuntimeHandle(adapter, qaRuntimeMetadata.get(adapter), handoffReceipt);
+
+      const qaV2SessionRef = (ref: ProviderSessionRefV1): ProviderSessionRefV2 => {
+        if (ref.role !== "qa" || ref.stream !== "qa" || !ref.sessionId || !ref.cwd || !ref.configRoot
+          || /^(?:unavailable|unknown)$/i.test(ref.sessionId.trim())) throw new Error("QA handoff receipt has an invalid scoped session identity");
+        return {
+          version: 2, provider: ref.provider, sessionId: ref.sessionId, role: "qa", stream: "qa",
+          generation: ref.generation, cwd: ref.cwd, configRoot: ref.configRoot,
+          createdAt: ref.createdAt, validatedAt: ref.validatedAt ?? new Date().toISOString(),
+        };
+      };
+      const qaV2HandoffReceipt = (
+        receipt: import("rafi-spec").HandoffAcceptanceReceiptV1,
+        recovery: { runId: string; ticketId: string; packetDigest: string; reviewedStateDigest: string },
+        confinementDigest: string,
+      ): HandoffAcceptanceReceiptV2 => {
+        if (!receipt.predecessorSessionRef) throw new Error("QA recovery handoff has no scoped predecessor identity");
+        const receiptDb = new WorkflowDb(cwd);
+        try {
+          const head = receiptDb.qaTicketHead(recovery.runId, recovery.ticketId);
+          if (!head.reviewBasisDigest || !head.sourceStateDigest) throw new Error("QA recovery handoff has no durable predecessor review basis/source state");
+          const resources = receipt.resources.map((resource) => {
+            if (!resource.path || !resource.purpose || resource.bytes === undefined || !resource.mediaType) throw new Error(`QA recovery handoff resource ${resource.label} lacks complete inventory metadata`);
+            return { label: resource.label, digest: resource.digest, authoritative: resource.authoritative,
+              requiredForRecovery: resource.requiredForRecovery ?? false, mediaType: resource.mediaType,
+              path: resource.path, purpose: resource.purpose, bytes: resource.bytes };
+          });
+          const base = {
+            version: 2 as const, runId: recovery.runId, ticketId: recovery.ticketId, qaRevision: head.revision,
+            sourceStateDigest: recovery.reviewedStateDigest, predecessorSourceStateDigest: head.sourceStateDigest,
+            reviewBasisDigest: head.reviewBasisDigest, requiresFullReview: true, confinementDigest,
+            predecessor: qaV2SessionRef(receipt.predecessorSessionRef), successor: qaV2SessionRef(receipt.successorSessionRef),
+            manifestDigest: receipt.manifestDigest, continuityCheckpointDigest: receipt.continuityCheckpointDigest,
+            acceptanceCheckpointDigest: receipt.acceptanceCheckpointDigest, packetDigest: recovery.packetDigest,
+            inventoryDigest: qaDigest("handoff-inventory", resources), resources, acceptedAt: receipt.acceptedAt,
+          };
+          const completed: HandoffAcceptanceReceiptV2 = { ...base, operationId: qaDigest("qa-handoff-operation", base) };
+          receiptDb.recordQaHandoffReceipt(completed);
+          return completed;
+        } finally { receiptDb.close(); }
       };
 
       const createQa = async (qaCwd: string, sessionId?: string): Promise<QaSessionHandle> => {
@@ -1192,7 +1300,7 @@ export function buildStartCommand(): Command {
         void sessionId;
         let adapter = await createRecoveringQa(qaCwd, effectiveSessionId);
         let explicitRecoveryAccepted = false;
-        let handoffReceipt: unknown = { unavailable: "no predecessor handoff was required" };
+        let handoffReceipt: QaSessionHandle["handoffReceipt"] = { kind: "initial" };
         if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "qa" && activeContinuityRunId === recoveryRecord?.runId) {
           const service = new HandoffService(cwd);
           const staged = service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration);
@@ -1202,10 +1310,17 @@ export function buildStartCommand(): Command {
             (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(resolvedContinuitySettings("qa"), runtime)),
             handoffRecoveryOptions("qa"),
           );
+          if (!accepted.acceptanceReceipt) throw new Error("QA recovery handoff did not produce a scoped acceptance receipt");
           adapter = accepted.successor;
           pendingHandoffGeneration = undefined;
           explicitRecoveryAccepted = true;
-          handoffReceipt = { generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest };
+          const packet = pendingQaRecoveryPacket(cwd, recoveryRecord!.runId, typeof opts.ticket === "string" ? opts.ticket : undefined);
+          if (!packet) throw new Error("accepted QA recovery handoff has no current durable packet");
+          const confinement = describeQaHandle(adapter, qaCwd, { kind: "initial" }).confinement;
+          handoffReceipt = { kind: "accepted", receipt: qaV2HandoffReceipt(accepted.acceptanceReceipt, {
+            runId: packet.manifest.runId, ticketId: packet.manifest.ticketId, packetDigest: packet.manifest.packetDigest,
+            reviewedStateDigest: packet.manifest.reviewedStateDigest,
+          }, confinement.digest) };
           log.write("recovery-handoff-accepted", { role: "qa", generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest });
         }
         // A new disposable QA worktree always means a new provider session.
@@ -1242,8 +1357,11 @@ export function buildStartCommand(): Command {
               (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(resolvedContinuitySettings("qa"), runtime)),
               handoffRecoveryOptions("qa"),
             );
+            if (!accepted.acceptanceReceipt) throw new Error("QA snapshot handoff did not produce a scoped acceptance receipt");
             adapter = accepted.successor;
-            handoffReceipt = { generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest };
+            // This continuity transfer precedes construction of a ticket/source
+            // review basis, so it is not a QA-report recovery receipt.
+            handoffReceipt = { kind: "initial" };
             log.write("handoff-transfer", {
               role: "qa", reason: staged.manifest.reason, generation: accepted.manifest.generation,
               predecessorSessionId: staged.manifest.predecessorSessionId, successorSessionId: accepted.successorSessionId,
@@ -1252,33 +1370,7 @@ export function buildStartCommand(): Command {
           }
         }
         const decorated = decorateQa(adapter, qaCwd, effectiveSessionId);
-        const settings = resolvedContinuitySettings("qa");
-        const bundle = loadRoleBundle("qa", { projectDir: qaCwd });
-        const effectiveRoleInstructions = `${bundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`;
-        return {
-          adapter: decorated,
-          sessionIdentity: decorated.sessionRef?.() ?? decorated.sessionId(),
-          effectiveRoleInstructions,
-          runtimeContext: settings,
-          skills: bundle.skills.map((name) => {
-            const path = [join(qaCwd, ".agents", "skills", name, "SKILL.md"), join(qaCwd, ".claude", "skills", name, "SKILL.md"), join(qaCwd, ".codex", "skills", name, "SKILL.md")].find(existsSync);
-            if (path) {
-              const dispatchedContent = `## ${name}\n${readFileSync(path, "utf8").trim()}`;
-              return { name, path, digest: createHash("sha256").update(dispatchedContent).digest("hex") };
-            }
-            if (settings.make === "codex") {
-              try {
-                const bundled = loadSkill(name);
-                if (bundled.body?.trim()) {
-                  const dispatchedContent = `## ${bundled.name}\n${bundled.body.trim()}`;
-                  return { name, path: `special-agents:${name}`, digest: createHash("sha256").update(dispatchedContent).digest("hex") };
-                }
-              } catch { /* explicit unavailable result below */ }
-            }
-            return { name, digest: "unavailable" as const, reason: "runtime skill name had no resolvable loaded skill content" };
-          }),
-          handoffReceipt,
-        };
+        return describeQaHandle(decorated, qaCwd, handoffReceipt);
       };
 
       const applyQaSettingsBoundary = async (
@@ -1316,18 +1408,20 @@ export function buildStartCommand(): Command {
           acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest,
         });
         await input.adapter.close().catch(() => {});
-        return decorateQa(transfer.successor, qaCwd, undefined, input.next);
+        return decorateQa(transfer.successor, qaCwd);
       };
 
       const qaSessionBoundary = async (
-        adapter: BuilderAdapter,
+        handle: QaSessionHandle,
         frozenAction: string,
         strategy: SessionStrategy,
         qaCwd: string,
         recovery?: import("../qaReview.js").QaSessionBoundaryRecovery,
-      ): Promise<BuilderAdapter> => {
+      ): Promise<import("../qaReview.js").QaSessionBoundaryResult> => {
+        const adapter = handle.adapter;
         if (!activeContinuityRunId) throw new Error("QA session boundary requires an active durable run");
-        const qaSettings = resolvedContinuitySettings("qa");
+        const qaSettings = frozenQaRuntimeSettings(adapter, qaRuntimeMetadata.get(adapter));
+        let acceptedBoundary: import("../qaReview.js").QaSessionBoundaryResult | undefined;
         const controller = RoleSessionController.managed({
           projectDir: cwd,
           runId: activeContinuityRunId,
@@ -1336,11 +1430,14 @@ export function buildStartCommand(): Command {
           historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, recoveryRecord, activeContinuityRunId, "qa"),
           readSettings: () => liveRoleSettings("qa", qaSettings),
           settingsBoundary: (input) => applyQaSettingsBoundary(activeContinuityRunId!, qaCwd, input),
-          settingsAdopted: (settings, active) => liveStatusReporter?.updateState({
-            role: "qa", provider: active.agent, model: settings.model, reasoning: settings.reasoning, fast: settings.fast,
-            adapter: active, settingsRevision: settings.settings_revision, displaySessionCost: settings.display_session_cost,
-            sessionTransition: "adopted live settings",
-          }),
+          settingsAdopted: (_settings, active) => {
+            const actual = frozenQaRuntimeSettings(active, qaRuntimeMetadata.get(active));
+            liveStatusReporter?.updateState({
+              role: "qa", provider: active.agent, model: actual.model, reasoning: actual.reasoning, fast: actual.fast,
+              adapter: active, settingsRevision: actual.settings_revision, displaySessionCost: actual.display_session_cost,
+              sessionTransition: "adopted live settings",
+            });
+          },
           report: (event) => {
             currentActivity()?.update(event.kind, event.detail, { provider: qaSettings.make, model: qaSettings.model });
           },
@@ -1357,21 +1454,27 @@ export function buildStartCommand(): Command {
                 cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
               } } : {}),
               compactionCount, compactMaximum: settings.compact_maximum ?? 10,
-              resources: [{ label: "frozen-qa-action", content: frozenAction, authoritative: true }, ...(recovery ? [
-                { label: "qa-recovery-packet", digest: recovery.packetDigest, authoritative: true, requiredForRecovery: true, mediaType: "application/vnd.rafi.qa-recovery+json", path: recovery.packetPath },
-                { label: "qa-reviewed-state", digest: recovery.reviewedStateDigest, authoritative: true, requiredForRecovery: true, mediaType: "application/vnd.rafi.reviewed-state", path: "reviewed-state/" },
-              ] : [])],
+              resources: [{ label: "frozen-qa-action", content: frozenAction, authoritative: true, purpose: "Frozen QA action across the session boundary" }, ...(recovery ? recovery.resources.map((resource) => ({
+                label: resource.label, digest: resource.digest, authoritative: true, requiredForRecovery: resource.requiredForRecovery,
+                mediaType: resource.mediaType, path: resource.path, purpose: resource.purpose, bytes: resource.bytes,
+              })) : [])],
             }, (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(settings, runtime)), handoffRecoveryOptions("qa"));
+            if (!transfer.acceptanceReceipt || !recovery) throw new Error("QA recovery boundary did not produce a complete receipt context");
+            const successor = decorateQa(transfer.successor, qaCwd);
+            acceptedBoundary = acceptQaRuntimeHandoff(describeQaHandle(successor, qaCwd, { kind: "initial" }),
+              (confinementDigest) => qaV2HandoffReceipt(transfer.acceptanceReceipt!, recovery, confinementDigest));
             log.write("handoff-transfer", { role: "qa", generation: transfer.manifest.generation, predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId, acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest });
             await predecessor.close().catch(() => {});
-            return decorateQa(transfer.successor, qaCwd, undefined, settings);
+            return successor;
           },
         });
-        return (await controller.atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter;
+        const next = (await controller.atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter;
+        if (!acceptedBoundary || acceptedBoundary.handle.adapter !== next) throw new Error("QA recovery boundary did not produce a validated acceptance receipt for its active successor");
+        return acceptedBoundary;
       };
       const observeQaNativeCompactions = async (adapter: BuilderAdapter): Promise<void> => {
         if (!activeContinuityRunId) return;
-        const qaSettings = resolvedContinuitySettings("qa");
+        const qaSettings = frozenQaRuntimeSettings(adapter, qaRuntimeMetadata.get(adapter));
         const controller = new ThresholdCompactionController({
           projectDir: cwd,
           runId: activeContinuityRunId,
@@ -1605,7 +1708,7 @@ export function buildStartCommand(): Command {
           compact_maximum: roleDefaults.qa?.compact_maximum ?? 10,
         };
         const firstResumeRef = plan.nodes[0] ? resumeSessionByTicket.get(plan.nodes[0].ticket.id)?.sessionRef : undefined;
-        let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null }) : createBuildRun({
+        let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
           runId: invocationRunId,
           tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
           repositoryRoot: cwd, branchMode: branchPresentation.allocationMode, baseRef: plan.baseRef, builder: capturedBranchBuilder, qa: capturedBranchQa,
@@ -1613,7 +1716,30 @@ export function buildStartCommand(): Command {
           runDecisions: { workMode: "branch-per-ticket", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBranchBuilder.auto_compact_threshold_percent ?? 50, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
         });
         activeContinuityRunId = masterRun.runId;
-        const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, masterRun.runId) : undefined;
+        const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, masterRun.runId, typeof opts.ticket === "string" ? opts.ticket : undefined) : undefined;
+        let qaProtocolResumeTicket: string | undefined;
+        if (recoveryRecord && !qaResumedRecovery) {
+          const protocolDb = new WorkflowDb(cwd);
+          try {
+            const pendingHeads = protocolDb.pendingQaTicketHeads(masterRun.runId);
+            if (pendingHeads.length > 1 && !opts.ticket) fail(`run ${masterRun.runId} has multiple pending QA tickets; select one with --ticket`);
+            const requested = typeof opts.ticket === "string" ? opts.ticket : undefined;
+            const head = requested ? pendingHeads.find((item) => item.ticketId === requested) : pendingHeads[0];
+            if (pendingHeads.length && requested && !head) fail(`--ticket ${requested} conflicts with the pending QA protocol ticket${pendingHeads.length === 1 ? ` ${pendingHeads[0].ticketId}` : "s"}`);
+            if (head && !["completed", "waived"].includes(head.state)) {
+              if (opts.qaRevision === undefined || !/^\d+$/.test(String(opts.qaRevision)) || Number(opts.qaRevision) !== head.revision) fail(`pending QA protocol requires exact --qa-revision ${head.revision}`);
+              qaProtocolResumeTicket = head.ticketId;
+            }
+          } finally { protocolDb.close(); }
+        }
+        if (qaResumedRecovery && String(opts.ticket ?? qaResumedRecovery.manifest.ticketId) !== qaResumedRecovery.manifest.ticketId) fail(`--ticket ${String(opts.ticket)} conflicts with pending QA recovery ticket ${qaResumedRecovery.manifest.ticketId}`);
+        if (qaResumedRecovery) {
+          const protocolDb = new WorkflowDb(cwd);
+          try {
+            const revision = protocolDb.qaTicketHead(masterRun.runId, qaResumedRecovery.manifest.ticketId).revision;
+            if (opts.qaRevision === undefined || !/^\d+$/.test(String(opts.qaRevision)) || Number(opts.qaRevision) !== revision) fail(`pending QA protocol requires exact --qa-revision ${revision}`);
+          } finally { protocolDb.close(); }
+        }
         activeObserver?.store.attachExecutionLease(activeObserver.executionId, readCurrentWorkflowLease(cwd)?.generation);
         const branchContextControllers = new Map<string, RoleSessionController>();
         const branchContextController = (worktreePath: string): RoleSessionController => {
@@ -1671,6 +1797,7 @@ export function buildStartCommand(): Command {
           qaContinuityManaged: true,
           qaReportRecovery,
           qaResumedRecovery,
+          qaProtocolResumeTicket,
           qaMaxFixAttempts: frozenPolicy.limits.builderQaFixesPerTicket,
           observer: activeObserver,
           createPr: branchDefaults.createReview,
@@ -1849,7 +1976,7 @@ export function buildStartCommand(): Command {
         compact_maximum: roleDefaults.builder?.compact_maximum ?? 10,
       };
       const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false, auto_compact_threshold_percent: roleDefaults.qa?.auto_compact_threshold_percent ?? 50, compact_maximum: roleDefaults.qa?.compact_maximum ?? 10, settings_revision: settingsRevision };
-      let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null }) : createBuildRun({
+      let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
         runId: invocationRunId,
         tickets: [], repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
         frozenPolicy, autonomyProfile, qaEnabled,
@@ -1857,7 +1984,35 @@ export function buildStartCommand(): Command {
       });
       activeObserver?.store.attachExecutionLease(activeObserver.executionId, readCurrentWorkflowLease(cwd)?.generation);
       activeContinuityRunId = buildRun.runId;
-      const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, buildRun.runId) : undefined;
+      const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, buildRun.runId, typeof opts.ticket === "string" ? opts.ticket : undefined) : undefined;
+      let qaFinalizationTicket: string | undefined;
+      let qaProtocolResumeTicket: string | undefined;
+      if (recoveryRecord && !qaResumedRecovery) {
+        const finalizationDb = new WorkflowDb(cwd);
+        try {
+          const pendingHeads = finalizationDb.pendingQaTicketHeads(buildRun.runId);
+          if (pendingHeads.length > 1 && !opts.ticket) fail(`run ${buildRun.runId} has multiple pending QA tickets; select one with --ticket`);
+          const requested = typeof opts.ticket === "string" ? opts.ticket : undefined;
+          const head = requested ? pendingHeads.find((item) => item.ticketId === requested) : pendingHeads[0];
+          if (pendingHeads.length && requested && !head) fail(`--ticket ${requested} conflicts with the pending QA protocol ticket${pendingHeads.length === 1 ? ` ${pendingHeads[0].ticketId}` : "s"}`);
+          if (head) {
+            if (head.state === "finalizing") qaFinalizationTicket = head.ticketId;
+            else if (!["idle", "completed", "waived"].includes(head.state)) qaProtocolResumeTicket = head.ticketId;
+            if ((qaFinalizationTicket || qaProtocolResumeTicket)
+              && (opts.qaRevision === undefined || !/^\d+$/.test(String(opts.qaRevision)) || Number(opts.qaRevision) !== head.revision)) {
+              fail(`pending QA protocol requires exact --qa-revision ${head.revision}`);
+            }
+          }
+        } finally { finalizationDb.close(); }
+      }
+      if (qaResumedRecovery && String(opts.ticket ?? qaResumedRecovery.manifest.ticketId) !== qaResumedRecovery.manifest.ticketId) fail(`--ticket ${String(opts.ticket)} conflicts with pending QA recovery ticket ${qaResumedRecovery.manifest.ticketId}`);
+      if (qaResumedRecovery) {
+        const qaDb = new WorkflowDb(cwd);
+        try {
+          const currentRevision = qaDb.qaTicketHead(buildRun.runId, qaResumedRecovery.manifest.ticketId).revision;
+          if (opts.qaRevision === undefined || !/^\d+$/.test(String(opts.qaRevision)) || Number(opts.qaRevision) !== currentRevision) fail(`pending QA recovery requires exact --qa-revision ${currentRevision}`);
+        } finally { qaDb.close(); }
+      }
       const heartbeat = setInterval(() => { buildRun = heartbeatBuildRun(cwd, buildRun); }, 10_000);
       heartbeat.unref();
       const checkpointSignal = (): void => {
@@ -1940,6 +2095,7 @@ export function buildStartCommand(): Command {
         true,
         qaReportRecovery,
         qaResumedRecovery,
+        buildRun.runId,
       );
       activeBuilderForStatus = () => foreman.builderAdapter();
       const statusReporter = liveStatusReporter = new AgentStatusReporter({
@@ -1974,6 +2130,45 @@ export function buildStartCommand(): Command {
       const viewer = printEvents(builder.events());
 
       try {
+        if (qaFinalizationTicket) {
+          console.log(`ai-foreman: reconciling the interrupted QA finalization for ${qaFinalizationTicket}; Builder dispatch is disabled.\n`);
+          await foreman.completePendingQaFinalization(qaFinalizationTicket);
+          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "qa-finalization-complete", { status: "recoverable", currentTicket: qaFinalizationTicket }), "recoverable");
+          clearInterval(heartbeat); statusReporter.stop(); await foreman.close(); await viewer;
+          activeObserver?.finish(buildRun.status, observationSummaryMetadata(cwd, buildRun, qaEnabled, capturedBuilder.make));
+          observabilityStore?.closeLogFile(logPath, buildRun.status); observabilityStore?.close(); activeObserver = undefined;
+          process.off("exit", finishObservationOnExit);
+          console.log(`foreman: reconciled QA finalization for ${qaFinalizationTicket}`);
+          process.exit(0);
+        }
+        if (qaResumedRecovery || qaProtocolResumeTicket) {
+          const ticketId = qaResumedRecovery?.manifest.ticketId ?? qaProtocolResumeTicket!;
+          console.log(`ai-foreman: resuming the exact QA boundary for ${ticketId}; Builder preflight and work dispatch are disabled.\n`);
+          buildRun = checkpointBuildRun(cwd, buildRun, "qa-recovery-before-dispatch", { currentTicket: ticketId });
+          const qa = await (activeObserver
+            ? activeObserver.span("qa_recovery", "Exact QA-only recovery", () => foreman.completePendingQaRecovery(ticketId))
+            : foreman.completePendingQaRecovery(ticketId));
+          if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted`);
+          if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
+          if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
+          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, qa.outcome === "passed" || qa.outcome === "waived" ? "qa-recovery-complete" : "qa-recovery-paused", {
+            status: "recoverable", currentTicket: ticketId,
+          }), "recoverable");
+          clearInterval(heartbeat);
+          statusReporter.stop();
+          await foreman.close();
+          await viewer;
+          activeObserver?.finish(buildRun.status, observationSummaryMetadata(cwd, buildRun, qaEnabled, capturedBuilder.make));
+          observabilityStore?.closeLogFile(logPath, buildRun.status);
+          observabilityStore?.enforceLimits();
+          observabilityStore?.maintainLogs(cwd);
+          observabilityStore?.close();
+          activeObserver = undefined;
+          process.off("exit", finishObservationOnExit);
+          console.log(`foreman: exact QA recovery for ${ticketId} — ${qa.outcome}`);
+          if (qa.detail) console.log(`foreman: ${qa.detail}`);
+          process.exit(qa.outcome === "passed" || qa.outcome === "waived" ? 0 : 2);
+        }
         console.log("ai-foreman: asking builder to plan the next tickets or steps...\n");
         buildRun = checkpointBuildRun(cwd, buildRun, "before-preflight");
         await (activeObserver ? activeObserver.span("preflight", "Builder preflight", () => foreman.runPreflight(steps, ticketsContent, preferredTicket)) : foreman.runPreflight(steps, ticketsContent, preferredTicket));
@@ -2280,7 +2475,7 @@ function createQaNonconvergenceHandler(projectDir: string, noninteractive: boole
 }
 
 function createQaReportRecoveryHandler(noninteractive: boolean, observer?: () => RunObserver | undefined): QaReportRecoveryHandler {
-  return async ({ packet, originalIssues, liveSession, contextUsage }) => {
+  return async ({ packet, liveSession, contextUsage }) => {
     if (noninteractive || !process.stdin.isTTY || !process.stdout.isTTY) {
       console.error(`foreman: QA report recovery requires input; saved packet ${packet.directory}`);
       console.error(`foreman: resume with the run ID recorded in ${join(packet.directory, "manifest.json")}`);
@@ -2289,24 +2484,20 @@ function createQaReportRecoveryHandler(noninteractive: boolean, observer?: () =>
     const choice = await withObservedUserWait(observer?.(), "QA report recovery decision", () => select({
       message: "QA report recovery:",
       options: [
-        { value: "fresh", label: "Try another fresh QA." },
-        { value: "plain", label: "Use plain issues fallback.", hint: originalIssues ? originalIssues.slice(0, 120) : "Unavailable: original issues synopsis was empty" },
-        { value: "manual", label: "Manually fix saved JSON.", hint: join(packet.directory, "report.json") },
-        { value: "guidance", label: "Give QA specific instructions." },
+        { value: "fresh", label: "Run complete fresh QA." },
+        { value: "manual", label: "Inspect saved JSON.", hint: join(packet.directory, "report.json") },
+        { value: "guidance", label: "Give QA fresh-review instructions." },
         { value: "pause", label: "Pause." },
       ],
     }));
     if (isCancel(choice) || choice === "pause") return { action: "pause" };
     if (choice === "fresh") return { action: "fresh" };
-    if (choice === "plain") return { action: "plain" };
     if (choice === "manual") return { action: "manual" };
     console.log(`foreman: current QA context usage: ${JSON.stringify(contextUsage).slice(0, 500)}`);
     const guidance = await withObservedUserWait(observer?.(), "QA recovery guidance", () => text({ message: "Specific QA report-recovery instructions:" }));
     if (isCancel(guidance) || !String(guidance).trim()) return { action: "pause" };
-    const route = await withObservedUserWait(observer?.(), "QA recovery session choice", () => select<"current" | "compact" | "fresh">({ message: "Use which QA session route?", options: liveSession ? [
-      { value: "current", label: "Current session" }, { value: "compact", label: "Compact current session" }, { value: "fresh", label: "Fresh validated handoff" },
-    ] : [{ value: "fresh", label: "Fresh validated handoff (resumed recovery)" }] }));
-    return isCancel(route) ? { action: "pause" } : { action: "guidance", instructions: String(guidance), route };
+    void liveSession;
+    return { action: "guidance", instructions: String(guidance), route: "fresh" };
   };
 }
 

@@ -1,9 +1,12 @@
-import type { QaFailureReportV1 } from "./types.js";
-import { validateQaFailureReport, type ValidationResult } from "./validate.js";
+import type { BuilderQaRemediationReportV2, QaFailureReportV1, QaFindingRefV2 } from "./types.js";
+import { validateBuilderQaRemediationReport, validateQaFailureReport, type ValidationResult } from "./validate.js";
 
 export const QA_FAILURE_REPORT_START = "RAFI_QA_FAILURE_REPORT_START";
 export const QA_FAILURE_REPORT_END = "RAFI_QA_FAILURE_REPORT_END";
 export const QA_FAILURE_REPORT_MAX_BYTES = 64 * 1024;
+export const BUILDER_QA_REMEDIATION_START = "RAFI_BUILDER_QA_REMEDIATION_START";
+export const BUILDER_QA_REMEDIATION_END = "RAFI_BUILDER_QA_REMEDIATION_END";
+export const BUILDER_QA_REMEDIATION_MAX_BYTES = 128 * 1024;
 
 export interface ParsedQaFailureReport {
   report?: QaFailureReportV1;
@@ -20,28 +23,98 @@ export interface QaResponseContract {
   rawReportJson?: string;
 }
 
+export interface ParsedBuilderQaRemediation {
+  report?: BuilderQaRemediationReportV2;
+  rawJson?: string;
+  validation: ValidationResult;
+}
+
+export interface BuilderQaRemediationContract {
+  valid: boolean;
+  errors: string[];
+  status: "done" | "blocked" | "needs_input" | "qa_pass" | "qa_fail" | "unknown";
+  fields: Record<string, string>;
+  report?: BuilderQaRemediationReportV2;
+  rawReportJson?: string;
+}
+
 /** Parse and strictly validate the JSON body of one QA report envelope. */
 export function parseQaFailureReport(input: string): ParsedQaFailureReport {
+  // Enforce the boundary on the exact provider payload before trimming or
+  // removing optional Markdown fences. A fence is transport syntax, not free
+  // bytes outside the protocol limit.
+  if (Buffer.byteLength(input, "utf8") > QA_FAILURE_REPORT_MAX_BYTES) return invalid(`serialized report exceeds ${QA_FAILURE_REPORT_MAX_BYTES} bytes`);
   const raw = unwrapFence(input);
   if (raw instanceof Error) return invalid(raw.message);
-  if (Buffer.byteLength(raw, "utf8") > QA_FAILURE_REPORT_MAX_BYTES) return invalid(`serialized report exceeds ${QA_FAILURE_REPORT_MAX_BYTES} bytes`);
   let value: unknown;
-  let objectKeys: Map<string, string[]>;
   try {
     const scanned = scanJson(raw);
     value = scanned.value;
-    objectKeys = scanned.objectKeys;
   } catch (error) {
     return invalid(`invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const orderErrors = validateFieldOrder(objectKeys);
   const validation = validateQaFailureReport(value);
-  const errors = [...orderErrors, ...validation.errors];
+  const errors = validation.errors;
   return errors.length
     ? { rawJson: raw, validation: { valid: false, errors } }
     : { rawJson: raw, report: value as QaFailureReportV1, validation: { valid: true, errors: [] } };
 }
 export const parseQaFailureReportV1 = parseQaFailureReport;
+
+/** Parse and strictly validate the JSON body of one Builder remediation envelope. */
+export function parseBuilderQaRemediationReport(input: string): ParsedBuilderQaRemediation {
+  if (Buffer.byteLength(input, "utf8") > BUILDER_QA_REMEDIATION_MAX_BYTES) return invalidBuilder(`serialized Builder QA remediation report exceeds ${BUILDER_QA_REMEDIATION_MAX_BYTES} bytes`);
+  const raw = unwrapFence(input);
+  if (raw instanceof Error) return invalidBuilder(raw.message);
+  let value: unknown;
+  try {
+    const scanned = scanJson(raw);
+    value = scanned.value;
+  } catch (error) {
+    return invalidBuilder(`invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const validation = validateBuilderQaRemediationReport(value);
+  return validation.valid
+    ? { rawJson: raw, report: value as BuilderQaRemediationReportV2, validation: { valid: true, errors: [] } }
+    : { rawJson: raw, validation };
+}
+export const parseBuilderQaRemediationReportV2 = parseBuilderQaRemediationReport;
+
+export function parseBuilderQaRemediationContract(text: string, expected?: { handoffId?: string; findings?: QaFindingRefV2[] }): BuilderQaRemediationContract {
+  const lines = text.split(/\r?\n/);
+  const start = indexes(lines, BUILDER_QA_REMEDIATION_START);
+  const end = indexes(lines, BUILDER_QA_REMEDIATION_END);
+  const statusLines = lines.map((line, index) => ({ line: line.trim(), index }))
+    .filter(({ line }) => /^STEP_STATUS:/.test(line));
+  const errors: string[] = [];
+  if (statusLines.length !== 1) errors.push(statusLines.length ? "multiple STEP_STATUS markers" : "missing STEP_STATUS marker");
+  const finalNonempty = lines.map((line, index) => ({ line: line.trim(), index })).filter(({ line }) => line).at(-1);
+  const statusLine = statusLines.at(-1);
+  if (statusLine && finalNonempty?.index !== statusLine.index) errors.push("STEP_STATUS marker must be the final non-empty line");
+  const parsedStatus = statusLine ? parseBuilderStatus(statusLine.line) : { status: "unknown" as const, fields: {}, error: undefined };
+  if (parsedStatus.error) errors.push(parsedStatus.error);
+  if (start.length !== end.length || start.length > 1) errors.push("Builder remediation requires exactly one ordered start/end marker pair");
+  if (start.length === 1 && end.length === 1 && start[0]! >= end[0]!) errors.push("Builder remediation markers are out of order");
+  if (end[0] !== undefined && statusLine && end[0] >= statusLine.index) errors.push("Builder remediation envelope must precede STEP_STATUS");
+  const firstNonempty = lines.findIndex((line) => line.trim());
+  if (start[0] !== undefined && firstNonempty !== start[0]) errors.push("Builder remediation envelope must be the first non-empty content");
+
+  let report: BuilderQaRemediationReportV2 | undefined;
+  let rawReportJson: string | undefined;
+  if (start.length === 1 && end.length === 1 && start[0]! < end[0]!) {
+    const parsed = parseBuilderQaRemediationReport(lines.slice(start[0]! + 1, end[0]).join("\n"));
+    errors.push(...parsed.validation.errors);
+    report = parsed.report;
+    rawReportJson = parsed.rawJson;
+  }
+  if (parsedStatus.status === "done" && start.length !== 1) errors.push("done requires one valid Builder remediation report");
+  if (parsedStatus.status !== "done" && start.length) errors.push(`${parsedStatus.status} must not include a Builder remediation report`);
+  if (parsedStatus.status === "done" && !report && start.length === 1) errors.push("done Builder remediation report is invalid");
+  if (report && expected?.handoffId && report.handoff_id !== expected.handoffId) errors.push(`handoff_id ${report.handoff_id} does not match expected ${expected.handoffId}`);
+  if (report && expected?.findings) errors.push(...validateBuilderFindingCoverage(report, expected.findings));
+
+  return { valid: errors.length === 0, errors: [...new Set(errors)], status: parsedStatus.status, fields: parsedStatus.fields, report, rawReportJson };
+}
 
 /** Validate the envelope and final status as a single, contradiction-free response. */
 export function parseQaResponseContract(text: string, options: { continuityRequired?: boolean } = {}): QaResponseContract {
@@ -86,15 +159,23 @@ function invalid(message: string): ParsedQaFailureReport {
   return { validation: { valid: false, errors: [message] } };
 }
 
+function invalidBuilder(message: string): ParsedBuilderQaRemediation {
+  return { validation: { valid: false, errors: [message] } };
+}
+
 function indexes(lines: string[], marker: string): number[] {
   return lines.flatMap((line, index) => line.trim() === marker ? [index] : []);
 }
 
 function unwrapFence(input: string): string | Error {
+  // The size boundary applies to the exact JSON payload supplied by QA.  In
+  // particular, do not trim the fenced body before byte accounting: JSON
+  // whitespace is still provider output and must not be usable to bypass the
+  // same limit imposed on an unfenced payload.
   const trimmed = input.trim();
   if (!trimmed.startsWith("```")) return input;
-  const match = trimmed.match(/^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```$/i);
-  return match ? match[1]!.trim() : new Error("malformed or multiple JSON code fences in report envelope");
+  const match = trimmed.match(/^```(?:json)?[^\S\r\n]*\r?\n([\s\S]*?)\r?\n```$/i);
+  return match ? match[1]! : new Error("malformed or multiple JSON code fences in report envelope");
 }
 
 function parseStatus(line: string): { status: QaResponseContract["status"]; fields: Record<string, string>; error?: string } {
@@ -123,7 +204,55 @@ function parseStatus(line: string): { status: QaResponseContract["status"]; fiel
     : { status: match[1] as QaResponseContract["status"], fields };
 }
 
-/** JSON.parse with duplicate-key and property-order metadata. */
+function parseBuilderStatus(line: string): { status: BuilderQaRemediationContract["status"]; fields: Record<string, string>; error?: string } {
+  const match = line.match(/^STEP_STATUS:\s*(done|blocked|needs_input|qa_pass|qa_fail)\b\s*(?:\|\s*(.*))?$/);
+  if (!match) return { status: "unknown", fields: {}, error: "malformed or unsupported Builder QA remediation STEP_STATUS marker" };
+  const fields: Record<string, string> = {};
+  let rest = (match[2] ?? "").trim();
+  while (rest) {
+    const key = rest.match(/^(\w+)="/);
+    if (!key) return { status: match[1] as BuilderQaRemediationContract["status"], fields, error: `malformed STEP_STATUS field near: ${rest.slice(0, 40)}` };
+    const name = key[1]!;
+    let i = key[0].length, value = "", closed = false;
+    for (; i < rest.length; i++) {
+      if (rest[i] === "\\") { if (i + 1 >= rest.length) break; value += rest[++i]; continue; }
+      if (rest[i] === '"') { closed = true; i++; break; }
+      value += rest[i];
+    }
+    if (!closed) return { status: match[1] as BuilderQaRemediationContract["status"], fields, error: `unterminated STEP_STATUS field: ${name}` };
+    if (fields[name] !== undefined) return { status: match[1] as BuilderQaRemediationContract["status"], fields, error: `duplicate STEP_STATUS field: ${name}` };
+    fields[name] = value; rest = rest.slice(i).trim();
+  }
+  if (match[1] !== "done") return { status: match[1] as BuilderQaRemediationContract["status"], fields, error: `${match[1]} is not a valid successful Builder QA remediation status` };
+  const unknown = Object.keys(fields).filter((key) => key !== "summary");
+  return unknown.length
+    ? { status: "done", fields, error: `unknown STEP_STATUS field(s): ${unknown.join(", ")}` }
+    : { status: "done", fields };
+}
+
+function validateBuilderFindingCoverage(report: BuilderQaRemediationReportV2, expected: QaFindingRefV2[]): string[] {
+  const errors: string[] = [];
+  const expectedByKey = new Map(expected.map((finding) => [finding.findingKey, finding]));
+  const seen = new Set<string>();
+  for (const finding of report.findings) {
+    if (seen.has(finding.finding_key)) errors.push(`duplicate finding_key: ${finding.finding_key}`);
+    seen.add(finding.finding_key);
+    const reference = expectedByKey.get(finding.finding_key);
+    if (!reference) errors.push(`unknown finding_key: ${finding.finding_key}`);
+    else if (reference.rawId !== finding.raw_id) errors.push(`raw_id ${finding.raw_id} does not match finding_key ${finding.finding_key}`);
+    if (finding.disposition === "fixed" && !finding.changes.some((item) => item.trim())) errors.push(`fixed finding ${finding.finding_key} must describe a change or no-code-change explanation`);
+    if (finding.disposition === "disputed" && !finding.evidence.trim()) errors.push(`disputed finding ${finding.finding_key} must provide evidence`);
+    for (const verification of finding.verification) {
+      if (verification.outcome === "not_run" && !verification.evidence.trim()) errors.push(`not_run verification for ${finding.finding_key} must include a reason`);
+    }
+  }
+  for (const expectedFinding of expected) {
+    if (!seen.has(expectedFinding.findingKey)) errors.push(`missing finding_key: ${expectedFinding.findingKey}`);
+  }
+  return errors;
+}
+
+/** JSON.parse with duplicate-key rejection. */
 function scanJson(source: string): { value: unknown; objectKeys: Map<string, string[]> } {
   let at = 0;
   const objectKeys = new Map<string, string[]>();
@@ -165,18 +294,4 @@ function scanJson(source: string): { value: unknown; objectKeys: Map<string, str
   };
   const parsed = value(""); ws(); if (at !== source.length) throw new Error(`trailing content at byte ${at}`);
   return { value: parsed, objectKeys };
-}
-
-function validateFieldOrder(keys: Map<string, string[]>): string[] {
-  const errors: string[] = [];
-  const expected = (path: string, names: string[]) => {
-    const actual = keys.get(path);
-    if (actual && actual.join("\0") !== names.join("\0")) errors.push(`${path || "/"} fields are missing, unknown, duplicated, or out of order`);
-  };
-  expected("", ["version", "summary", "checks_run", "findings", "observations"]);
-  for (const [path, actual] of keys) {
-    if (/^\/checks_run\/\d+$/.test(path)) expected(path, actual.includes("command") ? ["check", "command", "outcome", "evidence"] : ["check", "outcome", "evidence"]);
-    if (/^\/findings\/\d+$/.test(path)) expected(path, ["id", "requirement", "locations", "problem", "evidence", "expected", "fix_direction", "verification"]);
-  }
-  return errors;
 }

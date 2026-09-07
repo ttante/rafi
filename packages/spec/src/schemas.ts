@@ -49,6 +49,45 @@ export const qaFailureReportV1Schema = {
   },
 } as const;
 
+export const builderQaRemediationReportV2Schema = {
+  $id: "rafi/builderQaRemediationReportV2",
+  type: "object",
+  additionalProperties: false,
+  required: ["version", "handoff_id", "summary", "findings", "observations"],
+  properties: {
+    version: { const: 2 },
+    handoff_id: qaString,
+    summary: qaString,
+    findings: {
+      type: "array", minItems: 1, maxItems: 25,
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["finding_key", "raw_id", "disposition", "changes", "evidence", "verification"],
+        properties: {
+          finding_key: qaString,
+          raw_id: qaString,
+          disposition: { enum: ["fixed", "disputed"] },
+          changes: { type: "array", minItems: 1, maxItems: 20, items: qaString },
+          evidence: qaString,
+          verification: {
+            type: "array", minItems: 1, maxItems: 20,
+            items: {
+              type: "object", additionalProperties: false,
+              required: ["check", "outcome", "evidence"],
+              properties: {
+                check: qaString,
+                outcome: { enum: ["passed", "failed", "not_run"] },
+                evidence: qaString,
+              },
+            },
+          },
+        },
+      },
+    },
+    observations: { type: "array", maxItems: 25, items: qaString },
+  },
+} as const;
+
 export const rulePackSchema = {
   $id: "rafi/rulePack",
   type: "object",

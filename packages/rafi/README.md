@@ -21,6 +21,7 @@ mkdir my-app && cd my-app
 rafi create .              # complete setup, initial planning, and tracker journey
 rafi tickets plan          # guided proposal, review, and exact ticket creation
 rafi start . --steps 10    # builder works through the queue with QA
+rafi state export . --output rafi-state.rafi.gz
 ```
 
 Start with `rafi create .`. It asks about the stack and target runtimes, writes `rafi-config.yaml`, emits the selected Claude/Codex artifacts, verifies runtime readiness, offers standard or exhaustive initial planning, and continues into ticket setup/population in the same process. `rafi plan` is the initialization-only planning stage normally run by create.
@@ -139,7 +140,19 @@ rafi doctor .
 
 The current TTY status includes role/provider/activity and truthful context state (`measuring`, measured/stale occupancy, or unavailable). `rafi start --show-session-cost` enables provider-authoritative cost or cumulative-token display for both roles for that run. Persistent Builder and QA display preferences stay independent. Builder and QA threshold compaction each default to 50% and each per-session maximum defaults to 10; configure either role with `rafi agents . --agent-type builder|qa --auto-compact-threshold <percent> --compact-maximum <count>`.
 
-QA is independent and cannot edit protected project files. Each disposable QA snapshot gets a fresh location-scoped provider session; cumulative QA state crosses snapshots only through validated durable handoffs. Failed reviews use a validated V1 JSON report, and malformed reports follow a bounded nine-turn correction ladder. Owner-only recovery packets under `.foreman/qa-report-recovery/` preserve the exact reviewed state and host-observable QA context; a fresh successor must acknowledge the materialized packet and reviewed-state digests before reporting. Every completed Builder/QA turn publishes a validated bounded continuity delta, and automatic fresh transitions require an accepted cumulative handoff before the sole role lease moves. Exact Builder resume additionally requires a stored scoped binding and successful provider/location probe—raw or cross-worktree IDs are never enough. Interrupted implementation uses durable `.foreman/runs/*.json` and WorkflowDb checkpoints. `rafi build:resume` dispatches exactly the selected `exact-session`, `fresh-with-handoff`, `fresh-recovery-only`, or conditional guided-recovery path; `rafi build:start-over` archives/reconciles an entire run. Inspect handoffs with `rafi handoffs inspect --run <id>` and prune only disposable cache copies with `rafi handoffs prune-cache`. Setup/planning interviews continue with `rafi resume`. `rafi agents` stores per-role runtime/model/reasoning/fast intent. Uninstall is category-based, detects mixed user/Rafi edits, and retains project-local recovery bundles until explicit cleanup.
+QA is independent and cannot edit protected project files. Each disposable QA snapshot gets a fresh location-scoped provider session; cumulative QA state crosses snapshots only through validated durable handoffs. Failed reviews use a validated V1 JSON report with run/ticket/review-namespaced finding IDs, and malformed reports follow a bounded 2 + 2 + 5 correction ladder in which every fresh successor first performs a complete source-bound review. Owner-only, crash-durable recovery packets under `.foreman/qa-report-recovery/` preserve the full reviewed source state (commit, status, staged/unstaged bytes, and untracked content), exact prompts/responses/tool events, and complete resource metadata. Every fresh attempt compares the full frozen-state digest; drift makes prior reports historical and forces a complete review. A fresh successor must expose a scoped identity, return a durable acceptance receipt, and acknowledge the materialized packet before reporting. Report, remediation, and bounded fix-summary history is durably indexed across restarts, and a packet remains unresolved through Builder remediation until a subsequent bound QA review passes or an operator explicitly waives it. Every completed Builder/QA turn publishes a validated bounded continuity delta, and automatic fresh transitions require an accepted cumulative handoff before the sole role lease moves. Exact Builder resume additionally requires a stored scoped binding and successful provider/location probe—raw or cross-worktree IDs are never enough. Interrupted implementation uses durable `.foreman/runs/*.json` and WorkflowDb checkpoints. `rafi build:resume` validates the authoritative packet ticket before projection or execution and dispatches exactly the selected `exact-session`, `fresh-with-handoff`, `fresh-recovery-only`, or conditional guided-recovery path; `rafi build:start-over` archives/reconciles an entire run. Inspect handoffs with `rafi handoffs inspect --run <id>` and prune only disposable cache copies with `rafi handoffs prune-cache`. Setup/planning interviews continue with `rafi resume`. `rafi agents` stores per-role runtime/model/reasoning/fast intent. Uninstall is category-based, detects mixed user/Rafi edits, and retains project-local recovery bundles until explicit cleanup.
+
+## Move local state between machines
+
+Use `rafi state export` for a sequential machine handoff:
+
+```sh
+rafi state export . --output rafi-state.rafi.gz
+rafi state inspect rafi-state.rafi.gz
+rafi state import /path/to/matching-checkout rafi-state.rafi.gz
+```
+
+The bundle includes local Rafi and Foreman state such as ticket status, delivery state, workflow/recovery databases, compiled role bundles, source snapshots, interview records, and diagnostics. It does not include source code, provider sessions, or live worktrees. Export/import refuse dirty Git checkouts, active workflow leases, incompatible branch/HEAD state, and divergent transfer lineage. Import asks before replacing existing local Rafi state unless `--yes` is supplied, keeps a backup under `.rafi/state-transfer-backups/`, and rolls back failed imports.
 
 ## What gets written
 
@@ -157,7 +170,10 @@ QA is independent and cannot edit protected project files. Each disposable QA sn
   .rafi/compiled/<role>/           Runtime role bundles
   .rafi/interviews/                Ignored local interactive recovery records
   .rafi/recovery.sqlite3           Durable continuity, handoff, settings, and recovery history
+  .rafi/observability.sqlite3      Local activity and run observability state
   .rafi/cache/handoffs/            Ignored disposable handoff inspection copies
+  .rafi/state-transfer.json        State export/import lineage
+  .rafi/state-transfer-backups/    Backups made before state imports
   <docs.root>/                     Starter and ticket-tracker docs
   <docs.root>/rafi-plan.md         Latest Rafi plan
   <docs.root>/rafi-plans/*.md      Versioned Rafi plans

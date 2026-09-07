@@ -3,10 +3,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
-import { BUILD_RUN_DIRECTORY, buildRecoveryPreview, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, readBuildRuns, recordBuildReceipt, recoverableBuildRuns, releaseBuildLease } from "../src/buildRuns.js";
+import { BUILD_RUN_DIRECTORY, buildRecoveryPreview, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, readBuildRuns, recordBuildReceipt, recoverableBuildRuns, releaseBuildLease, resumeBuildRun, saveBuildRun } from "../src/buildRuns.js";
+import { WorkflowDb } from "../src/workflowDb.js";
 import { cmdInit } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
+
+test("child recovery rejects a superseded decision after acquiring its lease", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-recovery-decision-"));
+  try {
+    const settings = {
+      role: "builder" as const, source: "project" as const, make: "codex" as const,
+      model: "default", reasoning: "high", fast: false, session_strategy: "compact" as const,
+      display_session_cost: false, auto_compact_threshold_percent: 50,
+      compact_maximum: 10, settings_revision: 0,
+    };
+    let run = createBuildRun({ tickets: ["T001"], repositoryRoot: dir, builder: settings });
+    run = releaseBuildLease(dir, run, "recoverable");
+    const receipt = { version: 1 as const, mode: "fresh-recovery-only" as const, runId: run.runId, tickets: run.tickets, role: "builder" as const, authoritativeStateDigest: "state", settings, worktree: dir, planUpdateApproval: "auto" as const, decidedAt: new Date(0).toISOString() };
+    const expectedRecoveryDecisionDigest = createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
+    saveBuildRun(dir, { ...run, recoveryDecision: { ...receipt, decidedAt: new Date(1).toISOString() } });
+    assert.throws(() => resumeBuildRun(dir, run.runId, { expectedRecoveryDecisionDigest }), /Recovery decision changed/);
+    const db = new WorkflowDb(dir);
+    try { assert.equal(db.currentLease(), undefined); assert.equal(db.getRun(run.runId)?.status, "paused"); }
+    finally { db.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("build records atomically retain sessions, receipts, and completed history", () => {
   const dir = mkdtempSync(join(tmpdir(), "rafi-build-run-"));

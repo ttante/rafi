@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  BUILDER_QA_REMEDIATION_END,
+  BUILDER_QA_REMEDIATION_START,
   QA_FAILURE_REPORT_END,
   QA_FAILURE_REPORT_START,
+  assertBuilderQaRemediationReport,
   assertQaFailureReport,
+  parseBuilderQaRemediationContract,
+  parseBuilderQaRemediationReport,
   parseQaFailureReport,
   parseQaResponseContract,
+  validateBuilderQaRemediationReport,
   validateQaFailureReport,
+  type BuilderQaRemediationReportV2,
   type QaFailureReportV1,
+  type QaFindingRefV2,
   type QaResult,
   type BuilderQaHandoff,
 } from "../src/index.js";
@@ -37,7 +45,7 @@ test("parses indented and optionally fenced report JSON", () => {
   assert.deepEqual(parseQaFailureReport(`\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\``).report, report);
 });
 
-test("rejects malformed, empty, oversized, duplicate-id, unknown, mistyped, duplicate and out-of-order reports", () => {
+test("rejects malformed, empty, oversized, duplicate-id, unknown, mistyped, and duplicate-key reports", () => {
   assert.equal(parseQaFailureReport("{").validation.valid, false);
   assert.equal(validateQaFailureReport({ ...report, findings: [] }).valid, false);
   assert.equal(validateQaFailureReport({ ...report, summary: "x".repeat(4097) }).valid, false);
@@ -46,8 +54,11 @@ test("rejects malformed, empty, oversized, duplicate-id, unknown, mistyped, dupl
   assert.equal(validateQaFailureReport({ ...report, version: "1" }).valid, false);
   const duplicate = JSON.stringify(report).replace('"version":1', '"version":1,"version":1');
   assert.match(parseQaFailureReport(duplicate).validation.errors.join(" "), /duplicate field/);
+});
+
+test("accepts semantically valid QA report fields in any JSON object order", () => {
   const reordered = JSON.stringify({ summary: report.summary, version: 1, checks_run: report.checks_run, findings: report.findings, observations: [] });
-  assert.match(parseQaFailureReport(reordered).validation.errors.join(" "), /out of order/);
+  assert.equal(parseQaFailureReport(reordered).validation.valid, true);
 });
 
 test("parses response atomically and ignores marker-like JSON strings", () => {
@@ -122,6 +133,66 @@ test("enforces the raw 64 KiB report boundary exactly", () => {
   assert.equal(Buffer.byteLength(exact), 64 * 1024);
   assert.equal(parseQaFailureReport(exact).validation.valid, true);
   assert.match(parseQaFailureReport(`${exact} `).validation.errors.join(" "), /exceeds 65536 bytes/);
+  assert.match(parseQaFailureReport(`\`\`\`json\n${exact}\n\`\`\``).validation.errors.join(" "), /exceeds 65536 bytes/);
+  assert.match(parseQaFailureReport(`\`\`\`json\n${exact} \n\`\`\``).validation.errors.join(" "), /exceeds 65536 bytes/);
+});
+
+const findingRefs: QaFindingRefV2[] = [{
+  version: 2,
+  findingKey: "finding-key-1",
+  reportDigest: "report-digest",
+  reviewAttemptId: "review-1",
+  ordinal: 0,
+  rawId: "QA-1",
+}];
+
+const builderReport: BuilderQaRemediationReportV2 = {
+  version: 2,
+  handoff_id: "handoff-1",
+  summary: "Fixed the empty input handling.",
+  findings: [{
+    finding_key: "finding-key-1",
+    raw_id: "QA-1",
+    disposition: "fixed",
+    changes: ["Added an explicit empty input guard."],
+    evidence: "src/input.ts now returns [] for empty arrays.",
+    verification: [{ check: "empty input unit test", outcome: "passed", evidence: "pnpm test passed" }],
+  }],
+  observations: [],
+};
+
+const builderResponse = (body = JSON.stringify(builderReport, null, 2), status = 'STEP_STATUS: done | summary="fixed"') =>
+  `${BUILDER_QA_REMEDIATION_START}\n${body}\n${BUILDER_QA_REMEDIATION_END}\n${status}`;
+
+test("validates and parses Builder QA remediation reports", () => {
+  assert.deepEqual(validateBuilderQaRemediationReport(builderReport), { valid: true, errors: [] });
+  assert.doesNotThrow(() => assertBuilderQaRemediationReport(builderReport));
+  assert.deepEqual(parseBuilderQaRemediationReport(JSON.stringify(builderReport)).report, builderReport);
+  const parsed = parseBuilderQaRemediationContract(builderResponse(), { handoffId: "handoff-1", findings: findingRefs });
+  assert.equal(parsed.valid, true, parsed.errors.join("; "));
+  assert.equal(parsed.status, "done");
+  assert.equal(parsed.report?.findings[0]?.finding_key, "finding-key-1");
+});
+
+test("Builder remediation contract rejects ambiguous or incomplete successful responses", () => {
+  assert.equal(parseBuilderQaRemediationContract('STEP_STATUS: done | summary="x"', { handoffId: "handoff-1", findings: findingRefs }).valid, false);
+  assert.equal(parseBuilderQaRemediationContract(`${builderResponse()}\nSTEP_STATUS: done`).valid, false);
+  assert.equal(parseBuilderQaRemediationContract(builderResponse(JSON.stringify({ ...builderReport, extra: true }))).valid, false);
+  assert.equal(parseBuilderQaRemediationContract(builderResponse(JSON.stringify({ ...builderReport, handoff_id: "wrong" })), { handoffId: "handoff-1", findings: findingRefs }).valid, false);
+  assert.equal(parseBuilderQaRemediationContract(builderResponse(JSON.stringify({ ...builderReport, findings: [] })), { handoffId: "handoff-1", findings: findingRefs }).valid, false);
+  assert.equal(parseBuilderQaRemediationContract(builderResponse(JSON.stringify({ ...builderReport, findings: [{ ...builderReport.findings[0]!, finding_key: "unknown" }] })), { handoffId: "handoff-1", findings: findingRefs }).valid, false);
+  assert.equal(parseBuilderQaRemediationContract(builderResponse(JSON.stringify({ ...builderReport, findings: [{ ...builderReport.findings[0]!, raw_id: "wrong" }] })), { handoffId: "handoff-1", findings: findingRefs }).valid, false);
+  assert.equal(parseBuilderQaRemediationContract(builderResponse(JSON.stringify(builderReport), 'STEP_STATUS: blocked | reason="stuck"')).valid, false);
+  assert.equal(parseBuilderQaRemediationContract(`extra\n${builderResponse()}`).valid, false);
+});
+
+test("Builder remediation parser enforces exact raw byte boundary and duplicate keys", () => {
+  const json = JSON.stringify(builderReport);
+  const exact = `${json}${" ".repeat(128 * 1024 - Buffer.byteLength(json))}`;
+  assert.equal(parseBuilderQaRemediationReport(exact).validation.valid, true);
+  assert.match(parseBuilderQaRemediationReport(`${exact} `).validation.errors.join(" "), /exceeds 131072 bytes/);
+  const duplicate = JSON.stringify(builderReport).replace('"version":2', '"version":2,"version":2');
+  assert.match(parseBuilderQaRemediationReport(duplicate).validation.errors.join(" "), /duplicate field/);
 });
 
 test("legacy QA compatibility interfaces retain their published shapes", () => {

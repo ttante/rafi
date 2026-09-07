@@ -6,6 +6,7 @@ import { buildStartCommand } from "./cli/start.js";
 import { buildStatusCommand } from "./cli/status.js";
 import { buildDoctorCommand } from "./cli/doctor.js";
 import { buildManagerCommand } from "./cli/manager.js";
+import { buildStateCommand } from "./cli/state.js";
 import { buildAttachCommand, buildDecideCommand, buildStopCommand } from "./cli/recovery.js";
 import { withActivityContext } from "./activity.js";
 
@@ -24,6 +25,7 @@ program.addCommand(buildStartCommand());
 program.addCommand(buildStatusCommand());
 program.addCommand(buildDoctorCommand());
 program.addCommand(buildManagerCommand({ requireProject: true }));
+program.addCommand(buildStateCommand());
 program.addCommand(buildAttachCommand());
 program.addCommand(buildDecideCommand());
 program.addCommand(buildStopCommand());

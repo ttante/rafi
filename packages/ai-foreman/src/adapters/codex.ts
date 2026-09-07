@@ -232,6 +232,7 @@ export class CodexAdapter implements BuilderAdapter {
     // setup turn, then restart the app server with the provider-native ceiling
     // before any Builder or QA work is sent.
     if (!this.usage?.maximum) {
+      if (this.opts.allowAutoCompactionSetupTurn === false) return;
       const toolsBefore = this.observedToolCalls;
       const setup = await this.sendTurnInternal("Rafi internal initialization only. Do not call tools or modify files. Reply briefly that the context is ready.");
       if (setup.isError) throw new Error(`Codex automatic-compaction setup failed: ${setup.text.slice(0, 240)}`);
@@ -253,6 +254,10 @@ export class CodexAdapter implements BuilderAdapter {
       triggerTokens: this.nativeAutoCompactTokenLimit,
     };
     return this.preparedAutoCompactionPolicy;
+  }
+
+  requiresAutoCompactionSetupTurn(): boolean {
+    return this.opts.autoCompactThresholdPercent !== undefined && !this.autoCompactionPrepared && !this.usage?.maximum;
   }
 
   autoCompactionPolicy(): NativeAutoCompactionPolicy | undefined { return this.preparedAutoCompactionPolicy; }
@@ -279,6 +284,12 @@ export class CodexAdapter implements BuilderAdapter {
   }
   sessionId(): string | undefined { return this._sessionId; }
   sessionRef(): ProviderSessionRefV1 | undefined { return this._sessionRef; }
+  async prepareSession(): Promise<ProviderSessionRefV1> {
+    await this.ensureThread();
+    if (!this._sessionRef) throw new Error("Codex did not expose a scoped thread identity during session preparation");
+    if (!this._sessionRef.validatedAt) this._sessionRef = { ...this._sessionRef, validatedAt: new Date().toISOString() };
+    return this._sessionRef;
+  }
   adoptSessionRef(ref: ProviderSessionRefV1): void {
     if (ref.provider !== "codex" || ref.sessionId !== this._sessionId) throw new Error("cannot adopt a session reference for a different Codex thread");
     this._sessionRef = ref;
@@ -369,19 +380,21 @@ export class CodexAdapter implements BuilderAdapter {
         availability,
       });
     }
-    this._sessionId = returnedSessionId;
-    if (!this._sessionId) throw new Error(`${method} did not return a thread ID`);
+    if (!returnedSessionId?.trim()) throw new Error(`${method} did not return a thread ID`);
     const providerCwd = typeof thread?.cwd === "string" ? canonicalSessionPath(thread.cwd) : undefined;
-    if (this._sessionRef && providerCwd && providerCwd !== canonicalSessionPath(this._sessionRef.cwd)) {
-      const availability: SessionAvailabilityV1 = { version: 1, status: "unavailable", checkedAt: new Date().toISOString(), reason: "cwd-mismatch", observedCwd: providerCwd, detail: `Codex thread cwd ${providerCwd} does not match ${this._sessionRef.cwd}`, sessionRef: this._sessionRef };
+    const expectedCwd = canonicalSessionPath(this._sessionRef?.cwd ?? this.opts.cwd);
+    if ((providerCwd && providerCwd !== expectedCwd) || (!providerCwd && this.opts.sessionRole === "qa")) {
+      const availability: SessionAvailabilityV1 = { version: 1, status: "unavailable", checkedAt: new Date().toISOString(), reason: "cwd-mismatch", observedCwd: providerCwd, detail: `Codex thread cwd ${providerCwd ?? "was not returned"} does not match ${expectedCwd}`, sessionRef: this._sessionRef };
       this.sessionAvailability = availability;
       throw new SessionUnavailableError({ runtime: "codex", phase: "attach", dispatchState: "not-sent", executable: this.opts.runtimeExecutable ?? "codex", cwd: this.opts.cwd, diagnostics: availability.detail!, availability });
     }
+    this._sessionId = returnedSessionId;
     if (!this._sessionRef) {
       this._sessionRef = createProviderSessionRef({
         provider: "codex", sessionId: this._sessionId, cwd: providerCwd ?? this.opts.cwd, configRoot: this.opts.configRoot ?? this.opts.cwd,
         role: this.opts.sessionRole, stream: this.opts.sessionStream, generation: this.opts.sessionGeneration,
         workspaceIdentity: this.opts.workspaceIdentity, ticketId: this.opts.ticketId, deliveryUnitId: this.opts.deliveryUnitId,
+        validatedAt: new Date().toISOString(),
       });
     } else {
       this._sessionRef = { ...this._sessionRef, validatedAt: new Date().toISOString() };
@@ -435,6 +448,7 @@ export class CodexAdapter implements BuilderAdapter {
     const params = message.params ?? {};
     if (message.method === "item/started") {
       const item = params.item as Record<string, unknown> | undefined;
+      if (item) this.eventQueue.push({ kind: "provider-item", provider: "codex", lifecycle: "started", itemType: String(item.type ?? "unknown"), payload: exactProviderItem(item), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
       if (isCodexToolItem(item)) {
         this.observedToolCalls += 1;
         const callId = codexItemId(item) ?? randomUUID();
@@ -450,6 +464,7 @@ export class CodexAdapter implements BuilderAdapter {
       if (activity) this.eventQueue.push({ kind: "activity", provider: "codex", ...activity });
     } else if (message.method === "item/completed") {
       const item = params.item as Record<string, unknown> | undefined;
+      if (item) this.eventQueue.push({ kind: "provider-item", provider: "codex", lifecycle: "completed", itemType: String(item.type ?? "unknown"), payload: exactProviderItem(item), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
       if (isCodexToolItem(item)) {
         const callId = codexItemId(item);
         const spanId = callId ? this.toolSpans.get(callId) : undefined;
@@ -584,6 +599,9 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   private buildSkillsAppendix(): string | undefined {
+    if (this.opts.preloadedSkillContent?.length) {
+      return ["# Preloaded Skills", "Use the following skills for this run.", ...this.opts.preloadedSkillContent.map((skill) => skill.content)].join("\n\n");
+    }
     if (!this.opts.skills?.length) return undefined;
     const blocks = this.opts.skills.map((skill) => loadSkillMarkdown(this.opts.cwd, skill)).filter((block): block is string => Boolean(block));
     return blocks.length ? ["# Preloaded Skills", "Use the following skills for this run.", ...blocks].join("\n\n") : undefined;
@@ -632,13 +650,14 @@ function isCodexToolItem(item: Record<string, unknown> | undefined): boolean {
 
 function codexItemId(item: Record<string, unknown> | undefined): string | undefined { const value = item?.id ?? item?.itemId ?? item?.callId; return typeof value === "string" && value ? value : undefined; }
 function codexToolName(item: Record<string, unknown> | undefined): string { return String(item?.tool ?? item?.name ?? item?.type ?? "tool"); }
-function exactToolInput(item: Record<string, unknown> | undefined): Record<string, unknown> { if (!item) return {}; return Object.fromEntries(Object.entries(item).filter(([key]) => ["command", "tool", "name", "type", "path", "query", "arguments", "input"].includes(key))); }
+function exactProviderItem(item: Record<string, unknown>): Record<string, unknown> { return structuredClone(item); }
+function exactToolInput(item: Record<string, unknown> | undefined): Record<string, unknown> { return item ? exactProviderItem(item) : {}; }
 function boundedToolInput(item: Record<string, unknown> | undefined): Record<string, unknown> { if (!item) return {}; return Object.fromEntries(Object.entries(exactToolInput(item)).map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 1000) : value])); }
 function codexOutputSummary(item: Record<string, unknown> | undefined): { summary: string; digest: string; completeness: "complete" | "truncated"; bytes: number } | undefined { const value = item?.aggregatedOutput ?? item?.output ?? item?.stdout; if (typeof value !== "string" || !value) return undefined; const sanitized = value.replace(/\b(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[REDACTED]"); const providerTruncated = item?.outputTruncated === true || item?.truncated === true; return { summary: sanitized.slice(0, 1000), digest: createHash("sha256").update(value).digest("hex"), completeness: providerTruncated ? "truncated" : "complete", bytes: Buffer.byteLength(value) }; }
 function finiteNumber(value: unknown): number | undefined { const result = Number(value); return Number.isFinite(result) ? result : undefined; }
 
 function loadSkillMarkdown(cwd: string, skill: string): string | undefined {
-  const projectPath = join(cwd, ".agents", "skills", skill, "SKILL.md");
-  if (existsSync(projectPath)) return `## ${skill}\n${readFileSync(projectPath, "utf8").trim()}`;
+  const projectPath = [join(cwd, ".codex", "skills", skill, "SKILL.md"), join(cwd, ".agents", "skills", skill, "SKILL.md")].find(existsSync);
+  if (projectPath) return `## ${skill}\n${readFileSync(projectPath, "utf8").trim()}`;
   try { const bundled = loadSkill(skill); return bundled.body?.trim() ? `## ${bundled.name}\n${bundled.body.trim()}` : undefined; } catch { return undefined; }
 }

@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,6 +10,7 @@ import { stringify } from "yaml";
 import { createBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease } from "ai-foreman/build-runs.js";
 import { createProviderSessionRef } from "ai-foreman/session-identity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
+import { createQaRecoveryPacket } from "ai-foreman/qa-recovery.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
 import { buildBuildResumeCommand } from "../src/buildResume.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
@@ -22,6 +25,15 @@ function initializedProject(): string {
   return dir;
 }
 
+function initializeGit(dir: string): void {
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "resume@example.test"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Resume Test"], { cwd: dir });
+  writeFileSync(join(dir, "tracked.txt"), "base\n");
+  execFileSync("git", ["add", "tracked.txt"], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: dir });
+}
+
 function scopedSession(dir: string, sessionId: string, provider: "claude" | "codex" = "codex") {
   return createProviderSessionRef({
     provider,
@@ -32,6 +44,10 @@ function scopedSession(dir: string, sessionId: string, provider: "claude" | "cod
     configRoot: dir,
     source: "observed",
   });
+}
+
+function decisionDigest(dir: string, runId: string): string {
+  return createHash("sha256").update(JSON.stringify(readBuildRuns(dir).find((run) => run.runId === runId)!.recoveryDecision)).digest("hex");
 }
 
 function attachLegacyQaRecovery(dir: string, runId: string): string {
@@ -76,7 +92,13 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
     run = persistBuildSession(dir, run, "builder", scopedSession(dir, "session-123"));
     run = releaseBuildLease(dir, run, "recoverable");
     let invoked: string[] | undefined;
-    const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; }, resolveProjection: availableProjection });
+    const command = buildBuildResumeCommand({ executeStart: (args) => {
+      const childDb = new WorkflowDb(dir);
+      try { assert.equal(childDb.currentLease(), undefined, "resume CLI must release its parent lease before launching the new supervisor"); }
+      finally { childDb.close(); }
+      invoked = args;
+      return 0;
+    }, resolveProjection: availableProjection });
 
     await command.parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" });
 
@@ -89,6 +111,7 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
       run.runId,
       "--recovery-mode",
       "exact-session",
+      "--recovery-decision-digest", decisionDigest(dir, run.runId),
       "--resume",
       "session-123",
       "--agent",
@@ -169,14 +192,88 @@ test("build:resume supports explicit fresh-session recovery", async () => {
 
     assert.deepEqual(invoked, [
       "start", resolve(dir), "--steps", "1", "--recover-run", run.runId,
-      "--recovery-mode", "fresh-recovery-only", "--agent", "claude",
+      "--recovery-mode", "fresh-recovery-only", "--recovery-decision-digest", decisionDigest(dir, run.runId), "--agent", "claude",
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("build:resume refuses to treat a V1 QA packet as authoritative without an explicit legacy choice", async () => {
+test("build:resume rejects a wrong-ticket branch recovery before projection or execution", async () => {
+  const dir = initializedProject();
+  try {
+    initializeGit(dir);
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T021", "T022"], branchMode: "shared" });
+    createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: run.runId, ticketId: "T021", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", pendingAction: "operator-menu", resources: { prompt: { value: "review", purpose: "Exact review prompt", exactText: true } } });
+    run = releaseBuildLease(dir, run, "recoverable");
+    let projected = false;
+    let invoked = false;
+    const command = buildBuildResumeCommand({
+      executeStart: () => { invoked = true; return 0; },
+      resolveProjection: async (projectDir, selectedRun, now, ticket) => { projected = true; return availableProjection(projectDir, selectedRun, now, ticket); },
+    });
+    await assert.rejects(
+      command.parseAsync([dir, "--ticket", "T022", "--yes", "--fresh-with-handoff"], { from: "user" }),
+      /conflicts with pending QA recovery ticket T021/,
+    );
+    assert.equal(projected, false);
+    assert.equal(invoked, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("build:resume scopes a pending V2 QA packet and accepts only one undispatched successor revision", async () => {
+  const dir = initializedProject();
+  try {
+    initializeGit(dir);
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T031", "T032"], branchMode: "shared", qa: { role: "qa", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
+    const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: run.runId, ticketId: "T032", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", pendingAction: "operator-menu", resources: { prompt: { value: "review", purpose: "Exact review prompt", exactText: true } } });
+    const db = new WorkflowDb(dir);
+    db.beginQaReviewAttempt({ attemptId: packet.manifest.reviewAttemptId, runId: run.runId, ticketId: "T032", reviewNumber: 1, cycle: 1, remediationGeneration: 0, sourceDigest: packet.manifest.reviewedStateDigest });
+    let protocolHead = db.qaTicketHead(run.runId, "T032");
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "source-frozen", sourceStateDigest: packet.manifest.reviewedStateDigest });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "review-ready", reviewBasisDigest: "b".repeat(64), sessionGeneration: 1 });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "turn-intended", slot: "initial" });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "operator-menu" });
+    db.finishQaReviewAttempt(packet.manifest.reviewAttemptId, { status: "interrupted", detail: "simulated crash before packet review identity publication" });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "source-frozen", sourceStateDigest: packet.manifest.reviewedStateDigest });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "review-ready", reviewBasisDigest: "c".repeat(64), sessionGeneration: 2 });
+    db.beginQaReviewAttempt({ attemptId: "undispatched-successor", runId: run.runId, ticketId: "T032", reviewNumber: 2, cycle: 1, remediationGeneration: 0, sourceDigest: packet.manifest.reviewedStateDigest });
+    db.appendContinuityEvent({ runId: run.runId, role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+    db.publishContinuityCheckpoint({ runId: run.runId, role: "qa", authoritativeStateRevision: 1, delta: { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: ["recover QA report"], nextAction: "resume QA recovery" } });
+    db.close();
+    run = releaseBuildLease(dir, run, "recoverable");
+    let invoked: string[] | undefined;
+    const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; }, resolveProjection: availableProjection });
+    await command.parseAsync([dir, "--run", run.runId, "--ticket", "T032", "--qa-revision", String(protocolHead.revision), "--yes", "--fresh-with-handoff"], { from: "user" });
+    assert.ok(invoked);
+    assert.equal(invoked[invoked.indexOf("--ticket") + 1], "T032");
+    assert.equal(invoked[invoked.indexOf("--steps") + 1], "1");
+    assert.equal(invoked.includes("--branch-per-ticket"), true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("build:resume discovers a pending durable QA reducer even without a packet", async () => {
+  const dir = initializedProject();
+  try {
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T041"], builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
+    const db = new WorkflowDb(dir);
+    let head = db.qaTicketHead(run.runId, "T041");
+    head = db.transitionQa(run.runId, "T041", head.revision, { type: "source-frozen", sourceStateDigest: "a".repeat(64) });
+    head = db.transitionQa(run.runId, "T041", head.revision, { type: "review-ready", reviewBasisDigest: "b".repeat(64), sessionGeneration: 1 });
+    head = db.transitionQa(run.runId, "T041", head.revision, { type: "turn-intended", slot: "initial" });
+    head = db.transitionQa(run.runId, "T041", head.revision, { type: "review-failed", reportDigest: "c".repeat(64) });
+    db.close();
+    run = releaseBuildLease(dir, run, "recoverable");
+    let invoked: string[] | undefined;
+    const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; }, resolveProjection: availableProjection });
+    await command.parseAsync([dir, "--run", run.runId, "--ticket", "T041", "--qa-revision", String(head.revision), "--yes", "--fresh-session"], { from: "user" });
+    assert.ok(invoked);
+    assert.equal(invoked[invoked.indexOf("--ticket") + 1], "T041");
+    assert.equal(invoked[invoked.indexOf("--qa-revision") + 1], String(head.revision));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("build:resume refuses to treat a V1 QA packet as authoritative", async () => {
   const dir = initializedProject();
   try {
     let run = createBuildRun({ repositoryRoot: dir, tickets: ["T011"] });
@@ -185,37 +282,19 @@ test("build:resume refuses to treat a V1 QA packet as authoritative without an e
     const command = buildBuildResumeCommand({ executeStart: () => 0 });
     await assert.rejects(
       command.parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" }),
-      /--legacy-qa-recovery restart[\s\S]*--legacy-qa-recovery historical/,
+      /legacy QA recovery V1 packet/,
     );
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("legacy QA restart and historical modes both use a fresh validated Builder handoff", async () => {
-  for (const legacyMode of ["restart", "historical"] as const) {
-    const dir = initializedProject();
-    try {
-      let run = createBuildRun({ repositoryRoot: dir, tickets: ["T011"], builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
-      run = persistBuildSession(dir, run, "builder", scopedSession(dir, `legacy-${legacyMode}`));
-      run = releaseBuildLease(dir, run, "recoverable");
-      const db = new WorkflowDb(dir);
-      db.appendContinuityEvent({ runId: run.runId, role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
-      db.publishContinuityCheckpoint({ runId: run.runId, role: "builder", authoritativeStateRevision: 1, delta: { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: ["perform full QA"], nextAction: "resume Builder and create a fresh protected QA review" } });
-      db.close();
-      attachLegacyQaRecovery(dir, run.runId);
-      let invoked: string[] | undefined;
-      const command = buildBuildResumeCommand({ executeStart: (args) => { invoked = args; return 0; }, resolveProjection: availableProjection });
-      await command.parseAsync([dir, "--run", run.runId, "--yes", "--legacy-qa-recovery", legacyMode, "--fresh-with-handoff"], { from: "user" });
-      assert.ok(invoked);
-      assert.equal(invoked.includes("--accept-handoff-role"), true);
-      assert.equal(invoked[invoked.indexOf("--accept-handoff-role") + 1], "builder");
-      const after = new WorkflowDb(dir);
-      const pending = after.getRun(run.runId)?.state.qaReportRecovery as Record<string, unknown>;
-      after.close();
-      assert.equal(pending.authoritative, false);
-      assert.equal(pending.pendingAction, legacyMode === "restart" ? "legacy-clean-review" : "legacy-historical-full-review");
-      if (legacyMode === "historical") assert.equal(typeof pending.historicalContextPath, "string");
-    } finally { rmSync(dir, { recursive: true, force: true }); }
-  }
+test("build:resume exposes no legacy QA execution option", async () => {
+  const dir = initializedProject();
+  try {
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T011"] });
+    run = releaseBuildLease(dir, run, "recoverable");
+    const command = buildBuildResumeCommand({ executeStart: () => 0, resolveProjection: availableProjection }).exitOverride();
+    await assert.rejects(command.parseAsync([dir, "--run", run.runId, "--yes", "--legacy-qa-recovery", "restart"], { from: "user" }), /unknown option/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("build:resume recovers shared and mixed modes with isolated-branch flags", async () => {
@@ -247,6 +326,7 @@ test("build:resume recovers shared and mixed modes with isolated-branch flags", 
         run.runId,
         "--recovery-mode",
         "exact-session",
+        "--recovery-decision-digest", decisionDigest(dir, run.runId),
         "--branch-per-ticket",
         "--resume",
         `session-${branchMode}`,
@@ -334,4 +414,52 @@ test("build:resume propagates the child status without adding a redundant wrappe
     process.exitCode = priorExitCode;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("build:resume rejects state changed during prompting before saving or dispatching", async () => {
+  const dir = initializedProject();
+  try {
+    const settings = { role: "builder" as const, source: "project" as const, make: "codex" as const, model: "default", reasoning: "default", fast: false };
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T010"], builder: settings });
+    run = releaseBuildLease(dir, run, "recoverable");
+    let invoked = false;
+    const command = buildBuildResumeCommand({ executeStart: () => { invoked = true; return 0; }, resolvePlanUpdateApproval: async () => {
+      const db = new WorkflowDb(dir);
+      try {
+        const current = db.getRun(run.runId)!;
+        db.transition(run.runId, { status: current.status, checkpoint: "changed-by-other-supervisor", remainingWork: current.remainingWork, state: current.state, event: "concurrent_resume_test" });
+      } finally { db.close(); }
+      return "auto";
+    } });
+    await assert.rejects(command.parseAsync([dir, "--run", run.runId, "--fresh-session"], { from: "user" }), /Recovery state changed/);
+    assert.equal(invoked, false);
+    const db = new WorkflowDb(dir);
+    try {
+      assert.equal(db.getRun(run.runId)?.checkpoint, "changed-by-other-supervisor");
+      assert.equal(db.recoveryDecisions(run.runId).length, 0);
+      assert.equal(db.currentLease(), undefined);
+    } finally { db.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("build:resume saves its final run snapshot while holding the mutation lease", async () => {
+  const dir = initializedProject();
+  const original = WorkflowDb.prototype.transition;
+  let checked = false;
+  try {
+    const settings = { role: "builder" as const, source: "project" as const, make: "codex" as const, model: "default", reasoning: "default", fast: false };
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T010"], builder: settings });
+    run = releaseBuildLease(dir, run, "recoverable");
+    WorkflowDb.prototype.transition = function (...args: Parameters<WorkflowDb["transition"]>) {
+      if (args[0] === run.runId && args[1].checkpoint === "recovery-decision-frozen") {
+        assert.equal(this.currentLease()?.pid, process.pid);
+        assert.equal(this.currentLease()?.runId, run.runId);
+        checked = true;
+      }
+      return original.apply(this, args);
+    };
+    const command = buildBuildResumeCommand({ executeStart: () => 0 });
+    await command.parseAsync([dir, "--run", run.runId, "--yes", "--fresh-session"], { from: "user" });
+    assert.equal(checked, true);
+  } finally { WorkflowDb.prototype.transition = original; rmSync(dir, { recursive: true, force: true }); }
 });

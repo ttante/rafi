@@ -70,6 +70,7 @@ ai-foreman doctor ./my-project
 ai-foreman tickets init --project ./my-project --app-name "My App"
 ai-foreman tickets populate --project ./my-project --agent codex --model gpt-5.5 --effort xhigh
 ai-foreman start ./my-project --agent codex --model gpt-5.5 --effort xhigh --steps 5
+ai-foreman state export ./my-project --output rafi-state.rafi.gz
 ```
 
 What each part does:
@@ -88,6 +89,20 @@ What each part does:
 - roadmap docs
 - ticket files
 - folders or globs containing planning notes
+
+## Move Local State Between Machines
+
+Use `ai-foreman state export` for a sequential handoff from one checkout to another:
+
+```bash
+ai-foreman state export ./my-project --output rafi-state.rafi.gz
+ai-foreman state inspect rafi-state.rafi.gz
+ai-foreman state import ./matching-checkout rafi-state.rafi.gz
+```
+
+The bundle includes the local tracker database, delivery state, workflow/recovery databases, compiled role bundles, source snapshots, interview recovery records, and diagnostic run/recovery files. It does not include source code, provider sessions, or live worktrees. Export/import refuse dirty Git checkouts, active workflow leases, incompatible branch/HEAD state, and divergent transfer lineage. Import asks before replacing existing local state unless `--yes` is supplied, keeps a backup under `.rafi/state-transfer-backups/`, and rolls back failed imports.
+
+Provider sessions are historical after import. Resume with `rafi build:resume <project> --fresh-with-handoff` or the equivalent guided recovery path when exact session recovery is unavailable.
 
 ## Primary Options
 
@@ -148,7 +163,9 @@ With the saved `current` strategy, Foreman works in the active branch while the 
 
 The current terminal status includes the role/provider, activity, truthful context state, successful compaction count, and handoff generation. At the Builder threshold, Foreman settles the in-flight action, verifies native compaction plus a fresh provider usage sample, and resumes the frozen action. The configured maximum defaults to ten successful compactions per location-scoped provider session; the next crossing uses a validated fresh handoff instead of exceeding it. Disposable QA snapshots never reuse a prior QA conversation in a new `/tmp/rafi-qa-*` worktree; they transfer cumulative state through an accepted handoff.
 
-Failed QA reviews use the versioned `RAFI_QA_FAILURE_REPORT_START` / `RAFI_QA_FAILURE_REPORT_END` JSON contract. Foreman validates the report before Builder remediation and preserves reports by digest. A malformed failing report receives two correction-only turns, a compacted pair, then five turns in a validated fresh successor. Recovery packets are owner-only, locally Git-excluded, and stored under `.foreman/qa-report-recovery/`; the successor must acknowledge the copied packet and reviewed-state digests before reporting.
+Failed QA reviews use the versioned `RAFI_QA_FAILURE_REPORT_START` / `RAFI_QA_FAILURE_REPORT_END` JSON contract. Foreman validates the report before Builder remediation, namespaces finding IDs by run, ticket, and review, and durably indexes the exact report, remediation response, and bounded fix summary by digest. A malformed failing report receives two correction-only turns in its original session, then a validated fresh successor performs one complete source-bound review followed by up to two correction-only turns. Any later operator-requested fresh successor performs one complete source-bound review followed by five usable correction-only turns.
+
+Owner-only recovery packets under `.foreman/qa-report-recovery/` bind the review to a full frozen source digest: commit, porcelain status, staged and unstaged bytes, and untracked content. Every fresh attempt captures and compares that complete state. Drift appends the new state and forces a complete review; correction-only reconstruction is never applied to changed source. Packet revisions and the authoritative WorkflowDb recovery head advance together. A successor must have a location-scoped identity, accept a handoff containing the complete resource inventory (purpose, byte count, digest, and recovery requirement), and acknowledge the copied packet before reporting. Paused recovery resumes with `rafi build:resume <project> --run <run-id> --ticket <ticket-id> --fresh-with-handoff`.
 
 ### `ai-foreman manager`
 
@@ -497,6 +514,11 @@ ai-foreman start ./my-project --steps 5 --no-qa
 # Resume the latest session / a specific session
 ai-foreman start ./my-project --steps 5 --continue
 ai-foreman start ./my-project --steps 5 --resume <session-id>
+
+# Export, inspect, and import local Rafi state
+ai-foreman state export ./my-project --output rafi-state.rafi.gz
+ai-foreman state inspect rafi-state.rafi.gz
+ai-foreman state import ./matching-checkout rafi-state.rafi.gz
 ```
 
 ## Ticket Lifecycle Commands
@@ -558,16 +580,24 @@ STEP_STATUS: needs_input | question="Which storage backend?" choices="SQLite|Pos
 
 Provider-native `AskUserQuestion` prompts preserve their existing input/output behavior. Hosts may also observe a question only after the user successfully supplies a non-empty answer; cancelled, denied, malformed, and empty prompts do not emit answered-question telemetry. Rafi uses this boundary to recognize machine-shaped exhaustive-planning exchanges without treating generic questions as grill-me coverage.
 
-When QA is enabled, Foreman asks the builder to review its own work:
+When QA is enabled, Foreman creates an independent read-only review snapshot. A pass ends with:
 
 ```txt
 STEP_STATUS: qa_pass | summary="tests pass and acceptance criteria are met"
+```
+
+Failure uses a structured report immediately before the status marker (the short `issues` field is only a human synopsis and fallback input):
+
+```txt
+RAFI_QA_FAILURE_REPORT_START
+{"version":1,"summary":"missing empty-config coverage","checks_run":[{"check":"tests","command":"pnpm test","outcome":"failed","evidence":"empty-config case is absent"}],"findings":[{"id":"F1","requirement":"empty config is handled","locations":["src/config.ts","test/config.test.ts"],"problem":"no regression case exists","evidence":"test search found no empty-config case","expected":"the suite covers empty config","fix_direction":"add the missing case and repair behavior if needed","verification":["pnpm test"]}],"observations":[]}
+RAFI_QA_FAILURE_REPORT_END
 STEP_STATUS: qa_fail | issues="missing test for empty config"
 ```
 
 If QA fails:
 
-- Foreman sends a fix instruction.
+- Foreman sends the Builder the complete validated report, ticket requirements, current source digest, and prior report/remediation history.
 - Foreman reruns QA.
 - QA turns do not count against `--steps`.
 

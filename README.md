@@ -74,6 +74,7 @@ rafi status          # show the nearest project's latest builder run
 rafi doctor .        # check project, runtime, and tracker readiness
 rafi tickets queue   # view all tickets in queue
 rafi build:resume .  # resumes a build that stopped
+rafi state export . --output rafi-state.rafi.gz  # bundle local Rafi state for another checkout
 ```
 
 `rafi doctor .` reports the exact Claude executable, SDK-wrapper availability, setting sources, and the names (not values) of relevant proxy/certificate environment variables. If `claude -p "Return exactly OK"` succeeds but a Rafi Claude run still fails, use `rafi doctor . --live-claude` to exercise the same no-tools SDK execution path. The live check is opt-in, bounded, and uses account quota.
@@ -170,6 +171,20 @@ Builder and QA turns continuously publish bounded cumulative checkpoints. Exact 
 
 Use `rafi build:start-over .` when the whole run—not just tracker state—must restart. Local unmerged work is committed to a reported `archive/...` branch before the original branch returns to its recorded baseline. Pushed/open-review work is left untouched and restarts on a collision-safe `-restart-N` branch. Merged work offers current-base restart, a separate reviewable revert branch, manual guidance, or cancel. The command never force-pushes, deletes a remote branch, closes a review, or edits the base branch directly. `rafi tickets reset` only clears active tracker progress and ownership while preserving ticket definitions, dependencies, validation history, and audit events.
 
+## Move local Rafi state between machines
+
+Use `rafi state export` when you need to hand a Rafi project from one checkout to another without losing the local tracker database, build/recovery records, compiled role bundles, interview recovery records, source snapshots, or diagnostics:
+
+```sh
+rafi state export . --output rafi-state.rafi.gz
+rafi state inspect rafi-state.rafi.gz
+rafi state import /path/to/matching-checkout rafi-state.rafi.gz
+```
+
+State bundles are for sequential handoff, not concurrent multi-machine work. Source code is not bundled, so export and import require clean Git checkouts and import checks that the target branch and HEAD match the bundle when Git metadata is available. Imports replace existing local Rafi state only after confirmation or `--yes`, keep a backup under `.rafi/state-transfer-backups/`, and roll back if validation fails.
+
+Provider sessions are recorded as history but are not portable. After importing, use `rafi build:resume . --fresh-with-handoff` when exact session recovery is unavailable.
+
 ## Agent defaults and safe removal
 
 Run `rafi agents .` to configure committed defaults independently for planner, Builder, QA, ticket maker, and the read-only uninstaller interpreter. `rafi start --agent` overrides only Builder for that run; QA remains a separate provider session with its own settings.
@@ -218,6 +233,10 @@ my-project/
   .claude/skills/<name>/SKILL.md     Claude Code project skills
   .rafi/compiled/<role>/             Runtime-neutral role bundles
   .rafi/interviews/                  Ignored interview recovery records
+  .rafi/recovery.sqlite3             Durable workflow, handoff, and recovery state
+  .rafi/observability.sqlite3        Local activity and run observability state
+  .rafi/state-transfer.json          State export/import lineage
+  .rafi/state-transfer-backups/      Backups made before state imports
   .tickets/tickets.yaml              Canonical ticket definitions
   .tickets/delivery.yaml             Approved delivery groups and behavior
   .tickets/ticket-state.sqlite       Ignored local status and evidence history

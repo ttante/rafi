@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexAdapter, parseCodexLine } from "../src/adapters/codex.js";
@@ -43,6 +43,21 @@ test("buildArgs: baseline includes required flags and instruction", () => {
   assert.ok(args.includes(CWD), "missing cwd");
   assert.equal(args[args.length - 1], "do the thing", "instruction must be last");
   assert.ok(!args.includes("resume"), "should not include resume on first turn");
+});
+
+test("Codex instruction uses the Codex-specific skill when runtime artifacts conflict", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "codex-skill-dispatch-"));
+  try {
+    mkdirSync(join(cwd, ".codex/skills/review"), { recursive: true });
+    mkdirSync(join(cwd, ".agents/skills/review"), { recursive: true });
+    writeFileSync(join(cwd, ".codex/skills/review/SKILL.md"), "codex exact body\n");
+    writeFileSync(join(cwd, ".agents/skills/review/SKILL.md"), "generic conflicting body\n");
+    const a = adapter({ cwd, skills: ["review"], systemPromptAppend: "QA ROLE" });
+    const instruction = a.buildInstruction("review now");
+    assert.match(instruction, /codex exact body/);
+    assert.doesNotMatch(instruction, /generic conflicting body/);
+    await a.close();
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
 test("buildArgs: read-only sandbox override", () => {
@@ -187,6 +202,28 @@ test("Codex app-server non-recoverable error remains terminal", async () => {
     params: { error: { message: "Authentication failed" }, willRetry: false },
   });
   assert.deepEqual((await iterator.next()).value, { kind: "error", message: "Authentication failed" });
+  await a.close();
+});
+
+test("Codex app-server preserves complete file-change and future item payloads", async () => {
+  const a = adapter();
+  const iterator = a.events()[Symbol.asyncIterator]();
+  const fileChange = { id: "fc-1", type: "fileChange", changes: [{ path: "src/a.ts", kind: "update", patch: "exact" }], providerFutureField: { nested: true } };
+  (a as unknown as { handle(message: unknown): void }).handle({ method: "item/started", params: { item: fileChange } });
+  const raw = (await iterator.next()).value;
+  assert.equal(raw.kind, "provider-item");
+  assert.deepEqual(raw.payload, fileChange);
+  const tool = (await iterator.next()).value;
+  assert.equal(tool.kind, "tool");
+  assert.deepEqual(tool.input, fileChange);
+  assert.equal(tool.inputCompleteness, "complete");
+  assert.equal((await iterator.next()).value.kind, "activity");
+
+  const future = { id: "future-1", type: "futureToolKind", arbitrary: [1, { two: 2 }] };
+  (a as unknown as { handle(message: unknown): void }).handle({ method: "item/completed", params: { item: future } });
+  const futureEvent = (await iterator.next()).value;
+  assert.equal(futureEvent.kind, "provider-item");
+  assert.deepEqual(futureEvent.payload, future);
   await a.close();
 });
 

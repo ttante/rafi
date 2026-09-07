@@ -13,12 +13,14 @@ import { countProviderQuestions, handleProviderQuestionTool, type AnsweredProvid
 import type { Log } from "./log.js";
 import { signalAttention } from "./notify.js";
 import { pauseActivityForInput } from "./activity.js";
-import { isTicketsInitialized, loadTicketsConfig } from "./tickets/config.js";
+import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
+import { StateDb } from "./tickets/stateDb.js";
 import { cmdUpdate, cmdComplete, cmdBlock, cmdUnblock, cmdImplementationQueue } from "./tickets/commands.js";
 import { loadTickets } from "./tickets/ticketLoader.js";
 import type { TicketDef } from "./tickets/ticketSchema.js";
-import { buildDurableQaFixHandoff, runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaReportRecoveryHandler, type QaSessionBoundaryRecovery, type QaSessionHandle, type QaStreamState } from "./qaReview.js";
-import { changeManifestAsync, deterministicChangeSummaryAsync } from "./qaSnapshot.js";
+import { beginQaFinalization, completeQaFinalization, verifyPendingQaFinalizationSource, runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaReportRecoveryHandler, type QaSessionBoundaryRecovery, type QaSessionBoundaryResult, type QaSessionHandle, type QaStreamState } from "./qaReview.js";
+import { QaFailureDeliveryService } from "./qaFailureDelivery.js";
+import { generatedTrackerDirtyPaths } from "./branch/git.js";
 import type { SessionStrategy } from "rafi-spec";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -26,6 +28,7 @@ import { join, relative } from "node:path";
 import { SessionUnavailableError, sessionUnavailableErrorFromFailure } from "./adapters/sessionFailure.js";
 import type { RunObserver } from "./observability.js";
 import type { QaRecoveryPacket } from "./qaRecovery.js";
+import { WorkflowDb } from "./workflowDb.js";
 
 /** Parsed STEP_STATUS marker from a builder's turn. */
 export interface StepStatus {
@@ -287,7 +290,6 @@ export class Foreman {
   private readonly terminalBellEnabled: boolean;
   private readonly qaStream: QaStreamState = { reviews: 0, modificationViolations: 0 };
   private builderWorkSessions = 0;
-  private readonly fallbackQaRunId = `qa-${randomUUID()}`;
 
   constructor(
     private builder: BuilderAdapter,
@@ -298,14 +300,14 @@ export class Foreman {
     private readonly projectDir?: string,
     /** @deprecated QA must be created by qaFactory in a disposable snapshot. */
     _deprecatedSameSessionReviewer?: BuilderAdapter,
-    private readonly qaFactory?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter | QaSessionHandle>,
+    private readonly qaFactory?: (cwd: string, sessionId?: string) => Promise<QaSessionHandle>,
     private readonly qaSessionStrategy: SessionStrategy = "compact",
     private readonly builderFactory?: (cwd: string, sessionId?: string) => Promise<BuilderAdapter>,
     private readonly builderSessionStrategy: SessionStrategy = "compact",
     private readonly qaNonconvergence?: (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision>,
     private readonly beforeBuilderTurn?: (adapter: BuilderAdapter, frozenAction: string) => Promise<BuilderAdapter>,
     private readonly builderSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy) => Promise<BuilderAdapter>,
-    private readonly qaSessionBoundary?: (adapter: BuilderAdapter, frozenAction: string, strategy: SessionStrategy, cwd: string, recovery?: QaSessionBoundaryRecovery) => Promise<BuilderAdapter>,
+    private readonly qaSessionBoundary?: (handle: QaSessionHandle, frozenAction: string, strategy: SessionStrategy, cwd: string, recovery?: QaSessionBoundaryRecovery) => Promise<QaSessionBoundaryResult>,
     private readonly observeQaNativeCompactions?: (adapter: BuilderAdapter) => Promise<void>,
     /** Persist a Builder's provider-native event immediately after every turn. */
     private readonly observeBuilderNativeCompactions?: (adapter: BuilderAdapter) => Promise<void>,
@@ -314,6 +316,8 @@ export class Foreman {
     private readonly qaContinuityManaged = false,
     private readonly qaReportRecovery?: QaReportRecoveryHandler,
     private qaResumedRecovery?: QaRecoveryPacket,
+    /** Exact durable build-run scope. Observability is never an identity authority. */
+    private readonly qaRunId: string = `qa-${randomUUID()}`,
   ) {
     void _deprecatedSameSessionReviewer;
     this.notificationsEnabled = typeof notifications === "boolean" ? notifications : notifications.desktop;
@@ -534,10 +538,11 @@ export class Foreman {
     outcome: "passed" | "blocked" | "needs-human" | "waived";
     detail?: string;
     summary?: string;
+    passCertificateId?: string;
+    sourceStateDigest?: string;
   }> {
     if (this.projectDir && this.qaFactory) {
       const resumedRecovery = this.qaResumedRecovery;
-      this.qaResumedRecovery = undefined;
       const review = await runIsolatedQa({
         ticket: this.ticketForQa(stepIndex, ticketId),
         builderWorktree: this.projectDir,
@@ -545,32 +550,43 @@ export class Foreman {
         qaStrategy: this.qaSessionStrategy,
         state: this.qaStream,
         createQa: this.qaFactory,
-        sessionBoundary: this.qaSessionBoundary,
+        sessionBoundary: this.qaSessionBoundary ?? (async () => { throw new Error("QA recovery requires a validated durable session boundary"); }),
         observeNativeCompactions: this.observeQaNativeCompactions,
         maxCycles: this.qaMaxCycles,
-        recovery: { projectDir: this.projectDir, runId: this.observer?.runId ?? this.fallbackQaRunId },
+        recovery: { projectDir: this.projectDir, runId: this.qaRunId },
         observer: this.observer,
         qaRuntimeContext: this.qaRuntimeContext,
         continuityManaged: this.qaContinuityManaged,
         onReportRecovery: this.qaReportRecovery,
         resumedRecovery,
-        fix: async (request) => {
-          const manifest = await changeManifestAsync(this.projectDir!);
-          const changeSummary = await deterministicChangeSummaryAsync(this.projectDir!);
-          const instruction = buildDurableQaFixHandoff(this.ticketForQa(stepIndex, ticketId), request, this.projectDir!, request.latestBuilderResult, manifest.diffDigest, changeSummary);
-          await this.prepareBuilderBoundary(instruction); this.builderWorkSessions += 1;
-          const fix = await this.doTurn(instruction);
-          this.log.write("qa-fix", { stepIndex, statusKind: fix.status.kind, costUsd: fix.result.costUsd, isError: fix.result.isError });
-          return fix.result.isError || fix.status.kind !== "done"
-            ? { ok: false, detail: fix.status.reason ?? fix.status.error ?? fix.result.text.slice(0, 200) }
-            : { ok: true, response: fix.result.text, summary: fix.status.summary ?? fix.result.text };
+        deliverFailure: async (request) => {
+          this.builderWorkSessions += 1;
+          const delivery = new QaFailureDeliveryService();
+          const result = await delivery.deliver(request, {
+            adapter: () => this.builder,
+            setAdapter: (adapter) => { this.builder = adapter; },
+            sessionStrategy: this.builderSessionStrategy,
+            prepareBoundary: async (_adapter, instruction) => { await this.prepareBuilderBoundary(instruction); return this.builder; },
+            beforeTurn: async (adapter, instruction) => this.beforeBuilderTurn ? this.beforeBuilderTurn(adapter, instruction) : adapter,
+            recordSession: (session) => {
+              const sessionId = typeof session === "string" ? session : session.sessionId;
+              this.log.write("qa-fix", { stepIndex, sessionId });
+            },
+          });
+          this.log.write("qa-fix", { stepIndex, ok: result.ok, detail: result.detail, providerTurnId: result.providerTurnId, handoffId: result.handoffId, operationId: result.operationId });
+          return result;
         },
         evidence: ({ cycle, outcome, detail, qaDiff }) => this.log.write("qa", { stepIndex, cycle, outcome, detail, qaDiff, disposable: true }),
         onNonconvergence: this.qaNonconvergence,
         resolveBlocked: (adapter, reason) => this.resolveBlocker(adapter, reason, "qa"),
       });
+      if (resumedRecovery) {
+        const recoveryDb = new WorkflowDb(this.projectDir);
+        try { if (recoveryDb.qaRecoveryHead(resumedRecovery.manifest.runId, resumedRecovery.manifest.ticketId)?.pendingAction === "resolved") this.qaResumedRecovery = undefined; }
+        finally { recoveryDb.close(); }
+      }
       if (review.outcome === "nonconverged") return { outcome: "needs-human", detail: review.detail };
-      return { outcome: review.outcome, detail: review.detail, summary: review.summary };
+      return { outcome: review.outcome, detail: review.detail, summary: review.summary, passCertificateId: review.passCertificateId, sourceStateDigest: review.sourceStateDigest };
     }
     return {
       outcome: "needs-human",
@@ -584,6 +600,63 @@ export class Foreman {
     summary?: string;
   }> {
     return this.runQa(stepIndex, undefined, builderResult);
+  }
+
+  /** Resume an already-built ticket at the QA boundary without dispatching Builder preflight/work. */
+  async runPendingQaRecovery(ticketId: string, builderResult: string): Promise<{
+    outcome: "passed" | "blocked" | "needs-human" | "waived";
+    detail?: string;
+    summary?: string;
+    passCertificateId?: string;
+    sourceStateDigest?: string;
+  }> {
+    if (this.qaResumedRecovery && this.qaResumedRecovery.manifest.ticketId !== ticketId) throw new Error(`pending QA recovery belongs to ${this.qaResumedRecovery.manifest.ticketId}, not ${ticketId}`);
+    return this.runQa(1, ticketId, builderResult);
+  }
+
+  /** Complete only the pending QA boundary and its tracker transition. No Builder work turn is sent. */
+  async completePendingQaRecovery(ticketId: string): Promise<{
+    outcome: "passed" | "blocked" | "needs-human" | "waived";
+    detail?: string;
+  }> {
+    if (!this.projectDir || !this.ticketsEnabled) throw new Error("pending QA recovery requires an initialized ticket project");
+    const qa = await this.runPendingQaRecovery(ticketId, "Resuming the exact durable QA failure/review boundary; no new Builder work was dispatched.");
+    if (qa.outcome !== "passed" && qa.outcome !== "waived") return qa;
+    if (qa.outcome === "passed") {
+      if (!qa.passCertificateId || !qa.sourceStateDigest) throw new Error("QA passed without a durable pass certificate");
+      await beginQaFinalization(this.projectDir, this.projectDir, this.qaRunId, ticketId, qa.passCertificateId, qa.sourceStateDigest, `ticket-complete:${ticketId}`, generatedTrackerDirtyPaths(loadTicketsConfig(this.projectDir).paths));
+    }
+    cmdComplete(this.projectDir, ticketId, {
+      actor: "foreman",
+      summary: qa.summary ?? "Completed after exact QA recovery",
+      validationResult: qa.outcome === "waived" ? "failed" : "passed",
+      validationNotes: qa.outcome === "waived" ? "User explicitly waived unresolved QA failures" : "Durable QA recovery emitted qa_pass",
+      evidence: qa.summary ?? (qa.outcome === "waived" ? "Unresolved QA issues preserved in durable run evidence" : "Durable QA recovery emitted qa_pass"),
+    });
+    if (qa.outcome === "passed") completeQaFinalization(this.projectDir, this.qaRunId, ticketId);
+    return qa;
+  }
+
+  /** Reconcile a crash between certificate consumption, tracker completion, and the final receipt. */
+  async completePendingQaFinalization(ticketId: string): Promise<void> {
+    if (!this.projectDir || !this.ticketsEnabled) throw new Error("pending QA finalization requires an initialized ticket project");
+    const protocol = new WorkflowDb(this.projectDir);
+    try {
+      if (protocol.qaTicketHead(this.qaRunId, ticketId).state !== "finalizing") throw new Error(`QA finalization is not pending for ${ticketId}`);
+    } finally { protocol.close(); }
+    const paths = resolveTicketPaths(loadTicketsConfig(this.projectDir), this.projectDir);
+    const stateDb = new StateDb(paths.stateDb);
+    const alreadyDone = stateDb.getState(ticketId)?.status === "done";
+    stateDb.close();
+    await verifyPendingQaFinalizationSource(this.projectDir, this.projectDir, this.qaRunId, ticketId, alreadyDone);
+    if (!alreadyDone) {
+      cmdComplete(this.projectDir, ticketId, {
+        actor: "foreman", summary: "Completed after reconciling durable QA finalization",
+        validationResult: "passed", validationNotes: "Pass certificate was consumed before the interrupted tracker transition",
+        evidence: "Durable QA pass certificate and finalization intent reconciled after restart",
+      });
+    }
+    completeQaFinalization(this.projectDir, this.qaRunId, ticketId);
   }
 
   qaSessionId(): string | undefined { return this.qaStream.sessionId; }
@@ -686,6 +759,8 @@ export class Foreman {
       if (status.kind === "done" || status.kind === "plan_complete") {
         let qaSummary: string | undefined;
         let qaWaived = false;
+        let qaPassCertificateId: string | undefined;
+        let qaSourceStateDigest: string | undefined;
         if (this.qaEnabled) {
           const qa = await this.runQa(i, status.ticket ?? pendingTicketId, result.text);
           if (qa.outcome === "blocked") {
@@ -700,6 +775,8 @@ export class Foreman {
           }
           qaWaived = qa.outcome === "waived";
           qaSummary = qa.summary;
+          qaPassCertificateId = qa.passCertificateId;
+          qaSourceStateDigest = qa.sourceStateDigest;
         }
 
         // Update ticket state only after QA has passed, so generated tracker
@@ -708,6 +785,10 @@ export class Foreman {
           const ticketId = status.ticket ?? pendingTicketId;
           if (ticketId) {
             try {
+              if (this.qaEnabled && !qaWaived) {
+                if (!qaPassCertificateId || !qaSourceStateDigest) throw new Error("QA passed without a durable pass certificate");
+                await beginQaFinalization(this.projectDir, this.projectDir, this.qaRunId, ticketId, qaPassCertificateId, qaSourceStateDigest, `ticket-complete:${ticketId}`, generatedTrackerDirtyPaths(loadTicketsConfig(this.projectDir).paths));
+              }
               cmdComplete(this.projectDir, ticketId, {
                 actor: "foreman",
                 summary: status.summary ?? `Step ${i} complete`,
@@ -719,6 +800,7 @@ export class Foreman {
                   ? (qaSummary ?? (qaWaived ? "Unresolved QA issues preserved in run evidence" : "Foreman QA emitted qa_pass"))
                   : undefined,
               });
+              if (this.qaEnabled && !qaWaived) completeQaFinalization(this.projectDir, this.qaRunId, ticketId);
             } catch (err) {
               outcome = "needs-human";
               detail = `failed to complete ticket ${ticketId}: ${err instanceof Error ? err.message : String(err)}`;

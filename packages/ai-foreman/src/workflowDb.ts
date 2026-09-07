@@ -12,6 +12,7 @@ import type {
   ContinuityHead,
   ContinuityHeadState,
   HandoffLineage,
+  HandoffAcceptanceReceiptV1,
   HandoffManifestV1,
   LiveSettingsAcknowledgment,
   OperationLifecycle,
@@ -28,6 +29,21 @@ import type {
 } from "rafi-spec";
 import { providerSessionKey } from "./sessionIdentity.js";
 import type { BranchResumeSession } from "./branch/resume.js";
+import {
+  initialQaReducerState,
+  qaDigest,
+  reduceQaState,
+  type BuilderRemediationReceiptV2,
+  type FrozenQaSourceStateV2,
+  type HandoffAcceptanceReceiptV2,
+  type QaPassCertificateV2,
+  type QaReducerEventV2,
+  type QaReducerStateV2,
+  type QaReportDisposition,
+  type QaReviewBasisV2,
+  type QaTurnIntentV2,
+  type QaTurnReceiptV2,
+} from "./qaProtocolV2.js";
 
 export const WORKFLOW_DB_FILE = ".rafi/recovery.sqlite3";
 export type WorkflowKind = "plan" | "ticket-plan" | "ticket-populate" | "uninstall" | "build" | "qa-remediation" | "recovery" | "legacy";
@@ -124,6 +140,133 @@ export interface RoleMutationLease {
   sessionRef?: ProviderSessionRefV1;
   sessionKey?: string;
   movedAt: string;
+}
+
+export interface QaRecoveryHeadRecord {
+  runId: string;
+  ticketId: string;
+  packetId: string;
+  packetPath: string;
+  packetDigest: string;
+  reviewedStateDigest: string;
+  revision: number;
+  correctionTurns: number;
+  pendingAction: string;
+  updatedAt: string;
+}
+
+export interface QaPacketProjectionRecord {
+  runId: string;
+  ticketId: string;
+  packetRevision: number;
+  packetDigest: string;
+  path: string;
+  /** Exact canonical manifest bytes needed to finish an interrupted filesystem publication. */
+  manifestJson?: string;
+  status: "intended" | "published";
+  createdAt: string;
+}
+
+export interface QaFinalizationStepRecord {
+  operationId: string;
+  runId: string;
+  ticketId: string;
+  certificateId: string;
+  kind: string;
+  status: "intended" | "completed" | "invalidated";
+  intent: { expectedSourceStateDigest: string; expectedGitTree: string; allowedProjectionPaths: string[]; reducerRevision: number };
+  receipt?: unknown;
+}
+
+export interface QaReviewAttemptRecord {
+  attemptId: string;
+  runId: string;
+  ticketId: string;
+  reviewNumber: number;
+  cycle: number;
+  remediationGeneration: number;
+  sourceDigest: string;
+  status: "started" | "passed" | "failed" | "interrupted";
+  reportDigest?: string;
+  findingIds?: string[];
+  namespacedFindingIds?: string[];
+  detail?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QaRemediationAttemptRecord {
+  attemptId: string;
+  runId: string;
+  ticketId: string;
+  reviewAttemptId: string;
+  generation: number;
+  mode: "validated-report" | "planner-remediation";
+  status: "intended" | "started" | "succeeded" | "failed" | "uncertain";
+  requestDigest: string;
+  responseDigest?: string;
+  summaryDigest?: string;
+  detail?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type QaFailureHandoffState =
+  | "prepared"
+  | "delivery-intended"
+  | "delivery-uncertain"
+  | "response-invalid"
+  | "builder-blocked"
+  | "remediation-reported"
+  | "recheck-required"
+  | "source-drift";
+
+export interface QaFailureHandoffRecord {
+  handoffId: string;
+  operationId: string;
+  runId: string;
+  ticketId: string;
+  reviewAttemptId: string;
+  reportDigest: string;
+  generation: number;
+  reviewedContentDigest: string;
+  reviewBasisDigest: string;
+  state: QaFailureHandoffState;
+  handoffDigest: string;
+  hostInstructionDigest: string;
+  builderSession?: ProviderSessionRefV1;
+  providerTurnId?: string;
+  receiptDigest?: string;
+  responseDigest?: string;
+  parsedResponseDigest?: string;
+  postSourceDigest?: string;
+  detail?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QaTransitionRecordV2 {
+  sequence: number;
+  runId: string;
+  ticketId: string;
+  fromRevision: number;
+  toRevision: number;
+  event: QaReducerEventV2;
+  state: QaReducerStateV2;
+  createdAt: string;
+}
+
+export interface QaReportRecordV2 {
+  reportDigest: string;
+  runId: string;
+  ticketId: string;
+  reviewNumber: number;
+  sourceStateDigest: string;
+  reviewBasisDigest: string;
+  disposition: QaReportDisposition;
+  report: unknown;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** Authoritative persistence for every resumable workflow in a project. */
@@ -521,11 +664,24 @@ export class WorkflowDb {
     const at = now.toISOString();
     this.db.prepare(`INSERT INTO operation_journal(idempotency_key,run_id,kind,status,intent_json,created_at,updated_at)
       VALUES(?,?,?,'planned',?,?,?) ON CONFLICT(idempotency_key) DO NOTHING`).run(input.idempotencyKey, input.runId, input.kind, json(input.intent), at, at);
-    return this.operation(input.idempotencyKey)!;
+    const operation = this.operation(input.idempotencyKey)!;
+    if (operation.runId !== input.runId || operation.kind !== input.kind || json(operation.intent) !== json(input.intent)) {
+      throw new Error(`operation idempotency collision: ${input.idempotencyKey}`);
+    }
+    return operation;
   }
 
   updateOperation(idempotencyKey: string, status: OperationLifecycle, details: { result?: unknown; externalId?: string; error?: string } = {}, now = new Date()): OperationRecord {
     const prior = this.operation(idempotencyKey); if (!prior) throw new Error(`operation not found: ${idempotencyKey}`);
+    const allowed: Record<OperationLifecycle, OperationLifecycle[]> = {
+      planned: ["planned", "in_progress", "failed"],
+      in_progress: ["in_progress", "confirmed", "failed", "uncertain"],
+      uncertain: ["uncertain", "confirmed", "failed"],
+      confirmed: ["confirmed"],
+      failed: ["failed"],
+    };
+    if (!allowed[prior.status].includes(status)) throw new Error(`invalid operation transition ${prior.status} -> ${status}: ${idempotencyKey}`);
+    if (prior.status === status && prior.status !== "planned" && json(prior.result) !== json(details.result)) throw new Error(`conflicting terminal operation receipt: ${idempotencyKey}`);
     const at = now.toISOString();
     this.db.transaction(() => {
       this.db.prepare("UPDATE operation_journal SET status=?,result_json=?,external_id=?,error=?,updated_at=? WHERE idempotency_key=?")
@@ -546,6 +702,8 @@ export class WorkflowDb {
 
   putEvidence(kind: "handoff" | "diff" | "test" | "qa", value: string | Buffer, now = new Date()): string {
     const bytes = Buffer.isBuffer(value) ? value : Buffer.from(sanitizeText(value));
+    const maximum = kind === "qa" ? 8 * 1024 * 1024 : 16 * 1024 * 1024;
+    if (bytes.length > maximum) throw new Error(`${kind} evidence exceeds the durable ${maximum}-byte item limit`);
     const digest = createHash("sha256").update(bytes).digest("hex");
     this.db.prepare("INSERT OR IGNORE INTO content_refs(digest,kind,content,created_at) VALUES(?,?,?,?)").run(digest, kind, bytes, now.toISOString());
     return digest;
@@ -554,6 +712,656 @@ export class WorkflowDb {
   getEvidence(digest: string): Buffer | undefined {
     const row = this.db.prepare("SELECT content FROM content_refs WHERE digest=?").get(digest) as { content: Buffer } | undefined;
     return row?.content;
+  }
+
+  putQaRecoveryHead(input: Omit<QaRecoveryHeadRecord, "updatedAt">, now = new Date()): QaRecoveryHeadRecord {
+    this.ensureRun(input.runId);
+    const at = now.toISOString();
+    this.db.transaction(() => {
+      const prior = this.qaRecoveryHead(input.runId, input.ticketId);
+      if (prior) {
+        if (prior.packetId !== input.packetId && prior.pendingAction !== "resolved") throw new Error(`QA recovery packet identity changed for ${input.runId}/${input.ticketId}`);
+        if (prior.packetId === input.packetId && (input.revision < prior.revision || (input.revision === prior.revision && input.packetDigest !== prior.packetDigest))) throw new Error("stale or conflicting QA recovery head");
+        // The packet loader validates the complete immutable lineage before it
+        // reconciles a filesystem-ahead crash, so a head may legitimately
+        // advance across more than one already-durable revision here.
+      }
+      this.db.prepare(`INSERT INTO qa_recovery_heads(run_id,ticket_id,packet_id,packet_path,packet_digest,reviewed_state_digest,revision,correction_turns,pending_action,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,ticket_id) DO UPDATE SET packet_id=excluded.packet_id,packet_path=excluded.packet_path,packet_digest=excluded.packet_digest,reviewed_state_digest=excluded.reviewed_state_digest,revision=excluded.revision,correction_turns=excluded.correction_turns,pending_action=excluded.pending_action,updated_at=excluded.updated_at`)
+        .run(input.runId, input.ticketId, input.packetId, input.packetPath, input.packetDigest, input.reviewedStateDigest, input.revision, input.correctionTurns, input.pendingAction, at);
+      this.insertEvent(input.runId, "qa_recovery_head", `qa-recovery:${input.ticketId}:${input.revision}`, input, at);
+    })();
+    return this.qaRecoveryHead(input.runId, input.ticketId)!;
+  }
+
+  qaRecoveryHead(runId: string, ticketId?: string): QaRecoveryHeadRecord | undefined {
+    const row = (ticketId
+      ? this.db.prepare("SELECT * FROM qa_recovery_heads WHERE run_id=? AND ticket_id=?").get(runId, ticketId)
+      : this.db.prepare("SELECT * FROM qa_recovery_heads WHERE run_id=? AND pending_action<>'resolved' ORDER BY updated_at DESC LIMIT 1").get(runId)) as DbQaRecoveryHead | undefined;
+    return row ? qaRecoveryHeadFromRow(row) : undefined;
+  }
+
+  pendingQaRecoveryHeads(runId: string): QaRecoveryHeadRecord[] {
+    const rows = this.db.prepare("SELECT * FROM qa_recovery_heads WHERE run_id=? AND pending_action<>'resolved' ORDER BY updated_at,ticket_id").all(runId) as DbQaRecoveryHead[];
+    return rows.map(qaRecoveryHeadFromRow);
+  }
+
+  beginQaReviewAttempt(input: Omit<QaReviewAttemptRecord, "status" | "createdAt" | "updatedAt">, now = new Date()): QaReviewAttemptRecord {
+    this.ensureRun(input.runId); const at = now.toISOString();
+    this.db.prepare(`INSERT INTO qa_review_attempts(attempt_id,run_id,ticket_id,review_number,cycle,remediation_generation,source_digest,status,record_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'started','{}',?,?)`)
+      .run(input.attemptId, input.runId, input.ticketId, input.reviewNumber, input.cycle, input.remediationGeneration, input.sourceDigest, at, at);
+    return this.qaReviewAttempt(input.attemptId)!;
+  }
+
+  finishQaReviewAttempt(attemptId: string, patch: Pick<QaReviewAttemptRecord, "status"> & Partial<Pick<QaReviewAttemptRecord, "reportDigest" | "findingIds" | "namespacedFindingIds" | "detail">>, now = new Date()): QaReviewAttemptRecord {
+    const prior = this.qaReviewAttempt(attemptId); if (!prior) throw new Error(`QA review attempt not found: ${attemptId}`);
+    if (prior.status !== "started") {
+      const same = prior.status === patch.status && (patch.reportDigest === undefined || patch.reportDigest === prior.reportDigest);
+      if (!same) throw new Error(`QA review attempt ${attemptId} is already terminal (${prior.status})`);
+      return prior;
+    }
+    const next = { ...prior, ...patch, updatedAt: now.toISOString() };
+    this.db.prepare("UPDATE qa_review_attempts SET status=?,report_digest=?,record_json=?,updated_at=? WHERE attempt_id=?")
+      .run(next.status, next.reportDigest ?? null, json({ findingIds: next.findingIds, namespacedFindingIds: next.namespacedFindingIds, detail: next.detail }), next.updatedAt, attemptId);
+    return next;
+  }
+
+  qaReviewAttempts(runId: string, ticketId: string): QaReviewAttemptRecord[] {
+    return (this.db.prepare("SELECT * FROM qa_review_attempts WHERE run_id=? AND ticket_id=? ORDER BY review_number").all(runId, ticketId) as DbQaReviewAttempt[]).map(qaReviewAttemptFromRow);
+  }
+
+  qaReviewAttempt(attemptId: string): QaReviewAttemptRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM qa_review_attempts WHERE attempt_id=?").get(attemptId) as DbQaReviewAttempt | undefined;
+    return row ? qaReviewAttemptFromRow(row) : undefined;
+  }
+
+  beginQaRemediationAttempt(input: Omit<QaRemediationAttemptRecord, "status" | "createdAt" | "updatedAt">, now = new Date()): QaRemediationAttemptRecord {
+    this.ensureRun(input.runId); const at = now.toISOString();
+    this.db.prepare(`INSERT INTO qa_remediation_attempts(attempt_id,run_id,ticket_id,review_attempt_id,generation,mode,status,request_digest,record_json,created_at,updated_at) VALUES(?,?,?,?,?,?,'intended',?,'{}',?,?)`)
+      .run(input.attemptId, input.runId, input.ticketId, input.reviewAttemptId, input.generation, input.mode, input.requestDigest, at, at);
+    return this.qaRemediationAttempt(input.attemptId)!;
+  }
+
+  commitQaRemediationIntent(
+    expectedRevision: number,
+    recovery: RecoveryAttemptReceipt,
+    remediation: Omit<QaRemediationAttemptRecord, "status" | "createdAt" | "updatedAt">,
+    now = new Date(),
+  ): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const head = this.qaTicketHead(remediation.runId, remediation.ticketId);
+      if (head.revision !== expectedRevision || head.state !== "review-failed") throw new Error(`Builder remediation intent raced for ${remediation.runId}/${remediation.ticketId}`);
+      const next = this.transitionQa(remediation.runId, remediation.ticketId, head.revision, { type: "remediation-intended" }, now);
+      if (next.remediationGeneration !== remediation.generation) throw new Error("Builder remediation generation mismatch");
+      this.recordRecoveryAttempt(recovery);
+      this.updateRecoveryAttempt(recovery.attemptId, "started", undefined, now);
+      this.beginQaRemediationAttempt(remediation, now);
+      this.updateQaRemediationAttempt(remediation.attemptId, "started", {}, now);
+      return next;
+    })();
+  }
+
+  updateQaRemediationAttempt(attemptId: string, status: QaRemediationAttemptRecord["status"], patch: Partial<Pick<QaRemediationAttemptRecord, "responseDigest" | "summaryDigest" | "detail">> = {}, now = new Date()): QaRemediationAttemptRecord {
+    const prior = this.qaRemediationAttempt(attemptId); if (!prior) throw new Error(`QA remediation attempt not found: ${attemptId}`);
+    const next = { ...prior, ...patch, status, updatedAt: now.toISOString() };
+    this.db.prepare("UPDATE qa_remediation_attempts SET status=?,response_digest=?,summary_digest=?,record_json=?,updated_at=? WHERE attempt_id=?")
+      .run(status, next.responseDigest ?? null, next.summaryDigest ?? null, json({ detail: next.detail }), next.updatedAt, attemptId);
+    return next;
+  }
+
+  qaRemediationAttempts(runId: string, ticketId: string): QaRemediationAttemptRecord[] {
+    return (this.db.prepare("SELECT * FROM qa_remediation_attempts WHERE run_id=? AND ticket_id=? ORDER BY generation,created_at").all(runId, ticketId) as DbQaRemediationAttempt[]).map(qaRemediationAttemptFromRow);
+  }
+
+  qaRemediationAttempt(attemptId: string): QaRemediationAttemptRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM qa_remediation_attempts WHERE attempt_id=?").get(attemptId) as DbQaRemediationAttempt | undefined;
+    return row ? qaRemediationAttemptFromRow(row) : undefined;
+  }
+
+  recordQaFailureHandoffPrepared(input: {
+    handoffId: string;
+    operationId: string;
+    runId: string;
+    ticketId: string;
+    reviewAttemptId: string;
+    reportDigest: string;
+    generation: number;
+    reviewedContentDigest: string;
+    reviewBasisDigest: string;
+    handoffDigest: string;
+    hostInstructionDigest: string;
+  }, now = new Date()): QaFailureHandoffRecord {
+    const at = now.toISOString();
+    this.db.prepare(`INSERT INTO qa_failure_handoffs(
+      handoff_id,operation_id,run_id,ticket_id,review_attempt_id,report_digest,generation,reviewed_content_digest,review_basis_digest,state,
+      handoff_digest,host_instruction_digest,record_json,created_at,updated_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,'prepared',?,?, '{}',?,?)
+    ON CONFLICT(handoff_id) DO UPDATE SET
+      operation_id=excluded.operation_id,
+      handoff_digest=excluded.handoff_digest,
+      host_instruction_digest=excluded.host_instruction_digest,
+      updated_at=excluded.updated_at
+    WHERE qa_failure_handoffs.state='prepared'`)
+      .run(input.handoffId, input.operationId, input.runId, input.ticketId, input.reviewAttemptId, input.reportDigest, input.generation,
+        input.reviewedContentDigest, input.reviewBasisDigest, input.handoffDigest, input.hostInstructionDigest, at, at);
+    const record = this.qaFailureHandoff(input.handoffId);
+    if (!record) throw new Error(`QA failure handoff was not recorded: ${input.handoffId}`);
+    if (record.operationId !== input.operationId || record.reportDigest !== input.reportDigest || record.reviewedContentDigest !== input.reviewedContentDigest
+      || record.reviewBasisDigest !== input.reviewBasisDigest || record.state !== "prepared") {
+      throw new Error(`QA failure handoff collision: ${input.handoffId}`);
+    }
+    return record;
+  }
+
+  markQaFailureHandoffDeliveryIntended(handoffId: string, builderSession: ProviderSessionRefV1, now = new Date()): QaFailureHandoffRecord {
+    return this.transitionQaFailureHandoff(handoffId, "delivery-intended", { builderSession }, now);
+  }
+
+  transitionQaFailureHandoff(handoffId: string, state: QaFailureHandoffState, patch: Partial<Pick<QaFailureHandoffRecord, "builderSession" | "providerTurnId" | "receiptDigest" | "responseDigest" | "parsedResponseDigest" | "postSourceDigest" | "detail">> = {}, now = new Date()): QaFailureHandoffRecord {
+    const prior = this.qaFailureHandoff(handoffId);
+    if (!prior) throw new Error(`QA failure handoff not found: ${handoffId}`);
+    const next = { ...prior, ...patch, state, updatedAt: now.toISOString() };
+    const priorRecordRow = this.db.prepare("SELECT record_json FROM qa_failure_handoffs WHERE handoff_id=?").get(handoffId) as { record_json: string } | undefined;
+    const priorRecord = parseJson(priorRecordRow?.record_json ?? "{}") as { transitions?: unknown[] };
+    const priorTransitions = Array.isArray(priorRecord.transitions) ? priorRecord.transitions : [];
+    const recordJson = json({ ...priorRecord, transitions: [...priorTransitions, { state, detail: patch.detail, at: next.updatedAt }] });
+    this.db.prepare(`UPDATE qa_failure_handoffs SET state=?,builder_session_json=?,provider_turn_id=?,receipt_digest=?,response_digest=?,parsed_response_digest=?,post_source_digest=?,detail=?,record_json=?,updated_at=? WHERE handoff_id=?`)
+      .run(state, next.builderSession ? json(next.builderSession) : null, next.providerTurnId ?? null, next.receiptDigest ?? null, next.responseDigest ?? null,
+        next.parsedResponseDigest ?? null, next.postSourceDigest ?? null, next.detail ?? null,
+        recordJson, next.updatedAt, handoffId);
+    return this.qaFailureHandoff(handoffId)!;
+  }
+
+  qaFailureHandoff(handoffId: string): QaFailureHandoffRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM qa_failure_handoffs WHERE handoff_id=?").get(handoffId) as DbQaFailureHandoff | undefined;
+    return row ? qaFailureHandoffFromRow(row) : undefined;
+  }
+
+  qaFailureHandoffs(runId: string, ticketId: string): QaFailureHandoffRecord[] {
+    const rows = this.db.prepare("SELECT * FROM qa_failure_handoffs WHERE run_id=? AND ticket_id=? ORDER BY generation,created_at").all(runId, ticketId) as DbQaFailureHandoff[];
+    return rows.map(qaFailureHandoffFromRow);
+  }
+
+  qaTicketHead(runId: string, ticketId: string): QaReducerStateV2 {
+    const row = this.db.prepare("SELECT state_json FROM qa_ticket_heads WHERE run_id=? AND ticket_id=?").get(runId, ticketId) as { state_json: string } | undefined;
+    return row ? parseJson(row.state_json) as QaReducerStateV2 : initialQaReducerState(runId, ticketId);
+  }
+
+  pendingQaTicketHeads(runId: string): QaReducerStateV2[] {
+    const rows = this.db.prepare("SELECT state_json FROM qa_ticket_heads WHERE run_id=? AND state NOT IN ('completed','waived') ORDER BY updated_at,ticket_id").all(runId) as Array<{ state_json: string }>;
+    return rows.map((row) => parseJson(row.state_json) as QaReducerStateV2);
+  }
+
+  /** Compare-and-swap the authoritative QA reducer head and append its event atomically. */
+  transitionQa(runId: string, ticketId: string, expectedRevision: number, event: QaReducerEventV2, now = new Date()): QaReducerStateV2 {
+    this.ensureRun(runId);
+    return this.db.transaction(() => {
+      const current = this.qaTicketHead(runId, ticketId);
+      if (current.revision !== expectedRevision) throw new Error(`stale QA transition for ${runId}/${ticketId}: expected revision ${expectedRevision}, found ${current.revision}`);
+      const next = reduceQaState(current, event);
+      const at = now.toISOString();
+      this.db.prepare(`INSERT INTO qa_ticket_heads(run_id,ticket_id,revision,state,state_json,updated_at)
+        VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,ticket_id) DO UPDATE SET revision=excluded.revision,state=excluded.state,state_json=excluded.state_json,updated_at=excluded.updated_at
+        WHERE qa_ticket_heads.revision=?`)
+        .run(runId, ticketId, next.revision, next.state, json(next), at, expectedRevision);
+      this.db.prepare("INSERT INTO qa_transitions(run_id,ticket_id,from_revision,to_revision,event_json,state_json,created_at) VALUES(?,?,?,?,?,?,?)")
+        .run(runId, ticketId, current.revision, next.revision, json(event), json(next), at);
+      return next;
+    })();
+  }
+
+  qaTransitions(runId: string, ticketId: string): QaTransitionRecordV2[] {
+    const rows = this.db.prepare("SELECT * FROM qa_transitions WHERE run_id=? AND ticket_id=? ORDER BY sequence").all(runId, ticketId) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({ sequence: Number(row.sequence), runId: String(row.run_id), ticketId: String(row.ticket_id), fromRevision: Number(row.from_revision), toRevision: Number(row.to_revision), event: parseJson(String(row.event_json)) as QaReducerEventV2, state: parseJson(String(row.state_json)) as QaReducerStateV2, createdAt: String(row.created_at) }));
+  }
+
+  assertQaRunFinalizable(runId: string): void {
+    const rows = this.db.prepare("SELECT ticket_id,state FROM qa_ticket_heads WHERE run_id=? AND state NOT IN ('completed','waived') ORDER BY ticket_id").all(runId) as Array<{ ticket_id: string; state: string }>;
+    if (rows.length) throw new Error(`build run has non-final QA state: ${rows.map((row) => `${row.ticket_id}=${row.state}`).join(", ")}`);
+  }
+
+  putQaSourceState(state: FrozenQaSourceStateV2): void {
+    this.db.prepare("INSERT OR IGNORE INTO qa_source_states(digest,run_id,ticket_id,origin_digest,content_digest,state_json,created_at) VALUES(?,?,?,?,?,?,?)")
+      .run(state.digest, state.runId, state.ticketId, state.originDigest, state.contentDigest, json(state), state.capturedAt);
+    const stored = this.db.prepare("SELECT origin_digest,content_digest,state_json FROM qa_source_states WHERE run_id=? AND ticket_id=? AND digest=?").get(state.runId, state.ticketId, state.digest) as { origin_digest: string; content_digest: string; state_json: string };
+    const { capturedAt: _storedCapturedAt, ...storedIdentity } = parseJson(stored.state_json) as FrozenQaSourceStateV2;
+    const { capturedAt: _currentCapturedAt, ...currentIdentity } = state;
+    if (stored.origin_digest !== state.originDigest || stored.content_digest !== state.contentDigest || json(storedIdentity) !== json(currentIdentity)) throw new Error(`QA source-state digest collision: ${state.digest}`);
+  }
+
+  putQaReviewBasis(runId: string, ticketId: string, basis: QaReviewBasisV2, now = new Date()): void {
+    this.db.prepare("INSERT OR IGNORE INTO qa_review_bases(digest,run_id,ticket_id,basis_json,created_at) VALUES(?,?,?,?,?)")
+      .run(basis.digest, runId, ticketId, json(basis), now.toISOString());
+    const stored = this.db.prepare("SELECT basis_json FROM qa_review_bases WHERE run_id=? AND ticket_id=? AND digest=?").get(runId, ticketId, basis.digest) as { basis_json: string };
+    if (qaDigest("review-basis", parseJson(stored.basis_json)) !== qaDigest("review-basis", basis)) throw new Error(`QA review-basis digest collision: ${basis.digest}`);
+  }
+
+  commitQaReviewReady(
+    source: FrozenQaSourceStateV2,
+    basis: QaReviewBasisV2,
+    session: ProviderSessionRefV1,
+    confinement: { digest: string },
+    attempt: { attemptId: string; cycle: number; remediationGeneration: number },
+    expectedRevision: number,
+    now = new Date(),
+  ): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      this.putQaSourceState(source);
+      this.putQaReviewBasis(source.runId, source.ticketId, basis, now);
+      let head = this.qaTicketHead(source.runId, source.ticketId);
+      if (head.revision !== expectedRevision) throw new Error(`stale QA review preparation for ${source.runId}/${source.ticketId}`);
+      if (head.state === "passed") this.invalidateUnconsumedQaPassCertificates(source.runId, source.ticketId, "new-review", now);
+      if (head.state === "turn-intended") head = this.transitionQa(source.runId, source.ticketId, head.revision, { type: "source-drift" }, now);
+      head = this.transitionQa(source.runId, source.ticketId, head.revision, { type: "source-frozen", sourceStateDigest: source.digest }, now);
+      const next = this.transitionQa(source.runId, source.ticketId, head.revision, { type: "review-ready", reviewBasisDigest: basis.digest, sessionGeneration: session.generation }, now);
+      const sessionJson = { version: 2, session, sourceStateDigest: source.digest, reviewBasisDigest: basis.digest, confinement };
+      const sessionKey = qaDigest("qa-session", { runId: source.runId, ticketId: source.ticketId, reviewNumber: next.reviewNumber, providerSessionKey: providerSessionKey(session) });
+      this.db.prepare(`INSERT INTO qa_sessions(session_key,run_id,ticket_id,generation,source_state_digest,review_basis_digest,confinement_digest,session_json,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?)`).run(sessionKey, source.runId, source.ticketId, session.generation, source.digest, basis.digest,
+        confinement.digest, json(sessionJson), now.toISOString());
+      const at = now.toISOString();
+      this.db.prepare(`UPDATE qa_review_attempts SET status='interrupted',record_json=?,updated_at=?
+        WHERE run_id=? AND ticket_id=? AND status='started'`)
+        .run(json({ detail: "superseded by a new immutable QA review basis" }), at, source.runId, source.ticketId);
+      this.db.prepare(`INSERT INTO qa_review_attempts(attempt_id,run_id,ticket_id,review_number,cycle,remediation_generation,source_digest,status,record_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,'started','{}',?,?)`)
+        .run(attempt.attemptId, source.runId, source.ticketId, next.reviewNumber, attempt.cycle, attempt.remediationGeneration, source.digest, at, at);
+      return next;
+    })();
+  }
+
+  recordQaHandoffReceipt(receipt: HandoffAcceptanceReceiptV2): void {
+    this.db.transaction(() => {
+      const existing = this.db.prepare("SELECT receipt_json FROM qa_handoffs WHERE operation_id=?").get(receipt.operationId) as { receipt_json: string | null } | undefined;
+      if (existing) {
+        if (!existing.receipt_json || json(parseJson(existing.receipt_json)) !== json(receipt)) throw new Error(`conflicting QA handoff receipt: ${receipt.operationId}`);
+        return;
+      }
+      this.db.prepare(`INSERT INTO qa_handoffs(operation_id,run_id,ticket_id,qa_revision,source_state_digest,review_basis_digest,status,intent_json,receipt_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,'accepted',?,?,?,?)`).run(receipt.operationId, receipt.runId, receipt.ticketId, receipt.qaRevision,
+        receipt.sourceStateDigest, receipt.reviewBasisDigest, json({ packetDigest: receipt.packetDigest, predecessor: receipt.predecessor,
+          confinementDigest: receipt.confinementDigest, inventoryDigest: receipt.inventoryDigest }), json(receipt), receipt.acceptedAt, receipt.acceptedAt);
+      const sessionKey = qaDigest("qa-handoff-successor-session", { operationId: receipt.operationId, successor: receipt.successor });
+      this.db.prepare(`INSERT INTO qa_sessions(session_key,run_id,ticket_id,generation,source_state_digest,review_basis_digest,confinement_digest,session_json,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?)`).run(sessionKey, receipt.runId, receipt.ticketId, receipt.successor.generation, receipt.sourceStateDigest,
+        receipt.reviewBasisDigest, receipt.confinementDigest, json({ version: 2, session: receipt.successor, acceptedHandoffReceiptDigest: qaDigest("qa-handoff-receipt", receipt) }), receipt.acceptedAt);
+    })();
+  }
+
+  qaHandoffReceipt(operationId: string): HandoffAcceptanceReceiptV2 | undefined {
+    const row = this.db.prepare("SELECT receipt_json FROM qa_handoffs WHERE operation_id=? AND status='accepted'").get(operationId) as { receipt_json: string | null } | undefined;
+    return row?.receipt_json ? parseJson(row.receipt_json) as HandoffAcceptanceReceiptV2 : undefined;
+  }
+
+  beginQaTurn(intent: QaTurnIntentV2): void {
+    const at = intent.intendedAt;
+    this.db.transaction(() => {
+      const existing = this.db.prepare("SELECT intent_json FROM qa_turns WHERE operation_id=?").get(intent.operationId) as { intent_json: string } | undefined;
+      if (existing && json(parseJson(existing.intent_json)) !== json(intent)) throw new Error(`QA turn operation collision: ${intent.operationId}`);
+      this.db.prepare(`INSERT OR IGNORE INTO qa_turns(operation_id,run_id,ticket_id,review_number,session_generation,retry_slot,source_state_digest,review_basis_digest,status,intent_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?, 'intended',?,?,?)`).run(intent.operationId, intent.runId, intent.ticketId, intent.reviewNumber, intent.sessionGeneration, intent.slot, intent.sourceStateDigest, intent.reviewBasisDigest, json(intent), at, at);
+      this.db.prepare("INSERT OR IGNORE INTO qa_retry_slots(run_id,ticket_id,review_number,session_generation,retry_slot,operation_id,status,updated_at) VALUES(?,?,?,?,?,?,'intended',?)")
+        .run(intent.runId, intent.ticketId, intent.reviewNumber, intent.sessionGeneration, intent.slot, intent.operationId, at);
+    })();
+  }
+
+  commitQaTurnIntent(intent: QaTurnIntentV2, expectedRevision: number): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const next = this.transitionQa(intent.runId, intent.ticketId, expectedRevision, { type: "turn-intended", slot: intent.slot }, new Date(intent.intendedAt));
+      this.beginQaTurn(intent);
+      return next;
+    })();
+  }
+
+  finishQaTurn(receipt: QaTurnReceiptV2): void {
+    this.db.transaction(() => {
+      const prior = this.db.prepare("SELECT source_state_digest,review_basis_digest,status FROM qa_turns WHERE operation_id=?").get(receipt.operationId) as { source_state_digest: string; review_basis_digest: string; status: string } | undefined;
+      if (!prior) throw new Error(`QA turn intent not found: ${receipt.operationId}`);
+      if (prior.source_state_digest !== receipt.sourceStateDigest || prior.review_basis_digest !== receipt.reviewBasisDigest) throw new Error("QA turn receipt binding mismatch");
+      if (prior.status === "completed") {
+        const existing = this.db.prepare("SELECT receipt_json FROM qa_turns WHERE operation_id=?").get(receipt.operationId) as { receipt_json: string };
+        if (json(parseJson(existing.receipt_json)) !== json(receipt)) throw new Error(`conflicting QA turn receipt: ${receipt.operationId}`);
+        return;
+      }
+      this.db.prepare("UPDATE qa_turns SET status=?,receipt_json=?,updated_at=? WHERE operation_id=?")
+        .run(receipt.dispatch === "completed" ? "completed" : receipt.dispatch, json(receipt), receipt.completedAt, receipt.operationId);
+      this.db.prepare("UPDATE qa_retry_slots SET status=?,updated_at=? WHERE operation_id=?")
+        .run(receipt.dispatch === "completed" ? "consumed" : receipt.dispatch, receipt.completedAt, receipt.operationId);
+      this.db.prepare("INSERT INTO qa_turn_events(operation_id,event_index,event_json,event_digest,created_at) VALUES(?,?,?,?,?)")
+        .run(receipt.operationId, 0, json(receipt), qaDigest("turn-receipt", receipt), receipt.completedAt);
+    })();
+  }
+
+  recordQaReport(input: Omit<QaReportRecordV2, "disposition" | "createdAt" | "updatedAt">, findingIds: string[], now = new Date()): QaReportRecordV2 {
+    const at = now.toISOString();
+    this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO qa_reports(report_digest,run_id,ticket_id,review_number,source_state_digest,review_basis_digest,disposition,report_json,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,'open',?,?,?)`).run(input.reportDigest, input.runId, input.ticketId, input.reviewNumber, input.sourceStateDigest, input.reviewBasisDigest, json(input.report), at, at);
+      const insertFinding = this.db.prepare("INSERT INTO qa_findings(finding_id,report_digest,ordinal,created_at) VALUES(?,?,?,?)");
+      findingIds.forEach((id, ordinal) => insertFinding.run(id, input.reportDigest, ordinal, at));
+      this.db.prepare("INSERT INTO qa_report_dispositions(report_digest,disposition,reason,created_at) VALUES(?,'open','QA rejected reviewed state',?)").run(input.reportDigest, at);
+    })();
+    return this.qaReport(input.reportDigest)!;
+  }
+
+  commitQaFailure(input: Omit<QaReportRecordV2, "disposition" | "createdAt" | "updatedAt">, findingIds: string[], expectedRevision: number, now = new Date()): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const predecessors = this.unresolvedQaReports(input.runId, input.ticketId);
+      this.recordQaReport(input, findingIds, now);
+      for (const predecessor of predecessors) {
+        if (predecessor.reportDigest === input.reportDigest) continue;
+        this.db.prepare(`INSERT OR IGNORE INTO qa_report_chains(predecessor_report_digest,successor_report_digest,relation,created_at)
+          VALUES(?,?,'recheck-failed',?)`).run(predecessor.reportDigest, input.reportDigest, now.toISOString());
+      }
+      return this.transitionQa(input.runId, input.ticketId, expectedRevision, { type: "review-failed", reportDigest: input.reportDigest }, now);
+    })();
+  }
+
+  /** Accept a failed verdict, its exact attempt outcome, report, findings, and reducer edge atomically. */
+  commitQaFailureAttempt(
+    attemptId: string,
+    input: Omit<QaReportRecordV2, "disposition" | "createdAt" | "updatedAt">,
+    rawFindingIds: string[],
+    namespacedFindingIds: string[],
+    detail: string,
+    expectedRevision: number,
+    now = new Date(),
+  ): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const attempt = this.qaReviewAttempt(attemptId);
+      if (!attempt || attempt.runId !== input.runId || attempt.ticketId !== input.ticketId
+        || attempt.reviewNumber !== input.reviewNumber || attempt.sourceDigest !== input.sourceStateDigest || attempt.status !== "started") {
+        throw new Error(`QA failure attempt binding mismatch: ${attemptId}`);
+      }
+      this.finishQaReviewAttempt(attemptId, { status: "failed", reportDigest: input.reportDigest, findingIds: rawFindingIds, namespacedFindingIds, detail }, now);
+      return this.commitQaFailure(input, namespacedFindingIds, expectedRevision, now);
+    })();
+  }
+
+  qaReportChains(reportDigest: string): Array<{ predecessorReportDigest: string; successorReportDigest: string; relation: string; createdAt: string }> {
+    const rows = this.db.prepare(`SELECT predecessor_report_digest,successor_report_digest,relation,created_at FROM qa_report_chains
+      WHERE predecessor_report_digest=? OR successor_report_digest=? ORDER BY created_at,predecessor_report_digest,successor_report_digest`)
+      .all(reportDigest, reportDigest) as Array<{ predecessor_report_digest: string; successor_report_digest: string; relation: string; created_at: string }>;
+    return rows.map((row) => ({ predecessorReportDigest: row.predecessor_report_digest, successorReportDigest: row.successor_report_digest, relation: row.relation, createdAt: row.created_at }));
+  }
+
+  qaReport(reportDigest: string): QaReportRecordV2 | undefined {
+    const row = this.db.prepare("SELECT * FROM qa_reports WHERE report_digest=?").get(reportDigest) as Record<string, unknown> | undefined;
+    return row ? qaReportV2FromRow(row) : undefined;
+  }
+
+  unresolvedQaReports(runId: string, ticketId: string): QaReportRecordV2[] {
+    return (this.db.prepare("SELECT * FROM qa_reports WHERE run_id=? AND ticket_id=? AND disposition IN ('open','recheck-required') ORDER BY review_number,created_at").all(runId, ticketId) as Array<Record<string, unknown>>).map(qaReportV2FromRow);
+  }
+
+  setQaReportDisposition(reportDigest: string, disposition: QaReportDisposition, reason: string, now = new Date()): void {
+    const at = now.toISOString();
+    this.db.transaction(() => {
+      const changed = this.db.prepare("UPDATE qa_reports SET disposition=?,updated_at=? WHERE report_digest=?").run(disposition, at, reportDigest);
+      if (changed.changes !== 1) throw new Error(`QA report not found: ${reportDigest}`);
+      this.db.prepare("INSERT INTO qa_report_dispositions(report_digest,disposition,reason,created_at) VALUES(?,?,?,?)").run(reportDigest, disposition, reason, at);
+    })();
+  }
+
+  markQaReportsRecheckRequired(runId: string, ticketId: string, reason: string, now = new Date()): void {
+    for (const report of this.unresolvedQaReports(runId, ticketId)) this.setQaReportDisposition(report.reportDigest, "recheck-required", reason, now);
+  }
+
+  resolveQaReportsAfterPass(runId: string, ticketId: string, now = new Date()): void {
+    for (const report of this.unresolvedQaReports(runId, ticketId)) this.setQaReportDisposition(report.reportDigest, "verified-fixed", "subsequent bound QA review passed", now);
+  }
+
+  commitQaWaiver(runId: string, ticketId: string, expectedRevision: number, reason: string, now = new Date()): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const head = this.qaTicketHead(runId, ticketId);
+      if (head.revision !== expectedRevision) throw new Error(`QA waiver raced for ${runId}/${ticketId}`);
+      for (const report of this.unresolvedQaReports(runId, ticketId)) this.setQaReportDisposition(report.reportDigest, "waived", reason, now);
+      return this.transitionQa(runId, ticketId, head.revision, { type: "waived" }, now);
+    })();
+  }
+
+  recordBuilderRemediationReceipt(receipt: BuilderRemediationReceiptV2): void {
+    const text = json(receipt);
+    const existing = this.db.prepare("SELECT receipt_json FROM qa_remediation_receipts WHERE operation_id=?").get(receipt.operationId) as { receipt_json: string } | undefined;
+    if (existing && json(parseJson(existing.receipt_json)) !== text) throw new Error(`Builder remediation receipt collision: ${receipt.operationId}`);
+    this.db.prepare("INSERT OR IGNORE INTO qa_remediation_receipts(operation_id,run_id,ticket_id,report_digest,receipt_json,created_at) VALUES(?,?,?,?,?,?)")
+      .run(receipt.operationId, receipt.runId, receipt.ticketId, receipt.reportDigest, text, receipt.completedAt);
+  }
+
+  commitBuilderRemediationSuccess(receipt: BuilderRemediationReceiptV2, expectedRevision: number, now = new Date()): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      this.recordBuilderRemediationReceipt(receipt);
+      this.markQaReportsRecheckRequired(receipt.runId, receipt.ticketId, "Builder remediation received; QA recheck required", now);
+      return this.transitionQa(receipt.runId, receipt.ticketId, expectedRevision, { type: "remediation-received" }, now);
+    })();
+  }
+
+  commitQaRemediationOutcome(input: {
+    recoveryAttemptId: string;
+    remediationAttemptId: string;
+    outcome: "succeeded" | "failed" | "uncertain";
+    detail?: string;
+    responseDigest?: string;
+    summaryDigest?: string;
+    receipt?: BuilderRemediationReceiptV2;
+    expectedRevision: number;
+  }, now = new Date()): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const remediation = this.qaRemediationAttempt(input.remediationAttemptId);
+      if (!remediation) throw new Error(`QA remediation attempt not found: ${input.remediationAttemptId}`);
+      const head = this.qaTicketHead(remediation.runId, remediation.ticketId);
+      if (head.revision !== input.expectedRevision || head.state !== "remediation-intended") throw new Error(`Builder remediation outcome raced for ${remediation.runId}/${remediation.ticketId}`);
+      this.updateRecoveryAttempt(input.recoveryAttemptId, input.outcome === "uncertain" ? "failed" : input.outcome, input.detail, now);
+      this.updateQaRemediationAttempt(input.remediationAttemptId, input.outcome, { responseDigest: input.responseDigest, summaryDigest: input.summaryDigest, detail: input.detail }, now);
+      if (input.outcome === "succeeded") {
+        if (!input.receipt || input.receipt.operationId !== input.remediationAttemptId) throw new Error("successful Builder remediation is missing its bound receipt");
+        return this.commitBuilderRemediationSuccess(input.receipt, head.revision, now);
+      }
+      return this.transitionQa(remediation.runId, remediation.ticketId, head.revision,
+        { type: input.outcome === "uncertain" ? "remediation-uncertain" : "remediation-failed" }, now);
+    })();
+  }
+
+  issueQaPassCertificate(input: Omit<QaPassCertificateV2, "version" | "certificateId" | "unresolvedReportCount" | "issuedAt">, now = new Date()): QaPassCertificateV2 {
+    if (this.unresolvedQaReports(input.runId, input.ticketId).length) throw new Error("cannot issue QA pass certificate while reports remain unresolved");
+    const certificate: QaPassCertificateV2 = { version: 2, certificateId: qaDigest("pass-certificate", { ...input, issuedAt: now.toISOString() }), ...input, unresolvedReportCount: 0, issuedAt: now.toISOString() };
+    this.db.prepare("INSERT INTO qa_pass_certificates(certificate_id,run_id,ticket_id,qa_revision,source_state_digest,review_basis_digest,turn_receipt_digest,certificate_json,issued_at) VALUES(?,?,?,?,?,?,?,?,?)")
+      .run(certificate.certificateId, certificate.runId, certificate.ticketId, certificate.qaRevision, certificate.sourceStateDigest, certificate.reviewBasisDigest, certificate.turnReceiptDigest, json(certificate), certificate.issuedAt);
+    return certificate;
+  }
+
+  commitQaPass(input: Omit<QaPassCertificateV2, "version" | "certificateId" | "unresolvedReportCount" | "issuedAt">, expectedRevision: number, now = new Date()): QaPassCertificateV2 {
+    return this.db.transaction(() => {
+      this.resolveQaReportsAfterPass(input.runId, input.ticketId, now);
+      const certificate = this.issueQaPassCertificate(input, now);
+      this.transitionQa(input.runId, input.ticketId, expectedRevision, { type: "review-passed", passCertificateId: certificate.certificateId }, now);
+      return certificate;
+    })();
+  }
+
+  /** Accept a passing verdict, its review-attempt outcome, report resolution, certificate, and reducer edge atomically. */
+  commitQaPassAttempt(
+    attemptId: string,
+    input: Omit<QaPassCertificateV2, "version" | "certificateId" | "unresolvedReportCount" | "issuedAt">,
+    detail: string,
+    expectedRevision: number,
+    now = new Date(),
+  ): QaPassCertificateV2 {
+    return this.db.transaction(() => {
+      const attempt = this.qaReviewAttempt(attemptId);
+      if (!attempt || attempt.runId !== input.runId || attempt.ticketId !== input.ticketId
+        || attempt.reviewNumber !== this.qaTicketHead(input.runId, input.ticketId).reviewNumber
+        || attempt.sourceDigest !== input.sourceStateDigest || attempt.status !== "started") {
+        throw new Error(`QA pass attempt binding mismatch: ${attemptId}`);
+      }
+      this.finishQaReviewAttempt(attemptId, { status: "passed", detail }, now);
+      return this.commitQaPass(input, expectedRevision, now);
+    })();
+  }
+
+  consumeQaPassCertificate(runId: string, ticketId: string, certificateId: string, consumer: string, now = new Date()): QaPassCertificateV2 {
+    return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT certificate_json,consumed_at FROM qa_pass_certificates WHERE certificate_id=? AND run_id=? AND ticket_id=?").get(certificateId, runId, ticketId) as { certificate_json: string; consumed_at: string | null } | undefined;
+      if (!row) throw new Error("QA pass certificate is missing or scoped to another run/ticket");
+      if (row.consumed_at) throw new Error("QA pass certificate has already been consumed");
+      if (this.unresolvedQaReports(runId, ticketId).length) throw new Error("QA pass certificate cannot be consumed with unresolved reports");
+      const at = now.toISOString();
+      const certificate = { ...(parseJson(row.certificate_json) as QaPassCertificateV2), consumedAt: at, consumedBy: consumer };
+      const changed = this.db.prepare("UPDATE qa_pass_certificates SET certificate_json=?,consumed_at=?,consumed_by=? WHERE certificate_id=? AND consumed_at IS NULL").run(json(certificate), at, consumer, certificateId);
+      if (changed.changes !== 1) throw new Error("QA pass certificate consumption raced with another finalizer");
+      return certificate;
+    })();
+  }
+
+  invalidateUnconsumedQaPassCertificates(runId: string, ticketId: string, reason: string, now = new Date()): void {
+    const at = now.toISOString();
+    this.db.prepare("UPDATE qa_pass_certificates SET consumed_at=?,consumed_by=? WHERE run_id=? AND ticket_id=? AND consumed_at IS NULL").run(at, `invalidated:${reason}`, runId, ticketId);
+  }
+
+  invalidateQaPassBeforeFinalization(input: {
+    runId: string; ticketId: string; certificateId: string; expectedSourceStateDigest: string;
+    expectedRevision: number; reason: string;
+  }, now = new Date()): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const head = this.qaTicketHead(input.runId, input.ticketId);
+      if (head.revision !== input.expectedRevision || head.state !== "passed") throw new Error(`QA pass invalidation raced for ${input.runId}/${input.ticketId}`);
+      if (head.passCertificateId !== input.certificateId || head.sourceStateDigest !== input.expectedSourceStateDigest) {
+        throw new Error("QA pass invalidation does not match the accepted pass/source binding");
+      }
+      this.invalidateUnconsumedQaPassCertificates(input.runId, input.ticketId, input.reason, now);
+      return this.transitionQa(input.runId, input.ticketId, head.revision, { type: "pass-invalidated", reason: input.reason }, now);
+    })();
+  }
+
+  beginQaFinalization(input: {
+    runId: string; ticketId: string; certificateId: string; consumer: string;
+    expectedSourceStateDigest: string; expectedGitTree: string; allowedProjectionPaths: string[]; expectedRevision: number; operationId: string;
+  }, now = new Date()): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const head = this.qaTicketHead(input.runId, input.ticketId);
+      if (head.revision !== input.expectedRevision || head.state !== "passed") throw new Error(`QA finalization start raced for ${input.runId}/${input.ticketId}`);
+      if (head.passCertificateId !== input.certificateId || head.sourceStateDigest !== input.expectedSourceStateDigest) {
+        throw new Error("QA finalization does not match the reducer's accepted pass/source binding");
+      }
+      const certificate = this.consumeQaPassCertificate(input.runId, input.ticketId, input.certificateId, input.consumer, now);
+      if (certificate.qaRevision !== head.revision || certificate.sourceStateDigest !== input.expectedSourceStateDigest
+        || certificate.reviewBasisDigest !== head.reviewBasisDigest) {
+        throw new Error("QA finalization certificate does not match the durable reducer head");
+      }
+      const next = this.transitionQa(input.runId, input.ticketId, head.revision, { type: "finalization-started" }, now);
+      this.planQaFinalizationStep({ operationId: input.operationId, runId: input.runId, ticketId: input.ticketId, certificateId: input.certificateId,
+        kind: input.consumer, intent: { expectedSourceStateDigest: input.expectedSourceStateDigest, expectedGitTree: input.expectedGitTree,
+          allowedProjectionPaths: [...input.allowedProjectionPaths].sort(), reducerRevision: next.revision } }, now);
+      return next;
+    })();
+  }
+
+  planQaFinalizationStep(input: { operationId: string; runId: string; ticketId: string; certificateId: string; kind: string; intent: unknown }, now = new Date()): void {
+    const at = now.toISOString(); const intentText = json(input.intent);
+    const existing = this.db.prepare("SELECT run_id,ticket_id,certificate_id,kind,intent_json FROM qa_finalization_steps WHERE operation_id=?").get(input.operationId) as Record<string, unknown> | undefined;
+    if (existing && (existing.run_id !== input.runId || existing.ticket_id !== input.ticketId || existing.certificate_id !== input.certificateId || existing.kind !== input.kind || json(parseJson(String(existing.intent_json))) !== intentText)) throw new Error(`QA finalization operation collision: ${input.operationId}`);
+    this.db.prepare("INSERT OR IGNORE INTO qa_finalization_steps(operation_id,run_id,ticket_id,certificate_id,kind,status,intent_json,created_at,updated_at) VALUES(?,?,?,?,?,'intended',?,?,?)")
+      .run(input.operationId, input.runId, input.ticketId, input.certificateId, input.kind, intentText, at, at);
+  }
+
+  finishQaFinalizationStep(operationId: string, receipt: unknown, now = new Date()): void {
+    const at = now.toISOString();
+    const changed = this.db.prepare("UPDATE qa_finalization_steps SET status='completed',receipt_json=?,updated_at=? WHERE operation_id=? AND status='intended'").run(json(receipt), at, operationId);
+    if (changed.changes !== 1) {
+      const prior = this.db.prepare("SELECT status,receipt_json FROM qa_finalization_steps WHERE operation_id=?").get(operationId) as { status: string; receipt_json: string | null } | undefined;
+      if (!prior || prior.status !== "completed" || json(parseJson(prior.receipt_json!)) !== json(receipt)) throw new Error(`QA finalization step cannot be completed: ${operationId}`);
+    }
+  }
+
+  finishPendingQaFinalizationSteps(runId: string, ticketId: string, receipt: unknown, now = new Date()): void {
+    const rows = this.db.prepare("SELECT operation_id FROM qa_finalization_steps WHERE run_id=? AND ticket_id=? AND status='intended' ORDER BY created_at").all(runId, ticketId) as Array<{ operation_id: string }>;
+    if (!rows.length) throw new Error(`QA finalization intent is missing for ${runId}/${ticketId}`);
+    for (const row of rows) this.finishQaFinalizationStep(row.operation_id, receipt, now);
+  }
+
+  qaFinalizationSteps(runId: string, ticketId: string): QaFinalizationStepRecord[] {
+    const rows = this.db.prepare("SELECT * FROM qa_finalization_steps WHERE run_id=? AND ticket_id=? ORDER BY created_at,operation_id").all(runId, ticketId) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      operationId: String(row.operation_id), runId: String(row.run_id), ticketId: String(row.ticket_id),
+      certificateId: String(row.certificate_id), kind: String(row.kind), status: String(row.status) as QaFinalizationStepRecord["status"],
+      intent: parseJson(String(row.intent_json)) as QaFinalizationStepRecord["intent"],
+      ...(typeof row.receipt_json === "string" ? { receipt: parseJson(row.receipt_json) } : {}),
+    }));
+  }
+
+  invalidateQaFinalization(runId: string, ticketId: string, expectedRevision: number, reason: string, branch?: string, now = new Date()): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const head = this.qaTicketHead(runId, ticketId);
+      if (head.state !== "finalizing" || head.revision !== expectedRevision) throw new Error("QA finalization invalidation raced with another transition");
+      const published = this.operations(runId).find((operation) => {
+        if (!["direct-merge", "push", "pr-create", "mr-create", "ticket-complete"].includes(operation.kind)
+          || !["in_progress", "uncertain", "confirmed"].includes(operation.status)) return false;
+        const intent = operation.intent as { ticket?: string; branch?: string; head?: string };
+        return intent.ticket === ticketId || Boolean(branch && (intent.branch === branch || intent.head === branch));
+      });
+      if (published) throw new Error(`QA source drift requires reconciliation of existing publication ${published.idempotencyKey}; its durable evidence is preserved`);
+      const at = now.toISOString();
+      const updated = this.db.prepare("UPDATE qa_finalization_steps SET status='invalidated',receipt_json=?,updated_at=? WHERE run_id=? AND ticket_id=? AND status='intended'")
+        .run(json({ invalidatedAt: at, reason }), at, runId, ticketId);
+      if (updated.changes !== 1) throw new Error("QA finalization invalidation requires exactly one pending intent");
+      return this.transitionQa(runId, ticketId, head.revision, { type: "finalization-invalidated", reason }, now);
+    })();
+  }
+
+  completeQaFinalization(runId: string, ticketId: string, expectedRevision: number, receipt: unknown, now = new Date()): QaReducerStateV2 {
+    return this.db.transaction(() => {
+      const head = this.qaTicketHead(runId, ticketId);
+      if (head.revision !== expectedRevision || head.state !== "finalizing") throw new Error(`QA finalization completion raced for ${runId}/${ticketId}`);
+      this.finishPendingQaFinalizationSteps(runId, ticketId, receipt, now);
+      return this.transitionQa(runId, ticketId, head.revision, { type: "completed" }, now);
+    })();
+  }
+
+  planQaPacketProjection(input: { runId: string; ticketId: string; qaRevision: number; packetDigest: string; path: string; manifestJson: string }, now = new Date()): void {
+    this.ensureRun(input.runId);
+    this.db.prepare("INSERT INTO qa_packet_projections(run_id,ticket_id,qa_revision,packet_digest,path,manifest_json,status,created_at) VALUES(?,?,?,?,?,?,'intended',?) ON CONFLICT(packet_digest) DO NOTHING")
+      .run(input.runId, input.ticketId, input.qaRevision, input.packetDigest, input.path, input.manifestJson, now.toISOString());
+    const row = this.db.prepare("SELECT run_id,ticket_id,qa_revision,path,manifest_json FROM qa_packet_projections WHERE packet_digest=?").get(input.packetDigest) as { run_id: string; ticket_id: string; qa_revision: number; path: string; manifest_json: string | null };
+    if (row.run_id !== input.runId || row.ticket_id !== input.ticketId || row.qa_revision !== input.qaRevision || row.path !== input.path
+      || row.manifest_json !== input.manifestJson) throw new Error(`QA packet projection collision: ${input.packetDigest}`);
+  }
+
+  finishQaPacketProjection(runId: string, ticketId: string, packetDigest: string): void {
+    const changed = this.db.prepare("UPDATE qa_packet_projections SET status='published' WHERE run_id=? AND ticket_id=? AND packet_digest=? AND status='intended'").run(runId, ticketId, packetDigest);
+    if (changed.changes !== 1) {
+      const row = this.db.prepare("SELECT status FROM qa_packet_projections WHERE run_id=? AND ticket_id=? AND packet_digest=?").get(runId, ticketId, packetDigest) as { status: string } | undefined;
+      if (row?.status !== "published") throw new Error(`QA packet projection intent is missing: ${packetDigest}`);
+    }
+  }
+
+  qaPacketProjection(packetDigest: string): QaPacketProjectionRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM qa_packet_projections WHERE packet_digest=?").get(packetDigest) as Record<string, unknown> | undefined;
+    return row ? {
+      runId: String(row.run_id), ticketId: String(row.ticket_id), packetRevision: Number(row.qa_revision),
+      packetDigest: String(row.packet_digest), path: String(row.path), status: String(row.status) as QaPacketProjectionRecord["status"],
+      ...(typeof row.manifest_json === "string" ? { manifestJson: row.manifest_json } : {}),
+      createdAt: String(row.created_at),
+    } : undefined;
+  }
+
+  qaPacketProjectionsAtPath(path: string): QaPacketProjectionRecord[] {
+    const rows = this.db.prepare("SELECT * FROM qa_packet_projections WHERE path=? ORDER BY created_at,packet_digest").all(path) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      runId: String(row.run_id), ticketId: String(row.ticket_id), packetRevision: Number(row.qa_revision),
+      packetDigest: String(row.packet_digest), path: String(row.path), status: String(row.status) as QaPacketProjectionRecord["status"],
+      ...(typeof row.manifest_json === "string" ? { manifestJson: String(row.manifest_json) } : {}),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  pendingQaPacketProjections(runId: string): QaPacketProjectionRecord[] {
+    const rows = this.db.prepare("SELECT * FROM qa_packet_projections WHERE run_id=? AND status='intended' ORDER BY created_at,packet_digest").all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      runId: String(row.run_id), ticketId: String(row.ticket_id), packetRevision: Number(row.qa_revision),
+      packetDigest: String(row.packet_digest), path: String(row.path), status: "intended",
+      ...(typeof row.manifest_json === "string" ? { manifestJson: String(row.manifest_json) } : {}),
+      createdAt: String(row.created_at),
+    }));
   }
 
   stageHandoff(manifest: HandoffManifestV1, markdown: string): HandoffLineage {
@@ -584,7 +1392,7 @@ export class WorkflowDb {
     return this.handoff(manifest.runId, manifest.generation) ?? lineage;
   }
 
-  acceptHandoff(runId: string, generation: number, successor: string | ProviderSessionRefV1, now = new Date()): HandoffLineage {
+  acceptHandoff(runId: string, generation: number, successor: string | ProviderSessionRefV1, now = new Date(), receipt?: HandoffAcceptanceReceiptV1): HandoffLineage {
     const session = sessionParts(typeof successor === "object" ? successor : undefined, typeof successor === "string" ? successor : undefined);
     if (!session.id?.trim()) throw new Error("a validated successor session ID is required before handoff acceptance");
     if (session.ref) this.recordProviderSessionBinding(session.ref, now);
@@ -593,8 +1401,9 @@ export class WorkflowDb {
       if (!prior) throw new Error(`handoff generation ${generation} not found for run ${runId}`);
       if (prior.state === "failed") throw new Error("a failed handoff cannot be accepted");
       const at = now.toISOString();
-      this.db.prepare(`UPDATE handoffs SET state='accepted',successor_session_id=?,successor_session_key=?,successor_session_ref_json=?,accepted_at=? WHERE run_id=? AND generation=?`)
-        .run(session.id, session.key, session.refJson, at, runId, generation);
+      const receiptDigest = receipt ? this.putEvidence("handoff", Buffer.from(JSON.stringify(receipt))) : undefined;
+      this.db.prepare(`UPDATE handoffs SET state='accepted',successor_session_id=?,successor_session_key=?,successor_session_ref_json=?,accepted_at=?,acceptance_receipt_digest=? WHERE run_id=? AND generation=?`)
+        .run(session.id, session.key, session.refJson, at, receiptDigest ?? null, runId, generation);
       this.db.prepare(`INSERT INTO role_mutation_leases(run_id,role,generation,provider_session_id,provider_session_key,provider_session_ref_json,moved_at)
         SELECT run_id,role,generation,?,?,?,? FROM handoffs WHERE run_id=? AND generation=?
         ON CONFLICT(run_id,role) DO UPDATE SET generation=excluded.generation,provider_session_id=excluded.provider_session_id,provider_session_key=excluded.provider_session_key,provider_session_ref_json=excluded.provider_session_ref_json,moved_at=excluded.moved_at`)
@@ -948,6 +1757,28 @@ export class WorkflowDb {
       CREATE TABLE IF NOT EXISTS role_mutation_leases(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,generation INTEGER NOT NULL,provider_session_id TEXT NOT NULL,provider_session_key TEXT,provider_session_ref_json TEXT,moved_at TEXT NOT NULL,PRIMARY KEY(run_id,role));
       CREATE TABLE IF NOT EXISTS compaction_attempts(idempotency_key TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),role TEXT NOT NULL,provider_session_id TEXT,session_key TEXT,session_ref_json TEXT,crossing_key TEXT NOT NULL,status TEXT NOT NULL,before_sample_json TEXT,after_sample_json TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS recovery_decisions(decision_id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),decided_at TEXT NOT NULL,mode TEXT NOT NULL,digest TEXT NOT NULL UNIQUE,session_key TEXT,session_ref_json TEXT,receipt_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_recovery_heads(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,packet_id TEXT NOT NULL,packet_path TEXT NOT NULL,packet_digest TEXT NOT NULL,reviewed_state_digest TEXT NOT NULL,revision INTEGER NOT NULL,correction_turns INTEGER NOT NULL,pending_action TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(run_id,ticket_id));
+      CREATE TABLE IF NOT EXISTS qa_review_attempts(attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,review_number INTEGER NOT NULL,cycle INTEGER NOT NULL,remediation_generation INTEGER NOT NULL,source_digest TEXT NOT NULL,status TEXT NOT NULL,report_digest TEXT,record_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(run_id,ticket_id,review_number));
+      CREATE TABLE IF NOT EXISTS qa_remediation_attempts(attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,review_attempt_id TEXT NOT NULL REFERENCES qa_review_attempts(attempt_id),generation INTEGER NOT NULL,mode TEXT NOT NULL,status TEXT NOT NULL,request_digest TEXT NOT NULL,response_digest TEXT,summary_digest TEXT,record_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_ticket_heads(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,revision INTEGER NOT NULL,state TEXT NOT NULL,state_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(run_id,ticket_id));
+      CREATE TABLE IF NOT EXISTS qa_transitions(sequence INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,from_revision INTEGER NOT NULL,to_revision INTEGER NOT NULL,event_json TEXT NOT NULL,state_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(run_id,ticket_id,to_revision));
+      CREATE TABLE IF NOT EXISTS qa_source_states(digest TEXT NOT NULL,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,origin_digest TEXT NOT NULL,content_digest TEXT NOT NULL,state_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(run_id,ticket_id,digest));
+      CREATE TABLE IF NOT EXISTS qa_review_bases(digest TEXT NOT NULL,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,basis_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(run_id,ticket_id,digest));
+      CREATE TABLE IF NOT EXISTS qa_sessions(session_key TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,generation INTEGER NOT NULL,source_state_digest TEXT NOT NULL,review_basis_digest TEXT NOT NULL,confinement_digest TEXT NOT NULL,session_json TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_retry_slots(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,review_number INTEGER NOT NULL,session_generation INTEGER NOT NULL,retry_slot TEXT NOT NULL,operation_id TEXT NOT NULL UNIQUE,status TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(run_id,ticket_id,review_number,session_generation,retry_slot));
+      CREATE TABLE IF NOT EXISTS qa_turns(operation_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,review_number INTEGER NOT NULL,session_generation INTEGER NOT NULL,retry_slot TEXT NOT NULL,source_state_digest TEXT NOT NULL,review_basis_digest TEXT NOT NULL,status TEXT NOT NULL,intent_json TEXT NOT NULL,receipt_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_turn_events(operation_id TEXT NOT NULL REFERENCES qa_turns(operation_id),event_index INTEGER NOT NULL,event_json TEXT NOT NULL,event_digest TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(operation_id,event_index));
+      CREATE TABLE IF NOT EXISTS qa_reports(report_digest TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,review_number INTEGER NOT NULL,source_state_digest TEXT NOT NULL,review_basis_digest TEXT NOT NULL,disposition TEXT NOT NULL,report_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_findings(finding_id TEXT PRIMARY KEY,report_digest TEXT NOT NULL REFERENCES qa_reports(report_digest),ordinal INTEGER NOT NULL,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_report_dispositions(sequence INTEGER PRIMARY KEY AUTOINCREMENT,report_digest TEXT NOT NULL REFERENCES qa_reports(report_digest),disposition TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_report_chains(predecessor_report_digest TEXT NOT NULL REFERENCES qa_reports(report_digest),successor_report_digest TEXT NOT NULL REFERENCES qa_reports(report_digest),relation TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(predecessor_report_digest,successor_report_digest));
+      CREATE TABLE IF NOT EXISTS qa_failure_handoffs(handoff_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,review_attempt_id TEXT NOT NULL REFERENCES qa_review_attempts(attempt_id),report_digest TEXT NOT NULL REFERENCES qa_reports(report_digest),generation INTEGER NOT NULL,reviewed_content_digest TEXT NOT NULL,review_basis_digest TEXT NOT NULL,state TEXT NOT NULL,handoff_digest TEXT NOT NULL,host_instruction_digest TEXT NOT NULL,builder_session_json TEXT,provider_turn_id TEXT,receipt_digest TEXT,response_digest TEXT,parsed_response_digest TEXT,post_source_digest TEXT,detail TEXT,record_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(run_id,ticket_id,review_attempt_id,report_digest,generation));
+      CREATE TABLE IF NOT EXISTS qa_handoffs(operation_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,qa_revision INTEGER NOT NULL,source_state_digest TEXT NOT NULL,review_basis_digest TEXT NOT NULL,status TEXT NOT NULL,intent_json TEXT NOT NULL,receipt_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_remediation_receipts(operation_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,report_digest TEXT NOT NULL REFERENCES qa_reports(report_digest),receipt_json TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_pass_certificates(certificate_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,qa_revision INTEGER NOT NULL,source_state_digest TEXT NOT NULL,review_basis_digest TEXT NOT NULL,turn_receipt_digest TEXT NOT NULL,certificate_json TEXT NOT NULL,issued_at TEXT NOT NULL,consumed_at TEXT,consumed_by TEXT);
+      CREATE TABLE IF NOT EXISTS qa_finalization_steps(operation_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,certificate_id TEXT NOT NULL REFERENCES qa_pass_certificates(certificate_id),kind TEXT NOT NULL,status TEXT NOT NULL,intent_json TEXT NOT NULL,receipt_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_operation_journal(operation_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,kind TEXT NOT NULL,intent_digest TEXT NOT NULL,intent_json TEXT NOT NULL,status TEXT NOT NULL,receipt_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS qa_packet_projections(run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),ticket_id TEXT NOT NULL,qa_revision INTEGER NOT NULL,packet_digest TEXT PRIMARY KEY,path TEXT NOT NULL,manifest_json TEXT,status TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS workflow_events_run ON workflow_events(run_id,sequence);
       CREATE INDEX IF NOT EXISTS operations_run ON operation_journal(run_id,status);
       CREATE INDEX IF NOT EXISTS recovery_attempt_scope ON recovery_attempts(run_id,ticket,phase,cause,operation_key,outcome);
@@ -956,6 +1787,12 @@ export class WorkflowDb {
       CREATE INDEX IF NOT EXISTS continuity_events_run ON continuity_events(run_id,sequence);
       CREATE INDEX IF NOT EXISTS continuity_checkpoints_run_role ON continuity_checkpoints(run_id,role,checkpoint_id);
       CREATE INDEX IF NOT EXISTS compaction_session ON compaction_attempts(run_id,role,provider_session_id,status);
+      CREATE INDEX IF NOT EXISTS qa_review_history ON qa_review_attempts(run_id,ticket_id,review_number);
+      CREATE INDEX IF NOT EXISTS qa_remediation_history ON qa_remediation_attempts(run_id,ticket_id,generation);
+      CREATE INDEX IF NOT EXISTS qa_failure_handoff_history ON qa_failure_handoffs(run_id,ticket_id,generation,state);
+      CREATE INDEX IF NOT EXISTS qa_transition_history ON qa_transitions(run_id,ticket_id,sequence);
+      CREATE INDEX IF NOT EXISTS qa_report_open ON qa_reports(run_id,ticket_id,disposition,review_number);
+      CREATE INDEX IF NOT EXISTS qa_turn_history ON qa_turns(run_id,ticket_id,review_number,session_generation);
     `);
     for (const [table, columns] of Object.entries({
       provider_sessions: { session_key: "TEXT", session_ref_json: "TEXT" },
@@ -964,10 +1801,11 @@ export class WorkflowDb {
       live_settings_acknowledgments: { session_key: "TEXT", session_ref_json: "TEXT" },
       continuity_events: { session_key: "TEXT", session_ref_json: "TEXT" },
       continuity_checkpoints: { session_key: "TEXT", session_ref_json: "TEXT" },
-      handoffs: { predecessor_session_key: "TEXT", predecessor_session_ref_json: "TEXT", successor_session_key: "TEXT", successor_session_ref_json: "TEXT" },
+      handoffs: { predecessor_session_key: "TEXT", predecessor_session_ref_json: "TEXT", successor_session_key: "TEXT", successor_session_ref_json: "TEXT", acceptance_receipt_digest: "TEXT" },
       role_mutation_leases: { provider_session_key: "TEXT", provider_session_ref_json: "TEXT" },
       compaction_attempts: { session_key: "TEXT", session_ref_json: "TEXT" },
       recovery_decisions: { session_key: "TEXT", session_ref_json: "TEXT" },
+      qa_packet_projections: { manifest_json: "TEXT" },
     })) {
       for (const [column, definition] of Object.entries(columns)) this.ensureColumn(table, column, definition);
     }
@@ -978,6 +1816,10 @@ export class WorkflowDb {
       CREATE INDEX IF NOT EXISTS session_usage_scoped ON session_usage_samples(run_id,role,session_key,sample_id);
       CREATE INDEX IF NOT EXISTS compaction_session_scoped ON compaction_attempts(run_id,role,session_key,status);
     `);
+    const migration = "002_qa_protocol_v2";
+    const migrationDigest = createHash("sha256").update(migration).update("\0qa-v2-schema-2026-09-04").digest("hex");
+    const existingMigration = this.db.prepare("SELECT completed_at FROM recovery_schema_migrations WHERE migration=?").get(`${migration}:${migrationDigest}`);
+    if (!existingMigration) this.db.prepare("INSERT INTO recovery_schema_migrations(migration,completed_at) VALUES(?,?)").run(`${migration}:${migrationDigest}`, new Date().toISOString());
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -994,16 +1836,25 @@ type DbLease = { owner: string; generation: number; pid: number; host: string; p
 type DbContinuityEvent = { sequence: number; run_id: string; role: "builder" | "qa" | "host"; kind: string; payload_json: string; digest: string; authoritative_state_revision: number; session_key: string | null; session_ref_json: string | null; created_at: string };
 type DbContinuityCheckpoint = { checkpoint_id: number; run_id: string; role: "builder" | "qa"; event_sequence: number; state: ContinuityHeadState; delta_json: string; digest: string; predecessor_digest: string | null; authoritative_state_revision: number; session_key: string | null; session_ref_json: string | null; created_at: string };
 type DbContinuityHead = { run_id: string; role: "builder" | "qa" | "run"; state: ContinuityHeadState; event_sequence: number; digest: string; authoritative_state_revision: number; updated_at: string };
-type DbHandoff = { run_id: string; generation: number; manifest_digest: string; markdown_digest: string; predecessor_session_id: string | null; predecessor_session_key: string | null; predecessor_session_ref_json: string | null; successor_session_id: string | null; successor_session_key: string | null; successor_session_ref_json: string | null; state: HandoffLineage["state"]; created_at: string; accepted_at: string | null };
+type DbHandoff = { run_id: string; generation: number; manifest_digest: string; markdown_digest: string; predecessor_session_id: string | null; predecessor_session_key: string | null; predecessor_session_ref_json: string | null; successor_session_id: string | null; successor_session_key: string | null; successor_session_ref_json: string | null; acceptance_receipt_digest: string | null; state: HandoffLineage["state"]; created_at: string; accepted_at: string | null };
 type DbCompactionAttempt = { idempotency_key: string; run_id: string; role: "builder" | "qa"; provider_session_id: string | null; session_key: string | null; session_ref_json: string | null; crossing_key: string; status: CompactionAttemptRecord["status"]; before_sample_json: string | null; after_sample_json: string | null; error: string | null; created_at: string; updated_at: string };
+type DbQaRecoveryHead = { run_id: string; ticket_id: string; packet_id: string; packet_path: string; packet_digest: string; reviewed_state_digest: string; revision: number; correction_turns: number; pending_action: string; updated_at: string };
+type DbQaReviewAttempt = { attempt_id: string; run_id: string; ticket_id: string; review_number: number; cycle: number; remediation_generation: number; source_digest: string; status: QaReviewAttemptRecord["status"]; report_digest: string | null; record_json: string; created_at: string; updated_at: string };
+type DbQaRemediationAttempt = { attempt_id: string; run_id: string; ticket_id: string; review_attempt_id: string; generation: number; mode: QaRemediationAttemptRecord["mode"]; status: QaRemediationAttemptRecord["status"]; request_digest: string; response_digest: string | null; summary_digest: string | null; record_json: string; created_at: string; updated_at: string };
+type DbQaFailureHandoff = { handoff_id: string; operation_id: string; run_id: string; ticket_id: string; review_attempt_id: string; report_digest: string; generation: number; reviewed_content_digest: string; review_basis_digest: string; state: QaFailureHandoffState; handoff_digest: string; host_instruction_digest: string; builder_session_json: string | null; provider_turn_id: string | null; receipt_digest: string | null; response_digest: string | null; parsed_response_digest: string | null; post_source_digest: string | null; detail: string | null; record_json: string; created_at: string; updated_at: string };
 
 function rowToRun(row: DbRun): WorkflowRunSnapshot { return { runId: row.run_id, kind: row.kind, status: row.status, checkpoint: row.checkpoint, originalWork: parseJson(row.original_work_json), remainingWork: parseJson(row.remaining_work_json), state: parseJson(row.state_json) as Record<string, unknown>, ...(row.lease_generation === null ? {} : { leaseGeneration: row.lease_generation }), legacy: Boolean(row.legacy), createdAt: row.created_at, updatedAt: row.updated_at }; }
 function operationFromRow(row: DbOperation): OperationRecord { return { idempotencyKey: row.idempotency_key, runId: row.run_id, kind: row.kind, status: row.status, intent: parseJson(row.intent_json), ...(row.result_json ? { result: parseJson(row.result_json) } : {}), ...(row.external_id ? { externalId: row.external_id } : {}), ...(row.error ? { error: row.error } : {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
 function continuityEventFromRow(row: DbContinuityEvent): ContinuityEvent { return { sequence: row.sequence, runId: row.run_id, role: row.role, kind: row.kind, payload: parseJson(row.payload_json), digest: row.digest, authoritativeStateRevision: row.authoritative_state_revision, createdAt: row.created_at, ...(row.session_key ? { sessionKey: row.session_key } : {}), ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}) }; }
 function continuityCheckpointFromRow(row: DbContinuityCheckpoint): ContinuityCheckpoint { return { checkpointId: row.checkpoint_id, runId: row.run_id, role: row.role, sequence: row.event_sequence, state: row.state, delta: parseJson(row.delta_json) as ContinuityDelta, digest: row.digest, ...(row.predecessor_digest ? { predecessorDigest: row.predecessor_digest } : {}), authoritativeStateRevision: row.authoritative_state_revision, createdAt: row.created_at, ...(row.session_key ? { sessionKey: row.session_key } : {}), ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}) }; }
 function continuityHeadFromRow(row: DbContinuityHead): ContinuityHead { return { runId: row.run_id, role: row.role, state: row.state, sequence: row.event_sequence, digest: row.digest, authoritativeStateRevision: row.authoritative_state_revision, updatedAt: row.updated_at }; }
-function handoffFromRow(row: DbHandoff): HandoffLineage { return { runId: row.run_id, generation: row.generation, manifestDigest: row.manifest_digest, markdownDigest: row.markdown_digest, ...(row.predecessor_session_id ? { predecessorSessionId: row.predecessor_session_id } : {}), ...(row.predecessor_session_ref_json ? { predecessorSessionRef: parseJson(row.predecessor_session_ref_json) as ProviderSessionRefV1 } : {}), ...(row.successor_session_id ? { successorSessionId: row.successor_session_id } : {}), ...(row.successor_session_ref_json ? { successorSessionRef: parseJson(row.successor_session_ref_json) as ProviderSessionRefV1 } : {}), state: row.state, createdAt: row.created_at, ...(row.accepted_at ? { acceptedAt: row.accepted_at } : {}) }; }
+function handoffFromRow(row: DbHandoff): HandoffLineage { return { runId: row.run_id, generation: row.generation, manifestDigest: row.manifest_digest, markdownDigest: row.markdown_digest, ...(row.predecessor_session_id ? { predecessorSessionId: row.predecessor_session_id } : {}), ...(row.predecessor_session_ref_json ? { predecessorSessionRef: parseJson(row.predecessor_session_ref_json) as ProviderSessionRefV1 } : {}), ...(row.successor_session_id ? { successorSessionId: row.successor_session_id } : {}), ...(row.successor_session_ref_json ? { successorSessionRef: parseJson(row.successor_session_ref_json) as ProviderSessionRefV1 } : {}), ...(row.acceptance_receipt_digest ? { acceptanceReceiptDigest: row.acceptance_receipt_digest } : {}), state: row.state, createdAt: row.created_at, ...(row.accepted_at ? { acceptedAt: row.accepted_at } : {}) }; }
 function compactionAttemptFromRow(row: DbCompactionAttempt): CompactionAttemptRecord { return { idempotencyKey: row.idempotency_key, runId: row.run_id, role: row.role, ...(row.provider_session_id ? { providerSessionId: row.provider_session_id } : {}), ...(row.session_key ? { sessionKey: row.session_key } : {}), ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}), crossingKey: row.crossing_key, status: row.status, ...(row.before_sample_json ? { beforeSample: parseJson(row.before_sample_json) as ContextSample } : {}), ...(row.after_sample_json ? { afterSample: parseJson(row.after_sample_json) as ContextSample } : {}), ...(row.error ? { error: row.error } : {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
+function qaReportV2FromRow(row: Record<string, unknown>): QaReportRecordV2 { return { reportDigest: String(row.report_digest), runId: String(row.run_id), ticketId: String(row.ticket_id), reviewNumber: Number(row.review_number), sourceStateDigest: String(row.source_state_digest), reviewBasisDigest: String(row.review_basis_digest), disposition: String(row.disposition) as QaReportDisposition, report: parseJson(String(row.report_json)), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
+function qaRecoveryHeadFromRow(row: DbQaRecoveryHead): QaRecoveryHeadRecord { return { runId: row.run_id, ticketId: row.ticket_id, packetId: row.packet_id, packetPath: row.packet_path, packetDigest: row.packet_digest, reviewedStateDigest: row.reviewed_state_digest, revision: row.revision, correctionTurns: row.correction_turns, pendingAction: row.pending_action, updatedAt: row.updated_at }; }
+function qaReviewAttemptFromRow(row: DbQaReviewAttempt): QaReviewAttemptRecord { const record = parseJson(row.record_json) as Partial<QaReviewAttemptRecord>; return { attemptId: row.attempt_id, runId: row.run_id, ticketId: row.ticket_id, reviewNumber: row.review_number, cycle: row.cycle, remediationGeneration: row.remediation_generation, sourceDigest: row.source_digest, status: row.status, ...(row.report_digest ? { reportDigest: row.report_digest } : {}), ...(record.findingIds ? { findingIds: record.findingIds } : {}), ...(record.namespacedFindingIds ? { namespacedFindingIds: record.namespacedFindingIds } : {}), ...(record.detail ? { detail: record.detail } : {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
+function qaRemediationAttemptFromRow(row: DbQaRemediationAttempt): QaRemediationAttemptRecord { const record = parseJson(row.record_json) as Partial<QaRemediationAttemptRecord>; return { attemptId: row.attempt_id, runId: row.run_id, ticketId: row.ticket_id, reviewAttemptId: row.review_attempt_id, generation: row.generation, mode: row.mode, status: row.status, requestDigest: row.request_digest, ...(row.response_digest ? { responseDigest: row.response_digest } : {}), ...(row.summary_digest ? { summaryDigest: row.summary_digest } : {}), ...(record.detail ? { detail: record.detail } : {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
+function qaFailureHandoffFromRow(row: DbQaFailureHandoff): QaFailureHandoffRecord { return { handoffId: row.handoff_id, operationId: row.operation_id, runId: row.run_id, ticketId: row.ticket_id, reviewAttemptId: row.review_attempt_id, reportDigest: row.report_digest, generation: row.generation, reviewedContentDigest: row.reviewed_content_digest, reviewBasisDigest: row.review_basis_digest, state: row.state, handoffDigest: row.handoff_digest, hostInstructionDigest: row.host_instruction_digest, ...(row.builder_session_json ? { builderSession: parseJson(row.builder_session_json) as ProviderSessionRefV1 } : {}), ...(row.provider_turn_id ? { providerTurnId: row.provider_turn_id } : {}), ...(row.receipt_digest ? { receiptDigest: row.receipt_digest } : {}), ...(row.response_digest ? { responseDigest: row.response_digest } : {}), ...(row.parsed_response_digest ? { parsedResponseDigest: row.parsed_response_digest } : {}), ...(row.post_source_digest ? { postSourceDigest: row.post_source_digest } : {}), ...(row.detail ? { detail: row.detail } : {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
 function json(value: unknown): string { return JSON.stringify(value ?? null); }
 function parseJson(value: string): unknown { return JSON.parse(value); }
 function sessionParts(ref?: ProviderSessionRefV1, rawId?: string, suppliedKey?: string): {

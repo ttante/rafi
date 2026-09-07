@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { ContinuityDelta, HandoffLineage, HandoffManifestV1, ProviderSessionRefV1, SessionUsageSample } from "rafi-spec";
-import type { BuilderAdapter } from "./adapters/types.js";
+import type { ContinuityDelta, HandoffAcceptanceReceiptV1, HandoffLineage, HandoffManifestV1, ProviderSessionRefV1, SessionUsageSample } from "rafi-spec";
+import type { BuilderAdapter, BuilderEvent, TurnResult } from "./adapters/types.js";
 import { continuityInstruction, mergeContinuityDeltas, parseContinuityDelta } from "./continuity.js";
 import { WorkflowDb } from "./workflowDb.js";
 import { pauseActivityForInput } from "./activity.js";
@@ -12,6 +12,30 @@ export const HANDOFF_CACHE_RETENTION_DAYS = 30;
 export const HANDOFF_ACCEPTED = "HANDOFF_ACCEPTED";
 export const HANDOFF_REQUEST_START = "RAFI_HANDOFF_REQUEST_START";
 export const HANDOFF_REQUEST_END = "RAFI_HANDOFF_REQUEST_END";
+
+function handoffSessionIdentity(ref: ProviderSessionRefV1): string {
+  return JSON.stringify([ref.version, ref.provider, ref.sessionId, ref.role, ref.stream, ref.generation, resolve(ref.cwd), resolve(ref.configRoot), ref.workspaceIdentity, ref.ticketId, ref.deliveryUnitId]);
+}
+
+async function collectHandoffTerminalEvents(adapter: BuilderAdapter, turnId: string): Promise<BuilderEvent[]> {
+  const events: BuilderEvent[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const collect = (async () => {
+    for await (const event of adapter.events()) {
+      events.push(event);
+      if (event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === turnId) break;
+    }
+  })();
+  try {
+    await Promise.race([collect, new Promise<void>((resolve) => { timer = setTimeout(resolve, 1000); })]);
+  } catch (error) {
+    events.push({ kind: "error", message: `handoff event stream failed: ${error instanceof Error ? error.message : String(error)}` });
+  } finally { if (timer) clearTimeout(timer); }
+  // A missing terminal event makes acceptance fail below and closes the
+  // successor, ending any pending iterator read before it can perform work.
+  void collect.catch(() => {});
+  return events;
+}
 
 export interface BuilderHandoffRequest {
   version: 1;
@@ -61,7 +85,7 @@ export interface CreateHandoffInput {
   sessionUsage?: SessionUsageSample;
   compactionCount: number;
   compactMaximum: number;
-  resources?: Array<{ label: string; content?: string | Buffer; digest?: string; authoritative: boolean; requiredForRecovery?: boolean; mediaType?: string; path?: string }>;
+  resources?: Array<{ label: string; content?: string | Buffer; digest?: string; authoritative: boolean; requiredForRecovery?: boolean; mediaType?: string; path?: string; purpose?: string; bytes?: number }>;
   requestedByBuilder?: boolean;
   /** Internal recovery path: use the last valid checkpoint while its head is marked degraded/invalid. */
   allowNonCurrentContinuity?: boolean;
@@ -78,6 +102,7 @@ export interface HandoffTransferResult extends StagedHandoff {
   successor: BuilderAdapter;
   successorSessionId: string;
   acceptanceCheckpointDigest: string;
+  acceptanceReceipt?: HandoffAcceptanceReceiptV1;
 }
 
 export class HandoffLoopError extends Error {
@@ -91,6 +116,9 @@ export type HandoffAcceptanceFailureCode =
   | "invalid-continuity-delta"
   | "missing-successor-session"
   | "missing-scoped-successor-session"
+  | "provider-turn-failed"
+  | "successor-identity-mismatch"
+  | "missing-terminal-event"
   | "reused-predecessor-session";
 
 export class HandoffAcceptanceError extends Error {
@@ -160,13 +188,15 @@ export class HandoffService {
         label: resource.label,
         digest: resource.digest && /^[a-f0-9]{64}$/.test(resource.digest) ? resource.digest : digest(resource.content ?? ""),
         authoritative: resource.authoritative,
-        ...(resource.requiredForRecovery !== undefined ? { requiredForRecovery: resource.requiredForRecovery } : {}),
-        ...(resource.mediaType ? { mediaType: resource.mediaType } : {}),
-        ...(resource.path ? { path: resource.path } : {}),
+        requiredForRecovery: resource.requiredForRecovery ?? false,
+        mediaType: resource.mediaType ?? "application/octet-stream",
+        path: resource.path ?? `embedded:${resource.label}`,
+        purpose: resource.purpose ?? `Declared ${input.role} handoff resource: ${resource.label}`,
+        bytes: resource.bytes ?? (resource.content !== undefined ? Buffer.byteLength(resource.content) : 0),
       }));
       resources.unshift(
-        { label: "continuity-checkpoint", digest: head.digest, authoritative: true },
-        { label: "authoritative-run-state", digest: runHead.digest, authoritative: true },
+        { label: "continuity-checkpoint", digest: head.digest, authoritative: true, requiredForRecovery: false, mediaType: "application/vnd.rafi.digest", path: "db:continuity-checkpoint", purpose: "Digest reference to the durable role continuity checkpoint", bytes: Buffer.byteLength(head.digest) },
+        { label: "authoritative-run-state", digest: runHead.digest, authoritative: true, requiredForRecovery: false, mediaType: "application/vnd.rafi.digest", path: "db:authoritative-run-state", purpose: "Digest reference to the durable run continuity state", bytes: Buffer.byteLength(runHead.digest) },
       );
       const manifest: HandoffManifestV1 = {
         version: 1,
@@ -273,6 +303,46 @@ export class HandoffService {
   ): Promise<HandoffTransferResult> {
     const db = new WorkflowDb(this.projectDir);
     try {
+      const qaBoundary = staged.manifest.role === "qa";
+      const preparedRef = successor.sessionRef?.();
+      if (qaBoundary && (!preparedRef || preparedRef.version !== 1 || preparedRef.source !== "observed"
+        || preparedRef.role !== "qa" || preparedRef.stream !== "qa" || preparedRef.provider !== successor.agent
+        || !preparedRef.sessionId.trim() || /^(?:unknown|unavailable)$/i.test(preparedRef.sessionId.trim())
+        || !preparedRef.cwd || !preparedRef.configRoot || !Number.isSafeInteger(preparedRef.generation) || preparedRef.generation < 0
+        || !preparedRef.validatedAt || Number.isNaN(Date.parse(preparedRef.validatedAt)) || Number.isNaN(Date.parse(preparedRef.createdAt))
+        || preparedRef.sessionId !== successor.sessionId())) {
+        throw new HandoffAcceptanceError("missing-scoped-successor-session", staged.manifest.runId, staged.manifest.generation, "QA acceptance requires a prepared, validated scoped successor");
+      }
+      const acceptanceAttempts: Array<{ hostPromptDigest: string; providerPromptDigest: string; rawResponseDigest: string; cleanedResponseDigest: string; providerTurnId?: string; eventStreamDigest?: string }> = [];
+      const sendAcceptance = async (prompt: string): Promise<TurnResult> => {
+        const hostPromptDigest = db.putEvidence("handoff", Buffer.from(prompt));
+        db.appendContinuityEvent({ runId: staged.manifest.runId, role: "host", kind: "handoff_acceptance_intended", payload: { generation: staged.manifest.generation, attempt: acceptanceAttempts.length + 1, hostPromptDigest, preparedRef }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0 });
+        const response = await successor.sendTurn(prompt);
+        const events = qaBoundary && response.turnId ? await collectHandoffTerminalEvents(successor, response.turnId) : [];
+        const attempt = {
+          hostPromptDigest,
+          providerPromptDigest: db.putEvidence("handoff", Buffer.from(response.providerInstruction ?? response.hostInstruction ?? prompt)),
+          rawResponseDigest: db.putEvidence("handoff", Buffer.from(response.rawResponse ?? response.text)),
+          cleanedResponseDigest: db.putEvidence("handoff", Buffer.from(response.cleanedResponse ?? response.text)),
+          ...(response.turnId ? { providerTurnId: response.turnId } : {}),
+          ...(qaBoundary ? { eventStreamDigest: db.putEvidence("handoff", Buffer.from(JSON.stringify(events))) } : {}),
+        };
+        acceptanceAttempts.push(attempt);
+        db.appendContinuityEvent({ runId: staged.manifest.runId, role: "host", kind: "handoff_acceptance_observed", payload: { generation: staged.manifest.generation, attempt, isError: response.isError, failure: response.failure, providerMetadata: response.providerMetadata, activeSession: successor.sessionRef?.() }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0 });
+        if (response.isError || response.failure) throw new HandoffAcceptanceError("provider-turn-failed", staged.manifest.runId, staged.manifest.generation, "provider rejected or failed the acknowledgement turn");
+        const activeRef = successor.sessionRef?.();
+        const reportedRef = response.providerMetadata?.sessionRef;
+        if ((preparedRef && (!activeRef || handoffSessionIdentity(activeRef) !== handoffSessionIdentity(preparedRef)))
+          || (qaBoundary && (!response.providerMetadata || !reportedRef || response.providerMetadata.provider !== preparedRef!.provider
+            || response.providerMetadata.sessionId !== preparedRef!.sessionId || successor.sessionId() !== preparedRef!.sessionId
+            || successor.agent !== preparedRef!.provider || handoffSessionIdentity(reportedRef) !== handoffSessionIdentity(preparedRef!)))) {
+          throw new HandoffAcceptanceError("successor-identity-mismatch", staged.manifest.runId, staged.manifest.generation, "acknowledgement did not come from the prepared successor identity");
+        }
+        if (qaBoundary && (!response.turnId || !events.some((event) => event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === response.turnId))) {
+          throw new HandoffAcceptanceError("missing-terminal-event", staged.manifest.runId, staged.manifest.generation, "QA acknowledgement has no correlated terminal provider event");
+        }
+        return response;
+      };
       const acceptancePrompt = [
         "Accept this validated Rafi handoff. Do not repeat completed work and reconcile host receipts before side effects.",
         staged.markdown,
@@ -280,14 +350,15 @@ export class HandoffService {
         ...(options.guidance ? [`Human recovery guidance: ${options.guidance}`] : []),
         `Reply with ${HANDOFF_ACCEPTED} on the first line, then ${continuityInstruction()}`,
       ].join("\n\n");
-      let response = await successor.sendTurn(acceptancePrompt);
+      let response = await sendAcceptance(acceptancePrompt);
       let validation = validateHandoffAcceptance(staged, successor, response.text);
       if (validation && (validation.code === "missing-acknowledgement" || validation.code === "invalid-continuity-delta")) {
-        response = await successor.sendTurn([
+        const repairPrompt = [
           `Your handoff acknowledgement was rejected: ${validation.message}.`,
           "Correction only: do not use tools, repeat completed work, or perform implementation.",
           `Reply with ${HANDOFF_ACCEPTED} on the first line, then ${continuityInstruction()}`,
-        ].join("\n\n"));
+        ].join("\n\n");
+        response = await sendAcceptance(repairPrompt);
         validation = validateHandoffAcceptance(staged, successor, response.text);
       }
       if (validation) throw new HandoffAcceptanceError(validation.code, staged.manifest.runId, staged.manifest.generation, validation.message);
@@ -296,11 +367,19 @@ export class HandoffService {
       const observedSuccessorRef = successor.sessionRef?.();
       const successorRef = observedSuccessorRef ? { ...observedSuccessorRef, generation: staged.manifest.generation, validatedAt: new Date().toISOString() } : undefined;
       if (!parsed.delta || !sessionId) throw new Error("validated handoff acceptance lost its parsed continuity state");
+      if (staged.manifest.resources.some((resource) => resource.requiredForRecovery)
+        && (!successorRef || staged.manifest.resources.some((resource) => resource.requiredForRecovery && (!resource.purpose || !Number.isSafeInteger(resource.bytes) || resource.bytes! < 0)))) {
+        throw new HandoffAcceptanceError("missing-scoped-successor-session", staged.manifest.runId, staged.manifest.generation, "recovery handoffs require a scoped successor and complete resource purpose/byte metadata");
+      }
       if (successorRef) successor.adoptSessionRef?.(successorRef);
-      db.appendContinuityEvent({ runId: staged.manifest.runId, role: staged.manifest.role, kind: "handoff_successor_accepted", payload: { generation: staged.manifest.generation, sessionId, sessionRef: successorRef, delta: parsed.delta }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
+      db.appendContinuityEvent({ runId: staged.manifest.runId, role: staged.manifest.role, kind: "handoff_successor_accepted", payload: { generation: staged.manifest.generation, sessionId, sessionRef: successorRef, delta: parsed.delta, acceptanceAttempts }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
       const checkpoint = db.publishContinuityCheckpoint({ runId: staged.manifest.runId, role: staged.manifest.role, delta: parsed.delta, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
-      const lineage = db.acceptHandoff(staged.manifest.runId, staged.manifest.generation, successorRef ?? sessionId);
-      return { ...staged, lineage, successor, successorSessionId: sessionId, acceptanceCheckpointDigest: checkpoint.digest };
+      const receipt: HandoffAcceptanceReceiptV1 | undefined = successorRef ? { version: 1, runId: staged.manifest.runId, generation: staged.manifest.generation, role: staged.manifest.role,
+        manifestDigest: staged.lineage.manifestDigest, continuityCheckpointDigest: staged.manifest.continuityCheckpointDigest, acceptanceCheckpointDigest: checkpoint.digest,
+        ...(staged.manifest.predecessorSessionRef ? { predecessorSessionRef: staged.manifest.predecessorSessionRef } : {}), successorSessionRef: successorRef,
+        resources: staged.manifest.resources, acceptedAt: new Date().toISOString() } : undefined;
+      const lineage = db.acceptHandoff(staged.manifest.runId, staged.manifest.generation, successorRef ?? sessionId, undefined, receipt);
+      return { ...staged, lineage, successor, successorSessionId: sessionId, acceptanceCheckpointDigest: checkpoint.digest, ...(receipt ? { acceptanceReceipt: receipt } : {}) };
     } catch (error) {
       if (error instanceof HandoffAcceptanceError) await successor.close().catch(() => {});
       const current = db.handoff(staged.manifest.runId, staged.manifest.generation);
@@ -412,8 +491,9 @@ function validateHandoffAcceptance(
   successor: BuilderAdapter,
   text: string,
 ): { code: HandoffAcceptanceFailureCode; message: string } | undefined {
-  if (!text.trimStart().startsWith(HANDOFF_ACCEPTED)) {
-    return { code: "missing-acknowledgement", message: `the first non-whitespace line must begin with ${HANDOFF_ACCEPTED}` };
+  const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  if (firstLine !== HANDOFF_ACCEPTED) {
+    return { code: "missing-acknowledgement", message: `the first non-whitespace line must equal ${HANDOFF_ACCEPTED}` };
   }
   const parsed = parseContinuityDelta(text);
   if (!parsed.delta) {

@@ -749,6 +749,36 @@ export interface QaFailureReportV1 {
   observations: string[];
 }
 
+/** Host-owned durable identity for one QA failure finding. */
+export interface QaFindingRefV2 {
+  version: 2;
+  findingKey: string;
+  reportDigest: string;
+  reviewAttemptId: string;
+  ordinal: number;
+  rawId: string;
+}
+
+/** Builder's machine-readable answer to a source-bound QA failure handoff. */
+export interface BuilderQaRemediationReportV2 {
+  version: 2;
+  handoff_id: string;
+  summary: string;
+  findings: Array<{
+    finding_key: string;
+    raw_id: string;
+    disposition: "fixed" | "disputed";
+    changes: string[];
+    evidence: string;
+    verification: Array<{
+      check: string;
+      outcome: "passed" | "failed" | "not_run";
+      evidence: string;
+    }>;
+  }>;
+  observations: string[];
+}
+
 export interface UninstallProposal {
   operations: Array<{
     kind: "keep" | "delete" | "edit" | "remove-dependency";
@@ -1398,8 +1428,22 @@ export interface HandoffManifestV1 {
   sessionUsage?: SessionUsageSample;
   compactionCount: number;
   compactMaximum: number;
-  resources: Array<{ label: string; digest: string; authoritative: boolean; requiredForRecovery?: boolean; mediaType?: string; path?: string }>;
+  resources: Array<{ label: string; digest: string; authoritative: boolean; requiredForRecovery?: boolean; mediaType?: string; path?: string; purpose?: string; bytes?: number }>;
   createdAt: string;
+}
+
+export interface HandoffAcceptanceReceiptV1 {
+  version: 1;
+  runId: string;
+  generation: number;
+  role: "builder" | "qa";
+  manifestDigest: string;
+  continuityCheckpointDigest: string;
+  acceptanceCheckpointDigest: string;
+  predecessorSessionRef?: ProviderSessionRefV1;
+  successorSessionRef: ProviderSessionRefV1;
+  resources: HandoffManifestV1["resources"];
+  acceptedAt: string;
 }
 export interface HandoffLineage {
   runId: string;
@@ -1410,6 +1454,8 @@ export interface HandoffLineage {
   successorSessionId?: string;
   predecessorSessionRef?: ProviderSessionRefV1;
   successorSessionRef?: ProviderSessionRefV1;
+  /** Digest of the exact validated acceptance receipt stored as durable evidence. */
+  acceptanceReceiptDigest?: string;
   state: "staged" | "accepted" | "failed";
   createdAt: string;
   acceptedAt?: string;

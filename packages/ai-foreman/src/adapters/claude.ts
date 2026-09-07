@@ -4,8 +4,10 @@ import type {
   SDKSessionInfo,
   SDKUserMessage,
   PermissionResult,
+  HookInput,
 } from "@anthropic-ai/claude-agent-sdk";
 import { createHash, randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 
 /** Lazy-load the Claude Agent SDK. Throws an actionable error if not installed. */
 export async function requireClaudeSDK() {
@@ -52,24 +54,42 @@ import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFail
 export function buildClaudeQueryOptions(
   opts: Omit<BuilderAdapterOptions, "permission">,
 ): Record<string, unknown> {
+  const qaReadOnly = opts.sessionRole === "qa" || opts.sandboxMode === "read-only";
   const base: Record<string, unknown> = {
     cwd: opts.cwd,
     pathToClaudeCodeExecutable: opts.runtimeExecutable,
-    env: { ...process.env },
+    env: qaReadOnly ? qaEnvironment(process.env, opts.cwd) : { ...process.env },
     model: opts.model,
     resume: opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId,
-    permissionMode: "acceptEdits",
+    permissionMode: qaReadOnly ? "default" : "acceptEdits",
     effort: opts.effort,
     extraArgs: opts.fast ? { fast: null } : undefined,
-    settingSources: ["user", "project", "local"],
+    settingSources: qaReadOnly ? [] : ["user", "project", "local"],
+    ...(qaReadOnly ? { disallowedTools: ["Write", "Edit", "NotebookEdit"] } : {}),
+    ...(qaReadOnly ? { sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      filesystem: { allowWrite: [join(dirname(opts.cwd), "scratch")], denyWrite: [opts.cwd, ...(opts.configRoot ? [opts.configRoot] : [])] },
+    } } : {}),
   };
-  if (opts.systemPromptAppend) {
-    base.systemPrompt = { type: "preset", preset: "claude_code", append: opts.systemPromptAppend };
+  const exactSkills = opts.preloadedSkillContent?.length
+    ? ["# Preloaded Skills", "Use the following skills for this run.", ...opts.preloadedSkillContent.map((skill) => skill.content)].join("\n\n")
+    : undefined;
+  const systemAppend = [opts.systemPromptAppend, exactSkills].filter((part): part is string => Boolean(part)).join("\n\n");
+  if (systemAppend) {
+    base.systemPrompt = { type: "preset", preset: "claude_code", append: systemAppend };
   }
   if (opts.skills !== undefined) {
     base.skills = opts.skills;
   }
   return base;
+}
+
+function qaEnvironment(source: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
+  const allowed = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM", "NO_COLOR", "FORCE_COLOR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
+  return { ...Object.fromEntries(allowed.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]!]])), TMPDIR: join(dirname(cwd), "scratch") };
 }
 
 export async function probeClaudeSession(
@@ -202,6 +222,9 @@ export class ClaudeAdapter implements BuilderAdapter {
   private readonly pumpDone: Promise<void>;
   private _sessionId?: string;
   private _sessionRef?: ProviderSessionRefV1;
+  private readonly sessionIdentityReady: Promise<ProviderSessionRefV1>;
+  private resolveSessionIdentity!: (ref: ProviderSessionRefV1) => void;
+  private rejectSessionIdentity!: (error: Error) => void;
   private readonly stderrChunks: string[] = [];
   private turnSignals: string[] = [];
   private structuredError?: string;
@@ -268,11 +291,25 @@ export class ClaudeAdapter implements BuilderAdapter {
   private constructor(private readonly opts: BuilderAdapterOptions, query: (o: any) => Query) {
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
     this._sessionRef = opts.resumeSessionRef;
+    this.sessionIdentityReady = new Promise<ProviderSessionRefV1>((resolve, reject) => {
+      this.resolveSessionIdentity = resolve;
+      this.rejectSessionIdentity = reject;
+    });
+    void this.sessionIdentityReady.catch(() => {});
     this.query = query({
       prompt: this.inbox,
       options: {
         ...buildClaudeQueryOptions(opts),
         abortController: this.abort,
+        hooks: { SessionStart: [{ hooks: [async (input: HookInput) => {
+          if (input.hook_event_name !== "SessionStart" || input.agent_id) return {};
+          try { this.observeSession(input.session_id, input.cwd); }
+          catch (error) {
+            this.failSessionIdentity(error instanceof Error ? error : new Error(String(error)));
+            throw error;
+          }
+          return {};
+        }] }] },
         stderr: (data: string) => this.captureStderr(data),
         canUseTool: async (
           toolName: string,
@@ -322,6 +359,7 @@ export class ClaudeAdapter implements BuilderAdapter {
         const message = normalizeRuntimeErrorText("claude", rawMessage, null, "builder stream");
         this.eventQueue.push({ kind: "error", message });
         const result = this.streamFailureResult(message, isMissingClaudeSession(rawMessage));
+        this.rejectSessionIdentity(new Error(message));
         this.terminalResult = result;
         this.settlePending(result);
       }
@@ -334,14 +372,14 @@ export class ClaudeAdapter implements BuilderAdapter {
         this.settlePending(result);
       }
       if (!this.closed && !this.terminalResult) this.terminalResult = this.streamFailureResult("Claude stream ended without a result", Boolean(this.opts.resumeSessionRef ?? this.opts.resumeSessionId));
+      if (!this._sessionRef) this.rejectSessionIdentity(new Error("Claude stream ended before exposing a scoped session identity"));
       this.eventQueue.close();
     }
   }
 
   private handle(msg: SDKMessage): void {
     if ("session_id" in msg && typeof msg.session_id === "string") {
-      this._sessionId = msg.session_id;
-      this.observeSession(msg.session_id);
+      this.observeSession(msg.session_id, "cwd" in msg && typeof msg.cwd === "string" ? msg.cwd : undefined);
     }
     if (msg.type === "assistant") {
       if (msg.error) {
@@ -349,6 +387,7 @@ export class ClaudeAdapter implements BuilderAdapter {
         this.turnSignals.push(`assistant error: ${msg.error}`);
       }
       for (const block of msg.message.content) {
+        this.eventQueue.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType: String(block.type ?? "unknown"), payload: structuredClone(block) as unknown as Record<string, unknown>, payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
         if (block.type === "text" && block.text) {
           this.eventQueue.push({ kind: "text", text: block.text, byteCount: Buffer.byteLength(block.text), digest: createHash("sha256").update(block.text).digest("hex"), eventId: randomUUID(), observedAt: new Date().toISOString() });
           this.opts.observer?.signal(true);
@@ -543,6 +582,7 @@ export class ClaudeAdapter implements BuilderAdapter {
     if (!Array.isArray(body?.content)) return;
     for (const block of body.content as Array<Record<string, unknown>>) {
       if (block.type !== "tool_result") continue;
+      this.eventQueue.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType: "tool_result", payload: structuredClone(block), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
       const callId = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
       if (!callId) continue;
       const spanId = this.toolSpans.get(callId);
@@ -561,6 +601,29 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   sessionRef(): ProviderSessionRefV1 | undefined { return this._sessionRef; }
+  async prepareSession(timeoutMs = 30_000): Promise<ProviderSessionRefV1> {
+    if (this.closed || this.streamEnded || this.terminalResult) throw new Error(this.terminalResult?.text ?? "Claude session is closed");
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("Claude session initialization timeout must be positive");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let aborted: (() => void) | undefined;
+    try {
+      const interrupted = new Promise<never>((_resolve, reject) => {
+        aborted = () => reject(new Error(this.terminalResult?.text ?? "Claude session closed during initialization"));
+        this.abort.signal.addEventListener("abort", aborted, { once: true });
+        if (this.abort.signal.aborted) aborted();
+        timer = setTimeout(() => reject(new Error(`Claude did not expose a scoped session identity within ${timeoutMs}ms`)), timeoutMs);
+      });
+      const [, ref] = await Promise.race([Promise.all([this.query.initializationResult(), this.sessionIdentityReady]), interrupted]);
+      if (!ref.validatedAt) throw new Error("Claude session identity was not provider-validated during initialization");
+      return ref;
+    } catch (error) {
+      this.failSessionIdentity(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (aborted) this.abort.signal.removeEventListener("abort", aborted);
+    }
+  }
   adoptSessionRef(ref: ProviderSessionRefV1): void {
     if (ref.provider !== "claude" || ref.sessionId !== this._sessionId) throw new Error("cannot adopt a session reference for a different Claude conversation");
     this._sessionRef = ref;
@@ -677,24 +740,58 @@ export class ClaudeAdapter implements BuilderAdapter {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.rejectSessionIdentity(new Error("Claude session closed during initialization"));
+    this.abort.abort();
     this.inbox.close();
     try {
       await this.query.interrupt();
     } catch {
       // interrupt is best-effort — ignore if no turn is active
     }
-    this.abort.abort();
     await this.pumpDone.catch(() => {});
   }
 
-  private observeSession(sessionId: string): void {
-    if (this._sessionRef?.sessionId === sessionId) return;
-    this._sessionRef = createProviderSessionRef({
-      provider: "claude", sessionId, cwd: this.opts.cwd, configRoot: this.opts.configRoot ?? this.opts.cwd,
-      role: this.opts.sessionRole, stream: this.opts.sessionStream, generation: this.opts.sessionGeneration,
-      workspaceIdentity: this.opts.workspaceIdentity, ticketId: this.opts.ticketId, deliveryUnitId: this.opts.deliveryUnitId,
-      source: "observed",
-    });
+  private failSessionIdentity(error: Error): void {
+    this.rejectSessionIdentity(error);
+    const result = sessionUnavailableResult(new SessionUnavailableError({
+      runtime: "claude", phase: this.pending ? "turn" : "preflight", dispatchState: this.pending ? "unknown" : "not-sent",
+      executable: this.opts.runtimeExecutable ?? "claude", cwd: this.opts.cwd, diagnostics: error.message,
+      availability: { version: 1, status: "unavailable", checkedAt: new Date().toISOString(), reason: "attach-failed", detail: error.message, ...(this._sessionRef ? { sessionRef: this._sessionRef } : {}) },
+    }));
+    this.terminalResult = result;
+    this.settlePending(result);
+    this.inbox.close();
+    this.abort.abort();
+  }
+
+  private observeSession(sessionId: string, observedCwd?: string): void {
+    const expectedId = this._sessionRef?.sessionId ?? this._sessionId;
+    if (!sessionId.trim() || (expectedId && expectedId !== sessionId)) {
+      const error = new Error(`Claude initialized session ${sessionId || "without an ID"} instead of requested session ${expectedId ?? "a nonempty ID"}`);
+      this.failSessionIdentity(error);
+      throw error;
+    }
+    if (observedCwd !== undefined && canonicalSessionPath(observedCwd) !== canonicalSessionPath(this.opts.cwd)) {
+      const error = new Error(`Claude session cwd ${observedCwd} does not match ${this.opts.cwd}`);
+      this.failSessionIdentity(error);
+      throw error;
+    }
+    this._sessionId = sessionId;
+    if (this._sessionRef?.validatedAt) {
+      this.resolveSessionIdentity(this._sessionRef);
+      return;
+    }
+    const now = new Date().toISOString();
+    const validatedAt = observedCwd !== undefined || this.opts.sessionRole !== "qa" ? now : undefined;
+    this._sessionRef = this._sessionRef
+      ? { ...this._sessionRef, source: "observed", ...(validatedAt ? { validatedAt } : {}) }
+      : createProviderSessionRef({
+        provider: "claude", sessionId, cwd: this.opts.cwd, configRoot: this.opts.configRoot ?? this.opts.cwd,
+        role: this.opts.sessionRole, stream: this.opts.sessionStream, generation: this.opts.sessionGeneration,
+        workspaceIdentity: this.opts.workspaceIdentity, ticketId: this.opts.ticketId, deliveryUnitId: this.opts.deliveryUnitId,
+        source: "observed", validatedAt,
+      });
+    if (this._sessionRef.validatedAt) this.resolveSessionIdentity(this._sessionRef);
   }
 
   private settlePending(result: TurnResult, emit = true): void {

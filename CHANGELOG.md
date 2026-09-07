@@ -4,6 +4,25 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.9.14 / ai-foreman 1.7.14 / special-agents 0.8.9 / rafi-spec 0.8.10 - 2026-09-07
+
+### Added
+
+- Added portable local state transfer through `rafi state export`, `rafi state inspect`, and `rafi state import`, with manifest validation, lineage checks, live-run refusal, dirty-checkout refusal, confirmation before replacement, and rollback on failed imports.
+- Added V2 Builder QA remediation contracts, durable QA finding identities, handoff acceptance receipts, and stronger QA failure handoff/recovery evidence.
+
+### Fixed
+
+- Hardened QA recovery, snapshotting, branch finalization, provider continuity, and workflow DB state handling across retries, handoffs, and build resume flows.
+- Updated generated CLI documentation for the new state commands and current build/start options.
+
+### Packages
+
+- Bumped `rafi-spec` to `0.8.10` for the Builder QA remediation, finding identity, and handoff acceptance contract additions.
+- Bumped `special-agents` to `0.8.9` for its exact `rafi-spec@0.8.10` dependency.
+- Bumped `ai-foreman` to `1.7.14` for portable state transfer, QA recovery/handoff behavior, and its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.9.14` for `rafi state` commands, build resume updates, and its exact workspace dependencies.
+
 ## @rafi-ai/cli 0.9.6 / ai-foreman 1.7.6 / special-agents 0.8.4 / rafi-spec 0.8.4 - 2026-08-27
 
 ### Added

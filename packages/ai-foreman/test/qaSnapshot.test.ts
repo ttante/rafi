@@ -4,11 +4,29 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createDisposableQaSnapshotAsync } from "../src/qaSnapshot.js";
+import { captureStableFrozenQaSourceAsync, createDisposableQaSnapshotAsync, QaSourceInstabilityError, type FrozenQaSourceState } from "../src/qaSnapshot.js";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
+
+function frozen(digest: string): FrozenQaSourceState {
+  return { head: "head", originDigest: "origin", contentDigest: "content", repository: { topLevel: "/repo", gitDir: "/repo/.git", commonDir: "/repo/.git", indexDigest: "", configDigest: "", refsDigest: "", sparseDigest: "", submoduleDigest: "" }, status: Buffer.alloc(0), combinedDiff: Buffer.alloc(0), stagedDiff: Buffer.alloc(0), unstagedDiff: Buffer.alloc(0), changeSummary: "", pathInventory: [], untracked: [], digest, capturedAt: "" };
+}
+
+test("stable source capture retries twice and accepts the third byte-identical pair", async () => {
+  const seen: Array<[number, number]> = [];
+  const result = await captureStableFrozenQaSourceAsync(async (attempt, pass) => {
+    seen.push([attempt, pass]);
+    return frozen(attempt < 3 ? `${attempt}-${pass}` : "stable");
+  }, new Date("2026-01-01T00:00:00.000Z"));
+  assert.equal(result.digest, "stable");
+  assert.deepEqual(seen, [[1, 1], [1, 2], [2, 1], [2, 2], [3, 1], [3, 2]]);
+});
+
+test("stable source capture fails closed after all three pairs drift", async () => {
+  await assert.rejects(captureStableFrozenQaSourceAsync(async (attempt, pass) => frozen(`${attempt}-${pass}`)), QaSourceInstabilityError);
+});
 
 test("async disposable QA snapshot reproduces tracked, staged, binary, and untracked changes without mutating Builder state", async () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-qa-snapshot-test-"));
@@ -42,7 +60,7 @@ test("async disposable QA snapshot reproduces tracked, staged, binary, and untra
       writeFileSync(join(snapshot.path, "tracked.txt"), "QA must not edit\n");
       assert.deepEqual(await snapshot.qaChanges(), ["tracked diff changed"]);
       assert.equal(readFileSync(join(root, "tracked.txt"), "utf8"), "after\n");
-      assert.ok(progress.some((entry) => entry.includes("creating detached review worktree")));
+      assert.ok(progress.some((entry) => entry.includes("creating independent review repository")));
       assert.ok(progress.some((entry) => entry.includes("checking QA file changes")));
     } finally {
       await snapshot.remove();

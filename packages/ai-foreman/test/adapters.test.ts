@@ -58,6 +58,17 @@ test("buildClaudeQueryOptions forwards cwd, model, effort, and resumeSessionId u
   assert.equal(opts.resume, "sess-abc");
 });
 
+test("Claude QA runs fail closed in an OS sandbox with only isolated scratch writable", () => {
+  const opts = buildClaudeQueryOptions({ ...BASE_OPTS, cwd: "/tmp/qa/review", configRoot: "/project", sessionRole: "qa", sandboxMode: "read-only" });
+  assert.deepEqual(opts.settingSources, []);
+  assert.deepEqual(opts.disallowedTools, ["Write", "Edit", "NotebookEdit"]);
+  assert.equal((opts.env as NodeJS.ProcessEnv).TMPDIR, "/tmp/qa/scratch");
+  assert.deepEqual(opts.sandbox, {
+    enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
+    filesystem: { allowWrite: ["/tmp/qa/scratch"], denyWrite: ["/tmp/qa/review", "/project"] },
+  });
+});
+
 test("Claude cumulative usage replaces absolute SDK totals and never fabricates zero usage", () => {
   const empty = mergeClaudeProviderSessionUsage(
     { observedAt: new Date(0).toISOString(), source: "provider" },

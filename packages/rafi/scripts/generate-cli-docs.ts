@@ -6,6 +6,7 @@ import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { buildStatusCommand } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
 import { buildManagerCommand } from "ai-foreman/cli/manager.js";
+import { buildStateCommand } from "ai-foreman/cli/state.js";
 import { program } from "../src/index.js";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -30,6 +31,7 @@ foremanProgram.addCommand(buildStartCommand());
 foremanProgram.addCommand(buildStatusCommand());
 foremanProgram.addCommand(buildDoctorCommand());
 foremanProgram.addCommand(buildManagerCommand({ requireProject: true }));
+foremanProgram.addCommand(buildStateCommand());
 
 const cases: Array<[string, Command]> = [
   ["rafi --help", program],
@@ -61,6 +63,10 @@ const cases: Array<[string, Command]> = [
   ["rafi handoffs delete-history --help", commandByPath(["handoffs", "delete-history"])],
   ["rafi agents --help", commandByPath(["agents"])],
   ["rafi manager --help", commandByPath(["manager"])],
+  ["rafi state --help", commandByPath(["state"])],
+  ["rafi state export --help", commandByPath(["state", "export"])],
+  ["rafi state inspect --help", commandByPath(["state", "inspect"])],
+  ["rafi state import --help", commandByPath(["state", "import"])],
   ["rafi uninstall --help", commandByPath(["uninstall"])],
   ["rafi start --help", commandByPath(["start"])],
   ["rafi doctor --help", commandByPath(["doctor"])],
@@ -71,6 +77,10 @@ const cases: Array<[string, Command]> = [
   ["ai-foreman status --help", commandByPath(["status"], foremanProgram)],
   ["ai-foreman doctor --help", commandByPath(["doctor"], foremanProgram)],
   ["ai-foreman manager --help", commandByPath(["manager"], foremanProgram)],
+  ["ai-foreman state --help", commandByPath(["state"], foremanProgram)],
+  ["ai-foreman state export --help", commandByPath(["state", "export"], foremanProgram)],
+  ["ai-foreman state inspect --help", commandByPath(["state", "inspect"], foremanProgram)],
+  ["ai-foreman state import --help", commandByPath(["state", "import"], foremanProgram)],
 ];
 
 let docs = readFileSync(docsPath, "utf8");

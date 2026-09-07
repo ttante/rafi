@@ -147,7 +147,11 @@ export function mergeBranchToLocalBase(
   message: string,
   method: "squash" | "merge" | "rebase" = "squash",
 ): string {
-  if (method === "rebase") runGit(projectDir, ["rebase", baseBranch, branch]);
+  if (method === "rebase") {
+    const branchWorktree = findWorktreeForBranch(projectDir, branch);
+    if (branchWorktree) runGit(branchWorktree, ["rebase", baseBranch]);
+    else runGit(projectDir, ["rebase", baseBranch, branch]);
+  }
   if (currentGitRef(projectDir) !== baseBranch) {
     runGit(projectDir, ["checkout", baseBranch]);
   }

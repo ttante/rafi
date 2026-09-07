@@ -16,10 +16,11 @@ import { CurrentWorkflowGuardAdapter, captureCurrentWorkflowSessionIdentity } fr
 import { buildRunSessionBinding, createBuildRun, persistBuildSession, projectBuildRecovery, releaseBuildLease } from "../src/buildRuns.js";
 import { ContinuityAdapter, SessionUnavailableContinuityError } from "../src/continuity.js";
 import { HANDOFF_ACCEPTED, HandoffService } from "../src/handoffs.js";
-import { compactWithRetry, runIsolatedQa, type QaStreamState } from "../src/qaReview.js";
+import { compactWithRetry, runIsolatedQa, type QaSessionBoundaryResult, type QaSessionHandle, type QaStreamState } from "../src/qaReview.js";
 import { createProviderSessionRef, providerSessionKey, resolveUniqueSessionBinding, validateProviderSessionScope } from "../src/sessionIdentity.js";
 import { RoleSessionController, RoleSessionValidationError, ThresholdCompactionController } from "../src/sessionLifecycle.js";
 import { WorkflowDb } from "../src/workflowDb.js";
+import { qaDigest } from "../src/qaProtocolV2.js";
 
 const SETTINGS: ResolvedAgentSettings = {
   role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false,
@@ -31,6 +32,8 @@ class StaticAdapter implements BuilderAdapter {
   readonly agent: "claude" | "codex";
   sends = 0;
   closed = false;
+  private readonly eventQueue: BuilderEvent[] = [];
+  private readonly eventWaiters: Array<() => void> = [];
 
   constructor(
     private readonly id: string | undefined,
@@ -39,13 +42,33 @@ class StaticAdapter implements BuilderAdapter {
     agent: "claude" | "codex" = "codex",
   ) { this.agent = agent; }
 
-  async sendTurn(): Promise<TurnResult> { this.sends += 1; return this.result; }
+  async sendTurn(): Promise<TurnResult> {
+    this.sends += 1;
+    const result = { ...this.result, turnId: this.result.turnId ?? `${this.id ?? "session"}-turn-${this.sends}` };
+    this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
+    this.eventWaiters.splice(0).forEach((resolve) => resolve());
+    return result;
+  }
   sessionId(): string | undefined { return this.id; }
   sessionRef(): ProviderSessionRefV1 | undefined { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.ref = ref; }
-  async *events(): AsyncIterable<BuilderEvent> {}
-  async close(): Promise<void> { this.closed = true; }
+  async *events(): AsyncIterable<BuilderEvent> {
+    while (!this.closed || this.eventQueue.length) {
+      const event = this.eventQueue.shift();
+      if (event) { yield event; continue; }
+      await new Promise<void>((resolve) => this.eventWaiters.push(resolve));
+    }
+  }
+  async close(): Promise<void> { this.closed = true; this.eventWaiters.splice(0).forEach((resolve) => resolve()); }
 }
+
+function qaHandle(adapter: StaticAdapter, cwd: string): QaSessionHandle {
+  const fields = { version: 2 as const, sourceMode: "read-only" as const, scratchMode: "isolated" as const, settingsSources: "none" as const, networkMode: "disabled" as const, environmentDigest: "1".repeat(64), policyDigest: "2".repeat(64) };
+  const ref = adapter.sessionRef() ?? createProviderSessionRef({ provider: adapter.agent, sessionId: adapter.sessionId()!, cwd, configRoot: cwd, role: "qa", stream: "qa", validatedAt: new Date().toISOString() });
+  adapter.adoptSessionRef(ref);
+  return { adapter, sessionIdentity: () => ref, effectiveRoleInstructions: "test QA", runtimeContext: { test: true }, skills: [], confinement: { ...fields, digest: qaDigest("qa-confinement", fields) }, handoffReceipt: { kind: "initial" } };
+}
+const unavailableQaBoundary = async (): Promise<QaSessionBoundaryResult> => { throw new Error("unexpected QA boundary"); };
 
 function temp(prefix: string): string { return mkdtempSync(join(tmpdir(), prefix)); }
 
@@ -414,12 +437,13 @@ test("each disposable QA cycle creates a fresh provider session in a different s
       created += 1;
       cws.push(cwd);
       resumeIds.push(resumeId);
-      return new StaticAdapter(`qa-${created}`, {
+      return qaHandle(new StaticAdapter(`qa-${created}`, {
         text: created === 1 ? `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify({ version: 1, summary: "retry", checks_run: [{ check: "review", outcome: "failed", evidence: "retry needed" }], findings: [{ id: "QA-1", requirement: "isolated", locations: ["README.md"], problem: "retry", evidence: "review evidence", expected: "clean", fix_direction: "fix it", verification: ["review again"] }], observations: [] })}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="retry"` : 'STEP_STATUS: qa_pass | summary="clean"',
         isError: false, numTurns: 1, costUsd: 0,
-      });
+      }), cwd);
     },
-    fix: async () => ({ ok: true, response: 'STEP_STATUS: done | summary="fixed"', summary: "fixed" }),
+    sessionBoundary: unavailableQaBoundary,
+    fix: async () => ({ ok: true, response: 'STEP_STATUS: done | summary="fixed"', summary: "fixed", providerTurnId: "builder-fix-1" }),
     observeNativeCompactions: async (adapter) => { if (adapter.sessionId()) observedQaSessions.push(adapter.sessionId()!); },
   });
   assert.equal(result.outcome, "passed");

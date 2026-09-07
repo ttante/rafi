@@ -171,6 +171,15 @@ test("read-only planning escalates broad git forms and write-capable flags", () 
   }
 });
 
+test("read-only agents may run validation commands but not dependency installation", () => {
+  for (const command of ["npm test", "npm run typecheck", "pnpm test", "pnpm --filter ai-foreman test", "pytest", "cargo test", "go test ./..."]) {
+    assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command } }).decision, "allow", command);
+  }
+  for (const command of ["npm install", "npm ci", "pnpm install", "pnpm add left-pad", "yarn install"]) {
+    assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command } }).decision, "escalate", command);
+  }
+});
+
 test("parseStepStatus reads the marker line", () => {
   const done = parseStepStatus('blah blah\nSTEP_STATUS: done | summary="did x" next="do y"');
   assert.equal(done.kind, "done");

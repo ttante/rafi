@@ -102,6 +102,7 @@ export type BuilderEvent =
   (
   | { kind: "text"; text: string; byteCount?: number; digest?: string }
   | { kind: "tool"; name: string; input: unknown; inputCompleteness?: "complete" | "truncated" | "unavailable"; lifecycle?: "started" | "progress" | "completed"; callId?: string; status?: string; durationMs?: number; exitCode?: number; outputSummary?: string; outputDigest?: string; outputCompleteness?: "complete" | "truncated" | "unavailable"; rawOutputBytes?: number; completionKnown?: boolean; providerTurnId?: string }
+  | { kind: "provider-item"; provider: "claude" | "codex"; lifecycle: "started" | "completed"; itemType: string; payload: Record<string, unknown>; payloadCompleteness: "complete"; providerTurnId?: string }
   | { kind: "activity"; state: string; detail?: string; provider?: "claude" | "codex"; model?: string; transient?: boolean }
   | { kind: "retry"; provider: "claude" | "codex"; reason: string; attempt?: number; maximum?: number; delayMs?: number; managedBy: "provider" | "rafi"; retryId?: string; providerTurnId?: string }
   | { kind: "turn-complete"; result: TurnResult; turnId?: string }
@@ -194,8 +195,12 @@ export interface BuilderAdapterOptions {
   systemPromptAppend?: string;
   /** Skill names to preload for this session (Claude: lazy-loaded; Codex: flattened). */
   skills?: string[];
+  /** Exact host-frozen skill text injected into the provider instruction. */
+  preloadedSkillContent?: Array<{ name: string; content: string }>;
   /** Provider-native context ceiling, as a percentage of that provider's model window. */
   autoCompactThresholdPercent?: number;
+  /** QA forbids an unjournaled model turn merely to discover the context window. */
+  allowAutoCompactionSetupTurn?: boolean;
   /** Raw-adapter observability; wrapper adapters must not persist re-emitted events. */
   observer?: RunObserver;
 }
@@ -212,6 +217,12 @@ export interface BuilderAdapter {
   /** Current location-scoped session reference, once known. */
   sessionRef?(): ProviderSessionRefV1 | undefined;
 
+  /**
+   * Establish and observe the exact provider session without dispatching a
+   * role/work turn. Durable QA calls this before binding its first turn.
+   */
+  prepareSession?(): Promise<ProviderSessionRefV1>;
+
   /** Host-only metadata promotion after a validated handoff is accepted. */
   adoptSessionRef?(ref: ProviderSessionRefV1): void;
 
@@ -227,6 +238,8 @@ export interface BuilderAdapter {
    * tool-heavy first turn is protected too.
    */
   prepareAutoCompaction?(thresholdPercent?: number): Promise<NativeAutoCompactionPolicy | void>;
+  /** True only when a provider needs one observable, tool-free turn to learn its context window. */
+  requiresAutoCompactionSetupTurn?(): boolean;
 
   /** The last provider-native automatic-compaction policy verified on this transport. */
   autoCompactionPolicy?(): NativeAutoCompactionPolicy | undefined;

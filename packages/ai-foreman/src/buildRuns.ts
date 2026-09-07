@@ -89,12 +89,33 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
   return saved;
 }
 
-export function resumeBuildRun(projectDir: string, runId: string, patch: { builder?: LegacyResolvedAgentSettings; qa?: LegacyResolvedAgentSettings; builderSessionId?: string | null; builderSessionRef?: ProviderSessionRefV1 | null }, now = new Date()): BuildRunRecordV2 {
-  const existing = readBuildRuns(projectDir).find((run) => run.runId === runId);
+export function resumeBuildRun(projectDir: string, runId: string, patch: { builder?: LegacyResolvedAgentSettings; qa?: LegacyResolvedAgentSettings; builderSessionId?: string | null; builderSessionRef?: ProviderSessionRefV1 | null; expectedRecoveryDecisionDigest?: string }, now = new Date()): BuildRunRecordV2 {
+  let existing = readBuildRuns(projectDir).find((run) => run.runId === runId);
   if (!existing) throw new Error(`recoverable build run not found: ${runId}`);
   if (existing.status === "completed") throw new Error(`build run ${runId} is already complete`);
   const workflow = new WorkflowDb(projectDir);
-  try { workflow.acquireLease(runId, undefined, now, BUILD_LEASE_STALE_MS); } finally { workflow.close(); }
+  try {
+    const held = workflow.currentLease();
+    if (held && held.runId === runId && held.pid === process.pid && held.host === hostname() && held.processStart === processStartIdentity(process.pid)) {
+      workflow.heartbeatLease(held, now);
+    } else {
+      workflow.acquireLease(runId, undefined, now, BUILD_LEASE_STALE_MS);
+    }
+    if (patch.expectedRecoveryDecisionDigest) {
+      const decision = workflow.getRun(runId)?.state.recoveryDecision;
+      if (createHash("sha256").update(JSON.stringify(decision ?? null)).digest("hex") !== patch.expectedRecoveryDecisionDigest) {
+        const lease = workflow.currentLease();
+        if (lease?.runId === runId && lease.pid === process.pid) workflow.releaseLease(lease, now);
+        throw new Error("Recovery decision changed before the child supervisor acquired its lease; inspect and retry");
+      }
+    }
+    existing = readBuildRuns(projectDir).find((run) => run.runId === runId)!;
+    if (!existing || existing.status === "completed") {
+      const lease = workflow.currentLease();
+      if (lease?.runId === runId && lease.pid === process.pid) workflow.releaseLease(lease, now);
+      throw new Error("Recovery run completed or disappeared before lease acquisition");
+    }
+  } finally { workflow.close(); }
   const clearBuilderSession = patch.builderSessionId === null && patch.builderSessionRef === null;
   const builderSessionId = clearBuilderSession
     ? undefined
@@ -216,6 +237,7 @@ export function recordBuildReceipt(
   const workflow = new WorkflowDb(projectDir);
   try {
     workflow.planOperation({ runId: run.runId, idempotencyKey: operationId, kind: operationId.split(":", 1)[0] ?? "operation", intent: { checkpoint: run.checkpoint } });
+    workflow.updateOperation(operationId, "in_progress");
     workflow.updateOperation(operationId, "confirmed", { externalId: detail?.externalId, result: { detail: detail?.detail } });
   } finally { workflow.close(); }
   return next;
@@ -233,6 +255,9 @@ export function releaseBuildLease(projectDir: string, run: BuildRunRecordV2, sta
 }
 
 export function completeBuildRun(projectDir: string, run: BuildRunRecordV2, now = new Date()): BuildRunRecordV2 {
+  const workflow = new WorkflowDb(projectDir);
+  try { workflow.assertQaRunFinalizable(run.runId); }
+  finally { workflow.close(); }
   const saved = saveBuildRun(projectDir, { ...run, status: "completed", checkpoint: "complete", lease: undefined, completedAt: now.toISOString(), progress: { ...run.progress, completedTickets: [...run.tickets], remainingTickets: [], nextAction: "None; build complete" } }, now); releaseWorkflowLease(projectDir, run.runId, now); return saved;
 }
 

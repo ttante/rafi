@@ -24,6 +24,7 @@ test("workflow DB updates snapshots and append-only events in the same lifecycle
   const run = db.createRun({ kind: "build", originalWork: { tickets: ["T1", "T2"] } });
   db.transition(run.runId, { checkpoint: "builder-after", remainingWork: { tickets: ["T2"] }, event: "builder_complete" });
   db.planOperation({ runId: run.runId, idempotencyKey: `${run.runId}:push:x`, kind: "push", intent: { branch: "x" } });
+  db.updateOperation(`${run.runId}:push:x`, "in_progress");
   db.updateOperation(`${run.runId}:push:x`, "uncertain", { error: "network" });
   assert.equal(db.getRun(run.runId)?.checkpoint, "builder-after"); assert.deepEqual(db.events(run.runId).map((event) => event.type), ["run_created", "builder_complete"]);
   assert.equal(db.operations(run.runId)[0]?.status, "uncertain"); db.close();

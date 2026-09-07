@@ -9,6 +9,7 @@ export {
   buildRunRecordSchema,
   installManifestSchema,
   qaFailureReportV1Schema,
+  builderQaRemediationReportV2Schema,
 } from "./schemas.js";
 export {
   type ValidationResult,
@@ -21,6 +22,8 @@ export {
   validateInstallManifest,
   validateQaFailureReport,
   validateQaFailureReportV1,
+  validateBuilderQaRemediationReport,
+  validateBuilderQaRemediationReportV2,
   assertRulePack,
   assertSkillManifest,
   assertAgentManifest,
@@ -28,5 +31,7 @@ export {
   assertAgentDefaults,
   assertQaFailureReport,
   assertQaFailureReportV1,
+  assertBuilderQaRemediationReport,
+  assertBuilderQaRemediationReportV2,
 } from "./validate.js";
 export * from "./qaFailureReport.js";

@@ -46,10 +46,18 @@ export class CurrentWorkflowGuardAdapter implements BuilderAdapter {
   }
   sessionId(): string | undefined { return this.adapter.sessionId(); }
   sessionRef(): ProviderSessionRefV1 | undefined { return this.adapter.sessionRef?.(); }
+  async prepareSession(): Promise<ProviderSessionRefV1> {
+    assertCurrentWorkflowIdentity(this.cwd, this.expected);
+    if (!this.adapter.prepareSession) throw new Error("wrapped adapter cannot establish a provider session without a work turn");
+    const ref = await this.adapter.prepareSession();
+    assertCurrentWorkflowIdentity(this.cwd, this.expected);
+    return ref;
+  }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.adapter.adoptSessionRef?.(ref); }
   validateSession(): Promise<SessionAvailabilityV1> { assertCurrentWorkflowIdentity(this.cwd, this.expected); return this.adapter.validateSession?.() ?? Promise.resolve({ version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped" }); }
   async compact(): Promise<CompactResult> { assertCurrentWorkflowIdentity(this.cwd, this.expected); const result = await (this.adapter.compact?.() ?? Promise.resolve({ ok: false, error: "native compaction unavailable" })); assertCurrentWorkflowIdentity(this.cwd, this.expected); return result; }
   prepareAutoCompaction(thresholdPercent?: number): Promise<NativeAutoCompactionPolicy | void> { return this.adapter.prepareAutoCompaction?.(thresholdPercent) ?? Promise.resolve(); }
+  requiresAutoCompactionSetupTurn(): boolean { return this.adapter.requiresAutoCompactionSetupTurn?.() ?? false; }
   autoCompactionPolicy(): NativeAutoCompactionPolicy | undefined { return this.adapter.autoCompactionPolicy?.(); }
   drainNativeCompactions(): import("../adapters/types.js").NativeCompaction[] { return this.adapter.drainNativeCompactions?.() ?? []; }
   restoreNativeCompactions(compactions: NativeCompaction[]): void { this.adapter.restoreNativeCompactions?.(compactions); }

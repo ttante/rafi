@@ -12,6 +12,9 @@ import { cmdBlock, cmdInit, cmdUpdate } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
 import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/types.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
+import type { QaSessionHandle } from "../src/qaReview.js";
+import { qaDigest } from "../src/qaProtocolV2.js";
+import { BUILDER_QA_REMEDIATION_END, BUILDER_QA_REMEDIATION_START, type ProviderSessionRefV1 } from "rafi-spec";
 
 function makeTmpDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "foreman-runner-test-"));
@@ -48,6 +51,10 @@ class FakeBuilder implements BuilderAdapter {
   readonly agent = "claude" as const;
   readonly instructions: string[] = [];
   private index = 0;
+  private eventQueue: BuilderEvent[] = [];
+  private eventWaiters: Array<() => void> = [];
+  private closed = false;
+  private ref?: ProviderSessionRefV1;
 
   constructor(
     private readonly turns: string[],
@@ -57,17 +64,70 @@ class FakeBuilder implements BuilderAdapter {
   async sendTurn(instruction: string): Promise<TurnResult> {
     this.instructions.push(instruction);
     this.beforeTurn?.(this.index);
-    const text = this.turns[this.index++] ?? "";
-    return { text, isError: false, numTurns: 1, costUsd: 0 };
+    let text = this.turns[this.index++] ?? "";
+    if (instruction.includes(BUILDER_QA_REMEDIATION_START) && !text.includes(BUILDER_QA_REMEDIATION_START)) {
+      const handoffId = /QA failure handoff ID: ([a-f0-9]{64})/.exec(instruction)?.[1] ?? "missing";
+      const findingKey = /QA-1 -> ([a-f0-9]{64})/.exec(instruction)?.[1] ?? "missing";
+      text = [
+        BUILDER_QA_REMEDIATION_START,
+        JSON.stringify({
+          version: 2,
+          handoff_id: handoffId,
+          summary: "Applied QA remediation.",
+          findings: [{
+            finding_key: findingKey,
+            raw_id: "QA-1",
+            disposition: "fixed",
+            changes: ["Addressed the QA finding."],
+            evidence: "fake builder fixture",
+            verification: [{ check: "fixture", outcome: "passed", evidence: "fake builder fixture" }],
+          }],
+          observations: [],
+        }),
+        BUILDER_QA_REMEDIATION_END,
+        'STEP_STATUS: done | summary="fixed"',
+      ].join("\n");
+    }
+    const result = { text, isError: false, numTurns: 1, costUsd: 0, turnId: `fake-${this.index}`, hostInstruction: instruction, providerInstruction: instruction, rawResponse: text, cleanedResponse: text,
+      providerMetadata: { provider: this.agent, sessionId: this.sessionId(), sessionRef: this.ref } };
+    this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId }); this.eventWaiters.splice(0).forEach((wake) => wake());
+    return result;
   }
 
   sessionId(): string | undefined {
     return "fake-session";
   }
+  sessionRef(): ProviderSessionRefV1 | undefined { return this.ref; }
+  adoptSessionRef(ref: ProviderSessionRefV1): void { this.ref = ref; }
 
-  async *events(): AsyncIterable<BuilderEvent> {}
+  async *events(): AsyncIterable<BuilderEvent> { while (!this.closed || this.eventQueue.length) { if (!this.eventQueue.length) await new Promise<void>((resolve) => this.eventWaiters.push(resolve)); const event = this.eventQueue.shift(); if (event) yield event; } }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> { this.closed = true; this.eventWaiters.splice(0).forEach((wake) => wake()); }
+}
+
+function qaHandle(adapter: FakeBuilder, cwd: string): QaSessionHandle {
+  const fields = { version: 2 as const, sourceMode: "read-only" as const, scratchMode: "isolated" as const, settingsSources: "none" as const, networkMode: "disabled" as const, environmentDigest: "1".repeat(64), policyDigest: "2".repeat(64) };
+  const ref: ProviderSessionRefV1 = { version: 1, provider: adapter.agent, sessionId: adapter.sessionId()!, role: "qa", stream: "qa", generation: 0, cwd, configRoot: cwd, source: "observed", createdAt: new Date(0).toISOString(), validatedAt: new Date(0).toISOString() };
+  adapter.adoptSessionRef(ref);
+  return { adapter, sessionIdentity: () => ref, effectiveRoleInstructions: "test QA", runtimeContext: { test: true }, skills: [], confinement: { ...fields, digest: qaDigest("qa-confinement", fields) }, handoffReceipt: { kind: "initial" } };
+}
+
+function attachBuilderRef(adapter: FakeBuilder, cwd: string, ticketId?: string): FakeBuilder {
+  adapter.adoptSessionRef({
+    version: 1,
+    provider: adapter.agent,
+    sessionId: adapter.sessionId()!,
+    role: "builder",
+    stream: "builder",
+    generation: 0,
+    cwd,
+    configRoot: cwd,
+    ...(ticketId ? { ticketId } : {}),
+    source: "observed",
+    createdAt: new Date(0).toISOString(),
+    validatedAt: new Date(0).toISOString(),
+  });
+  return adapter;
 }
 
 test("reported blockers are converted into multiple approaches before a non-interactive safe pause", async () => {
@@ -96,7 +156,7 @@ test("runBatch completes ticket only after QA passes", async () => {
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
 
     const builder = new FakeBuilder(['implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"']);
-    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async () => new FakeBuilder([qaPass]));
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaPass]), cwd));
     const startedTickets: string[] = [];
 
     const result = await foreman.runBatch(1, undefined, (ticketId) => {
@@ -126,15 +186,15 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
 
-    const builder = new FakeBuilder([
+    const builder = attachBuilderRef(new FakeBuilder([
       'implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"',
       'fixed\nSTEP_STATUS: done | ticket="T001" summary="fixed"',
-    ]);
-    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 1, dir, undefined, async () => new FakeBuilder([qaFail]));
+    ]), dir, "T001");
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 1, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaFail]), cwd));
 
     const result = await foreman.runBatch(1);
     assert.equal(result.outcome, "needs-human");
-    assert.match(result.detail ?? "", /could not converge/);
+    assert.match(result.detail ?? "", /invalid QA response contract|complete fresh QA review|required/);
 
     const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
     try {
@@ -161,7 +221,7 @@ test("runBatch pins recovery to the requested in-progress ticket", async () => {
     cmdUpdate(dir, "T002", { status: "in_progress", actor: "test" });
 
     const builder = new FakeBuilder(['continued T002\nSTEP_STATUS: done | ticket="T002" summary="finished recovery"']);
-    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async () => new FakeBuilder([qaPass]));
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaPass]), cwd));
 
     const result = await foreman.runBatch(1, undefined, undefined, "T002");
 
@@ -185,7 +245,7 @@ test("explicit recovery reopens a safely paused blocked ticket", async () => {
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
     cmdBlock(dir, "T001", { summary: "user chose safe pause", actor: "test" });
     const builder = new FakeBuilder(['resumed\nSTEP_STATUS: done | ticket="T001" summary="finished after guidance"']);
-    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async () => new FakeBuilder([qaPass]));
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaPass]), cwd));
 
     const result = await foreman.runBatch(1, undefined, undefined, "T001");
 
@@ -212,12 +272,12 @@ test("independent QA may write Foreman's own .foreman runtime files", async () =
       3,
       dir,
       undefined,
-      async (cwd) => new FakeBuilder([qaPass], () => {
+      async (cwd) => qaHandle(new FakeBuilder([qaPass], () => {
         mkdirSync(join(cwd, ".foreman"), { recursive: true });
         writeFileSync(join(cwd, ".foreman/qa-runtime.jsonl"), "runtime output\n", "utf8");
         mkdirSync(join(cwd, ".rafi/cache"), { recursive: true });
         writeFileSync(join(cwd, ".rafi/cache/qa-runtime.json"), "{}\n", "utf8");
-      }),
+      }), cwd),
     );
 
     const result = await foreman.runBatch(1);
@@ -244,7 +304,7 @@ test("independent QA source changes still require human review", async () => {
       3,
       dir,
       undefined,
-      async (cwd) => new FakeBuilder([qaPass], () => writeFileSync(join(cwd, "source.ts"), "after\n", "utf8")),
+      async (cwd) => qaHandle(new FakeBuilder([qaPass], () => writeFileSync(join(cwd, "source.ts"), "after\n", "utf8")), cwd),
     );
 
     const result = await foreman.runBatch(1);

@@ -1,20 +1,35 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 export interface QaUntrackedCapture { path: string; kind: "file" | "symlink"; mode: number; digest: string; bytes: Buffer }
+export interface QaSourcePathState {
+  path: string;
+  staged: string[];
+  unstaged: string[];
+  headObject?: string;
+  indexObject?: string;
+  worktreeObject?: string;
+  untracked?: { kind: "file" | "symlink"; mode: number; digest: string };
+}
 
 /** Immutable host-observable product state from which QA is constructed. */
 export interface FrozenQaSourceState {
   head: string;
+  /** Repository identity/config/ref/index metadata, separate from product bytes. */
+  originDigest: string;
+  /** Product content identity, including staging distinctions and untracked bytes. */
+  contentDigest: string;
+  repository: { topLevel: string; gitDir: string; commonDir: string; indexDigest: string; configDigest: string; refsDigest: string; sparseDigest: string; submoduleDigest: string };
   status: Buffer;
   combinedDiff: Buffer;
   stagedDiff: Buffer;
   unstagedDiff: Buffer;
   changeSummary: string;
+  pathInventory: QaSourcePathState[];
   untracked: QaUntrackedCapture[];
   digest: string;
   capturedAt: string;
@@ -25,7 +40,7 @@ export interface DisposableQaSnapshot { path: string; manifest: QaChangeManifest
 export interface AsyncDisposableQaSnapshot { path: string; manifest: QaChangeManifest; frozenState: FrozenQaSourceState; verify(): Promise<void>; qaChanges(): Promise<string[]>; remove(): Promise<void> }
 export type QaSnapshotProgress = (state: string, detail?: string) => void;
 
-const PRODUCT_PATHSPEC = ["--", ".", ":(exclude).foreman/**", ":(exclude).rafi/cache/**"];
+const PRODUCT_PATHSPEC = ["--", ".", ":(exclude).foreman/**", ":(exclude).rafi/**"];
 const MAX_CAPTURE_ATTEMPTS = 3; // initial attempt plus two bounded retries
 
 export class QaSourceInstabilityError extends Error {
@@ -38,21 +53,29 @@ export class QaSourceInstabilityError extends Error {
 /** Capture twice and accept only a byte-identical source state. */
 export function captureFrozenQaSource(worktree: string): FrozenQaSourceState {
   const cwd = resolve(worktree);
-  for (let attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS; attempt++) {
-    const first = captureOnce(cwd);
-    const second = captureOnce(cwd);
-    if (first.digest === second.digest) return { ...first, capturedAt: new Date().toISOString() };
-  }
-  throw new QaSourceInstabilityError(MAX_CAPTURE_ATTEMPTS);
+  return captureStableFrozenQaSource(() => captureOnce(cwd));
 }
 
 export async function captureFrozenQaSourceAsync(worktree: string, progress: QaSnapshotProgress = () => {}): Promise<FrozenQaSourceState> {
   const cwd = resolve(worktree);
+  return captureStableFrozenQaSourceAsync(async (attempt, pass) => {
+    if (pass === 1) progress("freezing Builder source state", `integrity pass ${attempt}/3`);
+    return captureOnceAsync(cwd, progress);
+  });
+}
+
+export function captureStableFrozenQaSource(read: (attempt: number, pass: 1 | 2) => FrozenQaSourceState, now = new Date()): FrozenQaSourceState {
   for (let attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS; attempt++) {
-    progress("freezing Builder source state", `integrity pass ${attempt}/3`);
-    const first = await captureOnceAsync(cwd, progress);
-    const second = await captureOnceAsync(cwd, progress);
-    if (first.digest === second.digest) return { ...first, capturedAt: new Date().toISOString() };
+    const first = read(attempt, 1); const second = read(attempt, 2);
+    if (first.digest === second.digest) return { ...first, capturedAt: now.toISOString() };
+  }
+  throw new QaSourceInstabilityError(MAX_CAPTURE_ATTEMPTS);
+}
+
+export async function captureStableFrozenQaSourceAsync(read: (attempt: number, pass: 1 | 2) => Promise<FrozenQaSourceState>, now = new Date()): Promise<FrozenQaSourceState> {
+  for (let attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS; attempt++) {
+    const first = await read(attempt, 1); const second = await read(attempt, 2);
+    if (first.digest === second.digest) return { ...first, capturedAt: now.toISOString() };
   }
   throw new QaSourceInstabilityError(MAX_CAPTURE_ATTEMPTS);
 }
@@ -63,20 +86,22 @@ export function createDisposableQaSnapshot(builderWorktree: string): DisposableQ
   const frozenState = captureFrozenQaSource(source);
   const tempRoot = mkdtempSync(join(tmpdir(), "rafi-qa-"));
   const review = join(tempRoot, "review");
-  addWorktreeSync(root, review, frozenState.head);
+  cloneRepositorySync(root, review, frozenState.head);
   try {
     applyFrozenSync(review, frozenState);
+    projectDependencyTrees(root, review);
+    mkdirSync(join(tempRoot, "scratch"), { mode: 0o700 });
     const manifest = manifestFromFrozen(frozenState);
     const snapshot: DisposableQaSnapshot = {
       path: review, manifest, frozenState,
       verify: () => assertSnapshotMatches(review, manifest),
       qaChanges: () => manifestDifference(manifest, changeManifest(review)),
-      remove: () => removeWorktreeSync(root, review, tempRoot),
+      remove: () => rmSync(tempRoot, { recursive: true, force: true }),
     };
     snapshot.verify();
     return snapshot;
   } catch (error) {
-    removeWorktreeSync(root, review, tempRoot);
+    rmSync(tempRoot, { recursive: true, force: true });
     throw error;
   }
 }
@@ -89,17 +114,18 @@ export async function createDisposableQaSnapshotAsync(builderWorktree: string, p
   const tempRoot = await mkdtemp(join(tmpdir(), "rafi-qa-"));
   const review = join(tempRoot, "review");
   try {
-    progress("preparing disposable QA snapshot", "creating detached review worktree");
-    await runGit(root, ["worktree", "add", "--detach", review, frozenState.head]);
+    progress("preparing disposable QA snapshot", "creating independent review repository");
+    await cloneRepositoryAsync(root, review, frozenState.head);
     await applyFrozenAsync(review, frozenState, progress);
+    projectDependencyTrees(root, review);
+    await mkdir(join(tempRoot, "scratch"), { mode: 0o700 });
     const manifest = manifestFromFrozen(frozenState);
     const snapshot: AsyncDisposableQaSnapshot = {
       path: review, manifest, frozenState,
       verify: async () => assertSnapshotMatchesAsync(review, manifest, progress),
       qaChanges: async () => manifestDifference(manifest, await changeManifestAsync(review, progress)),
       remove: async () => {
-        progress("cleaning up disposable QA snapshot", "removing detached review worktree");
-        await runGit(root, ["worktree", "remove", "--force", review]).catch(() => {});
+        progress("cleaning up disposable QA snapshot", "removing independent review repository");
         await rm(tempRoot, { recursive: true, force: true });
       },
     };
@@ -107,7 +133,6 @@ export async function createDisposableQaSnapshotAsync(builderWorktree: string, p
     await snapshot.verify();
     return snapshot;
   } catch (error) {
-    await runGit(root, ["worktree", "remove", "--force", review]).catch(() => {});
     await rm(tempRoot, { recursive: true, force: true });
     throw error;
   }
@@ -144,8 +169,34 @@ export async function deterministicChangeSummaryAsync(worktree: string): Promise
   return renderSummary(staged, unstaged, untracked);
 }
 
+/** Git tree for exactly what `git add -A && git commit` would publish. */
+export function captureProspectiveGitTree(worktree: string): string {
+  const cwd = resolve(worktree);
+  const temporary = mkdtempSync(join(tmpdir(), "rafi-qa-finalize-"));
+  const index = join(temporary, "index");
+  const env = { ...process.env, GIT_INDEX_FILE: index };
+  try {
+    execFileSync("git", ["read-tree", "HEAD"], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("git", ["add", "-A", "--", "."], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", ["write-tree"], { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } finally { rmSync(temporary, { recursive: true, force: true }); }
+}
+
+/** Compare prospective publication trees while permitting only named host-owned paths. */
+export function prospectiveGitTreeMatches(worktree: string, expectedTree: string, allowedPaths: string[] = []): boolean {
+  const currentTree = captureProspectiveGitTree(worktree);
+  if (currentTree === expectedTree) return true;
+  const pathspec = ["--", ".", ...allowedPaths.map((path) => `:(exclude)${path.replaceAll("\\", "/")}`)];
+  const result = spawnSync("git", ["diff", "--quiet", expectedTree, currentTree, ...pathspec], { cwd: resolve(worktree), stdio: "ignore" });
+  if (result.error) throw result.error;
+  if (result.status === 0) return true;
+  if (result.status === 1) return false;
+  throw new Error(`git diff could not compare QA finalization trees (exit ${result.status ?? "unknown"})`);
+}
+
 function captureOnce(cwd: string): FrozenQaSourceState {
   const head = gitText(cwd, ["rev-parse", "HEAD"]);
+  const repository = captureRepositoryMetadataSync(cwd);
   const status = gitBuffer(cwd, ["status", "--porcelain=v2", "-z", "--untracked-files=all", ...PRODUCT_PATHSPEC]);
   const combinedDiff = gitBuffer(cwd, ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]);
   const stagedDiff = gitBuffer(cwd, ["diff", "--cached", "--binary", ...PRODUCT_PATHSPEC]);
@@ -154,34 +205,67 @@ function captureOnce(cwd: string): FrozenQaSourceState {
   const unstagedNames = gitBuffer(cwd, ["diff", "--name-status", "-z", ...PRODUCT_PATHSPEC]);
   const untrackedNames = gitBuffer(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
   const untracked = untrackedPathsFrom(untrackedNames).map((path) => captureUntrackedSync(cwd, path));
-  const base = { head, status, combinedDiff, stagedDiff, unstagedDiff, changeSummary: renderSummary(stagedNames, unstagedNames, untrackedNames), untracked };
+  const pathInventory = enrichTrackedPathInventorySync(cwd, buildPathInventory(stagedNames, unstagedNames, untracked));
+  const content = { head, status, combinedDiff, stagedDiff, unstagedDiff, changeSummary: renderSummary(stagedNames, unstagedNames, untrackedNames), pathInventory, untracked };
+  const contentDigest = calculateFrozenQaContentDigest(content);
+  const base = { ...content, repository, originDigest: repositoryDigest(repository), contentDigest };
   return { ...base, digest: calculateFrozenQaStateDigest(base), capturedAt: "" };
 }
 
 async function captureOnceAsync(cwd: string, progress: QaSnapshotProgress): Promise<FrozenQaSourceState> {
-  const [headBytes, status, combinedDiff, stagedDiff, unstagedDiff, stagedNames, unstagedNames, untrackedNames] = await Promise.all([
-    runGit(cwd, ["rev-parse", "HEAD"]), runGit(cwd, ["status", "--porcelain=v2", "-z", "--untracked-files=all", ...PRODUCT_PATHSPEC]),
-    runGit(cwd, ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]), runGit(cwd, ["diff", "--cached", "--binary", ...PRODUCT_PATHSPEC]),
-    runGit(cwd, ["diff", "--binary", ...PRODUCT_PATHSPEC]), runGit(cwd, ["diff", "--cached", "--name-status", "-z", ...PRODUCT_PATHSPEC]),
-    runGit(cwd, ["diff", "--name-status", "-z", ...PRODUCT_PATHSPEC]), runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]),
-  ]);
+  // These reads are deliberately serialized. Concurrent git reads can each
+  // observe a different index/worktree generation and manufacture a state
+  // that never existed. The enclosing double-capture supplies the stability
+  // fence across the complete sequence.
+  const headBytes = await runGit(cwd, ["rev-parse", "HEAD"]);
+  const repository = await captureRepositoryMetadataAsync(cwd);
+  const status = await runGit(cwd, ["status", "--porcelain=v2", "-z", "--untracked-files=all", ...PRODUCT_PATHSPEC]);
+  const combinedDiff = await runGit(cwd, ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]);
+  const stagedDiff = await runGit(cwd, ["diff", "--cached", "--binary", ...PRODUCT_PATHSPEC]);
+  const unstagedDiff = await runGit(cwd, ["diff", "--binary", ...PRODUCT_PATHSPEC]);
+  const stagedNames = await runGit(cwd, ["diff", "--cached", "--name-status", "-z", ...PRODUCT_PATHSPEC]);
+  const unstagedNames = await runGit(cwd, ["diff", "--name-status", "-z", ...PRODUCT_PATHSPEC]);
+  const untrackedNames = await runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
   const paths = untrackedPathsFrom(untrackedNames);
   const untracked: QaUntrackedCapture[] = [];
   for (let index = 0; index < paths.length; index++) {
     progress("freezing Builder source state", `reading untracked file ${index + 1}/${paths.length}`);
     untracked.push(await captureUntrackedAsync(cwd, paths[index]!));
   }
-  const base = { head: headBytes.toString().trim(), status, combinedDiff, stagedDiff, unstagedDiff, changeSummary: renderSummary(stagedNames, unstagedNames, untrackedNames), untracked };
+  const pathInventory = await enrichTrackedPathInventoryAsync(cwd, buildPathInventory(stagedNames, unstagedNames, untracked));
+  const content = { head: headBytes.toString().trim(), status, combinedDiff, stagedDiff, unstagedDiff, changeSummary: renderSummary(stagedNames, unstagedNames, untrackedNames), pathInventory, untracked };
+  const contentDigest = calculateFrozenQaContentDigest(content);
+  const base = { ...content, repository, originDigest: repositoryDigest(repository), contentDigest };
   return { ...base, digest: calculateFrozenQaStateDigest(base), capturedAt: "" };
 }
 
 export function calculateFrozenQaStateDigest(state: Omit<FrozenQaSourceState, "digest" | "capturedAt">): string {
   const h = createHash("sha256");
-  for (const [label, value] of [["head", Buffer.from(state.head)], ["status", state.status], ["combined", state.combinedDiff], ["staged", state.stagedDiff], ["unstaged", state.unstagedDiff], ["summary", Buffer.from(state.changeSummary)]] as Array<[string, Buffer]>) {
+  h.update("rafi.qa.source-state.v2\0").update(state.originDigest).update("\0").update(state.contentDigest).update("\0");
+  const pathBytes = Buffer.from(JSON.stringify(state.pathInventory.map((item) => ({
+    path: item.path, staged: item.staged, unstaged: item.unstaged,
+    ...(item.headObject ? { headObject: item.headObject } : {}),
+    ...(item.indexObject ? { indexObject: item.indexObject } : {}),
+    ...(item.worktreeObject ? { worktreeObject: item.worktreeObject } : {}),
+    ...(item.untracked ? { untracked: { kind: item.untracked.kind, mode: item.untracked.mode, digest: item.untracked.digest } } : {}),
+  }))));
+  for (const [label, value] of [["head", Buffer.from(state.head)], ["status", state.status], ["combined", state.combinedDiff], ["staged", state.stagedDiff], ["unstaged", state.unstagedDiff], ["summary", Buffer.from(state.changeSummary)], ["paths", pathBytes]] as Array<[string, Buffer]>) {
     h.update(label).update("\0").update(value).update("\0");
   }
   for (const item of state.untracked) h.update(item.path).update("\0").update(item.kind).update("\0").update(String(item.mode)).update("\0").update(item.bytes).update("\0");
   return h.digest("hex");
+}
+
+function calculateFrozenQaContentDigest(state: Pick<FrozenQaSourceState, "head" | "status" | "combinedDiff" | "stagedDiff" | "unstagedDiff" | "changeSummary" | "pathInventory" | "untracked">): string {
+  const h = createHash("sha256").update("rafi.qa.content.v2\0");
+  h.update(state.head).update("\0").update(state.status).update("\0").update(state.combinedDiff).update("\0").update(state.stagedDiff).update("\0").update(state.unstagedDiff).update("\0");
+  h.update(JSON.stringify(state.pathInventory)).update("\0");
+  for (const item of state.untracked) h.update(item.path).update("\0").update(item.kind).update("\0").update(String(item.mode)).update("\0").update(item.bytes).update("\0");
+  return h.digest("hex");
+}
+
+function repositoryDigest(repository: FrozenQaSourceState["repository"]): string {
+  return createHash("sha256").update("rafi.qa.origin.v2\0").update(JSON.stringify(repository)).digest("hex");
 }
 
 function manifestFromFrozen(state: FrozenQaSourceState): QaChangeManifest {
@@ -248,11 +332,104 @@ function describeUntrackedSync(worktree: string, path: string): QaChangeManifest
 function untrackedPaths(worktree: string): string[] { return untrackedPathsFrom(gitBuffer(resolve(worktree), ["ls-files", "--others", "--exclude-standard", "-z"])); }
 async function untrackedPathsAsync(worktree: string): Promise<string[]> { return untrackedPathsFrom(await runGit(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])); }
 function untrackedPathsFrom(raw: Buffer): string[] { return raw.toString().split("\0").filter((path) => path && isQaProductPath(path)).sort(); }
-function isQaProductPath(path: string): boolean { return path !== ".foreman" && !path.startsWith(".foreman/") && path !== ".rafi/cache" && !path.startsWith(".rafi/cache/"); }
+function isQaProductPath(path: string): boolean { return path !== ".foreman" && !path.startsWith(".foreman/") && path !== ".rafi" && !path.startsWith(".rafi/"); }
 
 function renderSummary(staged: Buffer, unstaged: Buffer, untracked: Buffer): string {
   const normalize = (value: Buffer) => value.toString().split("\0").filter(Boolean).filter(isQaProductPath).sort().join("\n") || "(none)";
   return `tracked/staged:\n${normalize(staged)}\ntracked/unstaged:\n${normalize(unstaged)}\nuntracked:\n${normalize(untracked)}`;
+}
+
+function buildPathInventory(staged: Buffer, unstaged: Buffer, untracked: QaUntrackedCapture[]): QaSourcePathState[] {
+  const rows = new Map<string, QaSourcePathState>();
+  const row = (path: string): QaSourcePathState => {
+    let value = rows.get(path);
+    if (!value) { value = { path, staged: [], unstaged: [] }; rows.set(path, value); }
+    return value;
+  };
+  const addTracked = (raw: Buffer, kind: "staged" | "unstaged"): void => {
+    const tokens = raw.toString().split("\0").filter(Boolean);
+    for (let index = 0; index < tokens.length;) {
+      const status = tokens[index++]!;
+      const first = tokens[index++];
+      if (!first) break;
+      if (/^[RC]/.test(status)) {
+        const second = tokens[index++];
+        if (!second) break;
+        row(first)[kind].push(`${status}:from`);
+        row(second)[kind].push(`${status}:to`);
+      } else row(first)[kind].push(status);
+    }
+  };
+  addTracked(staged, "staged"); addTracked(unstaged, "unstaged");
+  for (const item of untracked) row(item.path).untracked = { kind: item.kind, mode: item.mode, digest: item.digest };
+  return [...rows.values()].map((item) => ({ ...item, staged: item.staged.sort(), unstaged: item.unstaged.sort() })).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function enrichTrackedPathInventorySync(cwd: string, inventory: QaSourcePathState[]): QaSourcePathState[] {
+  return inventory.map((item) => item.untracked ? item : {
+    ...item,
+    ...optionalIdentity("headObject", gitTreeIdentitySync(cwd, item.path)),
+    ...optionalIdentity("indexObject", gitIndexIdentitySync(cwd, item.path)),
+    ...optionalIdentity("worktreeObject", worktreeIdentitySync(cwd, item.path)),
+  });
+}
+
+async function enrichTrackedPathInventoryAsync(cwd: string, inventory: QaSourcePathState[]): Promise<QaSourcePathState[]> {
+  const result: QaSourcePathState[] = [];
+  for (const item of inventory) {
+    if (item.untracked) { result.push(item); continue; }
+    result.push({
+      ...item,
+      ...optionalIdentity("headObject", await gitTreeIdentityAsync(cwd, item.path)),
+      ...optionalIdentity("indexObject", await gitIndexIdentityAsync(cwd, item.path)),
+      ...optionalIdentity("worktreeObject", await worktreeIdentityAsync(cwd, item.path)),
+    });
+  }
+  return result;
+}
+
+function optionalIdentity<K extends "headObject" | "indexObject" | "worktreeObject">(key: K, value: string | undefined): Partial<Pick<QaSourcePathState, K>> {
+  return value === undefined ? {} : { [key]: value } as Pick<QaSourcePathState, K>;
+}
+
+function gitTreeIdentitySync(cwd: string, path: string): string | undefined {
+  const result = spawnSync("git", ["-C", cwd, "ls-tree", "-z", "HEAD", "--", path], { encoding: "buffer" });
+  return result.status === 0 ? parseGitObjectIdentity(Buffer.from(result.stdout)) : undefined;
+}
+function gitIndexIdentitySync(cwd: string, path: string): string | undefined {
+  const result = spawnSync("git", ["-C", cwd, "ls-files", "--stage", "-z", "--", path], { encoding: "buffer" });
+  return result.status === 0 ? parseGitObjectIdentity(Buffer.from(result.stdout), true) : undefined;
+}
+async function gitTreeIdentityAsync(cwd: string, path: string): Promise<string | undefined> {
+  try { return parseGitObjectIdentity(await runGit(cwd, ["ls-tree", "-z", "HEAD", "--", path])); } catch { return undefined; }
+}
+async function gitIndexIdentityAsync(cwd: string, path: string): Promise<string | undefined> {
+  try { return parseGitObjectIdentity(await runGit(cwd, ["ls-files", "--stage", "-z", "--", path]), true); } catch { return undefined; }
+}
+function parseGitObjectIdentity(value: Buffer, index = false): string | undefined {
+  const header = value.toString().split("\t", 1)[0]?.trim();
+  if (!header) return undefined;
+  const parts = header.split(/\s+/);
+  const mode = parts[0]; const object = parts[index ? 1 : 2]; const stage = index ? parts[2] : undefined;
+  return mode && object && (!index || stage === "0") ? `${mode}:${object}` : undefined;
+}
+function worktreeIdentitySync(cwd: string, path: string): string | undefined {
+  const absolute = join(cwd, path);
+  try {
+    const stat = lstatSync(absolute); const mode = stat.mode & 0o7777;
+    if (stat.isSymbolicLink()) return `symlink:${mode}:${hash(Buffer.from(readlinkSync(absolute)))}`;
+    if (stat.isFile()) return `file:${mode}:${hash(readFileSync(absolute))}`;
+    return `other:${mode}`;
+  } catch { return undefined; }
+}
+async function worktreeIdentityAsync(cwd: string, path: string): Promise<string | undefined> {
+  const absolute = join(cwd, path);
+  try {
+    const stat = await lstat(absolute); const mode = stat.mode & 0o7777;
+    if (stat.isSymbolicLink()) return `symlink:${mode}:${hash(Buffer.from(await readlink(absolute)))}`;
+    if (stat.isFile()) return `file:${mode}:${hash(await readFile(absolute))}`;
+    return `other:${mode}`;
+  } catch { return undefined; }
 }
 
 function assertSnapshotMatches(review: string, expected: QaChangeManifest): void {
@@ -273,11 +450,72 @@ function manifestDifference(before: QaChangeManifest, after: QaChangeManifest): 
   return changes;
 }
 
-function addWorktreeSync(root: string, review: string, head: string): void {
-  const added = spawnSync("git", ["-C", root, "worktree", "add", "--detach", review, head], { encoding: "utf8" });
-  if (added.status !== 0) { rmSync(dirname(review), { recursive: true, force: true }); throw new Error(`cannot create disposable QA worktree: ${added.stderr.trim()}`); }
+function cloneRepositorySync(root: string, review: string, head: string): void {
+  const cloned = spawnSync("git", ["clone", "--no-local", "--no-hardlinks", "--no-checkout", "--quiet", root, review], { encoding: "utf8" });
+  if (cloned.status !== 0) { rmSync(dirname(review), { recursive: true, force: true }); throw new Error(`cannot create independent QA repository: ${cloned.stderr.trim()}`); }
+  const checked = spawnSync("git", ["-C", review, "checkout", "--detach", "--quiet", head], { encoding: "utf8" });
+  if (checked.status !== 0) { rmSync(dirname(review), { recursive: true, force: true }); throw new Error(`cannot check out frozen QA source: ${checked.stderr.trim()}`); }
 }
-function removeWorktreeSync(root: string, review: string, tempRoot: string): void { spawnSync("git", ["-C", root, "worktree", "remove", "--force", review], { encoding: "utf8" }); rmSync(tempRoot, { recursive: true, force: true }); }
+
+async function cloneRepositoryAsync(root: string, review: string, head: string): Promise<void> {
+  await runGit(dirname(review), ["clone", "--no-local", "--no-hardlinks", "--no-checkout", "--quiet", root, review]);
+  await runGit(review, ["checkout", "--detach", "--quiet", head]);
+}
+
+/**
+ * Dependency installs are execution environment, not reviewed product state.
+ * Project the existing trees without copying or permitting writes so validation
+ * commands in the independent clone can resolve the same installed toolchain.
+ */
+function projectDependencyTrees(sourceRoot: string, reviewRoot: string): void {
+  const parents = ["", ...readdirSync(sourceRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== ".git" && entry.name !== "node_modules")
+    .flatMap((entry) => {
+      const first = entry.name;
+      const nested = readdirSync(join(sourceRoot, first), { withFileTypes: true })
+        .filter((child) => child.isDirectory() && child.name !== "node_modules")
+        .map((child) => join(first, child.name));
+      return [first, ...nested];
+    })];
+  for (const parent of parents) {
+    const source = join(sourceRoot, parent, "node_modules");
+    const target = join(reviewRoot, parent, "node_modules");
+    if (!existsSync(source) || existsSync(target) || !lstatSync(source).isDirectory()) continue;
+    const relativeTarget = parent ? `${parent.replaceAll("\\", "/")}/node_modules` : "node_modules";
+    if (spawnSync("git", ["-C", reviewRoot, "check-ignore", "-q", "--", relativeTarget]).status !== 0) continue;
+    mkdirSync(dirname(target), { recursive: true });
+    symlinkSync(source, target, "dir");
+  }
+}
+
+function captureRepositoryMetadataSync(cwd: string): FrozenQaSourceState["repository"] {
+  const topLevel = gitText(cwd, ["rev-parse", "--show-toplevel"]);
+  const gitDir = gitText(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"]);
+  const commonDir = gitText(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  return {
+    topLevel, gitDir, commonDir,
+    indexDigest: hash(gitBuffer(cwd, ["ls-files", "--stage", "-z"])),
+    configDigest: hash(gitBuffer(cwd, ["config", "--local", "--null", "--list"])),
+    refsDigest: hash(gitBuffer(cwd, ["for-each-ref", "--format=%(refname)%00%(objectname)%00"])),
+    sparseDigest: hashOptionalFile(join(gitDir, "info", "sparse-checkout")),
+    submoduleDigest: hash(gitBuffer(cwd, ["submodule", "status", "--recursive"])),
+  };
+}
+
+async function captureRepositoryMetadataAsync(cwd: string): Promise<FrozenQaSourceState["repository"]> {
+  const topLevel = (await runGit(cwd, ["rev-parse", "--show-toplevel"])).toString().trim();
+  const gitDir = (await runGit(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"])).toString().trim();
+  const commonDir = (await runGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).toString().trim();
+  const index = await runGit(cwd, ["ls-files", "--stage", "-z"]);
+  const config = await runGit(cwd, ["config", "--local", "--null", "--list"]);
+  const refs = await runGit(cwd, ["for-each-ref", "--format=%(refname)%00%(objectname)%00"]);
+  const submodules = await runGit(cwd, ["submodule", "status", "--recursive"]);
+  let sparse = Buffer.alloc(0);
+  try { sparse = await readFile(join(gitDir, "info", "sparse-checkout")); } catch { /* absent is canonical empty */ }
+  return { topLevel, gitDir, commonDir, indexDigest: hash(index), configDigest: hash(config), refsDigest: hash(refs), sparseDigest: hash(sparse), submoduleDigest: hash(submodules) };
+}
+
+function hashOptionalFile(path: string): string { try { return hash(readFileSync(path)); } catch { return hash(Buffer.alloc(0)); } }
 function gitText(cwd: string, args: string[]): string { return gitBuffer(cwd, args).toString().trim(); }
 function gitBuffer(cwd: string, args: string[]): Buffer { return execFileSync("git", ["-C", cwd, ...args], { encoding: "buffer", maxBuffer: 256 * 1024 * 1024 }); }
 function runGit(cwd: string, args: string[], input?: Buffer): Promise<Buffer> {

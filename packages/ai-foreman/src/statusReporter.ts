@@ -214,10 +214,15 @@ export class RoleStatusAdapter implements BuilderAdapter {
   async sendTurn(text: string): Promise<TurnResult> { this.onActive(this.adapter); return this.adapter.sendTurn(text); }
   sessionId(): string | undefined { return this.adapter.sessionId(); }
   sessionRef(): import("rafi-spec").ProviderSessionRefV1 | undefined { return this.adapter.sessionRef?.(); }
+  prepareSession(): Promise<import("rafi-spec").ProviderSessionRefV1> {
+    if (!this.adapter.prepareSession) return Promise.reject(new Error("wrapped adapter cannot establish a provider session without a work turn"));
+    return this.adapter.prepareSession();
+  }
   adoptSessionRef(ref: import("rafi-spec").ProviderSessionRefV1): void { this.adapter.adoptSessionRef?.(ref); }
   validateSession(): Promise<import("rafi-spec").SessionAvailabilityV1> { return this.adapter.validateSession?.() ?? Promise.resolve({ version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped" }); }
   compact(): Promise<CompactResult> { this.onActive(this.adapter); return this.adapter.compact?.() ?? Promise.resolve({ ok: false, error: "native compaction unavailable" }); }
   prepareAutoCompaction(thresholdPercent?: number): Promise<NativeAutoCompactionPolicy | void> { return this.adapter.prepareAutoCompaction?.(thresholdPercent) ?? Promise.resolve(); }
+  requiresAutoCompactionSetupTurn(): boolean { return this.adapter.requiresAutoCompactionSetupTurn?.() ?? false; }
   autoCompactionPolicy(): NativeAutoCompactionPolicy | undefined { return this.adapter.autoCompactionPolicy?.(); }
   drainNativeCompactions(): import("./adapters/types.js").NativeCompaction[] { return this.adapter.drainNativeCompactions?.() ?? []; }
   restoreNativeCompactions(compactions: NativeCompaction[]): void { this.adapter.restoreNativeCompactions?.(compactions); }

@@ -9,6 +9,7 @@ import {
   buildRunRecordSchema,
   installManifestSchema,
   qaFailureReportV1Schema,
+  builderQaRemediationReportV2Schema,
 } from "./schemas.js";
 import type {
   RulePackFrontmatter,
@@ -17,6 +18,7 @@ import type {
   ProjectConfig,
   AgentDefaultsV1,
   QaFailureReportV1,
+  BuilderQaRemediationReportV2,
 } from "./types.js";
 
 const ajv = new Ajv({ allErrors: true, allowUnionTypes: true });
@@ -45,6 +47,7 @@ const vAgentDefaults = ajv.compile(agentDefaultsSchema);
 const vBuildRun = ajv.compile(buildRunRecordSchema);
 const vInstallManifest = ajv.compile(installManifestSchema);
 const vQaFailureReport = ajv.compile(qaFailureReportV1Schema);
+const vBuilderQaRemediationReport = ajv.compile(builderQaRemediationReportV2Schema);
 
 export const validateRulePack = (d: unknown): ValidationResult => run(vRulePack, d);
 export const validateSkillManifest = (d: unknown): ValidationResult => run(vSkill, d);
@@ -74,6 +77,21 @@ export const validateQaFailureReport = (d: unknown): ValidationResult => {
 };
 export const validateQaFailureReportV1 = validateQaFailureReport;
 
+export const validateBuilderQaRemediationReport = (d: unknown): ValidationResult => {
+  const result = run(vBuilderQaRemediationReport, d);
+  if (!result.valid || !d || typeof d !== "object") return result;
+  const blankPaths: string[] = [];
+  const visit = (value: unknown, path: string): void => {
+    if (typeof value === "string" && !value.trim()) blankPaths.push(path || "(root)");
+    else if (Array.isArray(value)) value.forEach((item, index) => visit(item, `${path}/${index}`));
+    else if (value && typeof value === "object") Object.entries(value as Record<string, unknown>).forEach(([key, item]) => visit(item, `${path}/${key}`));
+  };
+  visit(d, "");
+  if (blankPaths.length) return { valid: false, errors: blankPaths.map((path) => `${path} must not be blank`) };
+  return result;
+};
+export const validateBuilderQaRemediationReportV2 = validateBuilderQaRemediationReport;
+
 /** Validate and narrow, throwing on failure. */
 export function assertRulePack(d: unknown): asserts d is RulePackFrontmatter {
   const r = validateRulePack(d);
@@ -100,3 +118,8 @@ export function assertQaFailureReport(d: unknown): asserts d is QaFailureReportV
   if (!r.valid) throw new Error(`Invalid QA failure report: ${r.errors.join("; ")}`);
 }
 export const assertQaFailureReportV1: (d: unknown) => asserts d is QaFailureReportV1 = assertQaFailureReport;
+export function assertBuilderQaRemediationReport(d: unknown): asserts d is BuilderQaRemediationReportV2 {
+  const r = validateBuilderQaRemediationReport(d);
+  if (!r.valid) throw new Error(`Invalid Builder QA remediation report: ${r.errors.join("; ")}`);
+}
+export const assertBuilderQaRemediationReportV2: (d: unknown) => asserts d is BuilderQaRemediationReportV2 = assertBuilderQaRemediationReport;

@@ -113,6 +113,8 @@ export interface ContinuityAdapterOptions {
   replaceRecoveryLeaseAfterCheckpoint?: boolean;
   /** Host-owned validated Builder handoff request processing at a safe turn boundary. */
   handleHandoffRequest?: (text: string, predecessor: BuilderAdapter, frozenAction: string) => Promise<BuilderAdapter | undefined>;
+  /** QA journals each provider turn separately; wrappers must not repair or redispatch inside one host turn. */
+  durableSingleTurn?: boolean;
 }
 
 /** Enforces a durable role checkpoint after every completed provider turn. */
@@ -162,6 +164,10 @@ export class ContinuityAdapter implements BuilderAdapter {
     if (parsed.delta) {
       this.publish(parsed.delta, "turn_completed", original);
       this.moveRecoveryLeaseAfterCheckpoint();
+      if (this.options.durableSingleTurn) {
+        return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
+          rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
+      }
       const successor = await this.options.handleHandoffRequest?.(original.text, this.adapter, instruction);
       if (successor && successor !== this.adapter) {
         await this.adoptValidatedSuccessor(successor);
@@ -170,7 +176,17 @@ export class ContinuityAdapter implements BuilderAdapter {
           instruction,
         ].join("\n\n"));
       }
-      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction,
+      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
+        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
+    }
+
+    if (this.options.durableSingleTurn) {
+      const invalidDb = new WorkflowDb(this.options.projectDir);
+      try {
+        invalidDb.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "continuity_invalid", payload: { problems: parsed.error?.problems }, authoritativeStateRevision: this.revision() });
+      } finally { invalidDb.close(); }
+      return { ...original, isError: true, text: `QA continuity record was invalid: ${parsed.error?.problems.join("; ") ?? "unknown error"}`,
+        hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
         rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
     }
 
@@ -184,7 +200,7 @@ export class ContinuityAdapter implements BuilderAdapter {
     if (repaired.delta) {
       this.publish(repaired.delta, "turn_completed_after_repair", original);
       this.moveRecoveryLeaseAfterCheckpoint();
-      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction,
+      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
         rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
     }
 
@@ -222,7 +238,8 @@ export class ContinuityAdapter implements BuilderAdapter {
     const successor = await this.options.createSuccessor(handoff);
     const accepted = await successor.sendTurn(`${handoff}\n\nReply with HANDOFF_ACCEPTED on the first line, then ${continuityInstruction()}`);
     const successorDelta = parseContinuityDelta(accepted.text);
-    if (!/^HANDOFF_ACCEPTED\b/m.test(accepted.text) || !successorDelta.delta || !successor.sessionId()) {
+    const firstAcceptanceLine = accepted.text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+    if (firstAcceptanceLine !== "HANDOFF_ACCEPTED" || !successorDelta.delta || !successor.sessionId()) {
       await successor.close().catch(() => {});
       throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "fresh successor did not validate and accept the cumulative checkpoint");
     }
@@ -237,10 +254,15 @@ export class ContinuityAdapter implements BuilderAdapter {
 
   sessionId(): string | undefined { return this.adapter.sessionId(); }
   sessionRef(): import("rafi-spec").ProviderSessionRefV1 | undefined { return this.adapter.sessionRef?.(); }
+  prepareSession(): Promise<import("rafi-spec").ProviderSessionRefV1> {
+    if (!this.adapter.prepareSession) return Promise.reject(new Error("wrapped adapter cannot establish a provider session without a work turn"));
+    return this.adapter.prepareSession();
+  }
   adoptSessionRef(ref: import("rafi-spec").ProviderSessionRefV1): void { this.adapter.adoptSessionRef?.(ref); }
   validateSession(): Promise<import("rafi-spec").SessionAvailabilityV1> { return this.adapter.validateSession?.() ?? Promise.resolve({ version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped" }); }
   compact(): Promise<CompactResult> { return this.adapter.compact ? this.adapter.compact() : Promise.resolve({ ok: false, error: "provider adapter does not expose native compaction" }); }
   prepareAutoCompaction(thresholdPercent?: number): Promise<NativeAutoCompactionPolicy | void> { return this.adapter.prepareAutoCompaction?.(thresholdPercent) ?? Promise.resolve(); }
+  requiresAutoCompactionSetupTurn(): boolean { return this.adapter.requiresAutoCompactionSetupTurn?.() ?? false; }
   autoCompactionPolicy(): NativeAutoCompactionPolicy | undefined { return this.adapter.autoCompactionPolicy?.(); }
   drainNativeCompactions(): import("./adapters/types.js").NativeCompaction[] { return this.adapter.drainNativeCompactions?.() ?? []; }
   restoreNativeCompactions(compactions: NativeCompaction[]): void { this.adapter.restoreNativeCompactions?.(compactions); }

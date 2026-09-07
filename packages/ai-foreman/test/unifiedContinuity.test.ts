@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -334,6 +335,47 @@ test("validated handoff moves the sole role lease only after a fresh successor a
   after.close();
 });
 
+test("recovery handoff returns and durably indexes the exact complete acceptance receipt", async () => {
+  const projectDir = root("rafi-recovery-receipt-");
+  const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1");
+  db.appendContinuityEvent({ runId: "run-1", role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+  db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 });
+  db.close();
+  const transfer = await new HandoffService(projectDir).transfer({
+    runId: "run-1", role: "builder", reason: "recover exact packet", compactionCount: 0, compactMaximum: 10,
+    resources: [{ label: "packet/manifest.json", content: "packet", authoritative: true, requiredForRecovery: true, path: "packet/manifest.json", purpose: "Authoritative recovery packet manifest", mediaType: "application/json" }],
+  }, async () => new FakeAdapter("session-2"));
+  assert.ok(transfer.acceptanceReceipt);
+  const resource = transfer.acceptanceReceipt.resources.find((item) => item.label === "packet/manifest.json");
+  assert.deepEqual(resource, {
+    label: "packet/manifest.json", digest: createHash("sha256").update("packet").digest("hex"), authoritative: true,
+    requiredForRecovery: true, mediaType: "application/json", path: "packet/manifest.json",
+    purpose: "Authoritative recovery packet manifest", bytes: 6,
+  });
+  assert.equal(transfer.acceptanceReceipt.acceptanceCheckpointDigest, transfer.acceptanceCheckpointDigest);
+  const after = new WorkflowDb(projectDir);
+  assert.match(after.handoff("run-1", transfer.manifest.generation)?.acceptanceReceiptDigest ?? "", /^[a-f0-9]{64}$/);
+  after.close();
+});
+
+test("recovery handoff fails closed without a scoped successor identity", async () => {
+  class UnscopedAdapter extends FakeAdapter { override sessionRef(): undefined { return undefined; } }
+  const projectDir = root("rafi-recovery-unscoped-");
+  const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1");
+  db.appendContinuityEvent({ runId: "run-1", role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+  db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 });
+  db.close();
+  await assert.rejects(
+    new HandoffService(projectDir).transfer({
+      runId: "run-1", role: "builder", reason: "recover exact packet", compactionCount: 0, compactMaximum: 10,
+      resources: [{ label: "packet", content: "packet", authoritative: true, requiredForRecovery: true, purpose: "Recovery packet", bytes: 6 }],
+    }, async () => new UnscopedAdapter("session-2")),
+    (error: unknown) => error instanceof HandoffAcceptanceError && error.code === "missing-scoped-successor-session",
+  );
+});
+
 test("handoff acceptance gives a malformed acknowledgement one bounded correction turn", async () => {
   const projectDir = root("rafi-handoff-correction-");
   const db = new WorkflowDb(projectDir);
@@ -454,6 +496,19 @@ test("continuity protocol repairs one invalid delta in-session and advances the 
   await adapter.close();
 });
 
+test("continuity preserves the adapter's exact provider instruction", async () => {
+  const projectDir = root("rafi-continuity-provider-prompt-");
+  const provider = new FakeAdapter("session-provider-prompt");
+  provider.sendTurn = async (instruction?: string) => ({ text: `STEP_STATUS: done\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0,
+    hostInstruction: instruction, providerInstruction: `ROLE-AND-SKILLS\n${instruction ?? ""}` });
+  const adapter = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-provider-prompt", role: "builder", settings: SETTINGS });
+  const result = await adapter.sendTurn("host action");
+  assert.equal(result.hostInstruction, "host action");
+  assert.match(result.providerInstruction ?? "", /^ROLE-AND-SKILLS\nhost action/);
+  assert.match(result.providerInstruction ?? "", /RAFI_CONTINUITY_DELTA/);
+  await adapter.close();
+});
+
 test("double-invalid continuity uses a bundled handoff and moves the lease only after successor acceptance", async () => {
   const projectDir = root("rafi-continuity-handoff-");
   const predecessor = new FakeAdapter("session-1", [
@@ -480,5 +535,24 @@ test("double-invalid continuity uses a bundled handoff and moves the lease only 
   assert.equal(db.handoffs("run-1").at(-1)?.state, "accepted");
   assert.equal(db.roleMutationLease("run-1", "builder")?.providerSessionId, "session-2");
   db.close();
+  await adapter.close();
+});
+
+test("legacy continuity successor fallback requires an exact first-line acceptance marker", async () => {
+  const projectDir = root("rafi-continuity-exact-acceptance-");
+  const predecessor = new FakeAdapter("session-1", [
+    { text: "STEP_STATUS: done", isError: false, numTurns: 1, costUsd: 0 },
+    { text: "still not a continuity delta", isError: false, numTurns: 1, costUsd: 0 },
+  ]);
+  const successor = new FakeAdapter("session-2", [
+    { text: `HANDOFF_ACCEPTED extra text\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 },
+  ]);
+  const adapter = new ContinuityAdapter({
+    adapter: predecessor, projectDir, runId: "run-1", role: "builder", settings: SETTINGS,
+    createSuccessor: async () => successor,
+  });
+
+  await assert.rejects(adapter.sendTurn("do work"), /fresh successor did not validate/);
+  assert.equal(successor.closed, true);
   await adapter.close();
 });
