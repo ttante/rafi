@@ -126,7 +126,7 @@ export const agentManifestSchema = {
   properties: {
     name: { type: "string", pattern: KEBAB },
     description: { type: "string", minLength: 1 },
-    role: { enum: ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager"] },
+    role: { enum: ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager", "discovery"] },
     packs: { type: "array", items: { type: "string" } },
     skills: { type: "array", items: { type: "string" } },
     conditionalPacks: {
@@ -304,7 +304,7 @@ const agentDefaultsShape = {
     roles: {
       type: "object",
       additionalProperties: false,
-      properties: Object.fromEntries(["planner", "builder", "qa", "ticket-maker", "uninstaller", "manager"].map((role) => [role, {
+      properties: Object.fromEntries(["planner", "builder", "qa", "ticket-maker", "uninstaller", "manager", "discovery"].map((role) => [role, {
         type: "object",
         additionalProperties: false,
         properties: {

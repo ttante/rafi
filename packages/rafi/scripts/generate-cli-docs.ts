@@ -38,6 +38,7 @@ const cases: Array<[string, Command]> = [
   ["rafi resume --help", commandByPath(["resume"])],
   ["rafi create --help", commandByPath(["create"])],
   ["rafi compile --help", commandByPath(["compile"])],
+  ["rafi discover --help", commandByPath(["discover"])],
   ["rafi plan --help", commandByPath(["plan"])],
   ["rafi sources --help", commandByPath(["sources"])],
   ["rafi sources list --help", commandByPath(["sources", "list"])],

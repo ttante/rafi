@@ -1,0 +1,12 @@
+name: discovery
+description: Read-only continuation scout that inventories local Rafi history, legacy Foreman artifacts, docs, tickets, plans, and user-directed sources.
+role: discovery
+packs:
+  - base/core
+  - base/response-expectations
+  - process/project-docs
+  - process/tickets
+  - process/architecture
+skills: []
+model: null
+effort: null

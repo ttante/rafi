@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadRoleBundle } from "../src/roles.js";
+import { AGENT_ROLE_REGISTRY, loadRoleBundle } from "../src/roles.js";
 import { MARKER_SPEC, QA_MARKER_SPEC } from "../src/markers.js";
 
 function tempDir(): string {
@@ -66,6 +66,13 @@ test("tier 2: uses real special-agents library when no opts provided", () => {
   assert.equal(bundle.source, "library");
   assert.ok(bundle.system.includes("## Core Working Agreement"), "real library system text expected");
   assert.ok(bundle.skills.length > 0, "real library should include skills");
+});
+
+test("role registry includes discovery", () => {
+  const role = AGENT_ROLE_REGISTRY.find((item) => item.id === "discovery");
+  assert.ok(role);
+  assert.equal(role.manifest, "discovery");
+  assert.deepEqual(role.commands, ["rafi discover"]);
 });
 
 // --- tier 3 ---

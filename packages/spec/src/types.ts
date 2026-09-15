@@ -60,7 +60,7 @@ export interface SkillManifest {
 // ───────────────────────────── Agents (roles) ─────────────────────────────
 
 /** The role an agent fills, mapped to an ai-foreman turn-type or command. */
-export type AgentRole = "builder" | "qa" | "planner" | "ticket-maker" | "uninstaller" | "manager";
+export type AgentRole = "builder" | "qa" | "planner" | "ticket-maker" | "uninstaller" | "manager" | "discovery";
 
 /** Reasoning effort levels accepted by the builders. */
 export type EffortLevel = "low" | "medium" | "high" | "xhigh";
@@ -405,7 +405,7 @@ export interface ProjectLifecycleState {
 export type RuntimeProbePhase =
   | "sdk-load" | "authentication" | "compiler-update" | "capability-discovery"
   | "planning" | "ticket-planning" | "ticket-population" | "builder" | "qa"
-  | "recovery" | "uninstaller" | "manager" | "readiness";
+  | "recovery" | "uninstaller" | "manager" | "discovery" | "readiness";
 export type RuntimeProbeCategory =
   | "ready" | "missing-executable" | "sdk-load" | "authentication" | "authorization"
   | "configuration" | "rate-limit" | "network" | "timeout" | "malformed-protocol"

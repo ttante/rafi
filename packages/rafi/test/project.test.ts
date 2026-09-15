@@ -30,6 +30,7 @@ test("--defaults produces a config that validates against ProjectConfig schema",
     planner: { session_strategy: "fresh", display_session_cost: false },
     uninstaller: { session_strategy: "fresh", display_session_cost: false },
     manager: { session_strategy: "fresh", display_session_cost: false },
+    discovery: { session_strategy: "fresh", display_session_cost: false },
   });
 });
 

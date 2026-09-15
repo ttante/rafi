@@ -19,7 +19,9 @@ import { compile } from "./compiler.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 
 export { AGENT_ROLE_REGISTRY };
-export const CONFIGURABLE_ROLES = AGENT_ROLE_REGISTRY.filter((role) => role.configurable).map((role) => role.id);
+export const CONFIGURABLE_ROLES: ConfigurableAgentRole[] = AGENT_ROLE_REGISTRY
+  .filter((role) => role.configurable)
+  .map((role) => role.id as ConfigurableAgentRole);
 
 export interface AgentCliOverrides {
   make?: "claude" | "codex";
@@ -39,6 +41,7 @@ export const DEFAULT_SESSION_STRATEGY: Readonly<Record<ConfigurableAgentRole, Se
   planner: "fresh",
   uninstaller: "fresh",
   manager: "fresh",
+  discovery: "fresh",
 };
 
 export function defaultAgentDefaults(): AgentDefaultsV1 {
@@ -184,7 +187,7 @@ export function buildAgentsCommand(): Command {
   return new Command("agents")
     .description("Configure persistent runtime, model, reasoning, fast, and session defaults for Rafi roles.")
     .argument("[project]", "project directory", ".")
-    .option("--agent-type <role>", "planner | builder | qa | ticket-maker | uninstaller | manager | all")
+    .option("--agent-type <role>", "planner | builder | qa | ticket-maker | uninstaller | manager | discovery | all")
     .option("--agent-make <runtime>", "claude | codex")
     .option("--model <model>", "provider model ID or default")
     .option("--reasoning <level>", "provider reasoning level or default")

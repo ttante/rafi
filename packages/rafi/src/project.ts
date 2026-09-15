@@ -90,7 +90,7 @@ export function resolveExplicitRafiProject(project: string): DiscoveredRafiProje
   return undefined;
 }
 
-export const RAFI_AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager"] as const;
+export const RAFI_AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager", "discovery"] as const;
 export const RAFI_SKILL_NAMES = [
   "better-sqlite3-rebuild",
   "grill-me",
@@ -274,6 +274,7 @@ export function normalizeProjectAgentDefaults(defaults?: AgentDefaultsV1): Agent
     planner: "fresh",
     uninstaller: "fresh",
     manager: "fresh",
+    discovery: "fresh",
   } as const;
   const roles = { ...(defaults?.roles ?? {}) } as AgentDefaultsV1["roles"];
   for (const [role, sessionStrategy] of Object.entries(sessionDefaults)) {

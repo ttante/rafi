@@ -50,6 +50,7 @@ import { withActivityContext } from "ai-foreman/activity.js";
 import { buildPlanCommand, runPlanWorkflow } from "./plan.js";
 import { buildTicketPlanCommand } from "./ticketPlan.js";
 import { buildSourcesCommand } from "./sources.js";
+import { buildDiscoveryCommand, discoveryEnvelopePlanningSources, runDiscovery } from "./discovery.js";
 import { buildAgentsCommand, defaultAgentDefaults, promptSessionStrategyDefaults } from "./agents.js";
 import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
@@ -80,6 +81,7 @@ program
   .version(PACKAGE_VERSION);
 
 program.addCommand(buildSourcesCommand());
+program.addCommand(buildDiscoveryCommand());
 
 program
   .command("compile")
@@ -260,16 +262,34 @@ program
       });
       checkpointCreateAnswer("planning-sources-confirm", "docsRoot", docsRoot);
 
-      const hasPlanningSources = await confirm({
-        message: "Do you have existing ticket or planning docs you want the populate agent to use? (Enter to accept)",
-        initialValue: false,
-      });
-      if (isCancel(hasPlanningSources)) process.exit(0);
-      checkpointCreateAnswer("planning-sources", "hasPlanningSources", Boolean(hasPlanningSources));
-
       let planningSources: string | undefined;
       let sourceStorage: "local" | "tracked" | undefined;
-      if (hasPlanningSources) {
+      const runCreateDiscovery = await confirm({
+        message: "Run read-only discovery for existing context before continuing?",
+        initialValue: false,
+      });
+      if (isCancel(runCreateDiscovery)) process.exit(0);
+      checkpointCreateAnswer("discovery", "runDiscovery", Boolean(runCreateDiscovery));
+      if (runCreateDiscovery) {
+        const discovery = await runDiscovery({ project: targetDir, suppressNextCommand: true });
+        planningSources = discoveryEnvelopePlanningSources(discovery.envelope, discovery.answers);
+        if (planningSources) {
+          const storageAnswer = await select({ message: "Where should future source snapshots be stored?", options: [
+            { value: "local", label: "Private/local (Recommended)" },
+            { value: "tracked", label: "Team-visible/tracked" },
+          ] });
+          if (isCancel(storageAnswer)) process.exit(0);
+          sourceStorage = storageAnswer as "local" | "tracked";
+          checkpointCreateAnswer("compile-config", "planningSources", planningSources);
+        }
+      } else {
+        const hasPlanningSources = await confirm({
+          message: "Do you have existing ticket or planning docs you want the populate agent to use? (Enter to accept)",
+          initialValue: false,
+        });
+        if (isCancel(hasPlanningSources)) process.exit(0);
+        checkpointCreateAnswer("planning-sources", "hasPlanningSources", Boolean(hasPlanningSources));
+        if (hasPlanningSources) {
         log.info("Any format is OK: Markdown, YAML, text notes, folders, or globs. `rafi tickets populate` will scan relevant docs too.");
         const planningSourcesRaw = await text({
           message: "Files, folders, or globs for existing tickets/plans:",
@@ -284,6 +304,7 @@ program
         if (isCancel(storageAnswer)) process.exit(0);
         sourceStorage = storageAnswer as "local" | "tracked";
         checkpointCreateAnswer("compile-config", "planningSources", planningSources);
+        }
       }
 
       const branchStrategy = await select({

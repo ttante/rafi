@@ -312,6 +312,7 @@ function phaseForRole(role: string): BuilderAdapterOptions["runtimePhase"] {
   if (role === "qa") return "qa";
   if (role === "uninstaller") return "uninstaller";
   if (role === "manager") return "manager";
+  if (role === "discovery") return "discovery";
   return "builder";
 }
 
@@ -403,7 +404,7 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
 }
 
 function configurableRole(role: string): ConfigurableAgentRole {
-  return ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager"].includes(role)
+  return ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager", "discovery"].includes(role)
     ? role as ConfigurableAgentRole
     : "builder";
 }

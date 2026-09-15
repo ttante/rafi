@@ -368,6 +368,10 @@ test("agent: conditionalPacks and model/effort are optional", () => {
   assert.equal(validateAgentManifest(bare).valid, true);
 });
 
+test("agent: discovery role is accepted", () => {
+  assert.equal(validateAgentManifest({ ...validAgent, name: "discovery", role: "discovery", skills: [] }).valid, true);
+});
+
 test("agent: null model and null effort are accepted", () => {
   assert.equal(validateAgentManifest({ ...validAgent, model: null, effort: null }).valid, true);
 });

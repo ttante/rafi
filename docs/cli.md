@@ -74,6 +74,8 @@ Options:
 Commands:
   sources                                             Inspect and manage the project-wide planning
                                                       source registry.
+  discover [options] [project]                        Run a read-only project continuation discovery
+                                                      report.
   compile [options] <project>                         Re-render .claude/, .codex/, AGENTS.md, and
                                                       role bundles from an existing
                                                       rafi-config.yaml.
@@ -118,6 +120,36 @@ Commands:
   doctor [options] [project]                          Check Foreman, agent CLIs, config, and
                                                       optional ticket tracker readiness.
   help [command]                                      display help for command
+```
+
+### `rafi discover --help`
+
+```text
+Usage: rafi discover [options] [project]
+
+Run a read-only project continuation discovery report.
+
+Arguments:
+  project                  project directory (default: ".")
+
+Options:
+  --online <text>          online resources to include; repeatable (default:
+                           [])
+  --background <text>      background information; repeatable (default: [])
+  --local <text>           local files, folders, globs, areas, or avoids;
+                           repeatable (default: [])
+  --rafi-history <answer>  whether Rafi was used previously
+  -a, --agent <agent>      session runtime (claude | codex)
+  -m, --model <model>      session-only model override
+  --effort <level>         session-only reasoning override
+                           (low|medium|high|xhigh)
+  --fast                   enable provider fast/speed capability
+  --source-storage <mode>  storage for newly captured source versions (local |
+                           tracked)
+  --json                   print machine-readable JSON
+  -y, --yes                approve source-registry persistence
+                           non-interactively
+  -h, --help               display help for command
 ```
 
 ### `rafi resume --help`

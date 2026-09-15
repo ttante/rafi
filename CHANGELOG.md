@@ -4,6 +4,24 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.9.15 / ai-foreman 1.7.15 / special-agents 0.8.10 / rafi-spec 0.8.11 - 2026-09-15
+
+### Added
+
+- Added the Discovery agent and `rafi discover` flow for read-only project state discovery, source-request handling, source registry integration, and create-flow planning handoff.
+
+### Fixed
+
+- Preserved full discovery context across source-request rounds, resumed provider sessions when available, and forced final discovery envelopes after exhausted source rounds instead of treating unresolved source requests as completed reports.
+- Strengthened discovery reports to include latest known state, recent relevant plans, artifact freshness judgment, recommended next plan or command, confidence, and gaps.
+
+### Packages
+
+- Bumped `rafi-spec` to `0.8.11` for discovery-related schema updates.
+- Bumped `special-agents` to `0.8.10` for the Discovery agent content and its exact `rafi-spec@0.8.11` dependency.
+- Bumped `ai-foreman` to `1.7.15` for discovery support changes and its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.9.15` for `rafi discover`, create-flow discovery handoff, and its exact workspace dependencies.
+
 ## @rafi-ai/cli 0.9.14 / ai-foreman 1.7.14 / special-agents 0.8.9 / rafi-spec 0.8.10 - 2026-09-07
 
 ### Added

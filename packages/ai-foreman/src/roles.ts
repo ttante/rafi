@@ -30,6 +30,7 @@ export const AGENT_ROLE_REGISTRY: readonly AgentRoleRegistration[] = [
   { id: "ticket-maker", label: "Ticket maker", consumers: ["ticket population"], configurable: true, manifest: "ticket-maker", commands: ["rafi tickets populate"] },
   { id: "uninstaller", label: "Uninstaller", consumers: ["non-empty uninstall instructions only"], configurable: true, manifest: "uninstaller", commands: ["rafi uninstall"] },
   { id: "manager", label: "Manager (read-only diagnostics)", consumers: ["build diagnostics"], configurable: true, manifest: "manager", commands: ["rafi manager", "ai-foreman manager"] },
+  { id: "discovery", label: "Discovery", consumers: ["project continuation discovery"], configurable: true, manifest: "discovery", commands: ["rafi discover"] },
 ] as const;
 
 export interface RoleBundle {

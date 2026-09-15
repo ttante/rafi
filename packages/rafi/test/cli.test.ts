@@ -54,6 +54,7 @@ test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nod
   const docs = readFileSync(join(HERE, "..", "..", "..", "docs", "cli.md"), "utf8");
   const cases = [
     { heading: "rafi --help", command: program },
+    { heading: "rafi discover --help", command: commandByPath(["discover"]) },
     { heading: "rafi plan --help", command: commandByPath(["plan"]) },
     { heading: "rafi tickets plan --help", command: commandByPath(["tickets", "plan"]) },
     { heading: "rafi tickets init --help", command: commandByPath(["tickets", "init"]) },

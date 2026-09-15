@@ -851,6 +851,7 @@ function activityPhase(phase: BuilderAdapterOptions["runtimePhase"]): string {
   if (phase === "qa") return "reviewing with QA";
   if (phase === "uninstaller") return "planning uninstall";
   if (phase === "manager") return "analyzing diagnostics";
+  if (phase === "discovery") return "discovering project context";
   return "building";
 }
 
