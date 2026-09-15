@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.4.0",
-    "ai-foreman": "1.7.15",
+    "ai-foreman": "1.7.16",
     "ajv": "^8.20.0",
     "commander": "^12.1.0",
     "rafi-spec": "0.8.11",

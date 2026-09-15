@@ -198,7 +198,7 @@
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 tsx --test test/providerSmoke.test.ts",
-    "prepublishOnly": "pnpm build && pnpm test && pnpm typecheck"
+    "prepublishOnly": "tsc -p ../spec/tsconfig.build.json && tsc -p tsconfig.build.json && pnpm --filter ai-foreman test && tsc --noEmit"
   },
   "keywords": [
     "claude",
