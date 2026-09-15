@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -12,7 +12,7 @@ import { program } from "../src/index.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 function tempDir(): string {
-  return mkdtempSync(join(tmpdir(), "rafi-cli-test-"));
+  return realpathSync(mkdtempSync(join(tmpdir(), "rafi-cli-test-")));
 }
 
 function tsxBin(projectRoot: string): string {

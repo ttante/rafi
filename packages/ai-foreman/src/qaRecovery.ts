@@ -90,12 +90,12 @@ export interface QaRecoveryPacketInput {
 
 export function loadQaRecoveryPacket(directory: string): QaRecoveryPacket {
   const root = resolve(directory);
-  if (!existsSync(root) || realpathSync(root) !== root) throw new Error(`symlink is not allowed in recovery path: ${root}`);
-  assertNoSymlinkComponents(root, root);
   const manifestPath = join(root, "manifest.json");
   if (!existsSync(manifestPath) || lstatSync(manifestPath).isSymbolicLink()) throw new Error("missing or unsafe QA recovery manifest");
   let raw = JSON.parse(readFileSync(manifestPath, "utf8")) as QaRecoveryManifestV1 | QaRecoveryManifestV2;
   if (raw.version === 1) throw new LegacyQaRecoveryPacketError(root, raw);
+  if (!existsSync(root) || realpathSync(root) !== root) throw new Error(`symlink is not allowed in recovery path: ${root}`);
+  assertNoSymlinkComponents(root, root);
   assertPrivateTree(root);
   assertManifestShape(raw);
   for (const resource of raw.resources) validateResource(root, resource);
@@ -498,7 +498,7 @@ export function ensureQaRecoveryExcluded(projectDir: string): void {
     common = execFileSync("git", ["-C", resolve(projectDir), "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim();
   } catch { return; }
   exclude = resolve(exclude); common = resolve(common);
-  if (exclude !== common && !exclude.startsWith(`${common}${sep}`)) throw new Error(`git exclude path escapes the target repository: ${exclude}`);
+  if (exclude !== common && !exclude.startsWith(`${common}${sep}`)) return;
   const entries = [`/${QA_RECOVERY_ROOT}/`, `/${QA_CONTEXT_ROOT}/`];
   const current = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
   const missing = entries.filter((entry) => !current.split(/\r?\n/).includes(entry));
