@@ -1,13 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import type { HookCallback, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import type { BuilderAdapterOptions } from "../src/adapters/types.js";
 import { AsyncQueue } from "../src/util/asyncQueue.js";
 
+const testCwd = realpathSync.native("/tmp");
+
 const options: BuilderAdapterOptions = {
-  cwd: "/tmp", configRoot: "/tmp", sessionRole: "qa", sessionStream: "qa",
+  cwd: testCwd, configRoot: testCwd, sessionRole: "qa", sessionStream: "qa",
   workspaceIdentity: "test-session-workspace",
   permission: async () => ({ behavior: "deny", message: "QA is read-only" }),
 };
@@ -33,9 +36,9 @@ function claudeFixture(initialization: Promise<unknown> = Promise.resolve({})) {
   const adapter = Reflect.construct(ClaudeAdapter, [options, query]) as ClaudeAdapter;
   return {
     adapter, messages, prompts: () => prompts,
-    start: (sessionId = "claude-session", cwd = "/tmp") => hook({
+    start: (sessionId = "claude-session", cwd = testCwd) => hook({
       hook_event_name: "SessionStart", source: "startup", session_id: sessionId,
-      cwd, transcript_path: "/tmp/claude-session.jsonl",
+      cwd, transcript_path: `${testCwd}/claude-session.jsonl`,
     }, undefined, { signal: new AbortController().signal }),
     close: async () => { await adapter.close(); await promptPump; },
   };
@@ -48,7 +51,7 @@ test("fresh Claude QA observes startup identity without sending a user prompt", 
     await fixture.start();
     const ref = await ready;
     assert.equal(ref.sessionId, "claude-session");
-    assert.equal(ref.cwd, "/tmp");
+    assert.equal(ref.cwd, testCwd);
     assert.equal(ref.source, "observed");
     assert.ok(ref.validatedAt);
     assert.equal(fixture.prompts(), 0);

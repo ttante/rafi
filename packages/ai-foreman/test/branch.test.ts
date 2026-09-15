@@ -124,6 +124,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 function writeExecutable(path: string, lines: string[]): void {
+  if (lines[0] === "#!/usr/bin/env bash") lines[0] = "#!/bin/sh";
   writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
   chmodSync(path, 0o755);
 }
@@ -481,12 +482,12 @@ test("GitHub readiness classifies auth, remote, repo, git, and timeout failures"
     {
       name: "repo view timeout",
       code: "network_or_timeout",
-      timeout: "50",
+      timeout: "250",
       gh: [
         "#!/usr/bin/env bash",
         "if [ \"$1\" = \"--version\" ]; then echo 'gh version test'; exit 0; fi",
         "if [ \"$1 $2\" = \"auth status\" ]; then exit 0; fi",
-        "if [ \"$1 $2\" = \"repo view\" ]; then sleep 1; exit 0; fi",
+        "if [ \"$1 $2\" = \"repo view\" ]; then sleep 2; exit 0; fi",
         "exit 2",
       ],
       git: [

@@ -284,7 +284,6 @@ export async function waitForLiveSettingsAcknowledgments(
     return { runId: run.runId, role, ...(ack?.providerSessionId ? { providerSessionId: ack.providerSessionId } : {}), revision, acknowledged: Boolean(ack) };
   }));
 }
-
 export interface AgentSettingsPrompts {
   multiselect(options: unknown): Promise<unknown>;
   select(options: unknown): Promise<unknown>;

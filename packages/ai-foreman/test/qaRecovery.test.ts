@@ -351,7 +351,7 @@ test("packet storage is owner-only, digest-addressed, locally excluded, and muta
     assert.equal(drift.matches, false);
     assert.ok(drift.drift.includes("untracked.txt"));
     assert.ok(drift.drift.every((path) => !path.includes("integrity.json") && !path.includes("untracked-manifest.json")));
-    const exclude = execFileSync("git", ["rev-parse", "--git-path", "info/exclude"], { cwd: dir, encoding: "utf8" }).trim();
+    const exclude = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], { cwd: dir, encoding: "utf8" }).trim();
     assert.match(readFileSync(exclude, "utf8"), /qa-report-recovery/);
     const materialized = materializeQaRecoveryContext(packet, dir);
     materialized.verify();
