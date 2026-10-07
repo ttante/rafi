@@ -48,9 +48,11 @@ import { buildStateCommand } from "ai-foreman/cli/state.js";
 import { buildAttachCommand, buildDecideCommand, buildStopCommand } from "ai-foreman/cli/recovery.js";
 import { withActivityContext } from "ai-foreman/activity.js";
 import { buildPlanCommand, runPlanWorkflow } from "./plan.js";
+import { resolvePlanningRuntime } from "./planningRuntime.js";
 import { buildTicketPlanCommand } from "./ticketPlan.js";
 import { buildSourcesCommand } from "./sources.js";
-import { buildDiscoveryCommand, discoveryEnvelopePlanningSources, runDiscovery } from "./discovery.js";
+import { buildDiscoveryCommand } from "./discovery.js";
+import { collectCreateStackInterview } from "./createStackInterview.js";
 import { buildAgentsCommand, defaultAgentDefaults, promptSessionStrategyDefaults } from "./agents.js";
 import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
@@ -193,31 +195,17 @@ program
         defaultValue: answers.appName,
       });
       if (isCancel(appName)) process.exit(0);
-      checkpointCreateAnswer("frontend", "appName", String(appName));
+      checkpointCreateAnswer("project-kind", "appName", String(appName));
 
-      const frontendRaw = await text({
-        message: `Frontend stack (Enter to accept, or type "No UI" for no frontend):`,
-        initialValue: answers.frontend,
-        defaultValue: answers.frontend,
+      const stackInterview = await collectCreateStackInterview({
+        targetDir,
+        answers,
+        prompts: { text, confirm, select, isCancel, info: log.info },
+        checkpoint: checkpointCreateAnswer,
       });
-      if (isCancel(frontendRaw)) process.exit(0);
-      checkpointCreateAnswer("backend", "frontend", String(frontendRaw));
-
-      const backend = await text({
-        message: "Backend stack: (Enter to accept)",
-        initialValue: answers.backend,
-        defaultValue: answers.backend,
-      });
-      if (isCancel(backend)) process.exit(0);
-      checkpointCreateAnswer("database", "backend", String(backend));
-
-      const database = await text({
-        message: "Database: (Enter to accept)",
-        initialValue: answers.database,
-        defaultValue: answers.database,
-      });
-      if (isCancel(database)) process.exit(0);
-      checkpointCreateAnswer("cloud", "database", String(database));
+      if (!stackInterview) process.exit(0);
+      let { frontend: frontendRaw, backend, database, planningSources } = stackInterview;
+      let sourceStorage: "local" | "tracked" | undefined;
 
       const cloudRaw = await text({
         message: `Cloud provider (Enter to accept, or type "Local only" for no cloud):`,
@@ -262,26 +250,14 @@ program
       });
       checkpointCreateAnswer("planning-sources-confirm", "docsRoot", docsRoot);
 
-      let planningSources: string | undefined;
-      let sourceStorage: "local" | "tracked" | undefined;
-      const runCreateDiscovery = await confirm({
-        message: "Run read-only discovery for existing context before continuing?",
-        initialValue: false,
-      });
-      if (isCancel(runCreateDiscovery)) process.exit(0);
-      checkpointCreateAnswer("discovery", "runDiscovery", Boolean(runCreateDiscovery));
-      if (runCreateDiscovery) {
-        const discovery = await runDiscovery({ project: targetDir, suppressNextCommand: true });
-        planningSources = discoveryEnvelopePlanningSources(discovery.envelope, discovery.answers);
-        if (planningSources) {
-          const storageAnswer = await select({ message: "Where should future source snapshots be stored?", options: [
-            { value: "local", label: "Private/local (Recommended)" },
-            { value: "tracked", label: "Team-visible/tracked" },
-          ] });
-          if (isCancel(storageAnswer)) process.exit(0);
-          sourceStorage = storageAnswer as "local" | "tracked";
-          checkpointCreateAnswer("compile-config", "planningSources", planningSources);
-        }
+      if (planningSources) {
+        const storageAnswer = await select({ message: "Where should future source snapshots be stored?", options: [
+          { value: "local", label: "Private/local (Recommended)" },
+          { value: "tracked", label: "Team-visible/tracked" },
+        ] });
+        if (isCancel(storageAnswer)) process.exit(0);
+        sourceStorage = storageAnswer as "local" | "tracked";
+        checkpointCreateAnswer("compile-config", "planningSources", planningSources);
       } else {
         const hasPlanningSources = await confirm({
           message: "Do you have existing ticket or planning docs you want the populate agent to use? (Enter to accept)",
@@ -432,7 +408,7 @@ program
       if (handoff.journeyComplete) completeInterview(targetDir, interview);
       else checkpointInterview(targetDir, interview, {
         status: "paused",
-        checkpoint: ["child-plan-paused", "ticket-setup-prompt"].includes(interview.checkpoint) ? interview.checkpoint : "create-paused",
+        checkpoint: ["child-plan-paused", "child-plan-runtime-cancelled", "ticket-setup-prompt"].includes(interview.checkpoint) ? interview.checkpoint : "create-paused",
       });
     }
   });
@@ -524,13 +500,18 @@ async function applyCollisionChoices(
     const mode = await select({
       message: `${rootCollisions.length} root agent file collision(s) found. How should Rafi handle them?`,
       options: [
+        { value: "sidecar", label: "Do nothing — leave them unchanged and write Rafi's own files under .rafi/agent-files/" },
         { value: "append", label: "Append — preserve existing text and add Rafi guidance or a sidecar reference" },
         { value: "update", label: "Update — ask an authenticated installed agent runtime to rewrite the file" },
         { value: "overwrite", label: "Overwrite — replace with Rafi's generated file" },
       ],
     });
     if (isCancel(mode)) process.exit(0);
-    next.agent_files.mode = mode as ProjectConfig["agent_files"]["mode"];
+    if (mode === "sidecar") {
+      moveCollidingRootInstructionsToRafiFolder(targetDir, next, rootCollisions);
+    } else {
+      next.agent_files.mode = mode as ProjectConfig["agent_files"]["mode"];
+    }
   }
 
   const collisions = artifactCollisions(targetDir, next);
@@ -717,12 +698,22 @@ interface CreateHandoffResult {
   interview?: InterviewRecord;
 }
 
-async function runCreateTicketHandoff(
+interface CreateHandoffDependencies {
+  prompts?: {
+    select(options: { message: string; options: Array<{ value: string; label: string }> }): Promise<unknown>;
+    isCancel(value: unknown): boolean;
+  };
+  runPlan?: typeof runPlanWorkflow;
+  interactive?: boolean;
+}
+
+export async function runCreateTicketHandoff(
   targetDir: string,
   config: ProjectConfig,
   answers: WalkthroughAnswers,
   defaultsMode: boolean,
   opts: { planningMode?: "standard" | "exhaustive"; interview?: InterviewRecord; gitignoreMode?: CreateGitignoreMode } = {},
+  dependencies: CreateHandoffDependencies = {},
 ): Promise<CreateHandoffResult> {
   let interview = opts.interview;
   const docsRoot = config.docs?.root ?? DEFAULT_DOCS_ROOT;
@@ -730,7 +721,7 @@ async function runCreateTicketHandoff(
   const setupArgs = setupInitArgs(targetDir, answers, docsRoot);
   const planCommand = `rafi plan ${shellQuote(targetDir)}`;
   const populateCommand = `rafi tickets populate --project ${shellQuote(targetDir)}`;
-  const interactive = !defaultsMode && process.stdin.isTTY && process.stdout.isTTY;
+  const interactive = dependencies.interactive ?? (!defaultsMode && process.stdin.isTTY && process.stdout.isTTY);
 
   if (!interactive) {
     console.log("\nrafi: next steps:");
@@ -740,7 +731,8 @@ async function runCreateTicketHandoff(
     return { journeyComplete: true, interview };
   }
 
-  const { confirm, select, isCancel } = await import("@clack/prompts");
+  const prompts = dependencies.prompts ?? await import("@clack/prompts");
+  const { select, isCancel } = prompts;
   const priorWork = hasExistingPlanOrTickets(targetDir, docsRoot);
   console.log("Planning is optional. It can align implementation details, but may be unnecessary when an approved plan or populated tickets already exist.");
   const planChoice = await select({ message: "What should Rafi do next?", options: priorWork ? [
@@ -759,16 +751,29 @@ async function runCreateTicketHandoff(
       if (isCancel(answer)) return { journeyComplete: false, interview };
       mode = answer as "standard" | "exhaustive";
     }
+    const runtimeSelection = await resolvePlanningRuntime(config.harness.targets, interactive, prompts);
+    if (runtimeSelection.kind === "cancelled") {
+      if (interview) {
+        interview = checkpointInterview(targetDir, interview, {
+          status: "paused",
+          checkpoint: "child-plan-runtime-cancelled",
+          answers: { ...interview.answers, childPlanMode: mode },
+        });
+      }
+      return { journeyComplete: false, interview };
+    }
+    const agent = runtimeSelection.kind === "selected" ? runtimeSelection.runtime : undefined;
     if (interview) {
       interview = checkpointInterview(targetDir, interview, {
         checkpoint: "child-plan-before",
-        answers: { ...interview.answers, childPlanMode: mode },
+        answers: { ...interview.answers, childPlanMode: mode, childPlanRuntime: agent },
       });
     }
-    const planOutcome = await runPlanWorkflow({
+    const planOutcome = await (dependencies.runPlan ?? runPlanWorkflow)({
       project: targetDir,
       skipRunConfirmation: true,
       grillMe: mode === "exhaustive",
+      agent,
       rawArgs: [mode === "exhaustive" ? "--grill-me" : "--no-grill-me"],
       parentInterview: interview ? { id: interview.id, journeyId: interview.journeyId } : undefined,
       invocationLabel: "rafi create child plan",
@@ -958,6 +963,32 @@ function selectedArtifactPaths(
 
 function selectedRootInstructionPaths(config: ProjectConfig): string[] {
   return config.harness.targets.map((target) => config.agent_files[target]);
+}
+
+/** Keep a generated root instruction separate when the app owns its root file. */
+function moveCollidingRootInstructionsToRafiFolder(
+  targetDir: string,
+  config: ProjectConfig,
+  collisions: readonly string[],
+): void {
+  for (const target of config.harness.targets) {
+    const existingPath = config.agent_files[target];
+    if (!collisions.includes(existingPath)) continue;
+    const filename = target === "codex" ? "AGENTS.md" : "CLAUDE.md";
+    config.agent_files[target] = firstAvailableRafiAgentFilePath(targetDir, filename);
+  }
+  // The alternative paths are Rafi-owned, so they can be generated normally.
+  config.agent_files.mode = "overwrite";
+}
+
+function firstAvailableRafiAgentFilePath(targetDir: string, filename: string): string {
+  const base = `.rafi/agent-files/${filename}`;
+  if (!existsSync(join(targetDir, base))) return `./${base}`;
+  const extension = filename.endsWith(".md") ? ".md" : "";
+  const stem = extension ? filename.slice(0, -extension.length) : filename;
+  let suffix = 2;
+  while (existsSync(join(targetDir, `.rafi/agent-files/${stem}-${suffix}${extension}`))) suffix++;
+  return `./.rafi/agent-files/${stem}-${suffix}${extension}`;
 }
 
 function setArtifactPaths(

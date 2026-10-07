@@ -11,6 +11,7 @@ import {
   DISCOVERY_ENVELOPE_END,
   DISCOVERY_ENVELOPE_START,
   discoveryEnvelopePlanningSources,
+  discoveryEnvelopeStack,
   runDiscovery,
 } from "../src/discovery.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
@@ -97,6 +98,8 @@ test("discovery prompt requires latest state, latest plan, artifact freshness, a
   assert.match(instruction, /stale artifacts from current artifacts/i);
   assert.match(instruction, /Recommend the next plan or command/i);
   assert.match(instruction, /confidence and concrete gaps/i);
+  assert.match(instruction, /Infer the frontend, backend, and database/i);
+  assert.match(instruction, /detected_stack/i);
 });
 
 test("local inventory scans current and legacy Rafi artifact paths", () => {
@@ -265,6 +268,19 @@ test("create planning source handoff includes structured discovery envelope", ()
   assert.match(sources!, /docs\/rafi-plan\.md/);
   assert.match(sources!, /Discovery handoff/);
   assert.match(sources!, /Run ticket planning next/);
+});
+
+test("discovery stack uses detected values and retains interview defaults for missing fields", () => {
+  const stack = discoveryEnvelopeStack({
+    version: 1,
+    detected_stack: { frontend: "React", backend: "Fastify", database: "" },
+  }, {
+    frontend: "Default UI",
+    backend: "Default API",
+    database: "SQLite",
+  });
+
+  assert.deepEqual(stack, { frontend: "React", backend: "Fastify", database: "SQLite" });
 });
 
 test("discovery filters source requests that violate online and avoid instructions", async () => {

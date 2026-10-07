@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { StructuredPlanV1 } from "rafi-spec";
-import { authorizeTicketRetirements, materializeTicketPopulation, validateTicketPopulationProposal, type TicketPopulationProposalV1 } from "../src/ticketPopulation.js";
+import { authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, validateTicketPopulationProposal, type TicketPopulationProposalV1 } from "../src/ticketPopulation.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 
 const old: TicketDef = {
@@ -41,4 +41,11 @@ test("population rejects missing/duplicate mappings and requires exact computer-
   assert.match(validateTicketPopulationProposal(invalid, plan, [old]).join(";"), /duplicate slice mapping|missing ticket mapping/);
   assert.throws(() => authorizeTicketRetirements(["T010", "T011"], { computerRun: true, authorizedIds: ["T010"] }), /exact authorized ticket IDs/);
   assert.doesNotThrow(() => authorizeTicketRetirements(["T010", "T011"], { computerRun: true, authorizedIds: ["T011", "T010"] }));
+});
+
+test("ticket-maker proposal parsing errors remain distinct from plan discovery failures", () => {
+  assert.throws(
+    () => extractTicketPopulationProposal("Codex returned prose but no proposal envelope."),
+    /ticket-maker output is missing RAFI_TICKET_POPULATION_PROPOSAL_START/,
+  );
 });

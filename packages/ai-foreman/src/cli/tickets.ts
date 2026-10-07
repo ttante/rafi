@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { DeletedTicketResetPolicy, RequestedTicketResetTarget, StructuredPlanV1, TicketGroupId } from "rafi-spec";
 import { select, text, confirm, isCancel, multiselect } from "@clack/prompts";
@@ -118,17 +118,21 @@ function validateEffort(effort: string | undefined): asserts effort is EffortLev
   }
 }
 
-export function buildPopulateInstruction(sourceHints?: string[], progressDoc = "docs/ticket-progress.md"): string {
-  const sources = sourceHints ?? [];
+export function buildPopulateInstruction(
+  approvedPlanPath: string,
+  contextSources?: string[],
+  progressDoc = "docs/ticket-progress.md",
+): string {
+  const sources = contextSources ?? [];
   const sourceHintBlock = sources.length > 0
     ? `
-User-provided planning source hints:
+Original context source hints:
 ${sources.map((source) => `- ${source}`).join("\n")}
 
 Treat these as files, folders, or globs to check first. Any reasonable project-planning format is acceptable because you are responsible for interpreting it. If a hinted source does not exist or is ambiguous, continue scanning the repository before asking for help.
 `
     : `
-No specific planning sources were provided. Scan the repository for relevant planning and ticketing documents.
+No original context sources were provided. Use the approved plan and scan the repository only when it is needed to resolve its references.
 `;
 
   return `You are being run by Foreman to populate this repository's Foreman ticket tracker.
@@ -136,6 +140,10 @@ No specific planning sources were provided. Scan the repository for relevant pla
 Goal:
 - Convert every existing project ticket, task, backlog item, roadmap item, or implementation step into Foreman's structured ticket system.
 - Do not implement product/code changes. Only update ticket-tracker files.
+\nApproved structured Rafi plan (authoritative for plan identity and slice mapping):
+- ${approvedPlanPath}
+
+Read this approved plan before all other sources. It determines the exact plan_id, revision, and slice_ref values that the proposal must use. The context sources below provide supporting product and implementation detail; they do not replace or redefine the approved plan.
 ${sourceHintBlock}
 
 Before proposing, read these tracker control files:
@@ -144,7 +152,7 @@ Before proposing, read these tracker control files:
 - .tickets/tracker-rules.md
 - ${progressDoc} if it exists
 
-Then inspect the repository for existing planning sources, beginning with the approved structured Rafi plan. You are proposal-only: do not edit any file, run tracker mutation commands, allocate final ticket IDs, or write delivery configuration. Rafi validates and performs all writes after approval.
+Then inspect the repository for the context required by the approved structured Rafi plan. You are proposal-only: do not edit any file, run tracker mutation commands, allocate final ticket IDs, or write delivery configuration. Rafi validates and performs all writes after approval.
 
 Return ticket content using Foreman's schema:
 - slice_ref: the exact approved plan slice reference. Do not allocate ticket IDs.
@@ -451,13 +459,13 @@ async function collectTicketSetupPatch(
   }
 
   const section = await select({
-    message: "Which ticket setup section should be configured?",
+    message: "What would you like to configure for tickets?",
     options: [
-      { value: "sources", label: "Ticket sources" },
-      { value: "populate", label: "Populate defaults" },
-      { value: "build", label: "Build defaults" },
-      { value: "limits", label: "Tracker limits" },
-      { value: "all", label: "All sections" },
+      { value: "sources", label: "Where tickets come from", hint: "Choose planning files, issue trackers, or other sources." },
+      { value: "populate", label: "How Rafi creates tickets from those sources", hint: "Set import and enrichment behavior." },
+      { value: "build", label: "How Rafi implements tickets", hint: "Set branches, validation, and completion behavior." },
+      { value: "limits", label: "Ticket tracker limits", hint: "Set how many tickets Rafi can show or work on at once." },
+      { value: "all", label: "Configure everything", hint: "Walk through every ticket setting." },
     ],
   });
   if (isCancel(section)) cancelTicketInterview();
@@ -482,6 +490,15 @@ async function collectTicketSetupPatch(
     };
   }
   if (section === "populate" || section === "all") {
+    console.log([
+      "Recommended population settings:",
+      "  • Use the saved ticket sources by default.",
+      "  • Use the project's configured agent when both runtimes are available.",
+      `  • Import up to ${DEFAULT_TICKET_SETUP.populate.import_cap} tickets per run.`,
+      `  • Import up to ${DEFAULT_TICKET_SETUP.populate.comment_limit} comments per external ticket.`,
+      "  • Generate deterministic recommendations during population.",
+      "  • Recommend splitting XL tickets.",
+    ].join("\n"));
     const defaults = await confirm({ message: "Use the recommended population settings?", initialValue: true });
     if (isCancel(defaults)) cancelTicketInterview();
     if (defaults) Object.assign(populatePatch, DEFAULT_TICKET_SETUP.populate);
@@ -569,7 +586,7 @@ async function collectTicketSetupPatch(
       buildPatch.cleanup = true;
       buildPatch.auto_merge_wait = false;
       buildPatch.auto_merge_timeout_minutes = null;
-      buildPatch.validation_checklist = await promptRequirementList("validation checklist", current.build.validation_checklist);
+      buildPatch.validation_checklist = await promptValidationChecklist(current.build.validation_checklist);
       return {
         sources,
         limits,
@@ -614,7 +631,7 @@ async function collectTicketSetupPatch(
         description_sections: await promptRequirementList("required PR/MR description sections", current.build.review.description_sections),
       };
     }
-    buildPatch.validation_checklist = await promptRequirementList("validation checklist", current.build.validation_checklist);
+    buildPatch.validation_checklist = await promptValidationChecklist(current.build.validation_checklist);
     if (completion === "auto-merge") {
       const wait = await confirm({
         message: "Wait for dependency PR/MRs to merge before starting dependent tickets?",
@@ -665,6 +682,40 @@ async function promptNonNegativeInteger(message: string, initial: number): Promi
   const answer = await text({ message, initialValue: String(initial), defaultValue: String(initial), validate: (value) => Number.isInteger(Number(value)) && Number(value) >= 0 ? undefined : "Enter zero or a positive integer" });
   if (isCancel(answer)) cancelTicketInterview();
   return Number(answer);
+}
+
+async function promptValidationChecklist(initial: string[]): Promise<string[]> {
+  console.log([
+    "Rafi gives these project-wide checks to its QA reviewer for every ticket.",
+    "Current validation checklist:",
+    ...(initial.length ? initial.map((item) => `  • ${item}`) : ["  • No checks configured."]),
+  ].join("\n"));
+  const mode = await select({
+    message: "Which project-wide checks should Rafi's QA reviewer verify for every ticket?",
+    initialValue: "keep",
+    options: [
+      { value: "keep", label: "Keep all of these checks for every ticket (Recommended)" },
+      { value: "choose", label: "Choose from these checks and add others" },
+      { value: "replace", label: "Replace these with my own checks" },
+    ],
+  });
+  if (isCancel(mode)) cancelTicketInterview();
+  if (mode === "keep") return [...initial];
+  if (mode === "replace") {
+    const replacement = await text({ message: "Project-wide checks for QA to verify on every ticket (comma-separated):", defaultValue: "" });
+    if (isCancel(replacement)) cancelTicketInterview();
+    return splitCommaList(String(replacement));
+  }
+  const selected = initial.length ? await multiselect({
+    message: "Select the project-wide checks QA should verify for every ticket:",
+    options: initial.map((value) => ({ value, label: value })),
+    initialValues: initial,
+    required: false,
+  }) : [];
+  if (isCancel(selected)) cancelTicketInterview();
+  const additions = await text({ message: "Additional project-wide QA checks (comma-separated, optional):", defaultValue: "" });
+  if (isCancel(additions)) cancelTicketInterview();
+  return combineRequirementSelections(selected as string[], String(additions));
 }
 
 async function promptRequirementList(label: string, initial: string[]): Promise<string[]> {
@@ -1063,7 +1114,8 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     }
   }
 
-  const structuredPlan = loadPopulationPlan(dir, sourceHints);
+  const approvedPlan = resolvePopulationPlan(dir, sourceHints, ticketsConfig);
+  const contextSources = sourceHints.filter((source) => !isApprovedPlanArtifact(dir, source, approvedPlan.path));
 
   if (!opts.yes) {
     const action = await select({
@@ -1104,10 +1156,11 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     console.log(`foreman tickets: role ${TICKET_POPULATE_ROLE}`);
     console.log(`foreman tickets: log ${logPath}\n`);
 
-    if (sourceHints.length) {
-      console.log(`foreman tickets: source hints ${sourceHints.join(" ")}`);
+    console.log(`foreman tickets: approved plan ${approvedPlan.path}`);
+    if (contextSources.length) {
+      console.log(`foreman tickets: context sources ${contextSources.join(" ")}`);
     }
-    const turn = await foreman.runInstruction(buildPopulateInstruction(sourceHints, ticketsConfig.paths.progressDoc));
+    const turn = await foreman.runInstruction(buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc));
     await builder.close();
     await viewer;
 
@@ -1131,7 +1184,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
 
     const existing = loadTickets(resolveTicketPaths(ticketsConfig, dir).tickets);
     const proposal = extractTicketPopulationProposal(turn.result.text);
-    const materialized = materializeTicketPopulation(proposal, structuredPlan, existing);
+    const materialized = materializeTicketPopulation(proposal, approvedPlan.plan, existing);
     let retirementsConfirmed = false;
     if (!opts.yes) {
       console.log(`foreman tickets: proposal maps ${materialized.sliceToTicket.size} slice(s) and retires ${materialized.retirements.join(", ") || "none"}`);
@@ -1167,14 +1220,92 @@ async function prepareDocumentSources(projectDir: string, sources: string[]): Pr
   return unique(prepared);
 }
 
-function loadPopulationPlan(projectDir: string, sources: string[]): StructuredPlanV1 {
-  for (const source of sources) {
-    const candidate = source.endsWith(".json") ? resolve(projectDir, source) : source.endsWith(".md") ? resolve(projectDir, source.replace(/\.md$/, ".json")) : undefined;
-    if (!candidate || !existsSync(candidate)) continue;
-    const plan = JSON.parse(readFileSync(candidate, "utf8")) as StructuredPlanV1;
-    if (plan.version === 1 && plan.plan_id && Number.isInteger(plan.revision) && plan.content_digest) return plan;
+export interface PopulationPlanResolution {
+  /** Repository-relative path when possible, for both agent instructions and diagnostics. */
+  path: string;
+  plan: StructuredPlanV1;
+}
+
+/**
+ * Locate the plan that Rafi approved independently of the documents the user
+ * wants Ticket Maker to use as context. In particular, FEATURES.md is not a
+ * promise that FEATURES.json is a Rafi plan.
+ */
+export function resolvePopulationPlan(
+  projectDir: string,
+  contextSources: string[],
+  ticketsConfig: TicketsConfig,
+): PopulationPlanResolution {
+  const explicit = unique(contextSources.filter((source) => source.toLowerCase().endsWith(".json")));
+  const explicitResolution = findPopulationPlan(projectDir, explicit);
+  if (explicitResolution) return explicitResolution;
+
+  const activeCandidates = activePopulationPlanCandidates(projectDir, ticketsConfig);
+  const activeResolution = findPopulationPlan(projectDir, activeCandidates);
+  if (activeResolution) return activeResolution;
+
+  const locations = unique([...explicit, ...activeCandidates]);
+  throw new Error(
+    `ticket population could not find a valid approved Rafi plan. Looked for: ${locations.join(", ") || "configured Rafi plan locations"}. `
+    + "Run `rafi plan --validate` (or run `rafi plan` first) and retry.",
+  );
+}
+
+function activePopulationPlanCandidates(projectDir: string, ticketsConfig: TicketsConfig): string[] {
+  const configured = RAFI_CONFIG_FILES.map((file) => resolveConfiguredRafiPlanPath(projectDir, file)).filter((path): path is string => Boolean(path));
+  return unique([
+    ...configured,
+    join(dirname(ticketsConfig.paths.progressDoc), "rafi-plan.json"),
+    "docs/rafi-plan.json",
+  ]);
+}
+
+function resolveConfiguredRafiPlanPath(
+  projectDir: string,
+  file: typeof RAFI_CONFIG_FILES[number],
+): string | undefined {
+  const configPath = join(projectDir, file);
+  if (!existsSync(configPath)) return undefined;
+  const raw = parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${file}: expected a YAML object`);
   }
-  throw new Error("ticket population requires the approved paired structured plan (normally docs/rafi-plan.json); run `rafi plan --validate` first");
+  const docs = raw.docs as Record<string, unknown> | undefined;
+  if (typeof docs?.root !== "string") return undefined;
+  return `${validateDocsRoot(projectDir, docs.root)}/rafi-plan.json`;
+}
+
+function findPopulationPlan(projectDir: string, candidates: string[]): PopulationPlanResolution | undefined {
+  for (const candidate of candidates) {
+    const absolute = resolve(projectDir, candidate);
+    if (!existsSync(absolute)) continue;
+    try {
+      const plan = JSON.parse(readFileSync(absolute, "utf8")) as StructuredPlanV1;
+      if (plan.version === 1 && typeof plan.plan_id === "string" && plan.plan_id && Number.isInteger(plan.revision) && typeof plan.content_digest === "string" && plan.content_digest) {
+        return { path: displayPath(projectDir, absolute), plan };
+      }
+    } catch {
+      // A JSON context document is not necessarily a Rafi plan. Keep looking
+      // for the active approved plan and report every location if none exists.
+    }
+  }
+  return undefined;
+}
+
+function displayPath(projectDir: string, absolutePath: string): string {
+  const path = relative(projectDir, absolutePath).replace(/\\/g, "/");
+  return path && !path.startsWith("../") ? path : absolutePath;
+}
+
+function samePath(projectDir: string, first: string, second: string): boolean {
+  return resolve(projectDir, first) === resolve(projectDir, second);
+}
+
+function isApprovedPlanArtifact(projectDir: string, source: string, approvedDataPath: string): boolean {
+  if (samePath(projectDir, source, approvedDataPath)) return true;
+  const dataPath = resolve(projectDir, approvedDataPath);
+  return source.toLowerCase().endsWith(".md")
+    && resolve(projectDir, source) === dataPath.replace(/\.json$/i, ".md");
 }
 
 export interface TicketOwnershipReceipt { path: string; category: "tickets"; origin: string }

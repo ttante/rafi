@@ -58,15 +58,35 @@ test("buildClaudeQueryOptions forwards cwd, model, effort, and resumeSessionId u
   assert.equal(opts.resume, "sess-abc");
 });
 
-test("Claude QA runs fail closed in an OS sandbox with only isolated scratch writable", () => {
-  const opts = buildClaudeQueryOptions({ ...BASE_OPTS, cwd: "/tmp/qa/review", configRoot: "/project", sessionRole: "qa", sandboxMode: "read-only" });
-  assert.deepEqual(opts.settingSources, []);
-  assert.deepEqual(opts.disallowedTools, ["Write", "Edit", "NotebookEdit"]);
-  assert.equal((opts.env as NodeJS.ProcessEnv).TMPDIR, "/tmp/qa/scratch");
-  assert.deepEqual(opts.sandbox, {
-    enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
-    filesystem: { allowWrite: ["/tmp/qa/scratch"], denyWrite: ["/tmp/qa/review", "/project"] },
-  });
+test("Claude read-only roles load user authentication settings but no project settings", () => {
+  for (const sessionRole of ["qa", "planner", "manager"] as const) {
+    const opts = buildClaudeQueryOptions({ ...BASE_OPTS, cwd: "/tmp/qa/review", configRoot: "/project", sessionRole, sandboxMode: "read-only" });
+    assert.deepEqual(opts.settingSources, ["user"]);
+    assert.deepEqual(opts.disallowedTools, ["Write", "Edit", "NotebookEdit"]);
+    assert.equal((opts.env as NodeJS.ProcessEnv).TMPDIR, "/tmp/qa/scratch");
+    assert.deepEqual(opts.sandbox, {
+      enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
+      filesystem: { allowWrite: ["/tmp/qa/scratch"], denyWrite: ["/tmp/qa/review", "/project"] },
+    });
+  }
+});
+
+test("Claude QA retains enterprise gateway and api-key-helper refresh settings", () => {
+  const originalBaseUrl = process.env.ANTHROPIC_BASE_URL;
+  const originalHelperTtl = process.env.CLAUDE_CODE_API_KEY_HELPER_TTL_MS;
+  process.env.ANTHROPIC_BASE_URL = "https://claude-gateway.example.test";
+  process.env.CLAUDE_CODE_API_KEY_HELPER_TTL_MS = "3600000";
+  try {
+    const opts = buildClaudeQueryOptions({ ...BASE_OPTS, cwd: "/tmp/qa/review", sessionRole: "qa", sandboxMode: "read-only" });
+    const env = opts.env as NodeJS.ProcessEnv;
+    assert.equal(env.ANTHROPIC_BASE_URL, "https://claude-gateway.example.test");
+    assert.equal(env.CLAUDE_CODE_API_KEY_HELPER_TTL_MS, "3600000");
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
+    else process.env.ANTHROPIC_BASE_URL = originalBaseUrl;
+    if (originalHelperTtl === undefined) delete process.env.CLAUDE_CODE_API_KEY_HELPER_TTL_MS;
+    else process.env.CLAUDE_CODE_API_KEY_HELPER_TTL_MS = originalHelperTtl;
+  }
 });
 
 test("Claude cumulative usage replaces absolute SDK totals and never fabricates zero usage", () => {

@@ -19,10 +19,14 @@ export function frozenQaRuntimeSettings(adapter: BuilderAdapter, metadata: QaRun
 
 export function describeQaRuntimeHandle(adapter: BuilderAdapter, metadata: QaRuntimeMetadata | undefined, handoffReceipt: QaSessionHandle["handoffReceipt"]): QaSessionHandle {
   const settings = frozenQaRuntimeSettings(adapter, metadata);
-  const confinementPolicy = { sandboxMode: "read-only", settingsSources: "none", permissions: readOnlyPermissionConfig(), dependencyProjection: "read-only-symlink", scratch: "sibling-temp-directory" };
+  // `settingSources` is a Claude Agent SDK control. Claude read-only sessions
+  // need the machine owner's authentication settings; Codex does not receive
+  // that SDK option.
+  const settingsSources = adapter.agent === "claude" ? "user" as const : "none" as const;
+  const confinementPolicy = { sandboxMode: "read-only", settingsSources, permissions: readOnlyPermissionConfig(), dependencyProjection: "read-only-symlink", scratch: "sibling-temp-directory" };
   const confinementBase = {
     version: 2 as const, sourceMode: "read-only" as const, scratchMode: "isolated" as const,
-    settingsSources: "none" as const, networkMode: "provider-required" as const,
+    settingsSources, networkMode: "provider-required" as const,
     environmentDigest: qaDigest("qa-confinement-environment", { runtime: settings.make, model: settings.model, reasoning: settings.reasoning, fast: settings.fast, platform: process.platform, arch: process.arch }),
     policyDigest: qaDigest("qa-confinement-policy", confinementPolicy),
   };

@@ -35,6 +35,7 @@ import {
   SOURCE_REQUEST_START,
 } from "ai-foreman/sources/source-registry.js";
 import { chooseStagedSourceDisposition, handlePlanningInput, parseSourceStorage, promptSourceStorage } from "./planningDriver.js";
+import { resolvePlanningRuntime } from "./planningRuntime.js";
 import {
   checkpointInterview,
   completeInterview,
@@ -262,7 +263,15 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
     let grill = interview?.planningMode ?? (interview?.answers.grill === "exhaustive" ? "exhaustive" : undefined) ?? (opts.grillMe === true || argv.includes("--grill-me")
       ? "exhaustive"
       : interactive && !argv.includes("--no-grill-me") ? await promptGrill() : "standard");
-    const agent = opts.agent ?? (resumingInterview ? interview?.runtime.runtime : undefined) ?? await chooseRuntime(config, interactive);
+    const restoredAgent = opts.agent ?? (resumingInterview ? interview?.runtime.runtime : undefined);
+    const runtimeSelection = restoredAgent
+      ? { kind: "selected" as const, runtime: restoredAgent }
+      : await resolvePlanningRuntime(config.harness.targets, interactive);
+    if (runtimeSelection.kind === "cancelled") {
+      console.log("rafi tickets plan: cancelled; tracker unchanged");
+      return;
+    }
+    const agent = runtimeSelection.kind === "selected" ? runtimeSelection.runtime : undefined;
     const sessionOverrides = resumingInterview
       ? { model: opts.model ?? interview?.runtime.model, effort: opts.effort as EffortLevel | undefined }
       : await chooseSessionOverrides(opts, interactive);
@@ -528,18 +537,6 @@ function ensureTracker(projectDir: string, interactive: boolean): void {
   if (existsSync(join(projectDir, ".tickets", "config.yaml"))) return;
   if (!interactive) throw new Error("ticket tracker is missing; run `rafi tickets init` first");
   runSelf(["tickets", "init", "--project", projectDir, "--yes"]);
-}
-
-async function chooseRuntime(config: ProjectConfig, interactive: boolean): Promise<string | undefined> {
-  const targets = config.harness.targets;
-  if (targets.length === 1) return targets[0];
-  if (!interactive) return undefined;
-  const { select, isCancel } = await import("@clack/prompts");
-  const answer = await select({ message: "Both runtimes are configured. Which should plan this session?", options: [
-    { value: "claude", label: "Claude (Recommended)" }, { value: "codex", label: "Codex" },
-  ] });
-  if (isCancel(answer)) return undefined;
-  return String(answer);
 }
 
 async function promptGrill(): Promise<"standard" | "exhaustive"> {

@@ -63,6 +63,7 @@ import {
   validateSourceVersionRef,
   SOURCE_REQUEST_END,
   SOURCE_REQUEST_START,
+  type StructuredSourceRequest,
 } from "ai-foreman/sources/source-registry.js";
 import { chooseStagedSourceDisposition, handlePlanningInput, parseSourceStorage, promptSourceStorage } from "./planningDriver.js";
 import type { AnsweredProviderQuestion } from "ai-foreman/provider-questions.js";
@@ -247,6 +248,25 @@ export function resolvePlanSources(projectDir: string, explicitSources?: string[
     if (sources.length > 0) return sources;
   }
   return undefined;
+}
+
+/**
+ * Promote only exact, currently existing local pending sources. This keeps a
+ * create-time answer such as `FEATURES.md` available to both Planner and
+ * Ticket Maker without making prose, missing files, or globs fail planning.
+ */
+export function resolvablePendingLocalSourceRequests(
+  projectDir: string,
+  registry: SourceRegistryConfig,
+): StructuredSourceRequest[] {
+  return (registry.pending ?? []).flatMap(({ description }) => {
+    const request = sourceRequestFromAnswer(description, projectDir);
+    if (request.type !== "local" || !request.locator?.path) return [];
+    if (!existsSync(resolve(projectDir, request.locator.path))) return [];
+    // Keep the original description so registration removes only the pending
+    // item it successfully captured.
+    return [{ ...request, description }];
+  });
 }
 
 export function resolvePlanArtifactPaths(
@@ -575,6 +595,15 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
     const sourceAnswers = opts.sources ?? resolvePlanSources(projectDir) ?? [];
     if (!selectedStorage && interactiveInterview && !loadedSources.configured && sourceAnswers.length) selectedStorage = await promptSourceStorage();
     if (selectedStorage) stagedSources = setSourceStorage(stagedSources, selectedStorage);
+    // `rafi create` preserves source answers as pending text so prose is never
+    // guessed at or split. Capture an unambiguous existing local path before
+    // the planner starts; leave all other pending descriptions for the
+    // agent-guided intake flow.
+    const pendingLocalSources = resolvablePendingLocalSourceRequests(projectDir, stagedSources);
+    if (pendingLocalSources.length) {
+      const registered = await registerSourceRequests(projectDir, stagedSources, pendingLocalSources, { storage: selectedStorage });
+      stagedSources = registered.registry;
+    }
     if (sourceAnswers.length) {
       const registered = await registerSourceRequests(projectDir, stagedSources, sourceAnswers.map((answer) => sourceRequestFromAnswer(answer, projectDir)), { storage: selectedStorage });
       stagedSources = registered.registry;
@@ -892,7 +921,6 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       }
     }
     const written = writeStructuredPlanArtifacts(projectDir, docsRoot, plan);
-    saveSourceRegistry(projectDir, stagedSources);
     if (!stagedProjectConfig || !selectedAgentDefaults) throw new Error("approved planning decisions are unavailable for atomic config publication");
     const savedBuild = stagedProjectConfig.tickets?.build ?? {};
     const nextProjectConfig: ProjectConfig = {
@@ -916,6 +944,10 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       || readback.agent_defaults?.roles.builder?.compact_maximum !== (selectedAgentDefaults.roles.builder?.compact_maximum ?? 10)) {
       throw new Error("approved host workflow decisions failed config readback verification");
     }
+    // `nextProjectConfig` was read before source capture. Publish the staged
+    // registry after that config write so its entries (and removed pending
+    // descriptions) cannot be overwritten by the stale snapshot.
+    saveSourceRegistry(projectDir, stagedSources);
     const decisionReceipt = {
       version: 1, workMode: selectedWorkMode, consequences: workModeConsequences(selectedWorkMode), branchPrefix: selectedBranchPrefix,
       autoCompactThresholdPercent: selectedAgentDefaults.roles.builder?.auto_compact_threshold_percent ?? 50,

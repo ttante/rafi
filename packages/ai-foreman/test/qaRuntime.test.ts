@@ -50,11 +50,20 @@ test("QA decoration settings use the actual frozen provider configuration and ca
   const handle = describeQaRuntimeHandle(active, frozen, { kind: "initial" });
   assert.deepEqual(displayed, actual);
   assert.deepEqual(handle.runtimeContext, actual);
+  assert.equal(handle.confinement.settingsSources, "user");
   displayed.model = "later-change";
   assert.equal(frozen.settings.model, "accepted-model");
   assert.equal((handle.runtimeContext as ResolvedAgentSettings).model, "accepted-model");
   assert.throws(() => frozenQaRuntimeSettings(active, metadata(SETTINGS)), /does not match/);
   assert.throws(() => frozenQaRuntimeSettings(active, undefined), /no frozen/);
+});
+
+test("QA confinement records Claude's user auth source without attributing it to Codex", () => {
+  const claude = describeQaRuntimeHandle(adapter("claude", "claude-auth", 0), metadata({ ...SETTINGS, make: "claude" }), { kind: "initial" });
+  const codex = describeQaRuntimeHandle(adapter("codex", "codex-auth", 0), metadata(SETTINGS), { kind: "initial" });
+
+  assert.equal(claude.confinement.settingsSources, "user");
+  assert.equal(codex.confinement.settingsSources, "none");
 });
 
 for (const runtime of ["claude", "codex"] as const) {

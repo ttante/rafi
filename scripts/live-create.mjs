@@ -55,6 +55,7 @@ function createResponder() {
     stopAnswer: "Stop questions and make the plan now",
     setupSteps: [
       { prompt: "App name:", keys: "Rafi Live Todo\r" },
+      { prompt: "Are you starting a new app or adding Rafi to an existing app", keys: "\r" },
       { prompt: "Frontend stack", keys: "React TypeScript (Vite)\r" },
       { prompt: "Backend stack", keys: "FastAPI\r" },
       { prompt: "Database:", keys: "PostgreSQL\r" },
@@ -72,7 +73,7 @@ function createResponder() {
     ],
     ticketSetupSteps: [
       { prompt: "Run `rafi tickets setup:init` now", keys: "\r" },
-      { prompt: "Which ticket setup section should be configured", keys: "\u001B[B\u001B[B\u001B[B\r" },
+      { prompt: "What would you like to configure for tickets", keys: "\u001B[B\u001B[B\u001B[B\r" },
       { prompt: "Primary ticket source:", keys: "\r" },
       { prompt: "Local source paths or globs", keys: "\r" },
       { prompt: "When both runtimes are configured", keys: "\r" },

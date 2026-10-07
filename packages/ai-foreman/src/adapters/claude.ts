@@ -64,7 +64,10 @@ export function buildClaudeQueryOptions(
     permissionMode: qaReadOnly ? "default" : "acceptEdits",
     effort: opts.effort,
     extraArgs: opts.fast ? { fast: null } : undefined,
-    settingSources: qaReadOnly ? [] : ["user", "project", "local"],
+    // Read-only roles still need the user's Claude authentication settings (for
+    // example, an enterprise apiKeyHelper). Do not load repository-controlled
+    // settings in those roles.
+    settingSources: qaReadOnly ? ["user"] : ["user", "project", "local"],
     ...(qaReadOnly ? { disallowedTools: ["Write", "Edit", "NotebookEdit"] } : {}),
     ...(qaReadOnly ? { sandbox: {
       enabled: true,
@@ -88,7 +91,7 @@ export function buildClaudeQueryOptions(
 }
 
 function qaEnvironment(source: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
-  const allowed = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM", "NO_COLOR", "FORCE_COLOR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
+  const allowed = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM", "NO_COLOR", "FORCE_COLOR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_API_KEY_HELPER_TTL_MS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
   return { ...Object.fromEntries(allowed.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]!]])), TMPDIR: join(dirname(cwd), "scratch") };
 }
 

@@ -1366,7 +1366,7 @@ function validateQaSessionHandle(handle: QaSessionHandle, reviewedSnapshotPath: 
     throw new Error("QA session handle has an invalid or mismatched scoped identity");
   }
   if (!handle.effectiveRoleInstructions.trim() || confinement.version !== 2 || confinement.sourceMode !== "read-only"
-    || confinement.scratchMode !== "isolated" || confinement.settingsSources !== "none"
+    || confinement.scratchMode !== "isolated" || !["none", "user"].includes(confinement.settingsSources)
     || !["disabled", "provider-required"].includes(confinement.networkMode)
     || !/^[a-f0-9]{64}$/.test(confinement.environmentDigest) || !/^[a-f0-9]{64}$/.test(confinement.policyDigest)
     || digest !== qaDigest("qa-confinement", confinementFields)) {

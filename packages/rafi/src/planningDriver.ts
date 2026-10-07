@@ -16,6 +16,13 @@ export interface PlanningInputResult {
   cancelled: boolean;
 }
 
+export interface PlanningInputPrompts {
+  select(options: { message: string; options: Array<{ value: string; label: string }> }): Promise<unknown>;
+  text(options: { message: string; placeholder?: string }): Promise<unknown>;
+  isCancel(value: unknown): boolean;
+  log?: { info(message: string): void };
+}
+
 /** Shared ordinary-question and source-request turn handling for both planning commands. */
 export async function handlePlanningInput(options: {
   projectDir: string;
@@ -26,17 +33,40 @@ export async function handlePlanningInput(options: {
   storage?: SourceSnapshotStorage;
   interactive: boolean;
   context?: (registry: SourceRegistryConfig) => unknown;
+  prompts?: PlanningInputPrompts;
 }): Promise<PlanningInputResult> {
   const requests = extractSourceRequests(options.output);
   const received = requests.length
     ? await registerSourceRequests(options.projectDir, options.registry, requests, { storage: options.storage })
     : { registry: options.registry, snapshots: [] };
   if (!options.interactive) throw new Error(`planner needs input: ${options.question ?? "additional guidance required"}`);
-  const { text, isCancel, log } = await import("@clack/prompts");
-  if (options.choices?.length) log.info(`Choices: ${options.choices.join(" | ")}`);
-  const value = await text({ message: options.question ?? "Planner needs input:", placeholder: options.choices?.join(" | ") });
-  if (isCancel(value)) return { registry: received.registry, snapshots: received.snapshots, cancelled: true };
-  const answer = String(value);
+  const prompts = options.prompts ?? await import("@clack/prompts");
+  let answer: string;
+  if (options.choices?.length) {
+    const customValue = "custom-response";
+    const selected = await prompts.select({
+      message: options.question ?? "Planner needs input:",
+      options: [
+        ...options.choices.map((label, index) => ({ value: `planner-choice-${index}`, label })),
+        { value: customValue, label: "Custom response" },
+      ],
+    });
+    if (prompts.isCancel(selected)) return { registry: received.registry, snapshots: received.snapshots, cancelled: true };
+    if (selected === customValue) {
+      const value = await prompts.text({ message: options.question ?? "Planner needs input:" });
+      if (prompts.isCancel(value)) return { registry: received.registry, snapshots: received.snapshots, cancelled: true };
+      answer = String(value);
+    } else {
+      const index = typeof selected === "string" ? /^planner-choice-(\d+)$/.exec(selected)?.[1] : undefined;
+      const choice = index === undefined ? undefined : options.choices[Number(index)];
+      if (choice === undefined) throw new Error("planner choice selection was invalid");
+      answer = choice;
+    }
+  } else {
+    const value = await prompts.text({ message: options.question ?? "Planner needs input:" });
+    if (prompts.isCancel(value)) return { registry: received.registry, snapshots: received.snapshots, cancelled: true };
+    answer = String(value);
+  }
   let registry = received.registry; const snapshots = [...received.snapshots];
   if (requests.length) {
     const answerSources = await registerSourceRequests(options.projectDir, registry, [sourceRequestFromAnswer(answer, options.projectDir)], { storage: options.storage });

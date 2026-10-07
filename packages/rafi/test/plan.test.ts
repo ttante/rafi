@@ -14,6 +14,7 @@ import {
   resolveBrief,
   resolvePlanDocsRoot,
   resolvePlanSources,
+  resolvablePendingLocalSourceRequests,
   runPlanWorkflow,
   stripFinalStepStatusMarker,
   validatePlanMarkdown,
@@ -188,6 +189,33 @@ test("plan sources prefer an explicit flag and otherwise carry create planning s
     assert.deepEqual(resolvePlanSources(dir, ["manual.md"]), ["manual.md"]);
   } finally {
     rmSync(dir, { recursive: true });
+  }
+});
+
+test("only existing local pending create sources are promoted before planning", () => {
+  const dir = tempDir();
+  try {
+    writeFileSync(join(dir, "FEATURES.md"), "# Features\n", "utf8");
+    const requests = resolvablePendingLocalSourceRequests(dir, {
+      version: 1,
+      snapshot_storage: "local",
+      entries: [],
+      pending: [
+        { description: "FEATURES.md", created_at: "2026-01-01T00:00:00.000Z" },
+        { description: "missing-requirements.md", created_at: "2026-01-01T00:00:00.000Z" },
+        { description: "Review the old requirements before planning", created_at: "2026-01-01T00:00:00.000Z" },
+        { description: "docs/*.md", created_at: "2026-01-01T00:00:00.000Z" },
+      ],
+    });
+
+    assert.deepEqual(requests, [{
+      type: "local",
+      label: "FEATURES.md",
+      locator: { path: "FEATURES.md" },
+      description: "FEATURES.md",
+    }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

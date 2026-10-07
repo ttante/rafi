@@ -35,7 +35,8 @@ export interface QaConfinementV2 {
   sourceMode: "read-only";
   scratchMode: "isolated";
   networkMode: "disabled" | "provider-required";
-  settingsSources: "none";
+  /** "user" permits the machine owner's Claude authentication settings, but no project settings. */
+  settingsSources: "none" | "user";
   environmentDigest: string;
   policyDigest: string;
 }

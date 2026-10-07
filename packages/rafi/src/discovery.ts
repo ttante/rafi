@@ -31,6 +31,8 @@ export interface DiscoveryAnswers {
 
 export interface DiscoveryEnvelope {
   version: 1;
+  /** Stack inferred from the inspected codebase, for the create interview. */
+  detected_stack?: DiscoveredStack;
   discovered_artifacts?: unknown[];
   likely_current_state?: unknown;
   relevant_prior_plans_docs_tickets?: unknown[];
@@ -39,6 +41,12 @@ export interface DiscoveryEnvelope {
   source_candidates?: unknown[];
   excluded_or_avoided_resources?: unknown[];
   handoff_brief?: string;
+}
+
+export interface DiscoveredStack {
+  frontend?: string;
+  backend?: string;
+  database?: string;
 }
 
 export interface DiscoveryInventoryEntry {
@@ -366,6 +374,9 @@ Artifact discovery checklist:
 - Older artifacts: project.yaml, .foreman/runs/, foreman.yaml, root or docs-local tickets.yaml, older .tickets/config.yaml with queue_limit
 - Non-Rafi project artifacts: roadmap, spec, design, plan, TODO, backlog, milestone docs, and obvious local issue exports
 
+Stack discovery checklist:
+- Infer the frontend, backend, and database from the inspected codebase and its configuration. Use a short, concrete value for each field when evidence exists; use an empty string when it cannot be determined. Do not guess from project names or planning documents alone.
+
 Source intake protocol:
 - Preserve every user source answer verbatim. Do not split it on spaces, commas, or plus signs.
 - If a supported source is needed, emit one JSON object or array between:
@@ -383,7 +394,7 @@ Permissions:
 Output:
 - Print a readable discovery report first.
 - Then print exactly one JSON object between ${DISCOVERY_ENVELOPE_START} and ${DISCOVERY_ENVELOPE_END}.
-- Envelope shape: {"version":1,"discovered_artifacts":[],"likely_current_state":{},"relevant_prior_plans_docs_tickets":[],"rafi_history_confidence":{"answer":"...","confidence":"low|medium|high","basis":"..."},"recommended_next_command":"rafi tickets plan|rafi tickets populate|rafi create|none","source_candidates":[],"excluded_or_avoided_resources":[],"handoff_brief":"..."}.
+- Envelope shape: {"version":1,"detected_stack":{"frontend":"...","backend":"...","database":"..."},"discovered_artifacts":[],"likely_current_state":{},"relevant_prior_plans_docs_tickets":[],"rafi_history_confidence":{"answer":"...","confidence":"low|medium|high","basis":"..."},"recommended_next_command":"rafi tickets plan|rafi tickets populate|rafi create|none","source_candidates":[],"excluded_or_avoided_resources":[],"handoff_brief":"..."}.
 - End with exactly one final marker line:
 STEP_STATUS: plan_complete | summary="discovery_complete"`;
 }
@@ -403,6 +414,27 @@ export function discoveryEnvelopePlanningSources(envelope: DiscoveryEnvelope | u
     sections.push(`Discovery handoff:\n${envelope.handoff_brief.trim()}`);
   }
   return sections.length ? sections.join("\n\n") : undefined;
+}
+
+/**
+ * Return usable stack values from a discovery report. The agent's envelope is
+ * intentionally best-effort, so callers retain their interview defaults for
+ * anything discovery could not establish.
+ */
+export function discoveryEnvelopeStack(
+  envelope: DiscoveryEnvelope | undefined,
+  fallback: Required<DiscoveredStack>,
+): Required<DiscoveredStack> {
+  const candidate = envelope?.detected_stack;
+  const value = (field: keyof DiscoveredStack): string => {
+    const discovered = candidate?.[field];
+    return typeof discovered === "string" && discovered.trim() ? discovered.trim() : fallback[field];
+  };
+  return {
+    frontend: value("frontend"),
+    backend: value("backend"),
+    database: value("database"),
+  };
 }
 
 export function extractDiscoveryEnvelope(output: string): DiscoveryEnvelope | undefined {

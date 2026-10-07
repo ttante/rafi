@@ -25,6 +25,7 @@ import {
   cmdPopulateCli,
   buildPopulateAgentRunOptions,
   buildPopulateInstruction,
+  resolvePopulationPlan,
   resolvePopulateSources,
 } from "../src/cli/tickets.js";
 import { loadTicketsConfig } from "../src/tickets/config.js";
@@ -398,28 +399,99 @@ test("bulk reset scopes match the agreed terminal-state rules", () => {
 
 // ── populate instruction ─────────────────────────────────────────────────────
 
-test("populate instruction includes optional source hints and scan guidance", () => {
-  const instruction = buildPopulateInstruction(["docs/tickets.md", "docs/plans/**"]);
+test("populate instruction separates the approved plan from context source hints", () => {
+  const instruction = buildPopulateInstruction("docs/rafi-plan.json", ["docs/tickets.md", "docs/plans/**"]);
 
-  assert.match(instruction, /User-provided planning source hints/);
+  assert.match(instruction, /Approved structured Rafi plan/);
+  assert.match(instruction, /docs\/rafi-plan\.json/);
+  assert.match(instruction, /Original context source hints/);
   assert.match(instruction, /- docs\/tickets\.md/);
   assert.match(instruction, /- docs\/plans\/\*\*/);
   assert.match(instruction, /files, folders, or globs/);
   assert.match(instruction, /Any reasonable project-planning format is acceptable/);
-  assert.match(instruction, /Then inspect the repository for existing planning sources/);
+  assert.match(instruction, /do not replace or redefine the approved plan/);
 });
 
 test("populate instruction uses the configured progress doc path", () => {
-  const instruction = buildPopulateInstruction(undefined, "docs-rafi/ticket-progress.md");
+  const instruction = buildPopulateInstruction("docs-rafi/rafi-plan.json", undefined, "docs-rafi/ticket-progress.md");
   assert.match(instruction, /docs-rafi\/ticket-progress\.md if it exists/);
   assert.doesNotMatch(instruction, /docs\/ticket-progress\.md if it exists/);
 });
 
 test("populate instruction says to scan when no source hints are provided", () => {
-  const instruction = buildPopulateInstruction();
+  const instruction = buildPopulateInstruction("docs/rafi-plan.json");
 
-  assert.match(instruction, /No specific planning sources were provided/);
-  assert.match(instruction, /Scan the repository for relevant planning and ticketing documents/);
+  assert.match(instruction, /No original context sources were provided/);
+  assert.match(instruction, /Use the approved plan/);
+});
+
+function approvedPlan(planId = "pln_test"): Record<string, unknown> {
+  return { version: 1, plan_id: planId, revision: 1, content_digest: "a".repeat(64) };
+}
+
+test("manual populate sources can include context while an explicit Rafi plan takes priority", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeFileSync(join(dir, "docs", "feature-notes.md"), "# Notes\n", "utf8");
+    writeFileSync(join(dir, "docs", "rafi-plan.json"), JSON.stringify(approvedPlan("pln_active")), "utf8");
+    writeFileSync(join(dir, "manual-plan.json"), JSON.stringify(approvedPlan("pln_manual")), "utf8");
+
+    const resolved = resolvePopulationPlan(dir, ["docs/feature-notes.md", "manual-plan.json"], loadTicketsConfig(dir));
+
+    assert.equal(resolved.path, "manual-plan.json");
+    assert.equal(resolved.plan.plan_id, "pln_manual");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("population discovers the active plan at a configured non-default docs root", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "project-docs" });
+    writeFileSync(join(dir, "rafi-config.yaml"), stringify({ docs: { root: "project-docs" } }), "utf8");
+    writeFileSync(join(dir, "project-docs", "rafi-plan.json"), JSON.stringify(approvedPlan("pln_custom")), "utf8");
+
+    const resolved = resolvePopulationPlan(dir, ["FEATURES.md"], loadTicketsConfig(dir));
+
+    assert.equal(resolved.path, "project-docs/rafi-plan.json");
+    assert.equal(resolved.plan.plan_id, "pln_custom");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("population resolves docs-rafi JSON when its Markdown plan is the selected source", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC", docsRoot: "docs-rafi" });
+    writeFileSync(join(dir, "docs-rafi", "rafi-plan.md"), "# Approved Rafi plan\n", "utf8");
+    writeFileSync(join(dir, "docs-rafi", "rafi-plan.json"), JSON.stringify(approvedPlan("pln_docs_rafi")), "utf8");
+
+    const selectedSources = resolvePopulateSources(dir, undefined, loadTicketsConfig(dir));
+    assert.deepEqual(selectedSources, ["docs-rafi/rafi-plan.md"]);
+
+    const resolved = resolvePopulationPlan(dir, selectedSources!, loadTicketsConfig(dir));
+    assert.equal(resolved.path, "docs-rafi/rafi-plan.json");
+    assert.equal(resolved.plan.plan_id, "pln_docs_rafi");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("population plan discovery reports searched plan locations without suggesting source JSON companions", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    assert.throws(
+      () => resolvePopulationPlan(dir, ["FEATURES.md"], loadTicketsConfig(dir)),
+      /Looked for: docs\/rafi-plan\.json.*rafi plan --validate/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
 });
 
 test("populate defaults to the latest Rafi plan when present", () => {

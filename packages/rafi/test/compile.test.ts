@@ -69,6 +69,25 @@ test("custom stack values appear in AGENTS.md body", () => {
   assert.ok(body.includes("yarn"), "custom packageManager not in AGENTS.md");
 });
 
+test("compile can keep app-owned root instructions untouched by using Rafi sidecar paths", () => {
+  const dir = tempDir();
+  writeFileSync(join(dir, "AGENTS.md"), "app-owned instructions\n", "utf8");
+  writeFileSync(join(dir, "CLAUDE.md"), "app-owned Claude instructions\n", "utf8");
+  const config = buildProjectConfig(defaultAnswers());
+  config.agent_files = {
+    mode: "overwrite",
+    codex: "./.rafi/agent-files/AGENTS.md",
+    claude: "./.rafi/agent-files/CLAUDE.md",
+  };
+
+  compile(dir, config);
+
+  assert.equal(readFileSync(join(dir, "AGENTS.md"), "utf8"), "app-owned instructions\n");
+  assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "app-owned Claude instructions\n");
+  assert.ok(existsSync(join(dir, ".rafi/agent-files/AGENTS.md")));
+  assert.ok(existsSync(join(dir, ".rafi/agent-files/CLAUDE.md")));
+});
+
 test("custom docs root appears in generated rules and starter docs", () => {
   const dir = tempDir();
   const config = buildProjectConfig(defaultAnswers());
