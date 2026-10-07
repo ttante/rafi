@@ -195,7 +195,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "tsx src/index.ts",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 tsx --test test/providerSmoke.test.ts",
     "prepublishOnly": "tsc -p ../spec/tsconfig.build.json && tsc -p tsconfig.build.json && pnpm --filter ai-foreman test && tsc --noEmit"

@@ -484,11 +484,12 @@ test("GitHub readiness classifies auth, remote, repo, git, and timeout failures"
       code: "network_or_timeout",
       timeout: "250",
       gh: [
-        "#!/usr/bin/env bash",
-        "if [ \"$1\" = \"--version\" ]; then echo 'gh version test'; exit 0; fi",
-        "if [ \"$1 $2\" = \"auth status\" ]; then exit 0; fi",
-        "if [ \"$1 $2\" = \"repo view\" ]; then sleep 2; exit 0; fi",
-        "exit 2",
+        `#!${process.execPath}`,
+        "const [first, second] = process.argv.slice(2);",
+        "if (first === '--version') { console.log('gh version test'); process.exit(0); }",
+        "if (first === 'auth' && second === 'status') process.exit(0);",
+        "if (first === 'repo' && second === 'view') { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000); process.exit(0); }",
+        "process.exit(2);",
       ],
       git: [
         "#!/usr/bin/env bash",

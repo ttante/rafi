@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ import { saveTickets } from "../src/tickets/ticketLoader.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "rafi-direct-merge-test-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rafi-direct-merge-test-")));
   const project = join(root, "project");
   const worktree = join(root, "ticket");
   runGit(root, ["init", "-b", "main", project]);
@@ -102,7 +102,7 @@ test("squash resumes after staging the exact merge tree but before committing", 
   const f = fixture();
   try {
     const intent = prepareDirectMerge(f.project, "T1", "ticket/T1", "main", "squash");
-    runGit(f.project, ["merge", "--squash", intent.branch]);
+    runGit(f.project, ["-c", "merge.ff=true", "merge", "--squash", intent.branch]);
     const merged = executeDirectMerge(f.project, intent, "deliver");
     assert.equal(merged, runGit(f.project, ["rev-parse", "main"]).stdout);
     assert.equal(runGit(f.project, ["rev-parse", "main^{tree}"]).stdout, intent.expectedTree);
@@ -113,7 +113,7 @@ test("squash preserves additional edits made after staging its merge tree", () =
   const f = fixture();
   try {
     const intent = prepareDirectMerge(f.project, "T1", "ticket/T1", "main", "squash");
-    runGit(f.project, ["merge", "--squash", intent.branch]);
+    runGit(f.project, ["-c", "merge.ff=true", "merge", "--squash", intent.branch]);
     writeFileSync(join(f.project, "ticket.txt"), "new unreviewed edit\n");
     assert.throws(() => executeDirectMerge(f.project, intent, "deliver"), /unrecognized staged changes/);
     assert.equal(runGit(f.project, ["rev-parse", "main"]).stdout, intent.baseCommit);
