@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
@@ -339,7 +339,7 @@ test("packet storage is owner-only, digest-addressed, locally excluded, and muta
   const dir = repository();
   try {
     const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "../run unsafe", ticketId: "T/1", cycle: 1, reviewAttempt: 1, recoveryStage: "same-session", reportJson: "{}", resources: { prompt: { value: "exact prompt", purpose: "prompt", exactText: true } } });
-    assert.ok(packet.directory.startsWith(join(dir, ".foreman/qa-report-recovery/")));
+    assert.ok(packet.directory.startsWith(join(realpathSync.native(dir), ".foreman/qa-report-recovery/")));
     assert.equal(lstatSync(packet.directory).mode & 0o777, 0o700);
     assert.equal(lstatSync(join(packet.directory, "manifest.json")).mode & 0o777, 0o600);
     assert.equal(readFileSync(join(packet.directory, "context/prompt.txt"), "utf8"), "exact prompt");
@@ -352,7 +352,7 @@ test("packet storage is owner-only, digest-addressed, locally excluded, and muta
     assert.ok(drift.drift.includes("untracked.txt"));
     assert.ok(drift.drift.every((path) => !path.includes("integrity.json") && !path.includes("untracked-manifest.json")));
     const exclude = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], { cwd: dir, encoding: "utf8" }).trim();
-    assert.match(readFileSync(exclude, "utf8"), /qa-report-recovery/);
+    assert.match(readFileSync(exclude, "utf8"), /\.foreman\//);
     const materialized = materializeQaRecoveryContext(packet, dir);
     materialized.verify();
     chmodSync(join(materialized.path, "context/prompt.txt"), 0o600);

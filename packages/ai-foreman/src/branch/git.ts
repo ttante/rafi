@@ -156,7 +156,9 @@ export function mergeBranchToLocalBase(
     runGit(projectDir, ["checkout", baseBranch]);
   }
   if (method === "squash") {
-    runGit(projectDir, ["merge", "--squash", branch]);
+    // A user's global `merge.ff=only` conflicts with `--squash`; pin the
+    // ordinary merge policy so direct delivery remains independent of it.
+    runGit(projectDir, ["-c", "merge.ff=true", "merge", "--squash", branch]);
     runGit(projectDir, ["commit", "-m", message]);
   } else if (method === "merge") {
     runGit(projectDir, ["merge", "--no-ff", branch, "-m", message]);

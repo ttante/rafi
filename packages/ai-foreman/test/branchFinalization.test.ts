@@ -184,7 +184,7 @@ for (const crash of ["staged", "committed", "cleaned", "changed"] as const) {
         db.planOperation({ runId: "run", idempotencyKey: "run:direct-merge:T1", kind: "direct-merge", intent });
         db.updateOperation("run:direct-merge:T1", "in_progress");
         if (crash === "changed") writeFileSync(join(f.worktree, "ticket.txt"), "new unreviewed work\n");
-        else if (crash === "staged") runGit(f.project, ["merge", "--squash", intent.branch]);
+        else if (crash === "staged") runGit(f.project, ["-c", "merge.ff=true", "merge", "--squash", intent.branch]);
         else {
           const merged = executeDirectMerge(f.project, intent, "deliver");
           if (crash === "cleaned") {
