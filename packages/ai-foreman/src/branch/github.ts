@@ -84,10 +84,10 @@ export function originLooksLikeGitHub(cwd: string): boolean {
 export function checkGitHubReadiness(cwd: string): GitHubReadinessResult {
   const ghVersion = runCommand(cwd, "gh", ["--version"], 5_000);
   if (!ghVersion.ok) {
-    return failure("gh_missing", "GitHub CLI is not installed or is not on PATH.", [
+    return classifyCommandFailure(ghVersion, "gh_missing", "GitHub CLI is not installed or is not on PATH.", [
       "Install GitHub CLI: https://cli.github.com/",
       "gh --version",
-    ], ghVersion);
+    ]);
   }
 
   const remote = inspectGitHubRemote(cwd);

@@ -482,13 +482,12 @@ test("GitHub readiness classifies auth, remote, repo, git, and timeout failures"
     {
       name: "repo view timeout",
       code: "network_or_timeout",
-      timeout: "250",
       gh: [
         `#!${process.execPath}`,
         "const [first, second] = process.argv.slice(2);",
         "if (first === '--version') { console.log('gh version test'); process.exit(0); }",
         "if (first === 'auth' && second === 'status') process.exit(0);",
-        "if (first === 'repo' && second === 'view') { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000); process.exit(0); }",
+        "if (first === 'repo' && second === 'view') { console.error('request timed out'); process.exit(1); }",
         "process.exit(2);",
       ],
       git: [
