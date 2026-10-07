@@ -15,6 +15,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { WorkflowDb } from "./workflowDb.js";
+import { canonicalSessionPath } from "./sessionIdentity.js";
 import type { QaFailureDeliveryInput, QaFailureDeliveryResult } from "./qaFailureDelivery.js";
 import { loadProjectAutonomyConfig, resolveAutonomyPolicy } from "./recoveryPolicy.js";
 import {
@@ -1359,7 +1360,7 @@ function validateQaSessionHandle(handle: QaSessionHandle, reviewedSnapshotPath: 
   if (identity.version !== 1 || identity.role !== "qa" || identity.stream !== "qa" || identity.provider !== handle.adapter.agent
     || !identity.sessionId || /^(?:unavailable|unknown)$/i.test(identity.sessionId.trim())
     || !Number.isSafeInteger(identity.generation) || identity.generation < 0
-    || resolve(identity.cwd) !== resolve(reviewedSnapshotPath) || !identity.configRoot
+    || canonicalSessionPath(identity.cwd) !== canonicalSessionPath(reviewedSnapshotPath) || !identity.configRoot
     || Number.isNaN(Date.parse(identity.createdAt)) || !identity.validatedAt || Number.isNaN(Date.parse(identity.validatedAt))
     || handle.adapter.sessionId() !== identity.sessionId || !adapterIdentity
     || stableProviderSessionIdentity(adapterIdentity) !== stableProviderSessionIdentity(identity)) {

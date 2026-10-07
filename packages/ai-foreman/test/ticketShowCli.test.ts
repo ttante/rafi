@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -104,7 +104,7 @@ test("tickets show CLI appends single and bulk payloads without duplicating them
     cmdInit(project, { appName: "CLI output", timezone: "UTC" });
     writeFileSync(join(project, ".tickets", "tickets.yaml"), stringify({ tickets: [definition("T001", 1000), definition("T002", 2000)] }), "utf8");
     const relativeOutput = join("context", "agent-context.txt");
-    const absoluteOutput = join(invocation, relativeOutput);
+    const absoluteOutput = join(realpathSync.native(invocation), relativeOutput);
 
     const created = run(invocation, ["--all", "--json", "--project", project, "--output", relativeOutput]);
     assert.equal(created.status, 0, created.stderr);
