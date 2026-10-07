@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,12 +35,22 @@ test("no packages source references bootstrap-project.sh", () => {
   );
 });
 
-test("no packages source references agent-files/AGENTS", () => {
-  const matches = grepPackages("agent-files/AGENTS");
+test("no packages source references the retired root agent-files/AGENTS path", () => {
+  const legacyPath = "agent-files/AGENTS";
+  const permittedPrefix = ".rafi/";
+  const matches = grepPackages(legacyPath).filter((path) => {
+    const source = readFileSync(path, "utf8");
+    let offset = source.indexOf(legacyPath);
+    while (offset >= 0) {
+      if (source.slice(Math.max(0, offset - permittedPrefix.length), offset) !== permittedPrefix) return true;
+      offset = source.indexOf(legacyPath, offset + legacyPath.length);
+    }
+    return false;
+  });
   assert.deepEqual(
     matches,
     [],
-    `References to agent-files/AGENTS found: ${matches.join(", ")}`,
+    `References to the retired root agent-files/AGENTS path found: ${matches.join(", ")}`,
   );
 });
 
