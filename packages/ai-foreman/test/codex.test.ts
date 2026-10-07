@@ -205,6 +205,18 @@ test("Codex app-server non-recoverable error remains terminal", async () => {
   await a.close();
 });
 
+test("Codex app-server turn waiter fails rather than waiting forever after provider silence", async () => {
+  const a = adapter();
+  const internal = a as unknown as {
+    waitFor(method: string, predicate: (params: Record<string, unknown>) => boolean, timeoutMs?: number): Promise<Record<string, unknown>>;
+  };
+  await assert.rejects(
+    internal.waitFor("turn/completed", () => false, 15),
+    /provider was silent for 0 minutes while waiting for turn\/completed/,
+  );
+  await a.close();
+});
+
 test("Codex app-server preserves complete file-change and future item payloads", async () => {
   const a = adapter();
   const iterator = a.events()[Symbol.asyncIterator]();

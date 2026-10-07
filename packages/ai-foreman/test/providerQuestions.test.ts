@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { createPermissionHandler } from "../src/foreman.js";
 import { PermissionPolicy } from "../src/permissions/policy.js";
+import { withActivityContext, withActivityPhase } from "../src/activity.js";
 import {
   handleProviderQuestionTool,
   isGrillMeProviderQuestion,
@@ -29,6 +30,11 @@ function askInput(questions: unknown[]): Record<string, unknown> {
   return { questions };
 }
 
+function activityOutput(): { chunks: string[]; target: { isTTY: boolean; write(text: string): void } } {
+  const chunks: string[] = [];
+  return { chunks, target: { isTTY: true, write: (value) => { chunks.push(value); } } };
+}
+
 test("AskUserQuestion single-select returns updatedInput answers keyed by question text", async () => {
   const decision = await handleProviderQuestionTool({
     toolName: "AskUserQuestion",
@@ -50,6 +56,36 @@ test("AskUserQuestion single-select returns updatedInput answers keyed by questi
   assert.deepEqual(decision?.updatedInput?.answers, {
     "Which date library should we use?": "Luxon",
   });
+});
+
+test("AskUserQuestion pauses live activity until the local prompt resolves", async () => {
+  let resolveSelection!: (value: string) => void;
+  const selected = new Promise<string>((resolve) => { resolveSelection = resolve; });
+  const sink = activityOutput();
+  await withActivityContext("test", async () => {
+    await withActivityPhase("Claude planning", async () => {
+      const answering = handleProviderQuestionTool({
+        toolName: "AskUserQuestion",
+        input: askInput([{
+          question: "Continue?", header: "Grill-me", multiSelect: false,
+          options: [{ label: "Yes" }, { label: "No" }],
+        }]),
+      }, {
+        interactive: true,
+        prompts: {
+          ...promptDeps({}),
+          select: async () => selected as never,
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const pausedLength = sink.chunks.length;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(sink.chunks.length, pausedLength, "activity must not redraw over the active prompt");
+      resolveSelection("0");
+      assert.equal((await answering)?.behavior, "allow");
+    });
+  }, { output: sink.target, displayDelayMs: 0, tickMs: 5, quietWarningMs: 10_000, ttyMode: "cursor" });
+  assert.match(sink.chunks.join(""), /answer sent; waiting for Claude/);
 });
 
 test("AskUserQuestion custom response records free text as the answer and annotation notes", async () => {

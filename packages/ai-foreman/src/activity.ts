@@ -209,9 +209,15 @@ export class ActivityReporter {
       this.lastSemanticKey = semanticKey;
       return;
     }
+    const semanticKey = semanticStatusKey(body);
+    // Append-only outputs cannot replace an earlier line.  Emit the first
+    // state and meaningful state changes, but do not turn a changing counter
+    // or elapsed time into an endless log stream.
+    if (semanticKey === this.lastSemanticKey) return;
     if (force || now - this.lastHeartbeatAt >= this.heartbeatMs) {
       this.lastHeartbeatAt = now;
       this.output.write(`[${new Date(now).toISOString()}] rafi working: ${body} (${formatDuration(now - this.commandStartedAt)})\n`);
+      this.lastSemanticKey = semanticKey;
     }
   }
 
@@ -287,7 +293,13 @@ function clean(value: string, maximum: number): string {
 }
 
 function semanticStatusKey(body: string): string {
-  return body.replace(/\p{Number}+(?:[.,]\p{Number}+)*/gu, "#");
+  return body
+    // Counters, percentages, ticket suffixes, and model version numbers.
+    .replace(/\p{Number}+(?:[.,]\p{Number}+)*/gu, "#")
+    // Commit IDs, request IDs, and generated hexadecimal identifiers.
+    .replace(/\b[\da-f]{7,}\b/giu, "#")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function resolveTtyMode(requested?: ActivityTtyMode): Exclude<ActivityTtyMode, "auto"> {

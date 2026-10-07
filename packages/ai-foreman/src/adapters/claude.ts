@@ -46,6 +46,8 @@ import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
 import { createProviderSessionRef, validateProviderSessionScope, canonicalSessionPath } from "../sessionIdentity.js";
 import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
 
+const DEFAULT_PROVIDER_IDLE_TIMEOUT_MS = 30 * 60_000;
+
 /**
  * Pure function: build the `options` object passed to `query()`.
  * Extracted so tests can assert on the shape without making a live SDK call.
@@ -249,6 +251,11 @@ export class ClaudeAdapter implements BuilderAdapter {
     reject: (e: Error) => void;
     instruction: string;
     turnId: string;
+    idleTimer?: ReturnType<typeof setTimeout>;
+    /** Native questions wait on the person, not the provider. */
+    providerQuestionWaits?: number;
+    /** The local prompt resolved and its answer is being returned to Claude. */
+    providerQuestionAnswered?: boolean;
   };
   private terminalResult?: TurnResult;
   private streamEnded = false;
@@ -327,18 +334,26 @@ export class ClaudeAdapter implements BuilderAdapter {
             toolUseID?: string;
           } = {},
         ): Promise<PermissionResult> => {
-          const decision = await opts.permission({
-            toolName,
-            input,
-            signal: requestOptions.signal,
-            title: requestOptions.title,
-            displayName: requestOptions.displayName,
-            description: requestOptions.description,
-            decisionReason: requestOptions.decisionReason,
-            blockedPath: requestOptions.blockedPath,
-            toolUseID: requestOptions.toolUseID,
-          });
-          return permissionDecisionToClaudeResult(decision, requestOptions.toolUseID);
+          const isProviderQuestion = toolName === "AskUserQuestion";
+          if (isProviderQuestion) this.beginProviderQuestionWait();
+          try {
+            const decision = await opts.permission({
+              toolName,
+              input,
+              signal: requestOptions.signal,
+              title: requestOptions.title,
+              displayName: requestOptions.displayName,
+              description: requestOptions.description,
+              decisionReason: requestOptions.decisionReason,
+              blockedPath: requestOptions.blockedPath,
+              toolUseID: requestOptions.toolUseID,
+            });
+            if (isProviderQuestion) this.endProviderQuestionWait(decision.behavior === "allow");
+            return permissionDecisionToClaudeResult(decision, requestOptions.toolUseID);
+          } catch (error) {
+            if (isProviderQuestion) this.endProviderQuestionWait(false);
+            throw error;
+          }
         },
       },
     });
@@ -381,6 +396,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   private handle(msg: SDKMessage): void {
+    this.touchPendingTurn();
     if ("session_id" in msg && typeof msg.session_id === "string") {
       this.observeSession(msg.session_id, "cwd" in msg && typeof msg.cwd === "string" ? msg.cwd : undefined);
     }
@@ -557,7 +573,8 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.turnSignals = [];
       this.structuredError = undefined;
       this.apiErrorStatus = undefined;
-      this.pending = { resolve, reject, instruction: text, turnId: this.activeProviderTurnId ?? randomUUID() };
+      const pending = this.pending = { resolve, reject, instruction: text, turnId: this.activeProviderTurnId ?? randomUUID() };
+      this.armPendingTurn(pending);
       this.inbox.push({
         type: "user",
         message: { role: "user", content: text },
@@ -801,6 +818,7 @@ export class ClaudeAdapter implements BuilderAdapter {
     const pending = this.pending;
     if (!pending) return;
     this.pending = undefined;
+    if (pending.idleTimer) clearTimeout(pending.idleTimer);
     if (!result.turnId) {
       result.turnId = pending.turnId; result.hostInstruction = pending.instruction; result.providerInstruction = pending.instruction;
       result.rawResponse = result.text; result.cleanedResponse = result.text;
@@ -808,6 +826,49 @@ export class ClaudeAdapter implements BuilderAdapter {
     }
     if (emit) this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
     pending.resolve(result);
+  }
+
+  private touchPendingTurn(): void {
+    if (this.pending) this.armPendingTurn(this.pending);
+  }
+
+  private beginProviderQuestionWait(): void {
+    const pending = this.pending;
+    if (!pending) return;
+    pending.providerQuestionWaits = (pending.providerQuestionWaits ?? 0) + 1;
+    if (pending.idleTimer) clearTimeout(pending.idleTimer);
+    pending.idleTimer = undefined;
+  }
+
+  private endProviderQuestionWait(answered: boolean): void {
+    const pending = this.pending;
+    if (!pending) return;
+    pending.providerQuestionWaits = Math.max(0, (pending.providerQuestionWaits ?? 1) - 1);
+    pending.providerQuestionAnswered ||= answered;
+    if (pending.providerQuestionWaits === 0) this.armPendingTurn(pending);
+  }
+
+  private armPendingTurn(pending: NonNullable<ClaudeAdapter["pending"]>): void {
+    if (pending.idleTimer) clearTimeout(pending.idleTimer);
+    if ((pending.providerQuestionWaits ?? 0) > 0) return;
+    const timeoutMs = this.providerIdleTimeoutMs();
+    pending.idleTimer = setTimeout(() => {
+      if (this.pending !== pending || this.closed) return;
+      const context = pending.providerQuestionAnswered ? " after your answer was sent" : "";
+      const message = `Claude provider was silent for ${Math.round(timeoutMs / 60_000)} minutes${context}; the turn may have been dispatched and will not be retried automatically`;
+      const result = this.streamFailureResult(message, false);
+      this.eventQueue.push({ kind: "error", message });
+      this.settlePending(result);
+      // Do not leave a hidden stream running after the host has declared its
+      // result uncertain.  close() is intentionally not awaited here.
+      void this.close();
+    }, timeoutMs);
+    pending.idleTimer.unref();
+  }
+
+  private providerIdleTimeoutMs(): number {
+    const configured = this.opts.providerIdleTimeoutMs;
+    return Number.isFinite(configured) && configured! > 0 ? configured! : DEFAULT_PROVIDER_IDLE_TIMEOUT_MS;
   }
 
   private streamFailureResult(message: string, sessionUnavailable: boolean): TurnResult {

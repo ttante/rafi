@@ -4,6 +4,7 @@ import { currentActivity } from "../activity.js";
 /** Print a compact live feed of builder activity. */
 export async function printEvents(events: AsyncIterable<BuilderEvent>): Promise<void> {
   let atLineStart = true;
+  const startedTools = new Set<string>();
   for await (const ev of events) {
     if (ev.kind === "text") {
       if (ev.text) {
@@ -12,11 +13,27 @@ export async function printEvents(events: AsyncIterable<BuilderEvent>): Promise<
         else { process.stdout.write(ev.text); atLineStart = ev.text.endsWith("\n"); }
       }
     } else if (ev.kind === "tool") {
+      const key = ev.callId ?? `${ev.name}\u0000${briefInput(ev.input)}`;
+      // A tool normally arrives as started, progress, then completed.  The
+      // activity reporter owns that mutable live state; keeping only its
+      // initial permanent line avoids printing the same operation three times.
+      if (ev.lifecycle === "progress") continue;
+      if (ev.lifecycle === "completed" && startedTools.delete(key) && ev.status !== "failed" && (ev.exitCode === undefined || ev.exitCode === 0)) continue;
+      if (ev.lifecycle === "started") {
+        startedTools.add(key);
+        // The activity display is mutable, so a started tool is shown there
+        // and then replaced by its next state instead of becoming a durable
+        // line in the feed.
+        if (currentActivity()) continue;
+      }
       if (!atLineStart) {
         process.stdout.write("\n");
         atLineStart = true;
       }
-      writeLine(`  -> ${ev.name} ${briefInput(ev.input)}`);
+      const outcome = ev.lifecycle === "completed"
+        ? ev.status === "failed" || (ev.exitCode !== undefined && ev.exitCode !== 0) ? " failed" : " completed"
+        : "";
+      writeLine(`  -> ${ev.name} ${briefInput(ev.input)}${outcome}`.trimEnd());
     } else if (ev.kind === "turn-complete") {
       if (!atLineStart) {
         process.stdout.write("\n");

@@ -20,7 +20,7 @@ test("TTY activity continuously redraws one elapsed-time line and cleans it up",
   assert.equal(rendered.endsWith("\r\x1b[2K"), true);
 });
 
-test("non-TTY activity emits heartbeat lines without ANSI", async () => {
+test("non-TTY activity coalesces unchanged heartbeats without ANSI", async () => {
   const sink = output(false);
   const reporter = new ActivityReporter("test", { output: sink.target, displayDelayMs: 0, tickMs: 5, heartbeatMs: 10, quietWarningMs: 10_000 });
   const end = reporter.begin("fetching sources");
@@ -30,7 +30,23 @@ test("non-TTY activity emits heartbeat lines without ANSI", async () => {
   const rendered = sink.chunks.join("");
   assert.match(rendered, /rafi working: fetching sources/);
   assert.doesNotMatch(rendered, /\x1b/);
-  assert.ok(rendered.trim().split("\n").length >= 2);
+  assert.equal(rendered.trim().split("\n").length, 1);
+});
+
+test("non-TTY activity coalesces numeric-only status changes", () => {
+  const sink = output(false);
+  let now = 0;
+  const reporter = new ActivityReporter("test", { output: sink.target, now: () => now, displayDelayMs: 0 });
+  const end = reporter.begin("building ticket T001");
+  sink.chunks.length = 0;
+  now = 10_000;
+  reporter.update("building ticket T002", "context 20%", { provider: "codex", model: "gpt-5.4" });
+  now = 20_000;
+  reporter.update("building ticket T003", "context 30%", { provider: "codex", model: "gpt-5.5" });
+  assert.equal(sink.chunks.length, 1);
+  assert.match(sink.chunks[0]!, /ticket T002/);
+  end();
+  reporter.dispose();
 });
 
 test("quiet provider warning is durable and repeats only after a new signal", async () => {

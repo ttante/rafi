@@ -1835,7 +1835,7 @@ export function buildStartCommand(): Command {
               handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.handoffs(masterRun.runId).at(-1)?.generation ?? 0; } finally { db.close(); } },
             }, (line, snapshot) => {
               const activity = currentActivity();
-              if (activity && process.stdout.isTTY) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, "")); else console.log(line);
+              if (activity) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, "")); else console.log(line);
               activeObserver?.store.updateCurrentState({ runId: masterRun.runId, role: "builder", stream: "builder", executionId: activeObserver.executionId, ticketId: masterRun.currentTicket, providerSessionId: snapshot.contextSample.providerSessionId, phase: "builder ticket session", lastSignalAt: snapshot.contextSample.observedAt });
               if (snapshot.contextSample.used !== undefined) activeObserver?.store.recordMetric({ runId: masterRun.runId, executionId: activeObserver.executionId, role: "builder", stream: "builder", providerSessionId: snapshot.contextSample.providerSessionId }, "context_used_tokens", snapshot.contextSample.used, { unit: "tokens" });
             });
@@ -2109,7 +2109,7 @@ export function buildStartCommand(): Command {
         handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.handoffs(buildRun.runId).at(-1)?.generation ?? 0; } finally { db.close(); } },
       }, (line, snapshot) => {
         const activity = currentActivity();
-        if (activity && process.stdout.isTTY) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, ""));
+        if (activity) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, ""));
         else console.log(line);
         activeObserver?.store.updateCurrentState({ runId: buildRun.runId, role: "builder", stream: "builder", executionId: activeObserver.executionId, ticketId: buildRun.currentTicket, providerSessionId: snapshot.contextSample.providerSessionId, phase: "builder work session", lastSignalAt: snapshot.contextSample.observedAt });
         if (snapshot.contextSample.used !== undefined) activeObserver?.store.recordMetric({ runId: buildRun.runId, executionId: activeObserver.executionId, role: "builder", stream: "builder", providerSessionId: snapshot.contextSample.providerSessionId }, "context_used_tokens", snapshot.contextSample.used, { unit: "tokens" });

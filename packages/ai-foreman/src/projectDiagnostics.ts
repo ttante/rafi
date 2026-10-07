@@ -1,5 +1,4 @@
 import { hostname } from "node:os";
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type {
   BuildRunRecordV2,
@@ -21,6 +20,7 @@ import { BUILD_LEASE_STALE_MS, readBuildRuns } from "./buildRuns.js";
 import { collectManagerDiagnostics } from "./diagnostics.js";
 import { diagnosticDigest, ObservabilityReader } from "./observability.js";
 import { WorkflowReader } from "./workflowReader.js";
+import { isLiveProcessIdentity } from "./processIdentity.js";
 
 export const MANAGER_CATALOG_LIMIT = 30;
 export const MANAGER_LOOKUP_MAX_ROUNDS = 2;
@@ -268,17 +268,12 @@ function mergeDetailedReport(summary: ManagerRunSummaryV1, report: ManagerDiagno
 function verifiedActiveRunId(lease: ReturnType<WorkflowReader["currentLease"]>, now: Date): string | undefined {
   if (!lease || now.getTime() - Date.parse(lease.heartbeatAt) > BUILD_LEASE_STALE_MS) return undefined;
   if (lease.host !== hostname()) return undefined;
-  try {
-    process.kill(lease.pid, 0);
-    const start = readFileSync(`/proc/${lease.pid}/stat`, "utf8").split(" ")[21];
-    return start === lease.processStart ? lease.runId : undefined;
-  } catch { return undefined; }
+  return isLiveProcessIdentity(lease.pid, lease.processStart) ? lease.runId : undefined;
 }
 function verifiedSnapshotLease(run: BuildRunRecordV2, now: Date): boolean {
   const lease = run.lease;
   if (!lease || now.getTime() - Date.parse(lease.heartbeatAt) > BUILD_LEASE_STALE_MS || lease.hostname !== hostname()) return false;
-  try { process.kill(lease.pid, 0); return readFileSync(`/proc/${lease.pid}/stat`, "utf8").split(" ")[21] === lease.processStart; }
-  catch { return false; }
+  return isLiveProcessIdentity(lease.pid, lease.processStart);
 }
 
 function runUpdatedAt(runId: string, builds: Map<string, BuildRunRecordV2>, stored: Map<string, ManagerRunSummaryV1>, workflows: Map<string, ReturnType<WorkflowReader["buildRuns"]>[number]>, rollups: Map<string, RunRollupV1>): string { return builds.get(runId)?.updatedAt ?? workflows.get(runId)?.updatedAt ?? stored.get(runId)?.updatedAt ?? rollups.get(runId)?.completedAt ?? rollups.get(runId)?.createdAt ?? ""; }

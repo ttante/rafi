@@ -28,6 +28,7 @@ import type {
   WorkflowIssue,
 } from "rafi-spec";
 import { providerSessionKey } from "./sessionIdentity.js";
+import { isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
 import type { BranchResumeSession } from "./branch/resume.js";
 import {
   initialQaReducerState,
@@ -1880,11 +1881,10 @@ function sanitizeContinuityValue(value: unknown, depth = 0): unknown {
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !/^(credential|secret|hidden_reasoning|raw_transcript|api_key|token|password)$/i.test(key)).slice(0, 500).map(([key, entry]) => [key, sanitizeContinuityValue(entry, depth + 1)]));
   return value;
 }
-function processStartIdentity(pid = process.pid): string { try { return readFileSync(`/proc/${pid}/stat`, "utf8").split(" ")[21] ?? "unavailable"; } catch { return "unavailable"; } }
 function leaseVerifiedLive(lease: ProjectLease, now: Date, staleMs: number): boolean {
   if (now.getTime() - new Date(lease.heartbeatAt).getTime() > staleMs) return false;
   if (lease.host !== hostname()) return true;
-  try { process.kill(lease.pid, 0); return processStartIdentity(lease.pid) === lease.processStart; } catch { return false; }
+  return isLiveProcessIdentity(lease.pid, lease.processStart);
 }
 function ensureRecoveryGitignore(projectDir: string): void {
   const localExclude = join(projectDir, ".git", "info", "exclude");

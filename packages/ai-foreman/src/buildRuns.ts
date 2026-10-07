@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -13,6 +13,7 @@ import { captureCurrentWorkflowSessionIdentity, currentWorkflowIdentityKey } fro
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
 import { loadTickets } from "./tickets/ticketLoader.js";
 import { loadProjectAutonomyConfig, resolveAutonomyPolicy } from "./recoveryPolicy.js";
+import { isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
 
 export const BUILD_RUN_VERSION = 3;
 export const BUILD_RUN_DIRECTORY = ".foreman/runs";
@@ -291,7 +292,7 @@ export function recoverableBuildRuns(projectDir: string, now = new Date()): Arra
 function workflowLeaseLooksLive(lease: NonNullable<ReturnType<typeof readCurrentWorkflowLease>>, now: Date): boolean {
   if (now.getTime() - new Date(lease.heartbeatAt).getTime() > BUILD_LEASE_STALE_MS) return false;
   if (lease.host !== hostname()) return true;
-  try { process.kill(lease.pid, 0); return lease.processStart === processStartIdentity(lease.pid); } catch { return false; }
+  return isLiveProcessIdentity(lease.pid, lease.processStart);
 }
 
 /**
@@ -330,12 +331,7 @@ export function isLeaseActive(run: BuildRunRecordV2, now = new Date()): boolean 
   const age = now.getTime() - new Date(run.lease.heartbeatAt).getTime();
   if (age > BUILD_LEASE_STALE_MS) return false;
   if (run.lease.hostname !== hostname()) return true;
-  try {
-    process.kill(run.lease.pid, 0);
-    return run.lease.processStart === processStartIdentity(run.lease.pid);
-  } catch {
-    return false;
-  }
+  return isLiveProcessIdentity(run.lease.pid, run.lease.processStart);
 }
 
 export function buildRecoveryPreview(run: BuildRunRecordV2): string[] {
@@ -497,13 +493,6 @@ function currentLease(now: Date): NonNullable<BuildRunRecordV2["lease"]> {
   return { hostname: hostname(), pid: process.pid, processStart: processStartIdentity(process.pid), heartbeatAt: now.toISOString() };
 }
 
-function processStartIdentity(pid: number): string {
-  try {
-    return statSync(`/proc/${pid}`).birthtimeMs.toString();
-  } catch {
-    return pid === process.pid ? `${Date.now() - Math.round(process.uptime() * 1000)}` : "unknown";
-  }
-}
 
 function validateBuildRun(run: BuildRunRecord): void {
   if (![1, 2, 3].includes(run.version) || !run.runId || !run.repository?.root || !run.repository.worktree || !run.createdAt || !run.updatedAt) {

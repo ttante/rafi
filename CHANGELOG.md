@@ -4,6 +4,20 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.9.18 / ai-foreman 1.7.18 - 2026-10-07
+
+### Fixed
+
+- Builder turns now fail safely after 30 minutes with no provider activity, while legitimate provider events continue to reset the idle timer. Timed-out turns are never automatically replayed, preventing duplicate provider-side mutations.
+- Manager and build-run diagnostics can now verify live process identities on macOS as well as Linux, so active local runs are no longer incorrectly reported as stale.
+- Build activity output now coalesces messages that differ only by numeric counters or long hash-like identifiers, including non-TTY output. Successful tool start/progress/completion lifecycles no longer create duplicate durable log lines; failures remain durable.
+- Live activity rendering pauses during native provider questions so terminal prompts remain readable, then resumes with a waiting-for-provider status after an answer is sent.
+
+### Packages
+
+- Bumped `ai-foreman` to `1.7.18` for builder liveness, macOS diagnostics, activity logging, and provider-question interaction fixes.
+- Bumped `@rafi-ai/cli` to `0.9.18` to pin and deliver `ai-foreman@1.7.18`.
+
 ## @rafi-ai/cli 0.9.15 / ai-foreman 1.7.15 / special-agents 0.8.10 / rafi-spec 0.8.11 - 2026-09-15
 
 ### Added

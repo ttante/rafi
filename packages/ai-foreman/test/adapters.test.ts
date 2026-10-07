@@ -14,6 +14,8 @@ const BASE_OPTS: BuilderAdapterOptions = {
   permission: async () => ({ behavior: "allow" as const }),
 };
 
+const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 // --- Claude adapter option mapping ---
 
 test("buildClaudeQueryOptions maps systemPromptAppend to systemPrompt.append", () => {
@@ -152,6 +154,36 @@ test("Claude API retry messages normalize into immediate retry events", () => {
     delayMs: 1500,
     managedBy: "provider",
   });
+});
+
+test("Claude idle timeout excludes a human question and starts after its answer is returned", async () => {
+  const adapter = Object.create(ClaudeAdapter.prototype) as ClaudeAdapter;
+  const events: unknown[] = [];
+  const settled: { result?: { text: string } } = {};
+  let closed = 0;
+  const pending = {
+    instruction: "plan", turnId: "turn-1",
+    resolve: (value: unknown) => { settled.result = value as { text: string }; },
+    reject: () => {},
+  };
+  Object.assign(adapter as object, {
+    opts: { ...BASE_OPTS, providerIdleTimeoutMs: 15 },
+    pending,
+    closed: false,
+    eventQueue: { push: (event: unknown) => events.push(event) },
+    close: async () => { closed += 1; },
+  });
+
+  (adapter as never as { beginProviderQuestionWait(): void }).beginProviderQuestionWait();
+  await wait(35);
+  assert.equal(Boolean(settled.result), false, "a person considering a question must not consume provider idle time");
+
+  (adapter as never as { endProviderQuestionWait(answered: boolean): void }).endProviderQuestionWait(true);
+  await wait(35);
+  assert.equal(closed, 1);
+  assert.ok(settled.result);
+  assert.match(settled.result.text, /after your answer was sent/);
+  assert.ok(events.some((event) => (event as { kind?: string }).kind === "error"));
 });
 
 test("Claude automatic compaction records a provider-clamped effective ceiling", async () => {

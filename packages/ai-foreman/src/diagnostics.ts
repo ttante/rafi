@@ -16,6 +16,7 @@ import { diagnosticDigest, ObservabilityReader, sanitizeDiagnosticValue } from "
 import { WorkflowReader } from "./workflowReader.js";
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
 import { loadTickets } from "./tickets/ticketLoader.js";
+import { isLiveProcessIdentity } from "./processIdentity.js";
 
 export type ExternalDiagnosticMode = "auto" | "on" | "off";
 export interface DiagnosticCommandResult { ok: boolean; stdout: string; stderr?: string; timedOut?: boolean }
@@ -293,7 +294,7 @@ function evaluateLease(lease: ReturnType<WorkflowReader["currentLease"]>, now: D
   const age = Math.max(0, now.getTime() - new Date(lease.heartbeatAt).getTime());
   if (lease.host !== hostname()) return { summary: `Remote lease heartbeat is ${formatDuration(age)} old; matching remote process identity cannot be verified.`, live: false, failureObserved: false };
   let exists = false; try { process.kill(lease.pid, 0); exists = true; } catch { exists = false; }
-  let sameStart = false; try { sameStart = readFileSync(`/proc/${lease.pid}/stat`, "utf8").split(" ")[21] === lease.processStart; } catch { sameStart = false; }
+  const sameStart = isLiveProcessIdentity(lease.pid, lease.processStart);
   const live = age <= 45_000 && exists && sameStart;
   return { summary: live ? `Lease heartbeat is fresh (${formatDuration(age)} old) and PID/start identity match.` : `Lease health failed: heartbeat age ${formatDuration(age)}, process exists=${exists}, process-start matches=${sameStart}.`, live, failureObserved: !live && (!exists || !sameStart) };
 }

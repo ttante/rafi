@@ -1,5 +1,6 @@
 import { isCancel, multiselect, select, text } from "@clack/prompts";
 import type { PermissionDecision, PermissionRequest } from "./adapters/types.js";
+import { currentActivity, pauseActivityForInput } from "./activity.js";
 
 const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
 const CUSTOM_VALUE = "__rafi_custom_response__";
@@ -68,7 +69,9 @@ export async function handleProviderQuestionTool(
   const annotations = annotationRecordFromUnknown(req.input.annotations);
 
   for (const question of questions) {
-    const answered = await askOneQuestion(question, prompts, req.signal);
+    // A native provider question is a local terminal interaction, not provider
+    // work. Keep the live activity renderer from overwriting Clack's prompt.
+    const answered = await pauseActivityForInput(() => askOneQuestion(question, prompts, req.signal));
     if (answered.cancelled) {
       return {
         behavior: "deny",
@@ -78,6 +81,7 @@ export async function handleProviderQuestionTool(
     }
     answers[question.question] = answered.answer;
     if (answered.annotation) annotations[question.question] = answered.annotation;
+    currentActivity()?.update("answer sent; waiting for Claude");
     if (answered.answer.trim()) {
       opts.onAnsweredQuestion?.({
         toolName: ASK_USER_QUESTION_TOOL,

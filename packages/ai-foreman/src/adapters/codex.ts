@@ -27,7 +27,10 @@ export function parseCodexLine(raw: Record<string, unknown>): CodexLineResult {
 }
 
 type RpcMessage = { id?: number | string; method?: string; params?: Record<string, unknown>; result?: unknown; error?: { message?: string; code?: number } };
-type Waiter = { predicate: (params: Record<string, unknown>) => boolean; resolve: (params: Record<string, unknown>) => void; reject: (error: Error) => void };
+type Waiter = { predicate: (params: Record<string, unknown>) => boolean; resolve: (params: Record<string, unknown>) => void; reject: (error: Error) => void; touch?: () => void };
+
+/** A provider can legitimately take a long time, but not without any event. */
+const DEFAULT_PROVIDER_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 /** Persistent JSON-RPC controller for one live Codex thread. */
 export class CodexAdapter implements BuilderAdapter {
@@ -124,7 +127,7 @@ export class CodexAdapter implements BuilderAdapter {
       await this.ensureThread();
       this.activeText = [];
       this.lastTurnTokens = undefined;
-      const completion = this.waitFor("turn/completed", (params) => params.threadId === this._sessionId);
+      const completion = this.waitFor("turn/completed", (params) => params.threadId === this._sessionId, this.providerIdleTimeoutMs(), true);
       turnStartDispatched = true;
       await this.request("turn/start", {
         threadId: this._sessionId,
@@ -439,6 +442,7 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   private handle(message: RpcMessage): void {
+    this.touchWaiters();
     if (message.id !== undefined) {
       const pending = this.pending.get(message.id);
       if (pending) { this.pending.delete(message.id); message.error ? pending.reject(new Error(message.error.message ?? `JSON-RPC error ${message.error.code ?? "unknown"}`)) : pending.resolve(message.result); }
@@ -558,25 +562,37 @@ export class CodexAdapter implements BuilderAdapter {
       parentSpanId: this.activeProviderTurnSpanId ?? inherited.parentSpanId, providerTurnId: this.activeProviderTurnId ?? inherited.providerTurnId };
   }
 
-  private waitFor(method: string, predicate: Waiter["predicate"], timeoutMs?: number): Promise<Record<string, unknown>> {
+  private waitFor(method: string, predicate: Waiter["predicate"], timeoutMs?: number, resetOnProviderActivity = false): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      const clear = () => { if (timeout) clearTimeout(timeout); timeout = undefined; };
       const waiter: Waiter = {
         predicate,
-        resolve: (params) => { if (timeout) clearTimeout(timeout); resolve(params); },
-        reject: (error) => { if (timeout) clearTimeout(timeout); reject(error); },
+        resolve: (params) => { clear(); resolve(params); },
+        reject: (error) => { clear(); reject(error); },
       };
       const waiters = this.notificationWaiters.get(method) ?? [];
       waiters.push(waiter);
       this.notificationWaiters.set(method, waiters);
       if (timeoutMs !== undefined) {
-        timeout = setTimeout(() => {
+        const arm = () => { timeout = setTimeout(() => {
           const active = this.notificationWaiters.get(method) ?? [];
           this.notificationWaiters.set(method, active.filter((candidate) => candidate !== waiter));
-          reject(new Error(`Timed out waiting for Codex app-server notification ${method}`));
-        }, timeoutMs);
+          reject(new Error(`Codex provider was silent for ${Math.round(timeoutMs / 60_000)} minutes while waiting for ${method}; the turn may have been dispatched and will not be retried automatically`));
+        }, timeoutMs); };
+        if (resetOnProviderActivity) waiter.touch = () => { clear(); arm(); };
+        arm();
       }
     });
+  }
+
+  private touchWaiters(): void {
+    for (const waiters of this.notificationWaiters.values()) for (const waiter of waiters) waiter.touch?.();
+  }
+
+  private providerIdleTimeoutMs(): number {
+    const configured = this.opts.providerIdleTimeoutMs;
+    return Number.isFinite(configured) && configured! > 0 ? configured! : DEFAULT_PROVIDER_IDLE_TIMEOUT_MS;
   }
 
   private disconnect(error: Error): void {

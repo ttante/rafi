@@ -5,6 +5,7 @@ import { gzipSync } from "node:zlib";
 import { hostname, loadavg } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
+import { processStartIdentity } from "./processIdentity.js";
 import type {
   ConfigurableAgentRole,
   DiagnosticSourceResultV1,
@@ -891,7 +892,6 @@ function stableJson(value: unknown): string {
   if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
   return JSON.stringify(value ?? null);
 }
-function processStartIdentity(pid: number): string { try { return readFileSync(`/proc/${pid}/stat`, "utf8").split(" ")[21] ?? "unavailable"; } catch { return "unavailable"; } }
 function databaseBytes(path: string): number { return [path, `${path}-wal`, `${path}-shm`].reduce((sum, item) => sum + (existsSync(item) ? statSync(item).size : 0), 0); }
 function fileSize(path: string): number { try { return statSync(path).size; } catch { return 0; } }
 function safeOwnedLogPath(root: string, path: string): boolean { const target = resolve(path); return target.startsWith(`${root}${sep}`) && (target.endsWith(".jsonl") || target.endsWith(".jsonl.gz")); }

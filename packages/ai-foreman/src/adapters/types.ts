@@ -203,6 +203,13 @@ export interface BuilderAdapterOptions {
   allowAutoCompactionSetupTurn?: boolean;
   /** Raw-adapter observability; wrapper adapters must not persist re-emitted events. */
   observer?: RunObserver;
+  /**
+   * Maximum time a dispatched provider turn may remain completely silent.
+   * This is an idle timeout, not a total turn limit: every provider message
+   * resets it.  A timeout is intentionally terminal and has unknown dispatch
+   * state, so callers must never replay the instruction automatically.
+   */
+  providerIdleTimeoutMs?: number;
 }
 
 export interface BuilderAdapter {
