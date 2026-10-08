@@ -185,3 +185,26 @@ test("log retention compresses and deletes only indexed terminal logs", () => {
     store.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test("Manager exposes pending decisions, acceptance, adoption and dispatch independently", async () => {
+  const { WorkflowDb } = await import("../src/workflowDb.js");
+  const root = temp();
+  try {
+    const run = createBuildRun({ runId: "stall-diagnostic", tickets: [], repositoryRoot: root,
+      builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "high", fast: false } });
+    const db = new WorkflowDb(root);
+    try {
+      db.ensureHumanDecision({ runId: run.runId, decisionKey: "question", interruptionId: "ticket:T001", prompt: "Use local mirror?", choices: [{ id: "yes", label: "Yes" }] });
+      db.transition(run.runId, { status: "paused", checkpoint: "waiting-for-human", event: "handoff_accepted" });
+      db.appendContinuityEvent({ runId: run.runId, role: "builder", kind: "handoff_adopted", payload: {}, authoritativeStateRevision: 0 });
+      db.planOperation({ runId: run.runId, idempotencyKey: "dispatch-test", kind: "provider-dispatch", intent: { role: "builder" } });
+      db.updateOperation("dispatch-test", "in_progress");
+    } finally { db.close(); }
+    const report = collectManagerDiagnostics(root, { runId: run.runId, external: "off" });
+    for (const kind of ["pending_decision", "handoff_accepted", "handoff_adopted", "dispatch_state", "uncertain_dispatch"]) assert.ok(report.evidence.some(item => item.kind === kind), kind);
+    assert.ok(report.findings.some(item => item.code === "pending_decisions"));
+    assert.ok(report.findings.some(item => item.code === "unresolved_dispatch"));
+    assert.ok(!report.findings.some(item => item.code === "progressing"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

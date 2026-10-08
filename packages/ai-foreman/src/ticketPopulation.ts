@@ -112,6 +112,7 @@ export function applyTicketPopulation(projectDir: string, materialized: Material
       operation: "ticket-populate", operationId,
       files: [{ staged: stagedTickets, target: paths.tickets }, { staged: stagedDelivery, target: deliveryPath }],
       stage, managedTicketIds: materialized.tickets.map((ticket) => ticket.id),
+      approvedDefinitions: materialized.tickets, approvedDelivery: materialized.delivery,
     }, {
       [paths.tickets]: fileDigest(paths.tickets), [deliveryPath]: fileDigest(deliveryPath),
     }, now);

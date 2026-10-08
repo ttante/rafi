@@ -1,3 +1,4 @@
+import { OperationDeadline } from "../util/deadline.js";
 import type {
   Query,
   SDKMessage,
@@ -21,8 +22,9 @@ export async function requireClaudeSDK() {
     );
   }
 }
+import { QuestionRoundTripTrace } from "../questionTrace.js";
 import { AsyncQueue } from "../util/asyncQueue.js";
-import { BuilderEventQueue, withActivityPhase } from "../activity.js";
+import { BuilderEventQueue, currentActivity, withActivityPhase } from "../activity.js";
 import { normalizeRuntimeErrorText } from "../runtimeAuth.js";
 import {
   classifyClaudeSdkFailure,
@@ -235,6 +237,8 @@ export class ClaudeAdapter implements BuilderAdapter {
   private structuredError?: string;
   private apiErrorStatus?: number | null;
   private compactResult?: CompactResult;
+  private manualCompactionDeadline?: OperationDeadline;
+  private compactionPromise?: Promise<CompactResult>;
   private autoCompactionPrepared = false;
   private preparedAutoCompactThreshold?: number;
   private preparedAutoCompactionPolicy?: NativeAutoCompactionPolicy;
@@ -252,11 +256,16 @@ export class ClaudeAdapter implements BuilderAdapter {
     instruction: string;
     turnId: string;
     idleTimer?: ReturnType<typeof setTimeout>;
+    hardTimer?: ReturnType<typeof setTimeout>;
+    hardRemainingMs?: number;
+    hardArmedAt?: number;
     /** Native questions wait on the person, not the provider. */
     providerQuestionWaits?: number;
     /** The local prompt resolved and its answer is being returned to Claude. */
     providerQuestionAnswered?: boolean;
   };
+  private questionTrace?: QuestionRoundTripTrace;
+  private responseOnlyTurn = false;
   private terminalResult?: TurnResult;
   private streamEnded = false;
   private closed = false;
@@ -306,6 +315,10 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.rejectSessionIdentity = reject;
     });
     void this.sessionIdentityReady.catch(() => {});
+    this.questionTrace = new QuestionRoundTripTrace(opts.runtimePhase ?? "builder", opts.onQuestionTrace, opts.observer ? {
+      start: (attemptId) => opts.observer!.store.startSpan(this.observationContext(), { kind: "provider_wait", name: "Waiting for Claude after question answer", attributes: { attemptId } }),
+      finish: (spanId, outcome) => opts.observer!.store.finishSpan(spanId, { outcome }),
+    } : undefined);
     this.query = query({
       prompt: this.inbox,
       options: {
@@ -334,7 +347,9 @@ export class ClaudeAdapter implements BuilderAdapter {
             toolUseID?: string;
           } = {},
         ): Promise<PermissionResult> => {
+          if (this.responseOnlyTurn) return { behavior: "deny", message: "QA response correction forbids all tools, including read-only tools", interrupt: true };
           const isProviderQuestion = toolName === "AskUserQuestion";
+          const questionAttempt = isProviderQuestion ? this.questionTrace?.begin() : undefined;
           if (isProviderQuestion) this.beginProviderQuestionWait();
           try {
             const decision = await opts.permission({
@@ -348,9 +363,12 @@ export class ClaudeAdapter implements BuilderAdapter {
               blockedPath: requestOptions.blockedPath,
               toolUseID: requestOptions.toolUseID,
             });
+            const result = permissionDecisionToClaudeResult(decision, requestOptions.toolUseID);
+            if (questionAttempt) this.questionTrace?.returned(questionAttempt, decision.behavior === "allow" ? "allowed" : "denied");
             if (isProviderQuestion) this.endProviderQuestionWait(decision.behavior === "allow");
-            return permissionDecisionToClaudeResult(decision, requestOptions.toolUseID);
+            return result;
           } catch (error) {
+            if (questionAttempt) this.questionTrace?.returned(questionAttempt, "callback-error");
             if (isProviderQuestion) this.endProviderQuestionWait(false);
             throw error;
           }
@@ -367,6 +385,7 @@ export class ClaudeAdapter implements BuilderAdapter {
         this.handle(msg);
       }
     } catch (err) {
+      this.questionTrace?.finish(this.closed ? "closed" : "stream-error");
       // Suppress the AbortError that fires when close() aborts the stream.
       const isShutdownAbort =
         this.closed &&
@@ -382,6 +401,7 @@ export class ClaudeAdapter implements BuilderAdapter {
         this.settlePending(result);
       }
     } finally {
+      this.questionTrace?.finish(this.closed ? "closed" : "stream-ended");
       this.streamEnded = true;
       if (!this.closed && this.pending) {
         const result = this.streamFailureResult("Claude stream ended without a result", Boolean(this.opts.resumeSessionRef ?? this.opts.resumeSessionId));
@@ -396,6 +416,15 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   private handle(msg: SDKMessage): void {
+    const questionStreamOutcome = msg.type === "system" && msg.subtype === "api_retry" ? "provider-retry"
+      : msg.type === "auth_status" && msg.error ? "provider-auth-error"
+      : msg.type === "assistant" && (msg.error === "authentication_failed" || msg.error === "oauth_org_not_allowed") ? "provider-auth-error"
+      : msg.type === "assistant" && msg.error ? "provider-error" : "stream-message";
+    this.questionTrace?.message(questionStreamOutcome);
+    if (this.pending?.providerQuestionAnswered && !this.pending.providerQuestionWaits) {
+      this.pending.providerQuestionAnswered = false;
+      currentActivity()?.update("Claude stream resumed");
+    }
     this.touchPendingTurn();
     if ("session_id" in msg && typeof msg.session_id === "string") {
       this.observeSession(msg.session_id, "cwd" in msg && typeof msg.cwd === "string" ? msg.cwd : undefined);
@@ -435,7 +464,10 @@ export class ClaudeAdapter implements BuilderAdapter {
       if (msg.error) this.turnSignals.push(`auth status: ${msg.error}`);
       if (msg.output.length > 0) this.turnSignals.push(...msg.output.map((line) => `auth: ${line}`));
     } else if (msg.type === "system" && msg.subtype === "status") {
-      if (msg.status === "compacting") this.eventQueue.push({ kind: "session-transition", transition: "compacting" });
+      if (msg.status === "compacting") {
+        if (this.manualCompactionInFlight && msg.session_id === this._sessionId) this.manualCompactionDeadline?.extendForCorrelatedProgress();
+        this.eventQueue.push({ kind: "session-transition", transition: "compacting" });
+      }
       if (msg.compact_result === "success") {
         this.compactResult = { ok: true };
         this.eventQueue.push({ kind: "session-transition", transition: "compacted" });
@@ -533,13 +565,15 @@ export class ClaudeAdapter implements BuilderAdapter {
     }
   }
 
-  async sendTurn(text: string): Promise<TurnResult> {
+  async sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string }): Promise<TurnResult> {
+    if (this.pending) throw new Error("a turn is already in progress");
+    this.responseOnlyTurn = Boolean(policy?.responseOnly);
     const turnId = randomUUID();
     this.activeProviderTurnId = turnId;
     const observer = this.opts.observer;
     if (!observer) {
       try { return await withActivityPhase(`Claude ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(text)); }
-      finally { this.activeProviderTurnId = undefined; }
+      finally { this.activeProviderTurnId = undefined; this.responseOnlyTurn = false; }
     }
     const context = this.observationContext();
     const spanId = observer.store.startSpan(context, { spanId: turnId, kind: "provider_turn", name: `Claude ${activityPhase(this.opts.runtimePhase)}`, providerTurnId: turnId, attributes: { provider: "claude" } });
@@ -558,7 +592,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       throw error;
     } finally {
       for (const [callId, toolSpanId] of this.toolSpans) { observer.store.finishSpan(toolSpanId, { outcome: "unknown", completionKnown: false, attributes: { callId } }); this.toolSpans.delete(callId); }
-      this.activeProviderTurnId = undefined; this.activeProviderTurnSpanId = undefined;
+      this.activeProviderTurnId = undefined; this.activeProviderTurnSpanId = undefined; this.responseOnlyTurn = false;
     }
   }
 
@@ -621,7 +655,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   sessionRef(): ProviderSessionRefV1 | undefined { return this._sessionRef; }
-  async prepareSession(timeoutMs = 30_000): Promise<ProviderSessionRefV1> {
+  async prepareSession(timeoutMs = this.opts.preparationTimeoutMs ?? 120_000): Promise<ProviderSessionRefV1> {
     if (this.closed || this.streamEnded || this.terminalResult) throw new Error(this.terminalResult?.text ?? "Claude session is closed");
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("Claude session initialization timeout must be positive");
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -633,7 +667,23 @@ export class ClaudeAdapter implements BuilderAdapter {
         if (this.abort.signal.aborted) aborted();
         timer = setTimeout(() => reject(new Error(`Claude did not expose a scoped session identity within ${timeoutMs}ms`)), timeoutMs);
       });
-      const [, ref] = await Promise.race([Promise.all([this.query.initializationResult(), this.sessionIdentityReady]), interrupted]);
+      const prepare = async () => {
+        await this.query.initializationResult();
+        if (!this._sessionRef?.validatedAt && typeof this.query.supportedCommands === "function") {
+          const commands = await this.query.supportedCommands();
+          // Some SDK/CLI pairs expose init identity only after their first input.
+          // Require an advertised built-in local command; never substitute a
+          // model-generated warm-up for QA's pre-dispatch identity validation.
+          if (commands.some(command => command.name === "context" && "builtin" in command && command.builtin === true)) {
+            this.opts.onLifecycleTrace?.({ phase: "local-context-initialization-start", at: new Date().toISOString() });
+            const result = await this.sendTurn("/context", { responseOnly: true });
+            this.opts.onLifecycleTrace?.({ phase: "local-context-initialization-complete", at: new Date().toISOString() });
+            if (result.isError || result.failure || result.costUsd > 0) throw new Error("Claude local context initialization did not complete without model work");
+          }
+        }
+        return this.sessionIdentityReady;
+      };
+      const ref = await Promise.race([prepare(), interrupted]);
       if (!ref.validatedAt) throw new Error("Claude session identity was not provider-validated during initialization");
       return ref;
     } catch (error) {
@@ -663,17 +713,29 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   async compact(): Promise<CompactResult> {
-    return this.opts.observer
+    if (this.compactionPromise) return this.compactionPromise;
+    const operation = this.opts.observer
       ? this.opts.observer.span("compaction", "Claude context compaction", () => this.compactInternal())
       : this.compactInternal();
+    this.compactionPromise = operation;
+    try { return await operation; }
+    finally { if (this.compactionPromise === operation) this.compactionPromise = undefined; }
   }
 
   private async compactInternal(): Promise<CompactResult> {
     this.compactResult = undefined;
     this.manualCompactionInFlight = true;
+    const normalMs = Math.min(180_000, Math.max(1, this.opts.compactionTimeoutMs ?? 120_000));
+    const deadline = new OperationDeadline("Claude compaction", normalMs, Math.min(180_000, normalMs * 1.5));
+    this.manualCompactionDeadline = deadline;
     let result: TurnResult;
-    try { result = await this.sendTurn("/compact"); }
-    finally { this.manualCompactionInFlight = false; }
+    try { result = await deadline.run(() => this.sendTurn("/compact"), () => this.abort.abort()); }
+    catch (error) {
+      const failure = new SessionUnavailableError({ runtime: "claude", phase: "turn", dispatchState: "unknown", executable: this.opts.runtimeExecutable ?? "claude", cwd: this.opts.cwd, diagnostics: String(error) });
+      await this.close();
+      return { ok: false, error: failure.message, failure: failure.failure };
+    }
+    finally { this.manualCompactionInFlight = false; this.manualCompactionDeadline = undefined; }
     if (result.failure?.category === "session-unavailable") {
       return { ok: false, error: result.text || result.failure.diagnostics, failure: result.failure };
     }
@@ -682,13 +744,21 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   async prepareAutoCompaction(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<NativeAutoCompactionPolicy | void> {
+    return new OperationDeadline("Claude auto-compaction preparation", this.opts.preparationTimeoutMs ?? 120_000).run(() => this.prepareAutoCompactionInternal(thresholdPercent), () => this.abort.abort());
+  }
+
+  private async prepareAutoCompactionInternal(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<NativeAutoCompactionPolicy | void> {
     if (thresholdPercent === undefined) return;
     const threshold = validThreshold(thresholdPercent);
     if (this.autoCompactionPrepared && this.preparedAutoCompactThreshold === threshold) return this.preparedAutoCompactionPolicy;
     this.opts.autoCompactThresholdPercent = threshold;
-    await this.query.initializationResult();
-    await this.query.applyFlagSettings({ autoCompactEnabled: true });
-    const baseline = await this.query.getContextUsage();
+    await new OperationDeadline("Claude initialization", this.opts.preparationTimeoutMs ?? 120_000).run(() => this.query.initializationResult());
+    // The SDK can acknowledge initialization while its CLI is still waiting
+    // for first input. Sending getContextUsage then deadlocks the control
+    // queue, including a later local command. Establish identity first.
+    if (!this._sessionRef?.validatedAt && typeof this.query.supportedCommands === "function") await this.prepareSession();
+    await new OperationDeadline("Claude settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ autoCompactEnabled: true }));
+    const baseline = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
     if (!Number.isFinite(baseline.maxTokens) || baseline.maxTokens <= 0
       || !Number.isFinite(baseline.autoCompactThreshold) || baseline.autoCompactThreshold === undefined
       || !baseline.isAutoCompactEnabled) {
@@ -700,8 +770,8 @@ export class ClaudeAdapter implements BuilderAdapter {
     const reserve = baseline.maxTokens - baseline.autoCompactThreshold;
     if (reserve < 0) throw new Error("Claude reported an invalid automatic-compaction reserve");
     const requestedWindow = tokenLimit(baseline.maxTokens, threshold) + reserve;
-    await this.query.applyFlagSettings({ autoCompactEnabled: true, autoCompactWindow: requestedWindow });
-    const installed = await this.query.getContextUsage();
+    await new OperationDeadline("Claude settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ autoCompactEnabled: true, autoCompactWindow: requestedWindow }));
+    const installed = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
     if (!installed.isAutoCompactEnabled || !Number.isFinite(installed.maxTokens) || installed.maxTokens <= 0
       || !Number.isFinite(installed.autoCompactThreshold) || installed.autoCompactThreshold === undefined) {
       throw new Error("Claude did not expose an enabled native automatic-compaction threshold after configuration");
@@ -734,7 +804,7 @@ export class ClaudeAdapter implements BuilderAdapter {
 
   async contextUsage(): Promise<ContextUsage | undefined> {
     try {
-      const usage = await this.query.getContextUsage();
+      const usage = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
       const result = { used: usage.totalTokens, maximum: usage.maxTokens, percentage: usage.percentage, observedAt: new Date().toISOString(), source: "provider-query" as const };
       this.eventQueue.push({ kind: "context-usage", ...result });
       return result;
@@ -748,10 +818,12 @@ export class ClaudeAdapter implements BuilderAdapter {
   async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
     if (settings.effort !== this.opts.effort || settings.fast !== this.opts.fast) return { ok: false, error: "Claude SDK cannot change reasoning/fast controls on an existing transport" };
     if (settings.model === this.opts.model) return { ok: true };
-    const result = await this.sendTurn(`/model ${settings.model ?? "default"}`);
+    const result = await new OperationDeadline("Claude model settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.sendTurn(`/model ${settings.model ?? "default"}`), () => this.abort.abort());
     if (result.isError) return { ok: false, error: result.text, ...(result.failure ? { failure: result.failure } : {}) };
     this.opts.model = settings.model; return { ok: true };
   }
+
+  observeEvents(listener: (event: BuilderEvent) => void): () => void { return this.eventQueue.observe(listener); }
 
   events(): AsyncIterable<BuilderEvent> {
     return this.eventQueue;
@@ -760,15 +832,17 @@ export class ClaudeAdapter implements BuilderAdapter {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.questionTrace?.finish("closed");
     this.rejectSessionIdentity(new Error("Claude session closed during initialization"));
     this.abort.abort();
     this.inbox.close();
     try {
-      await this.query.interrupt();
+      await new OperationDeadline("Claude interrupt", this.opts.shutdownTimeoutMs ?? 10_000).run(() => this.query.interrupt());
     } catch {
       // interrupt is best-effort — ignore if no turn is active
     }
-    await this.pumpDone.catch(() => {});
+    this.query.close?.();
+    await new OperationDeadline("Claude shutdown", this.opts.shutdownTimeoutMs ?? 10_000).run(() => this.pumpDone).catch(() => {});
   }
 
   private failSessionIdentity(error: Error): void {
@@ -815,10 +889,12 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   private settlePending(result: TurnResult, emit = true): void {
+    this.questionTrace?.finish(result.isError ? "result-error" : "result");
     const pending = this.pending;
     if (!pending) return;
     this.pending = undefined;
     if (pending.idleTimer) clearTimeout(pending.idleTimer);
+    if (pending.hardTimer) clearTimeout(pending.hardTimer);
     if (!result.turnId) {
       result.turnId = pending.turnId; result.hostInstruction = pending.instruction; result.providerInstruction = pending.instruction;
       result.rawResponse = result.text; result.cleanedResponse = result.text;
@@ -838,6 +914,11 @@ export class ClaudeAdapter implements BuilderAdapter {
     pending.providerQuestionWaits = (pending.providerQuestionWaits ?? 0) + 1;
     if (pending.idleTimer) clearTimeout(pending.idleTimer);
     pending.idleTimer = undefined;
+    if (pending.hardTimer) {
+      clearTimeout(pending.hardTimer);
+      pending.hardTimer = undefined;
+      pending.hardRemainingMs = Math.max(0, (pending.hardRemainingMs ?? this.opts.turnDeadlineMs ?? 3_600_000) - (performance.now() - (pending.hardArmedAt ?? performance.now())));
+    }
   }
 
   private endProviderQuestionWait(answered: boolean): void {
@@ -851,10 +932,21 @@ export class ClaudeAdapter implements BuilderAdapter {
   private armPendingTurn(pending: NonNullable<ClaudeAdapter["pending"]>): void {
     if (pending.idleTimer) clearTimeout(pending.idleTimer);
     if ((pending.providerQuestionWaits ?? 0) > 0) return;
+    if (!pending.hardTimer) {
+      pending.hardRemainingMs ??= this.opts.turnDeadlineMs ?? 3_600_000;
+      pending.hardArmedAt = performance.now();
+      pending.hardTimer = setTimeout(() => {
+        if (this.pending !== pending) return;
+        this.settlePending(this.streamFailureResult("Claude active turn deadline exceeded; dispatched work requires reconciliation", false));
+        void this.close();
+      }, pending.hardRemainingMs);
+      pending.hardTimer.unref();
+    }
     const timeoutMs = this.providerIdleTimeoutMs();
     pending.idleTimer = setTimeout(() => {
       if (this.pending !== pending || this.closed) return;
-      const context = pending.providerQuestionAnswered ? " after your answer was sent" : "";
+      this.questionTrace?.finish("idle-timeout");
+      const context = pending.providerQuestionAnswered ? " after your answer was sent; Claude has not resumed its stream yet" : "";
       const message = `Claude provider was silent for ${Math.round(timeoutMs / 60_000)} minutes${context}; the turn may have been dispatched and will not be retried automatically`;
       const result = this.streamFailureResult(message, false);
       this.eventQueue.push({ kind: "error", message });

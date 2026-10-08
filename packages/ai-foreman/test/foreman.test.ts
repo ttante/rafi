@@ -52,6 +52,8 @@ class FakeBuilder implements BuilderAdapter {
   readonly instructions: string[] = [];
   private index = 0;
   private eventQueue: BuilderEvent[] = [];
+  private observers = new Set<(event: BuilderEvent) => void>();
+  observeEvents(listener: (event: BuilderEvent) => void): () => void { this.observers.add(listener); return () => { this.observers.delete(listener); }; }
   private eventWaiters: Array<() => void> = [];
   private closed = false;
   private ref?: ProviderSessionRefV1;
@@ -90,6 +92,7 @@ class FakeBuilder implements BuilderAdapter {
     }
     const result = { text, isError: false, numTurns: 1, costUsd: 0, turnId: `fake-${this.index}`, hostInstruction: instruction, providerInstruction: instruction, rawResponse: text, cleanedResponse: text,
       providerMetadata: { provider: this.agent, sessionId: this.sessionId(), sessionRef: this.ref } };
+    for (const observer of this.observers) observer({ kind: "turn-complete", result, turnId: result.turnId });
     this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId }); this.eventWaiters.splice(0).forEach((wake) => wake());
     return result;
   }
@@ -141,7 +144,8 @@ test("reported blockers are converted into multiple approaches before a non-inte
     const resolved = await foreman.resolveBlocker(builder, "missing deployment credential");
 
     assert.equal(resolved.status.kind, "blocked");
-    assert.match(resolved.status.reason ?? "", /input required in an interactive terminal/);
+    assert.match(resolved.status.reason ?? "", /waiting for input/);
+    assert.match(resolved.status.reason ?? "", /Resume with rafi build:resume --run/);
     assert.match(builder.instructions[0] ?? "", /two or three safe, materially different approaches/);
     assert.match(builder.instructions[0] ?? "", /recommended approach and consequence \(Recommended\)/);
   } finally {
@@ -193,13 +197,15 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 1, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaFail]), cwd));
 
     const result = await foreman.runBatch(1);
-    assert.equal(result.outcome, "needs-human");
+    assert.equal(result.outcome, "blocked", result.detail);
+    assert.equal(result.completed, 0);
+    assert.match(result.detail ?? "", /Deferred tickets: T001/);
     assert.match(result.detail ?? "", /invalid QA response contract|complete fresh QA review|required/);
 
     const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
     try {
       const state = db.getState("T001");
-      assert.equal(state?.status, "in_progress");
+      assert.equal(state?.status, "blocked");
       assert.equal(state?.validation_result, null);
     } finally {
       db.close();

@@ -1,11 +1,30 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ActivityReporter, withActivityContext, withActivityPhase } from "../src/activity.js";
+import { ActivityReporter, reportBuilderEvent, withActivityContext, withActivityPhase } from "../src/activity.js";
 
 function output(isTTY: boolean): { chunks: string[]; target: { isTTY: boolean; write(text: string): void } } {
   const chunks: string[] = [];
   return { chunks, target: { isTTY, write: (text) => { chunks.push(text); } } };
 }
+
+test("status spam cannot hide useful-progress age and human waits do not consume it", () => {
+  const sink = output(false);
+  let now = 0;
+  const reporter = new ActivityReporter("test", { output: sink.target, now: () => now, usefulProgressWarningMs: 100, quietWarningMs: 10000 });
+  const end = reporter.begin("long verification");
+  now = 90; reporter.pulse();
+  const resume = reporter.pause();
+  now = 1090; resume();
+  assert.doesNotMatch(sink.chunks.join(""), /no completed tool/);
+  now = 1110; reporter.update("long verification");
+  assert.equal(sink.chunks.join("").match(/no completed tool/g)?.length, 1);
+  now = 1200; reporter.pulse();
+  assert.equal(sink.chunks.join("").match(/no completed tool/g)?.length, 1);
+  reporter.completedWork();
+  now = 1310; reporter.update("next verification");
+  assert.equal(sink.chunks.join("").match(/no completed tool/g)?.length, 2);
+  end(); reporter.dispose();
+});
 
 test("TTY activity continuously redraws one elapsed-time line and cleans it up", async () => {
   const sink = output(true);
@@ -153,6 +172,36 @@ test("record TTY coalesces numeric updates and emits the latest state on semanti
   reporter.dispose();
 });
 
+test("automatic TTY records coalesce timer and numeric-only changes without ANSI", () => {
+  const originalMode = process.env.RAFI_ACTIVITY_RENDER_MODE;
+  const originalTerm = process.env.TERM;
+  try {
+    delete process.env.RAFI_ACTIVITY_RENDER_MODE;
+    process.env.TERM = "xterm-256color";
+    const sink = output(true);
+    let now = 0;
+    const reporter = new ActivityReporter("build", { output: sink.target, now: () => now, displayDelayMs: 0 });
+    const end = reporter.begin("checking ticket 1");
+    now = 10_000;
+    reporter.update("checking ticket 2");
+    now = 20_000;
+    reporter.update("checking ticket 3");
+    assert.equal(sink.chunks.length, 1);
+    assert.equal(sink.chunks[0]!.endsWith("\n"), true);
+    assert.doesNotMatch(sink.chunks.join(""), /\x1b/);
+
+    reporter.update("processing agent response");
+    assert.equal(sink.chunks.length, 2);
+    end();
+    reporter.dispose();
+  } finally {
+    if (originalMode === undefined) delete process.env.RAFI_ACTIVITY_RENDER_MODE;
+    else process.env.RAFI_ACTIVITY_RENDER_MODE = originalMode;
+    if (originalTerm === undefined) delete process.env.TERM;
+    else process.env.TERM = originalTerm;
+  }
+});
+
 test("record TTY resets semantic coalescing after an activity lifecycle ends", () => {
   const sink = output(true);
   const reporter = new ActivityReporter("test", { output: sink.target, displayDelayMs: 0, ttyMode: "records" });
@@ -191,14 +240,14 @@ test("non-TTY heartbeat behavior ignores TTY rendering overrides", () => {
   assert.doesNotMatch(rendered, /\x1b/);
 });
 
-test("automatic TTY mode detects record-oriented hosts and honors overrides", () => {
+test("automatic TTY mode is safe for every host and honors explicit overrides", () => {
   const original = {
     mode: process.env.RAFI_ACTIVITY_RENDER_MODE,
     codex: process.env.CODEX_CI,
     ci: process.env.CI,
     term: process.env.TERM,
   };
-  const render = (environment: { mode?: string; codex?: string; ci?: string; term?: string }): string => {
+  const render = (environment: { mode?: string; codex?: string; ci?: string; term?: string }, ttyMode?: "auto" | "cursor" | "records"): string => {
     for (const [key, value] of Object.entries({
       RAFI_ACTIVITY_RENDER_MODE: environment.mode,
       CODEX_CI: environment.codex,
@@ -209,19 +258,24 @@ test("automatic TTY mode detects record-oriented hosts and honors overrides", ()
       else process.env[key] = value;
     }
     const sink = output(true);
-    const reporter = new ActivityReporter("test", { output: sink.target, displayDelayMs: 0 });
+    const reporter = new ActivityReporter("test", { output: sink.target, displayDelayMs: 0, ttyMode });
     reporter.begin("checking")();
     reporter.dispose();
     return sink.chunks[0] ?? "";
   };
 
   try {
+    assert.equal(render({ term: "xterm-256color" }).endsWith("\n"), true);
     assert.equal(render({ codex: "1", term: "xterm-256color" }).endsWith("\n"), true);
     assert.equal(render({ ci: "true", term: "xterm-256color" }).endsWith("\n"), true);
     assert.equal(render({ term: "dumb" }).endsWith("\n"), true);
     assert.match(render({ mode: "cursor", codex: "1", term: "dumb" }), /^\r\x1b\[2K/);
     assert.equal(render({ mode: "records", term: "xterm-256color" }).endsWith("\n"), true);
-    assert.match(render({ mode: "invalid", term: "xterm-256color" }), /^\r\x1b\[2K/);
+    assert.equal(render({ mode: "auto", term: "xterm-256color" }).endsWith("\n"), true);
+    assert.equal(render({ mode: "invalid", term: "xterm-256color" }).endsWith("\n"), true);
+    assert.match(render({ mode: "records" }, "cursor"), /^\r\x1b\[2K/);
+    assert.equal(render({ mode: "cursor" }, "records").endsWith("\n"), true);
+    assert.match(render({ mode: "cursor" }, "auto"), /^\r\x1b\[2K/);
   } finally {
     for (const [key, value] of Object.entries({
       RAFI_ACTIVITY_RENDER_MODE: original.mode,
@@ -233,4 +287,91 @@ test("automatic TTY mode detects record-oriented hosts and honors overrides", ()
       else process.env[key] = value;
     }
   }
+});
+
+test("tool lifecycle presentation preserves useful status and liveness", async () => {
+  const sink = output(true);
+  let now = 0;
+  await withActivityContext("test", async () => {
+    await withActivityPhase("planning", async () => {
+      reportBuilderEvent({ kind: "activity", state: "reading repository", provider: "claude" });
+      sink.chunks.length = 0;
+
+      reportBuilderEvent({ kind: "tool", name: "tool_result", input: {}, lifecycle: "completed", status: "completed" });
+      assert.equal(sink.chunks.length, 0);
+
+      reportBuilderEvent({ kind: "tool", name: "Bash", input: { command: "pnpm test" }, lifecycle: "started" });
+      assert.equal(sink.chunks.length, 1);
+      assert.match(sink.chunks[0]!, /running Bash/);
+      assert.match(sink.chunks[0]!, /pnpm test/);
+
+      sink.chunks.length = 0;
+      now = 10_000;
+      reportBuilderEvent({ kind: "tool", name: "Bash", input: {}, lifecycle: "progress", durationMs: 10_000 });
+      reportBuilderEvent({ kind: "tool", name: "Bash", input: {}, lifecycle: "completed", status: "completed", exitCode: 0 });
+      assert.equal(sink.chunks.length, 0);
+
+      reportBuilderEvent({ kind: "tool", name: "Write", input: {}, lifecycle: "completed", status: "ERROR" });
+      assert.equal(sink.chunks.length, 1);
+      assert.match(sink.chunks[0]!, /tool failed.*Write/);
+
+      sink.chunks.length = 0;
+      now = 20_000;
+      reportBuilderEvent({ kind: "tool", name: "Bash", input: {}, lifecycle: "completed", exitCode: 1 });
+      assert.equal(sink.chunks.length, 1);
+      assert.match(sink.chunks[0]!, /tool failed.*Bash/);
+
+      now = 30_000;
+      await new Promise((resolve) => setTimeout(resolve, 8));
+      assert.equal(sink.chunks.length, 1);
+
+      sink.chunks.length = 0;
+      reportBuilderEvent({ kind: "tool", name: "Read", input: { file_path: "README.md" } });
+      assert.equal(sink.chunks.length, 1);
+      assert.match(sink.chunks[0]!, /running Read.*README\.md/);
+    });
+  }, { output: sink.target, now: () => now, displayDelayMs: 0, tickMs: 5, quietWarningMs: 100_000, ttyMode: "records" });
+});
+
+test("successful tool completion refreshes the quiet clock without creating a record", async () => {
+  const sink = output(true);
+  let now = 0;
+  await withActivityContext("test", async () => {
+    await withActivityPhase("planning", async () => {
+      reportBuilderEvent({ kind: "activity", state: "reading repository", provider: "claude" });
+      sink.chunks.length = 0;
+
+      now = 20;
+      reportBuilderEvent({ kind: "tool", name: "tool_result", input: {}, lifecycle: "completed", status: "completed" });
+      assert.equal(sink.chunks.length, 0);
+
+      await new Promise((resolve) => setTimeout(resolve, 8));
+      assert.doesNotMatch(sink.chunks.join(""), /still responsive/);
+
+      now = 31;
+      await new Promise((resolve) => setTimeout(resolve, 8));
+      assert.equal(sink.chunks.join("").match(/still responsive/g)?.length, 1);
+    });
+  }, { output: sink.target, now: () => now, displayDelayMs: 0, tickMs: 5, quietWarningMs: 10, ttyMode: "records" });
+});
+
+test("post-answer quiet status explicitly reports absent Claude stream resumption", () => {
+  const sink = output(false);
+  let now = 0;
+  const reporter = new ActivityReporter("test", { output: sink.target, now: () => now, displayDelayMs: 0, quietWarningMs: 10 });
+  const end = reporter.begin("planning");
+  reporter.update("answer sent; waiting for Claude");
+  now = 20;
+  reporter.pulse();
+  now = 40;
+  // A status redraw without a new provider signal reaches the quiet warning.
+  reporter.setAgentStatus("planner");
+  assert.match(sink.chunks.join(""), /Claude has not resumed its stream yet after your answer was sent/);
+  reporter.update("Claude stream resumed");
+  sink.chunks.length = 0;
+  now = 60;
+  reporter.setAgentStatus("planner");
+  assert.doesNotMatch(sink.chunks.join(""), /has not resumed/);
+  end();
+  reporter.dispose();
 });

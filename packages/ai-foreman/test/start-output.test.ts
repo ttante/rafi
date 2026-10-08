@@ -30,3 +30,17 @@ test("Rafi advertises only the canonical build recovery command", () => {
 test("standalone Foreman omits unusable resume guidance without a session ID", () => {
   assert.deepEqual(formatResumeGuidance("ai-foreman", "/tmp/project", 1), []);
 });
+
+
+test("durable run guidance lists pending choices and resumes the exact run for either executable", () => {
+  for (const executable of ["rafi", "ai-foreman"] as const) {
+    const lines = formatResumeGuidance(executable, "/tmp/project", 1, "old-session", {
+      runId: "run-1", decisions: [{ decisionId: "decision-1", prompt: "Continue?", choices: [{ id: "continue", label: "Continue" }] }],
+    }).join("\n");
+    assert.match(lines, /input required: Continue\?/);
+    assert.match(lines, /choices: continue \(Continue\)/);
+    assert.match(lines, /rafi build:decide \/tmp\/project --run run-1 --decision decision-1 --choice <choice-id>/);
+    assert.match(lines, /rafi build:resume \/tmp\/project --run run-1/);
+    assert.doesNotMatch(lines, /old-session/);
+  }
+});

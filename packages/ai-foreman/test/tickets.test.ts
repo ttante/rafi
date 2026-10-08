@@ -25,6 +25,8 @@ import {
   cmdPopulateCli,
   buildPopulateAgentRunOptions,
   buildPopulateInstruction,
+  resolveContextSources,
+  resolvePopulationMode,
   resolvePopulationPlan,
   resolvePopulateSources,
 } from "../src/cli/tickets.js";
@@ -35,6 +37,9 @@ import { createReviewRecommendation } from "../src/tickets/recommendations.js";
 import { StateDb } from "../src/tickets/stateDb.js";
 import {
   loadTicketSetupConfig,
+  denormalizeTicketsSetupConfig,
+  normalizeTicketsSetupConfig,
+  mergeTicketSetup,
   saveTicketSetupConfig,
   DEFAULT_TICKET_SETUP,
 } from "../src/tickets/setupConfig.js";
@@ -650,6 +655,90 @@ test("populate uses saved local setup sources before rafi-plan fallback", () => 
   }
 });
 
+test("ticket populate mode preserves legacy omission and round-trips explicit strategies", () => {
+  const legacy = normalizeTicketsSetupConfig({ populate: {} });
+  assert.equal(legacy.populate.mode, "legacy");
+  assert.equal(Object.hasOwn(denormalizeTicketsSetupConfig(legacy).populate as object, "mode"), false);
+
+  for (const mode of ["approved_plan", "external_import"] as const) {
+    const setup = normalizeTicketsSetupConfig({ populate: { mode } });
+    assert.equal(setup.populate.mode, mode);
+    assert.equal((denormalizeTicketsSetupConfig(setup).populate as { mode?: string }).mode, mode);
+  }
+  assert.throws(() => normalizeTicketsSetupConfig({ populate: { mode: "documents" } }), /populate\.mode/);
+});
+
+test("legacy ticket setup can be saved and merged without serializing its runtime sentinel", () => {
+  const dir = makeTmpDir();
+  try {
+    const legacy = normalizeTicketsSetupConfig({ populate: { source_handling: "manual" } });
+    const merged = mergeTicketSetup(legacy, { limits: { implementation: 12, view: 34 } });
+    assert.equal(merged.populate.mode, "legacy");
+    const recommended = mergeTicketSetup(legacy, { populate: { ...DEFAULT_TICKET_SETUP.populate } });
+    assert.equal(recommended.populate.mode, "legacy");
+    saveTicketSetupConfig(dir, merged);
+
+    const raw = parse(readFileSync(join(dir, "rafi-config.yaml"), "utf8")) as { tickets: { populate: Record<string, unknown> } };
+    assert.equal(Object.hasOwn(raw.tickets.populate, "mode"), false);
+    assert.equal(raw.tickets.populate.source_handling, "manual");
+    assert.equal(loadTicketSetupConfig(dir)?.populate.mode, "legacy");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("explicit ticket population strategies survive merge, save, and reload", () => {
+  for (const mode of ["approved_plan", "external_import"] as const) {
+    const dir = makeTmpDir();
+    try {
+      const merged = mergeTicketSetup(undefined, { populate: { mode } });
+      saveTicketSetupConfig(dir, merged);
+      const raw = parse(readFileSync(join(dir, "rafi-config.yaml"), "utf8")) as { tickets: { populate: { mode?: string } } };
+      assert.equal(raw.tickets.populate.mode, mode);
+      assert.equal(loadTicketSetupConfig(dir)?.populate.mode, mode);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  }
+});
+
+test("approved-plan context selection honors manual and saved source handling", async () => {
+  const manual = await resolveContextSources(".", undefined, {
+    ...DEFAULT_TICKET_SETUP,
+    sources: [{ type: "local", paths: ["docs/context.md"] }, { type: "url", url: "https://example.com/context" }],
+    populate: { ...DEFAULT_TICKET_SETUP.populate, mode: "approved_plan", source_handling: "manual" },
+  }, true);
+  assert.deepEqual(manual, { local: [], urls: [] });
+
+  const saved = await resolveContextSources(".", undefined, {
+    ...DEFAULT_TICKET_SETUP,
+    sources: [{ type: "local", paths: ["docs/context.md"] }],
+    populate: { ...DEFAULT_TICKET_SETUP.populate, mode: "approved_plan", source_handling: "saved" },
+  }, true);
+  assert.deepEqual(saved.local, ["docs/context.md"]);
+  assert.equal(resolvePopulationMode({ ...DEFAULT_TICKET_SETUP, populate: { ...DEFAULT_TICKET_SETUP.populate, mode: "approved_plan" } }), "approved_plan");
+});
+
+test("approved-plan explicit sources supplement saved context except in manual mode", async () => {
+  const setup = {
+    ...DEFAULT_TICKET_SETUP,
+    sources: [
+      { type: "local" as const, paths: ["docs/saved.md"] },
+      { type: "url" as const, url: "https://example.com/saved" },
+    ],
+    populate: { ...DEFAULT_TICKET_SETUP.populate, mode: "approved_plan" as const, source_handling: "saved" as const },
+  };
+  const saved = await resolveContextSources(".", ["docs/extra.md"], setup, true);
+  assert.deepEqual(saved.local, ["docs/saved.md", "docs/extra.md"]);
+  assert.deepEqual(saved.urls.map((source) => source.url), ["https://example.com/saved"]);
+
+  const manual = await resolveContextSources(".", ["docs/extra.md"], {
+    ...setup,
+    populate: { ...setup.populate, source_handling: "manual" },
+  }, true);
+  assert.deepEqual(manual, { local: ["docs/extra.md"], urls: [] });
+});
+
 test("populate imports saved external-only setup without requiring a local source", async () => {
   const dir = makeTmpDir();
   const oldFetch = globalThis.fetch;
@@ -688,6 +777,38 @@ test("populate imports saved external-only setup without requiring a local sourc
     assert.equal(raw.tickets.length, 1);
     assert.equal(raw.tickets[0]?.id, "T001");
     assert.equal(raw.tickets[0]?.external_refs?.[0]?.provider, "linear");
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = oldKey;
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("explicit external-import mode imports without consulting a plan or Ticket Maker", async () => {
+  const dir = makeTmpDir();
+  const oldFetch = globalThis.fetch;
+  const oldKey = process.env.LINEAR_API_KEY;
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    // If this mode reached approved-plan resolution it would fail here.
+    writeFileSync(join(dir, "docs", "rafi-plan.json"), "{not valid JSON", "utf8");
+    saveTicketSetupConfig(dir, {
+      ...DEFAULT_TICKET_SETUP,
+      sources: [{ type: "linear", api_key_env: "LINEAR_API_KEY", team_key: "ENG", filter: null }],
+      populate: { ...DEFAULT_TICKET_SETUP.populate, mode: "external_import" },
+    });
+    process.env.LINEAR_API_KEY = "test-key";
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ data: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }), { status: 200 });
+    }) as typeof fetch;
+
+    await cmdPopulateCli({ project: dir, yes: true });
+    assert.equal(calls, 1);
+    assert.deepEqual((parse(readFileSync(join(dir, ".tickets/tickets.yaml"), "utf8")) as { tickets: TicketDef[] }).tickets, []);
   } finally {
     globalThis.fetch = oldFetch;
     if (oldKey === undefined) delete process.env.LINEAR_API_KEY;

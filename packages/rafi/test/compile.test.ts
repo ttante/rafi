@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { compile, isRuntimeAuthFailure, RuntimeUpdateError } from "../src/compiler.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
-import { AGENT_ROLES } from "special-agents";
+import { AGENT_ROLES, SKILLS_DIR } from "special-agents";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // The same frozen snapshot the Phase 3 golden test uses.
@@ -154,6 +154,15 @@ test("compile writes Codex agents and project skills from rafi-config paths", ()
   }
   assert.ok(existsSync(join(dir, ".claude", "skills", "tdd", "SKILL.md")));
   assert.ok(existsSync(join(dir, ".agents", "skills", "tdd", "SKILL.md")));
+  for (const runtimeDir of [".claude", ".agents"]) {
+    for (const resource of ["SKILL.md", "references/review.md"]) {
+      assert.equal(
+        readFileSync(join(dir, runtimeDir, "skills", "implementor", resource), "utf8"),
+        readFileSync(join(SKILLS_DIR, "implementor", resource), "utf8"),
+        `implementor ${resource} missing or changed for ${runtimeDir}`,
+      );
+    }
+  }
 });
 
 test("compile with Claude-only target emits Claude artifacts and compiled bundles only", () => {

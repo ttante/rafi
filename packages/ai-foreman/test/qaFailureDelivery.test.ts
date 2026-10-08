@@ -54,6 +54,8 @@ class FakeBuilder implements BuilderAdapter {
   readonly agent = "codex" as const;
   readonly instructions: string[] = [];
   private queue: BuilderEvent[] = [];
+  private observers = new Set<(event: BuilderEvent) => void>();
+  observeEvents(listener: (event: BuilderEvent) => void): () => void { this.observers.add(listener); return () => { this.observers.delete(listener); }; }
   private closed = false;
   response = "";
   ref: ProviderSessionRefV1;
@@ -115,7 +117,9 @@ class FakeBuilder implements BuilderAdapter {
       cleanedResponse: this.response,
       providerMetadata: { provider: "codex", sessionId: this.ref.sessionId, sessionRef: this.ref },
     };
-    this.queue.push({ kind: "turn-complete", result, turnId: result.turnId });
+    const event: BuilderEvent = { kind: "turn-complete", result, turnId: result.turnId };
+    this.queue.push(event);
+    for (const listener of this.observers) listener(event);
     return result;
   }
 

@@ -15,9 +15,9 @@ Loop Claude Code or Codex through tickets.
 - **Rich ticket system** — tickets carry acceptance criteria, required tests, dependencies, priority, size, and risk level. The agent reads the full context before starting each step.
 - **Future work tracking** — when the builder discovers out-of-scope work during a run, `ai-foreman tickets discover` captures it without derailing the current ticket. Discovered items live in a separate inbox until you promote them.
 - **QA that actually gates** — QA runs after every completed ticket and checks code quality, test passing, and regression protection. The ticket only closes after QA passes. QA turns do not count against `--steps`.
-- **Visible long-running work** — semantic activity rows identify provider, phase, tools, retries, and quiet periods; cursor-capable terminals update changing counters in place, while record-oriented terminals coalesce them.
+- **Visible long-running work** — semantic activity rows identify provider, phase, tools, retries, and quiet periods; safe record output coalesces spinner- and time-only changes.
 
-Provider-managed retries are reported immediately as durable lines. A quiet-provider warning appears after 60 seconds without a signal, but Foreman does not add retries, abort the provider, or change provider retry limits. Non-TTY output receives a heartbeat every 30 seconds while work remains pending. TTY rendering defaults to automatic detection: Codex, CI, and `TERM=dumb` use newline records and suppress spinner- or number-only repeats; other terminals redraw those changes in place and retain a row when the textual status changes. Use `RAFI_ACTIVITY_RENDER_MODE=auto|cursor|records` to override detection.
+Provider-managed retries are reported immediately as durable lines. A quiet-provider warning appears after 60 seconds without a signal, but Foreman does not add retries, abort the provider, or change provider retry limits. Non-TTY output emits the initial and meaningful status changes without ANSI redraws. Automatic TTY output also uses newline records and suppresses spinner-, elapsed-time-, and number-only repeats, making it safe for transcript hosts. Set `RAFI_ACTIVITY_RENDER_MODE=cursor` to explicitly enable animated in-place redraws in a known real terminal; `records` explicitly forces safe records, while `auto` selects the safe default.
 
 ## Install
 
@@ -77,13 +77,14 @@ What each part does:
 
 - `./my-project`: the repo Foreman will work on.
 - `tickets init`: creates the local `.tickets/` tracker.
-- `tickets populate`: asks the ticket-maker role to convert project planning material.
+- `tickets populate`: generates tickets from an approved structured Rafi plan, with optional supporting context.
 - Converted output uses Foreman's schema.
 - `start`: drives Codex through the next tickets one step at a time.
 
-`tickets populate` can convert:
+In `approved_plan` mode, `tickets populate` requires a validated `<docs.root>/rafi-plan.json`. Supporting documents and URLs add detail but cannot replace its slices. `external_import` is a separate mode for importing configured Linear or Jira tickets.
 
-- a managed Rafi plan at `<docs.root>/rafi-plan.md`
+Supporting context can include:
+
 - plans
 - TODOs
 - roadmap docs
@@ -161,6 +162,16 @@ Saved `tickets.build` defaults in `rafi-config.yaml` can enable branch-per-ticke
 
 With the saved `current` strategy, Foreman works in the active branch while the user owns Git. It may edit, test, run QA, and update tracker/recovery state, but all branch/worktree, commit, push, merge, rebase, and review lifecycle commands are fenced. An unexpected active ref or worktree change pauses the run. Explicit isolated flags are reported as run overrides.
 
+Build stall recovery uses current context occupancy, not lifetime token usage. The `compact` session strategy checks occupancy at ordinary boundaries and compacts only when the threshold requires it; `fresh` still creates an intentional new session. Compaction normally has a 120-second deadline, extending to at most 180 seconds only after correlated progress. Late completion is attributed to the original session; unresolved attempts remain quarantined across restart. Unknown completion pauses recovery rather than replaying implementation in a replacement session.
+
+Unchanged, source-bound plan and ticket approvals are reused. Material ticket, plan, delivery, or workflow changes require a new decision, including with `--yes`. Legacy approval evidence that cannot prove unchanged scope requires review. `--steps` counts completed tickets or steps; it is neither a wall-clock limit nor a model-turn budget.
+
+Questions are persisted before prompting. Redirected or detached runs return a recoverable needs-input outcome (exit 2). Use `rafi build:attach . --run <id>` to see decisions, `rafi build:decide . --run <id> --decision <id> --choice <id>` to answer, and `rafi build:resume . --run <id>` to continue. Custom answers additionally use `--choice custom --answer "text"`. Independent eligible tickets continue around a ticket blocker; dependent and unsafe shared-delivery work stays deferred. Answered ticket questions are reconsidered at safe boundaries.
+
+CLI starts run under a durable parent supervisor by default. `--detach` writes output under `.rafi/logs/supervisor-<run>.log`; `--no-supervisor` retains direct execution. A preparation-only worker crash may restart within frozen budgets after proving the worker and registered readiness children are stopped. A worker crash with unresolved provider work pauses for reconciliation: it does not silently repeat a possibly completed action. `build:stop` signals only a verified supervisor process incarnation.
+
+Runtime deadlines can be overridden in `autonomy.runtime_deadlines` using positive integer milliseconds: `preparation_ms` (120000), `rpc_ms` (60000), `compaction_ms` (120000), `shutdown_ms` (10000), and `turn_ms` (3600000). They are frozen with the run policy. Transport-idle and hard active-turn deadlines have distinct meanings; neither grants permission to repeat uncertain side effects. Attached-process elapsed time includes waiting and is not provider compute time. Activity warns after five minutes without a completed tool or agent turn; intentional human waits are excluded, and the warning alone does not cancel work. Final paused output lists the durable question and exact run-scoped recovery commands.
+
 The current terminal status includes the role/provider, activity, truthful context state, successful compaction count, and handoff generation. At the Builder threshold, Foreman settles the in-flight action, verifies native compaction plus a fresh provider usage sample, and resumes the frozen action. The configured maximum defaults to ten successful compactions per location-scoped provider session; the next crossing uses a validated fresh handoff instead of exceeding it. Disposable QA snapshots never reuse a prior QA conversation in a new `/tmp/rafi-qa-*` worktree; they transfer cumulative state through an accepted handoff.
 
 Failed QA reviews use the versioned `RAFI_QA_FAILURE_REPORT_START` / `RAFI_QA_FAILURE_REPORT_END` JSON contract. Foreman validates the report before Builder remediation, namespaces finding IDs by run, ticket, and review, and durably indexes the exact report, remediation response, and bounded fix summary by digest. A malformed failing report receives two correction-only turns in its original session, then a validated fresh successor performs one complete source-bound review followed by up to two correction-only turns. Any later operator-requested fresh successor performs one complete source-bound review followed by five usable correction-only turns.
@@ -214,11 +225,11 @@ gh repo view <host>/<owner>/<repo>
 | `-a, --agent <agent>` | `claude` / `codex` | single `rafi-config.yaml` target, otherwise `claude` | Builder agent. Explicit `--agent` always wins. |
 | `-m, --model <model>` | `gpt-5.5` / any supported agent model | agent default | Overrides the builder model. |
 | `--effort <level>` | Claude Code: `low` / `medium` / `high` / `xhigh`<br>Codex: `low` / `medium` / `high` / `xhigh` | agent default | Reasoning level. |
-| `--sources <paths...>` | `docs/tickets.md docs/plans/**` | Configured Rafi `<docs.root>/rafi-plan.md`, then ticket docs root, then `docs/rafi-plan.md`, otherwise scans | Optional files, folders, or globs for the agent to check first. Any reasonable planning format is OK. |
+| `--sources <paths...>` | `docs/tickets.md docs/plans/**` | saved context, subject to `source_handling` | Supplemental files, folders, URLs, or globs. Passing an approved `rafi-plan.json` remains supported; ordinary documents cannot replace the approved plan. |
 | `--fast` | flag | off | Lower latency. |
 | `-y, --yes` | flag | off | Skips confirmation before builder edits ticket files. |
 
-Use `ai-foreman tickets setup:init` or `setup:update` to append local, Linear, or Jira Cloud sources to the project-wide registry in `rafi-config.yaml`. Linear imports use `LINEAR_API_KEY`; Jira Cloud imports use `JIRA_EMAIL` and `JIRA_API_TOKEN`. Credentials are never persisted, and mirrored tickets retain source provenance.
+Use `ai-foreman tickets setup:init` or `setup:update` to manage supporting local/URL context and external Linear/Jira connections in the project-wide registry in `rafi-config.yaml`. Linear imports use `LINEAR_API_KEY`; Jira Cloud imports use `JIRA_EMAIL` and `JIRA_API_TOKEN`. Credentials are never persisted, and mirrored tickets retain source provenance.
 
 Use `ai-foreman tickets review` to accept, defer, or dismiss pending split/combine/duplicate recommendations rendered in the progress doc.
 

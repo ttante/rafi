@@ -16,6 +16,8 @@ import { StateDb } from "../src/tickets/stateDb.js";
 import { loadTickets } from "../src/tickets/ticketLoader.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import { WorkflowDb } from "../src/workflowDb.js";
+import { SessionUnavailableError } from "../src/adapters/sessionFailure.js";
+import { providerSessionKey } from "../src/sessionIdentity.js";
 
 const EMPTY_DELTA: ContinuityDelta = {
   version: 1,
@@ -51,7 +53,7 @@ class FakeAdapter implements BuilderAdapter {
     return this.adoptedRef ?? (this.id ? {
       version: 1, provider: this.agent, sessionId: this.id, role: "builder", stream: "builder", generation: 0,
       cwd: `/test/${this.id}`, configRoot: "/test", workspaceIdentity: `workspace-${this.id}`,
-      source: "observed", createdAt: "2026-01-01T00:00:00.000Z",
+      source: "observed", createdAt: "2026-01-01T00:00:00.000Z", validatedAt: "2026-01-01T00:00:00.000Z",
     } : undefined);
   }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.adoptedRef = ref; }
@@ -66,6 +68,35 @@ class FakeAdapter implements BuilderAdapter {
 }
 
 function root(prefix: string): string { return mkdtempSync(join(tmpdir(), prefix)); }
+
+test("uncertain compaction survives restart and late completion stays with its original session", async () => {
+  const projectDir = root("rafi-late-compact-");
+  const adapter = new FakeAdapter("session-1", [], [{ used: 60, maximum: 100, percentage: 60 }]);
+  let listener: ((event: BuilderEvent) => void) | undefined;
+  Object.assign(adapter, { observeEvents: (next: (event: BuilderEvent) => void) => { listener = next; return () => { listener = undefined; }; } });
+  adapter.compact = async () => {
+    adapter.compactCalls++;
+    const failure = new SessionUnavailableError({ runtime: "codex", phase: "turn", dispatchState: "unknown", executable: "codex", cwd: projectDir, diagnostics: "compaction wait expired" });
+    return { ok: false, error: failure.message, failure: failure.failure };
+  };
+  let handoffs = 0;
+  const options = { projectDir, runId: "run", role: "builder" as const, initialSettings: SETTINGS, handoff: async () => { handoffs++; return new FakeAdapter("successor"); } };
+  await assert.rejects(new ThresholdCompactionController(options).atSafeBoundary(adapter, "first action"), /expired/);
+  const reopened = new ThresholdCompactionController(options);
+  await assert.rejects(reopened.atSafeBoundary(adapter, "changed action"), /unresolved outcome/);
+  await assert.rejects(reopened.atWorkSessionBoundary(adapter, "fresh action", "fresh"), /unresolved outcome/);
+  assert.equal(adapter.compactCalls, 1); assert.equal(handoffs, 0);
+  const db = new WorkflowDb(projectDir);
+  try {
+    assert.equal(db.unresolvedCompactions("run", "builder", providerSessionKey(adapter.sessionRef()!))[0]!.status, "uncertain");
+    listener!({ kind: "session-transition", transition: "compacted" });
+    listener!({ kind: "session-transition", transition: "compacted" });
+    assert.equal(db.unresolvedCompactions("run", "builder", providerSessionKey(adapter.sessionRef()!)).length, 0);
+    assert.equal(db.successfulCompactionCount("run", "builder", adapter.sessionRef()!), 1);
+    assert.equal(db.successfulCompactionCount("run", "builder", new FakeAdapter("successor").sessionRef()!), 0);
+    assert.equal(db.continuityEvents("run").filter(event => event.kind === "late_compaction_completion").length, 1);
+  } finally { db.close(); }
+});
 function definition(id: string, title = id): Record<string, unknown> { return { id, order: Number(id.replace(/\D/g, "")) * 1000, title, depends_on: [] }; }
 
 test("ticket groups allocate stable monotonic IDs, preserve order, and reuse an operation only idempotently", () => {
@@ -224,6 +255,10 @@ test("an uncheckpointed provider turn is visible to recovery as uncertain", () =
   });
   assert.equal(db.hasUncheckpointedRoleTurn("run-1", "builder"), true);
   db.appendContinuityEvent({
+    runId: "run-1", role: "qa", kind: "handback_turn_completed", payload: {}, authoritativeStateRevision: 1,
+  });
+  assert.equal(db.hasUncheckpointedRoleTurn("run-1", "builder"), true, "a different role cannot clear Builder uncertainty");
+  db.appendContinuityEvent({
     runId: "run-1", role: "builder", kind: "turn_completed", payload: {}, authoritativeStateRevision: 1,
   });
   assert.equal(db.hasUncheckpointedRoleTurn("run-1", "builder"), false);
@@ -372,8 +407,11 @@ test("recovery handoff fails closed without a scoped successor identity", async 
       runId: "run-1", role: "builder", reason: "recover exact packet", compactionCount: 0, compactMaximum: 10,
       resources: [{ label: "packet", content: "packet", authoritative: true, requiredForRecovery: true, purpose: "Recovery packet", bytes: 6 }],
     }, async () => new UnscopedAdapter("session-2")),
-    (error: unknown) => error instanceof HandoffAcceptanceError && error.code === "missing-scoped-successor-session",
+    (error: unknown) => error instanceof Error && error.name === "HumanDecisionRequired" && error.message.includes("missing-scoped-successor-session"),
   );
+  const persisted = new WorkflowDb(projectDir);
+  try { assert.equal(persisted.pendingHumanDecisions("run-1").length, 1); assert.equal(persisted.roleMutationLease("run-1", "builder"), undefined); }
+  finally { persisted.close(); }
 });
 
 test("handoff acceptance gives a malformed acknowledgement one bounded correction turn", async () => {
@@ -477,6 +515,23 @@ test("a third consecutive unproductive Builder handoff request is fenced", () =>
   assert.equal(paused.continuityHead("run-1", "builder")?.state, "degraded");
   assert.equal(paused.continuityEvents("run-1").at(-1)?.kind, "builder_handoff_loop_paused");
   paused.close();
+});
+
+test("validated handback progress resets the Builder handoff limit without counting another role's work", () => {
+  const projectDir = root("rafi-handoff-progress-");
+  const db = new WorkflowDb(projectDir);
+  try {
+    db.ensureRun("run-1");
+    db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 });
+    for (let index = 0; index < 2; index++) db.appendContinuityEvent({ runId: "run-1", role: "host", kind: "builder_handoff_requested", payload: { request: index + 1 }, authoritativeStateRevision: 1 });
+    const delta = { ...EMPTY_DELTA, completedActions: ["Addressed the QA finding"] };
+    db.appendContinuityEvent({ runId: "run-1", role: "qa", kind: "turn_completed", payload: { delta }, authoritativeStateRevision: 1 });
+    const service = new HandoffService(projectDir);
+    assert.throws(() => service.stage({ runId: "run-1", role: "builder", reason: "still no Builder progress", requestedByBuilder: true, compactionCount: 0, compactMaximum: 10 }), HandoffLoopError);
+    db.appendContinuityEvent({ runId: "run-1", role: "builder", kind: "handback_turn_completed", payload: { delta }, authoritativeStateRevision: 1 });
+    db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta, authoritativeStateRevision: 1 });
+    assert.doesNotThrow(() => service.stage({ runId: "run-1", role: "builder", reason: "progress after QA", requestedByBuilder: true, compactionCount: 0, compactMaximum: 10 }));
+  } finally { db.close(); }
 });
 
 test("continuity protocol repairs one invalid delta in-session and advances the durable head", async () => {

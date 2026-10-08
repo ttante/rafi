@@ -76,6 +76,26 @@ export function collectManagerDiagnostics(projectDir: string, options: CollectMa
     const workflowEvents = workflow.events(run.runId);
     const issues = workflow.issues(run.runId);
     const operations = workflow.operations(run.runId);
+    const pendingDecisions = workflow.pendingHumanDecisions(run.runId);
+    for (const event of workflowEvents.filter(event => event.type === "handoff_accepted").slice(-20)) evidence.push({
+      evidenceId: `handoff-accepted-${event.sequence}`, source: "recovery", kind: "handoff_accepted", observedAt: event.at,
+      summary: `Successor accepted at ${event.checkpoint}; acceptance alone does not establish adoption or implementation dispatch`,
+    });
+    for (const event of workflow.adoptionMilestones(run.runId)) evidence.push({
+      evidenceId: `handoff-adopted-${event.sequence}`, source: "recovery", kind: "handoff_adopted", observedAt: event.at,
+      summary: `${event.role} successor adopted${event.sessionKey ? ` (${event.sessionKey})` : ""}; dispatch is tracked separately`,
+    });
+    for (const operation of operations.filter(item => item.kind === "provider-dispatch").slice(-20)) evidence.push({
+      evidenceId: `dispatch-state-${operation.idempotencyKey}`, source: "recovery", kind: "dispatch_state", observedAt: operation.updatedAt,
+      summary: `Provider action ${operation.idempotencyKey}: ${operation.status}; intent recorded ${operation.createdAt}`,
+    });
+    for (const decision of pendingDecisions) evidence.push({ evidenceId: `decision-${decision.decisionId}`, source: "recovery", kind: "pending_decision", observedAt: decision.createdAt,
+      summary: `${decision.interruptionId}: ${decision.prompt.slice(0, 500)}; pending since ${decision.createdAt}; answer decision ${decision.decisionId}` });
+    for (const dispatch of operations.filter(item => item.kind === "provider-dispatch" && ["in_progress", "uncertain"].includes(item.status))) evidence.push({
+      evidenceId: `dispatch-${dispatch.idempotencyKey}`, source: "recovery", kind: "uncertain_dispatch", observedAt: dispatch.updatedAt,
+      summary: `Provider dispatch ${dispatch.idempotencyKey} is ${dispatch.status}; completion is unknown and replay is blocked` });
+    evidence.push({ evidenceId: "work-location", source: "recovery", kind: "worktree", summary: `Work is in ${run.repository.worktree} on ${run.repository.branch ?? "unknown branch"}` });
+    if (pendingDecisions.length && workflowRun?.status === "paused") currentState.push({ version: 1, runId: run.runId, role: "host", stream: "human-decision", phase: "waiting for a decision", updatedAt: workflowRun.updatedAt });
     const lease = workflow.currentLease();
     const leaseEvidence = evaluateLease(lease?.runId === run.runId ? lease : undefined, now);
     const continuity = workflow.continuityHeads(run.runId);
@@ -129,7 +149,7 @@ export function collectManagerDiagnostics(projectDir: string, options: CollectMa
     const pausedOfflineMs = Math.max(0, calendarAgeMs - activeExecutionMs);
     const topContributors = Object.entries(byKind).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 3).map(([kind, durationMs]) => ({ kind, durationMs }));
 
-    evidence.push({ evidenceId: "timing-active", source: "observability", kind: "active_execution", summary: `Active execution accounted for ${activeExecutionMs} ms`, durationMs: activeExecutionMs });
+    evidence.push({ evidenceId: "timing-active", source: "observability", kind: "active_execution", summary: `Attached process elapsed time accounted for ${activeExecutionMs} ms (includes observed waits; not a measure of provider compute)`, durationMs: activeExecutionMs });
     for (const [index, contributor] of topContributors.entries()) evidence.push({ evidenceId: `timing-${index + 1}`, source: "observability", kind: contributor.kind, summary: `${contributor.kind} accounted for ${contributor.durationMs} ms`, durationMs: contributor.durationMs });
     const significantSpans = spans.filter(span => WAIT_KINDS.has(span.kind) || ["retry", "qa_attempt", "qa_fix", "fix"].includes(span.kind)
       || ["failed", "error", "blocked"].includes(span.outcome ?? ""))
@@ -156,6 +176,11 @@ export function collectManagerDiagnostics(projectDir: string, options: CollectMa
     };
     const comparisons = chooseComparison(observable.rollups(), run, ticketSizeBucketForRun(root, run.tickets), now);
     const findings = buildFindings({ run, now, spans, currentState, evidence, topContributors, activeExecutionMs, explicitWaitMs, unattributedMs, byKind, counts, comparisons, leaseEvidence });
+    if (pendingDecisions.length) findings.push({ code: "pending_decisions", title: workflowRun?.status === "paused" ? "Waiting for a decision" : "Some work needs a decision",
+      summary: `${pendingDecisions.length} unanswered decision(s) persist. Answer the listed decision IDs; independent eligible work may continue.`, confidence: "observed", evidenceIds: pendingDecisions.map(decision => `decision-${decision.decisionId}`) });
+    const uncertainDispatch = evidence.filter(item => item.kind === "uncertain_dispatch");
+    if (uncertainDispatch.length) findings.push({ code: "unresolved_dispatch", title: "Provider completion is unresolved",
+      summary: "An intended provider action has no terminal receipt. This may be active work; after interruption it requires reconciliation before replay.", confidence: "observed", evidenceIds: uncertainDispatch.map(item => item.evidenceId) });
     if (findings.every((finding) => finding.code === "largest_contributors")) findings.push({ code: "progressing", title: "Run appears to be progressing", summary: `No supported anomaly is present; the longest current phase is ${topContributors[0]?.kind ?? run.checkpoint}.`, confidence: spans.length ? "derived" : "limited", evidenceIds: topContributors[0] ? ["timing-1", "lease-health"] : ["lease-health"] });
 
     const max = Math.max(1, options.maxDetailSpans ?? 100);

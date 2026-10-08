@@ -14,6 +14,32 @@ import {
 import { ensureRuntimeReadyForCommand } from "../src/cli/runtimeAuthPrompt.js";
 import { resolveAgentForProject } from "../src/cli/runtimeSelection.js";
 import { readRoleDefaultsForExecution } from "../src/agentRun.js";
+import { WorkflowDb } from "../src/workflowDb.js";
+import { HumanDecisionRequired } from "../src/humanDecision.js";
+
+test("noninteractive readiness persists recovery and spends retry answers once", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "rafi-runtime-decision-"));
+  const runId = "readiness-run";
+  let probes = 0;
+  const check = async () => { probes++; throw new Error("fixture authentication unavailable"); };
+  const options = { label: "Builder", yes: true, allowSwitch: false, check, durable: { projectDir, runId, scopeRevision: "scope-1" } };
+  await assert.rejects(ensureRuntimeReadyForCommand(projectDir, "codex", options), HumanDecisionRequired);
+  const db = new WorkflowDb(projectDir);
+  try {
+    const first = db.pendingHumanDecisions(runId)[0]!;
+    assert.equal(first.choices.some(choice => choice.id === "switch"), false);
+    db.answerHumanDecision(runId, first.decisionId, "retry");
+    await assert.rejects(ensureRuntimeReadyForCommand(projectDir, "codex", options), HumanDecisionRequired);
+    assert.equal(probes, 3);
+    const pending = db.pendingHumanDecisions(runId);
+    assert.equal(pending.length, 1);
+    assert.notEqual(pending[0]!.decisionId, first.decisionId);
+    assert.equal(db.operations(runId).filter(item => item.kind === "runtime-recovery-decision").length, 1);
+    await assert.rejects(ensureRuntimeReadyForCommand(projectDir, "codex", options), HumanDecisionRequired);
+    assert.equal(probes, 4);
+    assert.equal(db.pendingHumanDecisions(runId)[0]!.decisionId, pending[0]!.decisionId);
+  } finally { db.close(); }
+});
 
 test("runtime auth detection matches 401 credential output", () => {
   assert.equal(isRuntimeAuthFailure("Error: 401 Invalid authentication credentials"), true);

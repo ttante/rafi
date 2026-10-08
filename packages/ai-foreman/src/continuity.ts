@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import type { ContinuityCheckpoint, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
 import type { BuilderAdapter, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, ProviderSessionUsage, ProviderSettingSwitch, RuntimeFailure, TurnResult } from "./adapters/types.js";
 import { BuilderEventQueue } from "./activity.js";
+import { providerSessionKey } from "./sessionIdentity.js";
 import { WorkflowDb } from "./workflowDb.js";
 
 export const CONTINUITY_MARKER = "RAFI_CONTINUITY_DELTA:";
@@ -142,14 +143,46 @@ export class ContinuityAdapter implements BuilderAdapter {
 
   get agent(): "claude" | "codex" { return this.adapter.agent; }
 
-  async sendTurn(instruction: string): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string }): Promise<TurnResult> {
     const db = new WorkflowDb(this.options.projectDir);
     try {
       db.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "turn_started", payload: { role: this.options.role, instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) }, authoritativeStateRevision: this.revision() });
     } finally { db.close(); }
 
     const providerInstruction = `${instruction}\n\n${continuityInstruction()}`;
-    const original = await this.adapter.sendTurn(providerInstruction);
+    const journal = new WorkflowDb(this.options.projectDir);
+    const dispatchId = `dispatch:${this.options.runId}:${this.options.role}:${randomUUID()}`;
+    let original: TurnResult;
+    try {
+      journal.atomic(() => {
+        if (process.send && process.env.RAFI_BUILD_WORKER_RUN === this.options.runId) {
+          const supervisor = journal.supervisorState(this.options.runId);
+          if (!process.connected || supervisor?.status !== "running" || supervisor.workerGeneration !== Number(process.env.RAFI_BUILD_WORKER_GENERATION)) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "supervised worker no longer owns dispatch authority");
+        }
+        const owner = journal.roleMutationLease(this.options.runId, this.options.role);
+        const ref = this.adapter.sessionRef?.();
+        const session = ref?.sessionId ?? this.adapter.sessionId();
+        if (owner && session && (owner.providerSessionId !== session || (owner.sessionKey && ref && owner.sessionKey !== providerSessionKey(ref)))) {
+          throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "provider session no longer owns role dispatch authority");
+        }
+        if (journal.unresolvedRoleDispatches(this.options.runId, this.options.role).length) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "a previous dispatched turn has no durable completion; reconcile it before sending more work");
+        journal.planOperation({ runId: this.options.runId, idempotencyKey: dispatchId, kind: "provider-dispatch", intent: { role: this.options.role, sessionRef: this.adapter.sessionRef?.(), instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) } });
+        journal.updateOperation(dispatchId, "in_progress");
+      });
+      try { original = await this.adapter.sendTurn(providerInstruction, policy); }
+      catch (error) { journal.updateOperation(dispatchId, "uncertain", { error: String(error) }); throw error; }
+      const responseDigest = journal.putEvidence("handoff", original.rawResponse ?? original.text);
+      journal.updateOperation(dispatchId, original.failure?.dispatchState === "unknown" ? "uncertain" : "confirmed", { result: { responseDigest, isError: original.isError, failure: original.failure, turnId: original.turnId, sessionRef: this.adapter.sessionRef?.() } });
+    } finally { journal.close(); }
+    if (policy?.handback) {
+      const parsed = parseContinuityDelta(original.rawResponse ?? original.text);
+      // The delivery journal owns the sole repair allowance and validates execution
+      // before a checkpoint is published. Never transfer/replay inside this turn.
+      return { ...original, text: parsed.cleanText, hostInstruction: instruction,
+        providerInstruction: original.providerInstruction ?? providerInstruction,
+        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText,
+        continuityErrors: parsed.error?.problems ?? [] };
+    }
     const activeSession = this.adapter.sessionRef?.() ?? this.adapter.sessionId();
     if (activeSession) {
       const leaseDb = new WorkflowDb(this.options.projectDir);
@@ -160,8 +193,9 @@ export class ContinuityAdapter implements BuilderAdapter {
       this.recordSessionUnavailable(original.failure, instruction);
       throw new SessionUnavailableContinuityError(this.options.runId, this.options.role, original.failure);
     }
+    if (original.isError || original.failure) return original;
     const parsed = parseContinuityDelta(original.text);
-    if (parsed.delta) {
+    if (parsed.delta && !original.isError && !original.failure) {
       this.publish(parsed.delta, "turn_completed", original);
       this.moveRecoveryLeaseAfterCheckpoint();
       if (this.options.durableSingleTurn) {
@@ -190,16 +224,28 @@ export class ContinuityAdapter implements BuilderAdapter {
         rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
     }
 
+    const budget = new WorkflowDb(this.options.projectDir);
+    try {
+      const maximum = budget.autonomyPolicy(this.options.runId)?.limits.protocolCorrections ?? 1;
+      if (!budget.reserveRecoveryAllowance(this.options.runId, policy?.logicalActionId ?? sha(instruction), "protocol-correction", maximum)) {
+        throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "shared protocol correction budget exhausted");
+      }
+    } finally { budget.close(); }
     const repair = await this.adapter.sendTurn([
       "Continuity protocol repair only. Do not run tools, repeat work, or change files.",
       `Your prior turn's continuity record was invalid: ${parsed.error?.problems.join("; ")}.`,
       continuityInstruction(),
       "Return only the continuity record.",
-    ].join("\n"));
+    ].join("\n"), { ...policy, responseOnly: true });
     const repaired = parseContinuityDelta(repair.text);
-    if (repaired.delta) {
+    if (repaired.delta && !repair.isError && !repair.failure) {
       this.publish(repaired.delta, "turn_completed_after_repair", original);
       this.moveRecoveryLeaseAfterCheckpoint();
+      const successor = await this.options.handleHandoffRequest?.(original.text, this.adapter, instruction);
+      if (successor && successor !== this.adapter) {
+        await this.adoptValidatedSuccessor(successor);
+        return this.sendTurn(["Continue the frozen action after the accepted Rafi handoff. Do not repeat completed side effects.", instruction].join("\n\n"));
+      }
       return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
         rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
     }
@@ -252,6 +298,17 @@ export class ContinuityAdapter implements BuilderAdapter {
       rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
   }
 
+  observeEvents(listener: (event: import("./adapters/types.js").BuilderEvent) => void): () => void {
+    if (!this.adapter.observeEvents) throw new Error("wrapped provider does not expose turn observation");
+    return this.adapter.observeEvents(listener);
+  }
+  acceptHandbackTurn(turn: TurnResult): void {
+    const parsed = parseContinuityDelta(turn.rawResponse ?? turn.text);
+    if (turn.isError || turn.failure || !parsed.delta) throw new Error("cannot publish an invalid handback checkpoint");
+    this.publish(parsed.delta, "handback_turn_completed", turn);
+    this.moveRecoveryLeaseAfterCheckpoint();
+  }
+
   sessionId(): string | undefined { return this.adapter.sessionId(); }
   sessionRef(): import("rafi-spec").ProviderSessionRefV1 | undefined { return this.adapter.sessionRef?.(); }
   prepareSession(): Promise<import("rafi-spec").ProviderSessionRefV1> {
@@ -277,9 +334,12 @@ export class ContinuityAdapter implements BuilderAdapter {
   async adoptValidatedSuccessor(successor: BuilderAdapter): Promise<void> {
     if (successor === this.adapter) return;
     const prior = this.adapter;
+    await prior.close();
     this.adapter = successor;
+    const db = new WorkflowDb(this.options.projectDir);
+    try { db.appendContinuityEvent({ runId: this.options.runId, role: this.options.role, kind: "handoff_adopted", payload: { predecessorSessionId: prior.sessionId(), successorSessionId: successor.sessionId(), sessionRef: successor.sessionRef?.() }, authoritativeStateRevision: this.revision(), sessionRef: successor.sessionRef?.() }); }
+    finally { db.close(); }
     this.pumpEvents();
-    await prior.close().catch(() => {});
   }
 
   private publish(delta: ContinuityDelta, kind: string, result: TurnResult): ContinuityCheckpoint {

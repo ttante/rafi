@@ -133,7 +133,10 @@ export interface AutonomyRuleOverride {
   max_attempts?: number;
 }
 
+export interface RuntimeDeadlines { preparation_ms: number; rpc_ms: number; compaction_ms: number; shutdown_ms: number; turn_ms: number; }
+
 export interface AutonomyConfig {
+  runtime_deadlines?: Partial<RuntimeDeadlines>;
   profile: AutonomyProfile;
   continue_independent_tickets: boolean;
   rules?: Partial<Record<RecoveryRuleId, AutonomyRuleOverride>>;
@@ -145,6 +148,7 @@ export interface AutonomyConfig {
 }
 
 export interface ResolvedAutonomyPolicy {
+  runtimeDeadlines?: RuntimeDeadlines;
   version: 1;
   profile: AutonomyProfile;
   continueIndependentTickets: boolean;
@@ -237,6 +241,8 @@ export interface HumanDecisionChoice {
 }
 
 export interface PendingHumanDecision {
+  /** Operator-provided custom answer for a correlated durable question. */
+  answer?: string;
   decisionId: string;
   runId: string;
   interruptionId: string;
@@ -250,6 +256,7 @@ export interface PendingHumanDecision {
 }
 
 export interface SupervisorState {
+  processStart?: string;
   status: "disabled" | "starting" | "running" | "waiting_for_human" | "stopping" | "stopped" | "failed";
   pid?: number;
   generation: number;
@@ -779,6 +786,19 @@ export interface BuilderQaRemediationReportV2 {
   observations: string[];
 }
 
+/** V3 adds truthful partial blockers; V2 disputes retain their original meaning. */
+export interface BuilderQaRemediationReportV3 {
+  version: 3;
+  handoff_id: string;
+  summary: string;
+  findings: Array<Omit<BuilderQaRemediationReportV2["findings"][number], "disposition"> & {
+    disposition: "fixed" | "disputed" | "blocked";
+    blocker?: { category: "environment" | "permission" | "decision" | "dependency" | "other"; reason: string; recovery: string; capability: string; evidence: string };
+  }>;
+  observations: string[];
+}
+export type BuilderQaRemediationReport = BuilderQaRemediationReportV2 | BuilderQaRemediationReportV3;
+
 export interface UninstallProposal {
   operations: Array<{
     kind: "keep" | "delete" | "edit" | "remove-dependency";
@@ -814,6 +834,8 @@ export type TicketSetupSource =
     };
 
 export type TicketPopulateAgentPreference = "configured" | "claude" | "codex";
+/** How the ticket tracker is populated.  Omitted means a pre-mode legacy setup. */
+export type TicketPopulateMode = "approved_plan" | "external_import";
 export type TicketPopulateEnrichmentPolicy = "none" | "recommendations" | "agent";
 export type TicketBuildBranchStrategy = "current" | "batch" | "branch-per-ticket";
 export type TicketBranchPolicyMode = "global" | "size";
@@ -823,6 +845,7 @@ export type TicketBuildProvider = "auto" | "github" | "gitlab" | "local";
 export type TicketBuildMergeMethod = "squash" | "merge" | "rebase";
 
 export interface TicketPopulateDefaultsConfig {
+  mode?: TicketPopulateMode;
   source_handling?: "saved" | "prompt" | "manual";
   agent_preference?: TicketPopulateAgentPreference;
   import_cap?: number;

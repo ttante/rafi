@@ -272,3 +272,32 @@ test("permission handler routes AskUserQuestion before unknown-tool policy escal
   assert.deepEqual(events.map((event) => event.event), ["permission"]);
   assert.equal(events[0]?.data.reason, "provider question prompt");
 });
+
+test("native question permission logging failure does not reject the SDK callback", async () => {
+  const log = { write: () => { throw new Error("log unavailable"); } } as unknown as import("../src/log.js").Log;
+  const handler = createPermissionHandler(new PermissionPolicy(DEFAULT_CONFIG.permissions, "/tmp/test"), log, { interactive: false });
+  const decision = await handler({ toolName: "AskUserQuestion", input: { questions: [] } });
+  assert.equal(decision.behavior, "deny");
+  assert.equal(decision.interrupt, true);
+});
+
+test("noninteractive native questions persist before interrupting the provider", async t => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { WorkflowDb } = await import("../src/workflowDb.js");
+  const root = mkdtempSync(join(tmpdir(), "rafi-native-decision-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const request = { toolName: "AskUserQuestion", toolUseID: "question-1", input: askInput([{ question: "Choose a registry", options: [{ label: "Local" }, { label: "Public" }] }]) };
+  const options = { interactive: false, durable: { projectDir: root, runId: "run", ticketId: "T001" } };
+  assert.equal((await handleProviderQuestionTool(request, options))?.behavior, "deny");
+  const db = new WorkflowDb(root);
+  try {
+    const pending = db.pendingHumanDecisions("run");
+    assert.equal(pending.length, 1);
+    db.answerHumanDecision("run", pending[0]!.decisionId, "Local");
+    const response = await handleProviderQuestionTool(request, options);
+    assert.equal(response?.behavior, "allow");
+    if (response?.behavior === "allow") assert.equal((response.updatedInput?.answers as Record<string, string>)["Choose a registry"], "Local");
+  } finally { db.close(); }
+});

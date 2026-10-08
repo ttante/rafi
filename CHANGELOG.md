@@ -4,10 +4,34 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.9.19 / ai-foreman 1.7.19 / special-agents 0.8.11 / rafi-spec 0.8.12 - 2026-10-08
+
+### Fixed
+
+- Correct Codex context occupancy and host-turn accounting; avoid ordinary compaction below the configured threshold and accommodate observed slow compactions.
+- Validate handoff ownership before acceptance, advance generations across runs, journal provider dispatch, and prefer authoritative active session bindings over stale resume files.
+- Reuse unchanged approved scope, persist visible questions, continue independent tickets around blockers, and retain recovery budgets across restarts.
+- Preserve provider failures through response correction; reject tool-using response-only corrections and retain QA delivery evidence.
+- Bound initialization, RPCs, compaction, work turns, and shutdown. Supervise actual CLI workers, support detached output, and pause uncertain dispatch instead of replaying it.
+- Show pending decisions, separate accepted/adopted/dispatch milestones, unresolved dispatch, and actual worktree locations in diagnostics. Preserve paused terminal outcomes and print exact decision/resume commands. Keep process elapsed time distinct from claims about provider compute.
+
+### Added
+
+- Added Builder QA remediation V3 with structured partial blockers, durable QA delivery and handback recovery, and migration support.
+- Added explicit approved-plan and external-import ticket population modes and the Implementor skill.
+
+### Packages
+
+- Bumped `rafi-spec` to `0.8.12` for runtime deadline, ticket population, and QA remediation contracts.
+- Bumped `special-agents` to `0.8.11` for the Implementor skill and its exact `rafi-spec@0.8.12` dependency.
+- Bumped `ai-foreman` to `1.7.19` for build supervision, QA handback, ticket population, and recovery fixes plus its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.9.19` for planning, create, and build flow fixes plus its exact workspace dependencies.
+
 ## @rafi-ai/cli 0.9.18 / ai-foreman 1.7.18 - 2026-10-07
 
 ### Fixed
 
+- Automatic TTY activity output now uses coalesced newline records, preventing append-only terminals and transcripts from accumulating spinner redraws. Set `RAFI_ACTIVITY_RENDER_MODE=cursor` to explicitly restore animated in-place output in a known real terminal.
 - Builder turns now fail safely after 30 minutes with no provider activity, while legitimate provider events continue to reset the idle timer. Timed-out turns are never automatically replayed, preventing duplicate provider-side mutations.
 - Manager and build-run diagnostics can now verify live process identities on macOS as well as Linux, so active local runs are no longer incorrectly reported as stale.
 - Build activity output now coalesces messages that differ only by numeric counters or long hash-like identifiers, including non-TTY output. Successful tool start/progress/completion lifecycles no longer create duplicate durable log lines; failures remain durable.

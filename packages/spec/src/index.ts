@@ -10,6 +10,7 @@ export {
   installManifestSchema,
   qaFailureReportV1Schema,
   builderQaRemediationReportV2Schema,
+  builderQaRemediationReportV3Schema,
 } from "./schemas.js";
 export {
   type ValidationResult,

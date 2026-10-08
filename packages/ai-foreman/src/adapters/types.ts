@@ -82,6 +82,8 @@ export interface TurnResult {
   failure?: RuntimeFailure;
   /** Stable host/provider correlation ID for this turn. */
   turnId?: string;
+  /** Deferred handback continuity validation; no hidden provider repair. */
+  continuityErrors?: string[];
   /** Exact instruction requested by the immediate host caller. */
   hostInstruction?: string;
   /** Exact instruction dispatched to the provider after all wrappers. */
@@ -203,6 +205,8 @@ export interface BuilderAdapterOptions {
   allowAutoCompactionSetupTurn?: boolean;
   /** Raw-adapter observability; wrapper adapters must not persist re-emitted events. */
   observer?: RunObserver;
+  /** Redacted AskUserQuestion diagnostics, independent of build observability. */
+  onQuestionTrace?: import("../questionTrace.js").QuestionTraceSink;
   /**
    * Maximum time a dispatched provider turn may remain completely silent.
    * This is an idle timeout, not a total turn limit: every provider message
@@ -210,13 +214,24 @@ export interface BuilderAdapterOptions {
    * state, so callers must never replay the instruction automatically.
    */
   providerIdleTimeoutMs?: number;
+  compactionTimeoutMs?: number;
+  preparationTimeoutMs?: number;
+  rpcTimeoutMs?: number;
+  turnDeadlineMs?: number;
+  shutdownTimeoutMs?: number;
+  /** Metadata-only lifecycle trace; no prompts, responses, credentials, or tool inputs. */
+  onLifecycleTrace?: (event: { phase: string; at: string; elapsedMs?: number; sessionId?: string; method?: string; timeoutMs?: number }) => void;
 }
 
 export interface BuilderAdapter {
   readonly agent: "claude" | "codex";
 
   /** Send one instruction; resolves when that turn completes. */
-  sendTurn(text: string): Promise<TurnResult>;
+  sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string }): Promise<TurnResult>;
+  /** Synchronous observation through the event owner. Terminal precedes sendTurn resolution. */
+  observeEvents?(listener: (event: BuilderEvent) => void): () => void;
+  /** Commit a deferred handback checkpoint only after the host validates the turn. */
+  acceptHandbackTurn?(turn: TurnResult): void;
 
   /** Current session id, once known — used for resume. */
   sessionId(): string | undefined;

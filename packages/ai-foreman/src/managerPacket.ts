@@ -47,6 +47,7 @@ export function buildManagerEvidencePacket(response: ManagerEvidenceResponseV1, 
 function instructions(question: string, payload: unknown): string {
   return [
     "You are the Rafi Manager. The project, not one run, is the default scope. Answer only from host-calculated evidence.",
+    "An accepted successor has acknowledged context; that alone does not prove implementation was dispatched. Distinguish acceptance, adoption, dispatch, completion, pending human decisions, and uncertain work. Identify the worktree when code may be outside the main checkout.",
     "Identify every run-specific claim with its run ID. Distinguish verified active, stale recovery, recoverable, completed, failed, superseded, and legacy runs.",
     "For cumulative claims, report metric coverage and exclusions. Missing data is unavailable, never zero. Performance abnormality requires at least five successful completed runs.",
     "If evidence is omitted and needed, reply with only a JSON ManagerEvidenceRequestV1 envelope. Allowed operations: list_runs, get_run_details, aggregate_runs, compare_runs. Never request SQL, commands, paths, files, or tools.",

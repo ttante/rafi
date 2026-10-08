@@ -10,6 +10,7 @@ import {
   installManifestSchema,
   qaFailureReportV1Schema,
   builderQaRemediationReportV2Schema,
+  builderQaRemediationReportV3Schema,
 } from "./schemas.js";
 import type {
   RulePackFrontmatter,
@@ -47,6 +48,7 @@ const vAgentDefaults = ajv.compile(agentDefaultsSchema);
 const vBuildRun = ajv.compile(buildRunRecordSchema);
 const vInstallManifest = ajv.compile(installManifestSchema);
 const vQaFailureReport = ajv.compile(qaFailureReportV1Schema);
+const vBuilderQaRemediationReportV3 = ajv.compile(builderQaRemediationReportV3Schema);
 const vBuilderQaRemediationReport = ajv.compile(builderQaRemediationReportV2Schema);
 
 export const validateRulePack = (d: unknown): ValidationResult => run(vRulePack, d);
@@ -78,7 +80,7 @@ export const validateQaFailureReport = (d: unknown): ValidationResult => {
 export const validateQaFailureReportV1 = validateQaFailureReport;
 
 export const validateBuilderQaRemediationReport = (d: unknown): ValidationResult => {
-  const result = run(vBuilderQaRemediationReport, d);
+  const result = run((d as { version?: number } | null)?.version === 3 ? vBuilderQaRemediationReportV3 : vBuilderQaRemediationReport, d);
   if (!result.valid || !d || typeof d !== "object") return result;
   const blankPaths: string[] = [];
   const visit = (value: unknown, path: string): void => {
@@ -90,7 +92,7 @@ export const validateBuilderQaRemediationReport = (d: unknown): ValidationResult
   if (blankPaths.length) return { valid: false, errors: blankPaths.map((path) => `${path} must not be blank`) };
   return result;
 };
-export const validateBuilderQaRemediationReportV2 = validateBuilderQaRemediationReport;
+export const validateBuilderQaRemediationReportV2 = (d: unknown): ValidationResult => run(vBuilderQaRemediationReport, d);
 
 /** Validate and narrow, throwing on failure. */
 export function assertRulePack(d: unknown): asserts d is RulePackFrontmatter {
@@ -119,7 +121,7 @@ export function assertQaFailureReport(d: unknown): asserts d is QaFailureReportV
 }
 export const assertQaFailureReportV1: (d: unknown) => asserts d is QaFailureReportV1 = assertQaFailureReport;
 export function assertBuilderQaRemediationReport(d: unknown): asserts d is BuilderQaRemediationReportV2 {
-  const r = validateBuilderQaRemediationReport(d);
+  const r = validateBuilderQaRemediationReportV2(d);
   if (!r.valid) throw new Error(`Invalid Builder QA remediation report: ${r.errors.join("; ")}`);
 }
 export const assertBuilderQaRemediationReportV2: (d: unknown) => asserts d is BuilderQaRemediationReportV2 = assertBuilderQaRemediationReport;

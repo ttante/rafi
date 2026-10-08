@@ -5,6 +5,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { dirname, join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
+import { registerHandbackWriter } from "../src/qaHandbackMigration.js";
 import type { BuilderAdapter, BuilderEvent, CompactResult, TurnResult } from "../src/adapters/types.js";
 import { beginQaFinalization, completeQaFinalization, runIsolatedQa, verifyPendingQaFinalizationSource, type QaSessionBoundaryRecovery, type QaSessionBoundaryResult, type QaSessionHandle, type QaStreamState } from "../src/qaReview.js";
 import type { ProviderSessionRefV1 } from "rafi-spec";
@@ -208,6 +209,7 @@ test("publication recovery rejects a symlinked ancestor before restoring any man
   try {
     const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "symlink-intent", ticketId: "T1", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", resources: {} });
     const raw = new Database(join(dir, ".rafi/recovery.sqlite3"));
+    registerHandbackWriter(raw);
     raw.prepare("UPDATE qa_packet_projections SET status='intended' WHERE packet_digest=?").run(packet.manifest.packetDigest);
     raw.close();
     rmSync(join(packet.directory, "manifest.json"));
@@ -392,6 +394,7 @@ test("V2 revisions are append-only, content-addressed, and detect sealed tamperi
     const correction = next.manifest.resources.find((resource) => resource.path === "prompts/correction.txt")!;
     assert.equal(readFileSync(join(next.directory, correction.objectPath!), "utf8"), "second");
     const rawDb = new Database(join(dir, ".rafi/recovery.sqlite3"));
+    registerHandbackWriter(rawDb);
     rawDb.prepare("UPDATE qa_recovery_heads SET packet_digest=?,reviewed_state_digest=?,revision=?,correction_turns=?,pending_action=? WHERE run_id=? AND ticket_id=?")
       .run(packet.manifest.packetDigest, packet.manifest.reviewedStateDigest, packet.manifest.revision, packet.manifest.correctionTurns, packet.manifest.pendingAction, packet.manifest.runId, packet.manifest.ticketId);
     rawDb.prepare("UPDATE qa_packet_projections SET status='intended' WHERE packet_digest=?").run(next.manifest.packetDigest);
@@ -414,6 +417,7 @@ test("explicit startup reconciliation completes a manifest-ahead packet publicat
   try {
     const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "manifest-ahead", ticketId: "T1", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", pendingAction: "operator-menu", resources: { prompt: { value: "review", purpose: "prompt", exactText: true } } });
     const rawDb = new Database(join(dir, ".rafi/recovery.sqlite3"));
+    registerHandbackWriter(rawDb);
     rawDb.prepare("DELETE FROM qa_recovery_heads WHERE run_id=? AND ticket_id=?").run(packet.manifest.runId, packet.manifest.ticketId);
     rawDb.prepare("UPDATE qa_packet_projections SET status='intended' WHERE packet_digest=?").run(packet.manifest.packetDigest);
     rawDb.close();
@@ -434,6 +438,7 @@ test("explicit startup reconciliation restores manifest bytes after a crash imme
       recoveryStage: "operator-menu", pendingAction: "operator-menu", resources: { prompt: { value: "review", purpose: "prompt", exactText: true } } });
     const revision = join(packet.directory, "manifests/revision-00000001.json");
     const rawDb = new Database(join(dir, ".rafi/recovery.sqlite3"));
+    registerHandbackWriter(rawDb);
     rawDb.prepare("DELETE FROM qa_recovery_heads WHERE run_id=? AND ticket_id=?").run(packet.manifest.runId, packet.manifest.ticketId);
     rawDb.prepare("UPDATE qa_packet_projections SET status='intended' WHERE packet_digest=?").run(packet.manifest.packetDigest);
     rawDb.close();
@@ -457,6 +462,7 @@ test("packet retry never quarantines bytes covered by a durable publication inte
       reviewAttemptId: "same-attempt", recoveryStage: "operator-menu", pendingAction: "operator-menu",
       resources: { prompt: { value: "review", purpose: "prompt", exactText: true } } });
     const rawDb = new Database(join(dir, ".rafi/recovery.sqlite3"));
+    registerHandbackWriter(rawDb);
     rawDb.prepare("DELETE FROM qa_recovery_heads WHERE run_id=? AND ticket_id=?").run(packet.manifest.runId, packet.manifest.ticketId);
     rawDb.prepare("UPDATE qa_packet_projections SET status='intended' WHERE packet_digest=?").run(packet.manifest.packetDigest);
     rawDb.close();
@@ -948,6 +954,7 @@ test("a provider context-window discovery turn is journaled before the first QA 
     assert.match(qa.instructions[0]!, /session initialization only/);
     assert.match(qa.instructions[1]!, /Now QA the ticket/);
     const rawDb = new Database(join(dir, ".rafi/recovery.sqlite3"));
+    registerHandbackWriter(rawDb);
     const slots = rawDb.prepare("SELECT retry_slot,status FROM qa_turns WHERE run_id=? AND ticket_id=? ORDER BY created_at").all("journaled-setup", "T1") as Array<{ retry_slot: string; status: string }>;
     rawDb.close();
     assert.deepEqual(slots, [

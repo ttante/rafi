@@ -40,9 +40,9 @@ export class RecoveringAdapter implements BuilderAdapter {
     return this.adapter.agent;
   }
 
-  async sendTurn(text: string): Promise<TurnResult> {
+  async sendTurn(text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     while (true) {
-      const result = await this.adapter.sendTurn(text);
+      const result = await this.adapter.sendTurn(text, policy);
       const sessionRef = this.adapter.sessionRef?.();
       if (sessionRef && this.opts.onSessionRef) {
         try { this.opts.onSessionRef(sessionRef); }
@@ -50,10 +50,10 @@ export class RecoveringAdapter implements BuilderAdapter {
           this.eventQueue.push({ kind: "error", message: `failed to persist scoped provider session binding: ${error instanceof Error ? error.message : String(error)}` });
         }
       }
-      if (!this.opts.enabled || !result.isError || !result.failure) return result;
+      if (policy?.handback || !this.opts.enabled || !result.isError || !result.failure) return result;
       // The host cannot know whether a missing exact session received this
       // instruction. Never replay it or silently switch providers.
-      if (result.failure.category === "session-unavailable") return result;
+      if (result.failure.category === "session-unavailable" || result.failure.dispatchState === "unknown") return result;
 
       const otherRuntime = this.runtime === "claude" ? "codex" : "claude";
       const choice = this.opts.choose
@@ -113,6 +113,14 @@ export class RecoveringAdapter implements BuilderAdapter {
   events(): AsyncIterable<BuilderEvent> {
     return this.eventQueue;
   }
+
+  observeEvents(listener: (event: BuilderEvent) => void): () => void {
+    if (!this.adapter.observeEvents) throw new Error("wrapped provider does not expose turn observation");
+    // Observe synchronously at the provider, before sendTurn resolves. The async
+    // display pump may still have buffered events when the journal unsubscribes.
+    return this.adapter.observeEvents(listener);
+  }
+  acceptHandbackTurn(turn: TurnResult): void { this.adapter.acceptHandbackTurn?.(turn); }
 
   async close(): Promise<void> {
     if (this.closed) return;

@@ -19,6 +19,8 @@ rafi create .
 
 The interview accepts existing plans or sources, improves a rough plan, or starts from an idea. It configures the project, writes Rafi guidance, and can hand off to initial planning and ticket setup.
 
+The normal ticket flow is: add supporting requirements/context, approve `rafi-plan.json`, initialize ticket setup, then generate tickets from that approved plan. Supporting documents and URLs can enrich ticket details, but they never replace the plan's slices. Importing existing Linear or Jira tickets is a separate explicit setup mode.
+
 ## Adding Rafi To An Existing Project
 
 Run the same guided setup from an existing codebase:

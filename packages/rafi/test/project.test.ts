@@ -131,6 +131,11 @@ test("--defaults includes root agent files and native agent/skill paths", () => 
   assert.equal(config.skills.tdd.artifact_source, "rafi");
   assert.equal(config.skills.tdd.claude, "./.claude/skills/tdd/SKILL.md");
   assert.equal(config.skills.tdd.codex, "./.agents/skills/tdd/SKILL.md");
+  assert.deepEqual(config.skills.implementor, {
+    artifact_source: "rafi",
+    claude: "./.claude/skills/implementor/SKILL.md",
+    codex: "./.agents/skills/implementor/SKILL.md",
+  });
 });
 
 test("normalizeProjectConfig adds new fields to legacy project config", () => {

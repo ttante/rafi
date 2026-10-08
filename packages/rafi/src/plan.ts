@@ -450,9 +450,9 @@ export function buildPlanCommand(): Command {
             const answer = await select({ message: "Set up tickets now?", options: [
               { value: "setup", label: "Set up now (Recommended)" }, { value: "later", label: "Skip for now" },
             ] });
-            if (!isCancel(answer) && answer === "setup") await buildTicketsCommand().parseAsync(["node", "rafi-tickets", "setup:init", "--project", projectDir]);
-            else console.log(`rafi plan: run \`rafi tickets setup:init --project ${shellQuote(projectDir)}\` later.`);
-          } else console.log(`rafi plan: run \`rafi tickets setup:init --project ${shellQuote(projectDir)}\` next.`);
+            if (!isCancel(answer) && answer === "setup") await buildTicketsCommand().parseAsync(["node", "rafi-tickets", "setup:init", "--project", projectDir, "--population-mode", "approved_plan"]);
+            else console.log(`rafi plan: run \`rafi tickets setup:init --project ${shellQuote(projectDir)} --population-mode approved_plan\` later.`);
+          } else console.log(`rafi plan: run \`rafi tickets setup:init --project ${shellQuote(projectDir)} --population-mode approved_plan\` next.`);
         }
       }
       if (outcome.status === "completed" || outcome.status === "cancelled") return;

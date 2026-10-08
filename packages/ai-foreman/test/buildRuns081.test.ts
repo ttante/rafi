@@ -124,3 +124,52 @@ test("recoverable runs infer tickets omitted by legacy current-branch records", 
     assert.equal(recovered?.currentTicket, "T030");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("a superseded authoritative run cannot be resurrected through an old projection", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-retired-resume-"));
+  try {
+    const run = createBuildRun({ tickets: ["T1"], repositoryRoot: dir });
+    releaseBuildLease(dir, run, "recoverable");
+    const db = new WorkflowDb(dir);
+    db.transition(run.runId, { status: "superseded", checkpoint: "start-over" });
+    db.close();
+    assert.equal(readBuildRuns(dir)[0]?.status, "superseded");
+    assert.throws(() => resumeBuildRun(dir, run.runId, {}), /superseded/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("projection publication failure retains the DB revision and reconciles on the next safe save", async () => {
+  const { mkdirSync, readFileSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "rafi-projection-fault-"));
+  try {
+    const initial = createBuildRun({ tickets: ["T001"], repositoryRoot: dir });
+    const path = join(dir, BUILD_RUN_DIRECTORY, `${initial.runId}.json`);
+    rmSync(path);
+    mkdirSync(path); // Inject a deterministic rename failure after DB commit.
+    assert.throws(() => saveBuildRun(dir, { ...initial, checkpoint: "new-authoritative-revision" }));
+    const recovered = readBuildRuns(dir)[0]!;
+    assert.equal(recovered.checkpoint, "new-authoritative-revision");
+    const db = new WorkflowDb(dir);
+    try { assert.equal(db.incompletePublications().filter(item => (item.intent as { operation?: string }).operation === "build-run-projection").length, 1); }
+    finally { db.close(); }
+    rmSync(path, { recursive: true });
+    saveBuildRun(dir, recovered);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).checkpoint, "new-authoritative-revision");
+    const after = new WorkflowDb(dir);
+    try { assert.equal(after.incompletePublications().length, 0); }
+    finally { after.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("missing run projection does not hide authoritative state and read does not rewrite the DB", async () => {
+  const { readFileSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "rafi-projection-reader-"));
+  try {
+    const run = createBuildRun({ tickets: ["T001"], repositoryRoot: dir });
+    rmSync(join(dir, BUILD_RUN_DIRECTORY), { recursive: true });
+    const database = join(dir, ".rafi/recovery.sqlite3");
+    const before = createHash("sha256").update(readFileSync(database)).digest("hex");
+    assert.equal(readBuildRuns(dir)[0]?.runId, run.runId);
+    assert.equal(createHash("sha256").update(readFileSync(database)).digest("hex"), before);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

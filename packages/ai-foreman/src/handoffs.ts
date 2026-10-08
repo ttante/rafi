@@ -1,3 +1,4 @@
+import { durableHumanDecision } from "./humanDecision.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -165,7 +166,7 @@ export class HandoffService {
   stage(input: CreateHandoffInput, now = new Date()): StagedHandoff {
     this.pruneExpiredCache(now);
     const db = new WorkflowDb(this.projectDir);
-    try {
+    try { return db.atomic(() => {
       db.ensureRun(input.runId);
       if (input.requestedByBuilder && this.consecutiveBuilderRequests(db, input.runId) >= 2) {
         db.appendContinuityEvent({
@@ -182,8 +183,20 @@ export class HandoffService {
       if (!head || !runHead || checkpoints.length === 0 || (head.state !== "current" && !input.allowNonCurrentContinuity)) {
         throw new Error(`cannot hand off ${input.role}: the latest continuity checkpoint is ${head?.state ?? "missing"}`);
       }
-      const prior = db.handoffs(input.runId).at(-1);
-      const generation = (prior?.generation ?? 0) + 1;
+      const historicalLineage = db.handoffs(input.runId);
+      const prior = historicalLineage.at(-1);
+      const owner = db.roleMutationLease(input.runId, input.role);
+      if (input.predecessorSessionRef && input.predecessorSessionId && input.predecessorSessionRef.sessionId !== input.predecessorSessionId) throw new Error("handoff predecessor identity fields disagree");
+      if (owner?.sessionRef && input.predecessorSessionRef && handoffSessionIdentity(owner.sessionRef) !== handoffSessionIdentity(input.predecessorSessionRef)) throw new Error("handoff predecessor scope is no longer the role owner");
+      if (owner && input.predecessorSessionId && owner.providerSessionId !== input.predecessorSessionId) throw new Error("handoff predecessor is no longer the role owner");
+      if (input.predecessorSessionRef && (input.predecessorSessionRef.role !== input.role || !input.predecessorSessionRef.validatedAt)) throw new Error("handoff predecessor must be validated for the role");
+      // Legacy binaries could accept a lower generation than their predecessor.
+      // Preserve that immutable evidence, but never repeat its regression when
+      // an explicit recovery stages the next transfer from the accepted owner.
+      const historicalHighWater = historicalLineage.reduce((maximum, item) => Math.max(maximum, item.generation,
+        item.predecessorSessionRef?.validatedAt ? item.predecessorSessionRef.generation : 0,
+        item.successorSessionRef?.validatedAt ? item.successorSessionRef.generation : 0), 0);
+      const generation = Math.max(historicalHighWater, input.predecessorSessionRef?.generation ?? 0, owner?.generation ?? 0) + 1;
       const resources = (input.resources ?? []).map((resource) => ({
         label: resource.label,
         digest: resource.digest && /^[a-f0-9]{64}$/.test(resource.digest) ? resource.digest : digest(resource.content ?? ""),
@@ -232,6 +245,12 @@ export class HandoffService {
       }, now);
       const cacheDirectory = this.materialize(manifest, markdown);
       return { manifest, markdown, lineage, cacheDirectory };
+    }); } catch (error) {
+      if (error instanceof HandoffLoopError) {
+        db.setContinuityHeadState(input.runId, "builder", "degraded", now);
+        db.appendContinuityEvent({ runId: input.runId, role: "host", kind: "builder_handoff_loop_paused", payload: { reason: input.reason }, authoritativeStateRevision: db.continuityHead(input.runId, "builder")?.authoritativeStateRevision ?? 0 }, now);
+      }
+      throw error;
     } finally { db.close(); }
   }
 
@@ -263,15 +282,19 @@ export class HandoffService {
           this.failStaged(staged, error instanceof Error ? error.message : String(error));
           throw error;
         }
-        if ((!process.stdin.isTTY || !process.stdout.isTTY) && !recovery.choose) {
-          this.failStaged(staged, error.message);
-          throw error;
-        }
         signalAttention("Rafi handoff needs input", error.message, recovery.desktopNotifications, recovery.terminalBell);
         const currentRuntime = successor.agent;
+        const recoveryDb = new WorkflowDb(this.projectDir);
+        let rejectionSequence: number;
+        try { rejectionSequence = recoveryDb.appendContinuityEvent({ runId: staged.manifest.runId, role: "host", kind: "handoff_recovery_needed", payload: { generation: staged.manifest.generation, code: error.code }, authoritativeStateRevision: 0 }).sequence; }
+        finally { recoveryDb.close(); }
+
         const choice = recovery.choose
           ? await recovery.choose(error, currentRuntime)
-          : await promptHandoffRecovery(error, currentRuntime, Boolean(recovery.allowProviderSwitch));
+          : await durableHumanDecision<HandoffRecoveryChoice | "guidance">({ projectDir: this.projectDir, runId: staged.manifest.runId,
+            key: `handoff:${staged.manifest.generation}:${rejectionSequence}:${error.code}`, prompt: `How should Rafi recover the rejected successor handoff? ${error.message}`,
+            choices: [{ id: "retry", label: "Retry with a fresh successor" }, ...(recovery.allowProviderSwitch ? [{ id: "switch", label: "Switch provider" }] : []), { id: "guidance", label: "Custom guidance" }, { id: "pause", label: "Pause safely" }],
+            operation: async () => { const answer = await promptHandoffRecovery(error, currentRuntime, Boolean(recovery.allowProviderSwitch)); return answer === "custom" ? "guidance" : answer; } });
         if (choice === "pause") {
           this.failStaged(staged, `user paused after ${error.code}`);
           throw new HandoffRecoveryPausedError(staged.manifest.runId, staged.manifest.generation, error.message);
@@ -279,8 +302,8 @@ export class HandoffService {
         guidance = undefined;
         let requestedRuntime: "claude" | "codex" | undefined;
         if (choice === "switch") requestedRuntime = currentRuntime === "claude" ? "codex" : "claude";
-        if (choice === "custom") {
-          guidance = recovery.customGuidance ? await recovery.customGuidance() : await promptCustomHandoffGuidance();
+        if (choice === "custom" || choice === "guidance") {
+          guidance = recovery.customGuidance ? await recovery.customGuidance() : await durableHumanDecision({ projectDir: this.projectDir, runId: staged.manifest.runId, key: `handoff-guidance:${staged.manifest.generation}:${rejectionSequence}`, prompt: "Guidance for the next fresh successor:", choices: [{ id: "custom", label: "Custom guidance" }], operation: promptCustomHandoffGuidance });
           if (!guidance) {
             successor = await createSuccessor(staged);
             continue;
@@ -304,7 +327,13 @@ export class HandoffService {
     const db = new WorkflowDb(this.projectDir);
     try {
       const qaBoundary = staged.manifest.role === "qa";
+      const initialRef = successor.sessionRef?.();
+      if (initialRef && successor.adoptSessionRef) successor.adoptSessionRef({ ...initialRef, generation: staged.manifest.generation });
       const preparedRef = successor.sessionRef?.();
+      if (preparedRef && (preparedRef.role !== staged.manifest.role || preparedRef.provider !== successor.agent || preparedRef.sessionId !== successor.sessionId()
+        || preparedRef.generation !== staged.manifest.generation || !preparedRef.validatedAt)) {
+        throw new HandoffAcceptanceError("successor-identity-mismatch", staged.manifest.runId, staged.manifest.generation, "prepared successor scope or generation is invalid");
+      }
       if (qaBoundary && (!preparedRef || preparedRef.version !== 1 || preparedRef.source !== "observed"
         || preparedRef.role !== "qa" || preparedRef.stream !== "qa" || preparedRef.provider !== successor.agent
         || !preparedRef.sessionId.trim() || /^(?:unknown|unavailable)$/i.test(preparedRef.sessionId.trim())
@@ -332,7 +361,7 @@ export class HandoffService {
         if (response.isError || response.failure) throw new HandoffAcceptanceError("provider-turn-failed", staged.manifest.runId, staged.manifest.generation, "provider rejected or failed the acknowledgement turn");
         const activeRef = successor.sessionRef?.();
         const reportedRef = response.providerMetadata?.sessionRef;
-        if ((preparedRef && (!activeRef || handoffSessionIdentity(activeRef) !== handoffSessionIdentity(preparedRef)))
+        if ((preparedRef && (!activeRef || handoffSessionIdentity(activeRef) !== handoffSessionIdentity(preparedRef) || (reportedRef && handoffSessionIdentity(reportedRef) !== handoffSessionIdentity(preparedRef))))
           || (qaBoundary && (!response.providerMetadata || !reportedRef || response.providerMetadata.provider !== preparedRef!.provider
             || response.providerMetadata.sessionId !== preparedRef!.sessionId || successor.sessionId() !== preparedRef!.sessionId
             || successor.agent !== preparedRef!.provider || handoffSessionIdentity(reportedRef) !== handoffSessionIdentity(preparedRef!)))) {
@@ -372,16 +401,19 @@ export class HandoffService {
         throw new HandoffAcceptanceError("missing-scoped-successor-session", staged.manifest.runId, staged.manifest.generation, "recovery handoffs require a scoped successor and complete resource purpose/byte metadata");
       }
       if (successorRef) successor.adoptSessionRef?.(successorRef);
+      const acceptedDelta = parsed.delta;
+      return db.atomic(() => {
       db.appendContinuityEvent({ runId: staged.manifest.runId, role: staged.manifest.role, kind: "handoff_successor_accepted", payload: { generation: staged.manifest.generation, sessionId, sessionRef: successorRef, delta: parsed.delta, acceptanceAttempts }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
-      const checkpoint = db.publishContinuityCheckpoint({ runId: staged.manifest.runId, role: staged.manifest.role, delta: parsed.delta, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
+      const checkpoint = db.publishContinuityCheckpoint({ runId: staged.manifest.runId, role: staged.manifest.role, delta: acceptedDelta, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
       const receipt: HandoffAcceptanceReceiptV1 | undefined = successorRef ? { version: 1, runId: staged.manifest.runId, generation: staged.manifest.generation, role: staged.manifest.role,
         manifestDigest: staged.lineage.manifestDigest, continuityCheckpointDigest: staged.manifest.continuityCheckpointDigest, acceptanceCheckpointDigest: checkpoint.digest,
         ...(staged.manifest.predecessorSessionRef ? { predecessorSessionRef: staged.manifest.predecessorSessionRef } : {}), successorSessionRef: successorRef,
         resources: staged.manifest.resources, acceptedAt: new Date().toISOString() } : undefined;
       const lineage = db.acceptHandoff(staged.manifest.runId, staged.manifest.generation, successorRef ?? sessionId, undefined, receipt);
       return { ...staged, lineage, successor, successorSessionId: sessionId, acceptanceCheckpointDigest: checkpoint.digest, ...(receipt ? { acceptanceReceipt: receipt } : {}) };
+      });
     } catch (error) {
-      if (error instanceof HandoffAcceptanceError) await successor.close().catch(() => {});
+      await successor.close().catch(() => {});
       const current = db.handoff(staged.manifest.runId, staged.manifest.generation);
       if (options.finalizeFailure !== false && current?.state === "staged") db.failHandoff(staged.manifest.runId, staged.manifest.generation, error instanceof Error ? error.message : String(error));
       throw error;
@@ -470,7 +502,7 @@ export class HandoffService {
     let usefulSinceLastRequest = false;
     const events = db.continuityEvents(runId);
     for (const event of events) {
-      if (event.kind === "turn_completed" || event.kind === "turn_completed_after_repair") {
+      if (event.role === "builder" && (event.kind === "turn_completed" || event.kind === "turn_completed_after_repair" || event.kind === "handback_turn_completed")) {
         const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, unknown> : undefined;
         const delta = payload?.delta;
         if (isContinuityDelta(delta) && useful(delta)) usefulSinceLastRequest = true;
@@ -482,7 +514,9 @@ export class HandoffService {
         usefulSinceLastRequest = false;
       }
     }
-    return count;
+    // stage() checks the limit before appending the next request. Progress
+    // since the previous request must reset that limit immediately.
+    return usefulSinceLastRequest ? 0 : count;
   }
 }
 

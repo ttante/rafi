@@ -237,6 +237,8 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
       configRoot: opts.projectDir,
       runtimeExecutable,
       runtimePhase: phaseForRole(opts.role),
+      onQuestionTrace: (trace) => log.write("question-round-trip", { ...trace }),
+      onLifecycleTrace: (trace) => log.write("provider-lifecycle", { ...trace, role: opts.role }),
       model,
       ...(scopedRef ? { resumeSessionRef: scopedRef } : {}),
       sessionRole: configurableRole(opts.role),

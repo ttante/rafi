@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { stringify } from "yaml";
+import { parse as parseYaml, stringify } from "yaml";
 import { createInterviewRecord } from "ai-foreman/interviews.js";
 import { buildPopulateInstruction, resolvePopulationPlan, resolvePopulateSources } from "ai-foreman/cli/tickets.js";
 import { loadTicketSetupConfig } from "ai-foreman/tickets/setup-config.js";
@@ -148,6 +148,7 @@ test("create preserves a local source through a docs-rafi plan into Ticket Maker
     assert.ok(registry.entries[0]?.versions[0]?.snapshot_path);
 
     assert.deepEqual(loadTicketSetupConfig(dir)?.sources, [{ type: "local", paths: ["FEATURES.md"] }]);
+    assert.equal(((parseYaml(readFileSync(join(dir, "rafi-config.yaml"), "utf8")) as { tickets?: { populate?: { mode?: string } } }).tickets?.populate?.mode), "approved_plan");
     const progressDoc = "docs-rafi/ticket-progress.md";
     const ticketsConfig = { paths: { progressDoc } } as never;
     const contextSources = resolvePopulateSources(dir, undefined, ticketsConfig);

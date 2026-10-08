@@ -4,16 +4,23 @@ import { delimiter, isAbsolute, resolve } from "node:path";
 import type { RuntimeProbeCategory, RuntimeProbePhase, RuntimeProbeResult } from "rafi-spec";
 import type { AgentRuntime } from "./runtimeAuth.js";
 import { currentActivity, withActivityPhase } from "./activity.js";
+import { processStartIdentity } from "./processIdentity.js";
 
-export const RUNTIME_PROBE_TIMEOUT_MS = 30_000;
+export const RUNTIME_PROBE_TIMEOUT_MS = 120_000;
 export const RUNTIME_DIAGNOSTIC_LIMIT = 8 * 1024;
 const RELEVANT_ENV = /^(ANTHROPIC|CLAUDE|CODEX|OPENAI|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|SSL_CERT_FILE|NODE_EXTRA_CA_CERTS)(_|$)/i;
+const ownedProbes = new Set<() => void>();
+
+/** Used when a supervised worker loses its parent, including detached probes. */
+export function cancelOwnedRuntimeProbes(): void { for (const cancel of ownedProbes) cancel(); }
 
 export interface ProbeRuntimeOptions {
   phase?: RuntimeProbePhase;
   timeoutMs?: number;
   maxDiagnosticsBytes?: number;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  onTrace?: (event: { phase: string; at: string; elapsedMs: number; pid?: number; bytes?: number; exitCode?: number | null; signal?: string | null }) => void;
 }
 
 /** Resolve the executable Node will launch without involving a shell. */
@@ -95,9 +102,23 @@ async function probeRuntimeInternal(
     let output = Buffer.alloc(0);
     let timedOut = false;
     let settled = false;
-    const spawnOpts: SpawnOptions = { cwd, env, stdio: ["ignore", "pipe", "pipe"] };
+    let cancelled = false;
+    let forceTimer: ReturnType<typeof setTimeout> | undefined;
+    const began = performance.now();
+    const trace = (phase: string, data: { pid?: number; bytes?: number; exitCode?: number | null; signal?: string | null } = {}) => {
+      try { opts.onTrace?.({ phase, at: new Date().toISOString(), elapsedMs: performance.now() - began, ...data }); } catch { /* non-authoritative diagnostics */ }
+    };
+    const spawnOpts: SpawnOptions = { cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" };
     const child = spawn(executable, args, spawnOpts);
+    const notifySupervisor = (active: boolean) => {
+      if (process.send && process.connected && process.env.RAFI_BUILD_WORKER_RUN && child.pid) {
+        process.send({ kind: "rafi-readiness-child", active, pid: child.pid, processStart: active ? processStartIdentity(child.pid) : undefined });
+      }
+    };
+    notifySupervisor(true);
+    trace("spawn", { pid: child.pid });
     const append = (chunk: Buffer | string): void => {
+      trace("output", { bytes: Buffer.byteLength(chunk) });
       currentActivity()?.pulse(`${runtime} runtime responded`);
       if (output.length >= limit) return;
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -105,26 +126,47 @@ async function probeRuntimeInternal(
     };
     child.stdout?.on("data", append);
     child.stderr?.on("data", append);
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 1_000).unref();
-    }, timeoutMs);
+    const killOwnedGroup = (signal: NodeJS.Signals) => {
+      if (!child.pid) return;
+      try { if (process.platform !== "win32") process.kill(-child.pid, signal); else child.kill(signal); } catch { /* owned process/group already exited */ }
+    };
+    const stop = () => {
+      trace(cancelled ? "cancelled" : "timeout", { pid: child.pid });
+      killOwnedGroup("SIGTERM");
+      forceTimer = setTimeout(() => {
+        killOwnedGroup("SIGKILL");
+        child.stdout?.destroy(); child.stderr?.destroy();
+        trace("owned-child-cleanup", { pid: child.pid });
+        finish(child.exitCode, child.signalCode);
+      }, 1_000);
+    };
+    const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
     timer.unref();
+    const abort = () => { cancelled = true; clearTimeout(timer); stop(); };
+    ownedProbes.add(abort);
 
     const finish = (exitCode: number | null, signal: NodeJS.Signals | null, spawnError?: NodeJS.ErrnoException): void => {
       if (settled) return;
       settled = true;
+      ownedProbes.delete(abort);
+      notifySupervisor(false);
       clearTimeout(timer);
+      // The direct child can close stdio while a descendant that ignored TERM
+      // remains alive with redirected pipes. Complete cleanup before dropping
+      // the escalation timer; this group was created exclusively for the probe.
+      if (timedOut || cancelled) { killOwnedGroup("SIGKILL"); trace("owned-child-cleanup", { pid: child.pid }); }
+      clearTimeout(forceTimer);
+      opts.signal?.removeEventListener("abort", abort);
+      trace("settled", { exitCode, signal });
       const diagnostics = sanitizeDiagnostics(spawnError?.message
         ? `${spawnError.message}\n${output.toString("utf8")}`
         : output.toString("utf8"), limit);
-      const category = timedOut
+      const category = cancelled ? "unknown" : timedOut
         ? "timeout"
         : spawnError?.code === "ENOENT"
           ? "missing-executable"
           : exitCode === 0
-            ? "ready"
+            ? /(?:^|\s)OK(?:\s|$)/.test(output.toString("utf8")) ? "ready" : "malformed-protocol"
             : classifyRuntimeFailure(diagnostics, phase);
       resolveResult({
         ok: category === "ready",
@@ -136,13 +178,16 @@ async function probeRuntimeInternal(
         timedOut,
         exitCode,
         signal,
-        diagnostics,
+        diagnostics: cancelled ? `Runtime probe cancelled. ${diagnostics}` : diagnostics,
         environmentNames: Object.keys(env).filter((name) => RELEVANT_ENV.test(name)).sort(),
         recoveryChoices: category === "ready" ? [] : ["retry", "switch", "cancel"],
       });
     };
     child.once("error", (error: NodeJS.ErrnoException) => finish(null, null, error));
-    child.once("close", (code, signal) => finish(code, signal));
+    child.once("exit", (code, signal) => trace("exit", { exitCode: code, signal }));
+    child.once("close", (code, signal) => { trace("stdio-closed", { exitCode: code, signal }); finish(code, signal); });
+    opts.signal?.addEventListener("abort", abort, { once: true });
+    if (opts.signal?.aborted) abort();
   });
 }
 

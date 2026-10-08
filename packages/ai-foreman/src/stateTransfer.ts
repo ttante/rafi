@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { registerHandbackWriter } from "./qaHandbackMigration.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   copyFileSync,
@@ -461,6 +462,7 @@ function rewriteWorkflowDb(root: string, sourceRoot: string): void {
   const path = join(root, WORKFLOW_DB_FILE);
   if (!existsSync(path)) return;
   const db = new Database(path);
+  registerHandbackWriter(db);
   try {
     rewriteSqlJsonColumn(db, "workflow_runs", "run_id", ["original_work_json", "remaining_work_json", "state_json"], sourceRoot, root);
     rewriteSqlJsonColumn(db, "branch_resume_sessions", "rowid", ["session_json"], sourceRoot, root);

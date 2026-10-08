@@ -1,6 +1,6 @@
 # special-agents
 
-29 composable best-practice rule packs, 6 skills, and 4 agent roles for Claude Code and Codex.
+Composable best-practice rule packs, skills, and agent roles for Claude Code and Codex.
 
 The content layer of [Rafi](https://github.com/ttante/rafi). Ships both the authoring source (`content/`) and prebuilt composition logic so it can be used as a library, consumed by `rafi compile`, or extended directly.
 
@@ -13,14 +13,17 @@ npm install special-agents
 ## Usage
 
 ```ts
-import { getAgent, getSkill, emitCompiledBundles } from "special-agents";
+import { getAgent, loadSkill, emitCompiledBundles } from "special-agents";
 
 // Get a composed role bundle (system prompt + skills list)
 const { system, skills } = getAgent("builder");
 // system → assembled prompt with all applicable rule packs rendered
-// skills → ["tdd", "improve-codebase-architecture"]
+// skills → ["handoff", "tdd", "improve-codebase-architecture"]
 
-// Write compiled role bundles + AGENTS.md + CLAUDE.md to a target repo
+// Read a standalone implementation workflow
+const implementor = loadSkill("implementor");
+
+// Write compiled role bundles to a target repo
 emitCompiledBundles("./my-repo", {
   defaults: {
     stack: { frontend: "React", backend: "Node.js", database: "PostgreSQL", cloud: "AWS", packageManager: "pnpm" },
@@ -28,6 +31,24 @@ emitCompiledBundles("./my-repo", {
   },
 });
 ```
+
+## Implementor skill
+
+[`implementor`](content/skills/implementor/SKILL.md) carries a scoped feature, bug fix, or plan through implementation, verification, a durable checkpoint, review, and corrections. It supports compact-then-audit workflows, prefers an independent final review when available and permitted, and labels the fallback as self-review. Its [review checklist](content/skills/implementor/references/review.md) checks requirements separately from code quality and asks for evidence behind findings.
+
+New Rafi projects include it in their default skill configuration. For an existing project with an explicit `skills` map, merge this entry under `skills` in `rafi-config.yaml`, then run `rafi compile .` using a CLI build containing this skill:
+
+```yaml
+skills:
+  implementor:
+    artifact_source: rafi
+    claude: ./.claude/skills/implementor/SKILL.md
+    codex: ./.agents/skills/implementor/SKILL.md
+```
+
+Compilation copies the skill and its review reference into the selected runtimes' skill directories. In an agent session, request it by name, for example: "Use the implementor skill to implement the plan in docs/plan.md, then audit and fix the result."
+
+The skill provides workflow instructions; actual compaction and independent review depend on the host's capabilities and permissions. When used within Rafi's Builder/QA loop, it respects the assigned step and host-owned review and handoff protocols.
 
 ## Roles
 

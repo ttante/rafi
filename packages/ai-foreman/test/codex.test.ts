@@ -212,7 +212,7 @@ test("Codex app-server turn waiter fails rather than waiting forever after provi
   };
   await assert.rejects(
     internal.waitFor("turn/completed", () => false, 15),
-    /provider was silent for 0 minutes while waiting for turn\/completed/,
+    /provider wait timed out after 15 ms while waiting for turn\/completed/,
   );
   await a.close();
 });
@@ -253,7 +253,7 @@ test("Codex token usage keeps live context and cumulative provider totals separa
     },
   });
   assert.deepEqual(await a.contextUsage(), {
-    used: 72, maximum: 100, percentage: 72, observedAt: (await a.contextUsage())?.observedAt, source: "provider-event",
+    used: 12, maximum: 100, percentage: 12, observedAt: (await a.contextUsage())?.observedAt, source: "provider-event",
   });
   assert.deepEqual(await a.sessionUsage(), {
     inputTokens: 50, outputTokens: 22, totalTokens: 72,
@@ -274,12 +274,12 @@ test("Codex native compaction requires explicit completion and a fresh post-comp
   internal.request = async () => {
     queueMicrotask(() => {
       internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { type: "contextCompaction" } } });
-      internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 24, inputTokens: 18, outputTokens: 6 }, last: { totalTokens: 4, inputTokens: 3, outputTokens: 1 }, modelContextWindow: 100 } } });
+      internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 80, inputTokens: 60, outputTokens: 20 }, last: { totalTokens: 4, inputTokens: 3, outputTokens: 1 }, modelContextWindow: 100 } } });
     });
     return {};
   };
   assert.deepEqual(await a.compact(), { ok: true });
-  assert.equal((await a.contextUsage())?.percentage, 24);
+  assert.equal((await a.contextUsage())?.percentage, 4);
   await a.close();
 });
 
@@ -299,6 +299,31 @@ test("Codex native compaction rejects completion without authoritative post-comp
   const result = await a.compact();
   assert.equal(result.ok, false);
   assert.match(result.error ?? "", /fresh usage unavailable/);
+  await a.close();
+});
+
+test("failed compaction acknowledgement removes both registered waiters and traces the failure", async () => {
+  const phases: string[] = [];
+  const a = adapter({ resumeSessionId: "session-1", compactionTimeoutMs: 50, onLifecycleTrace: event => phases.push(event.phase) });
+  const internal = a as unknown as { ensureThread(): Promise<void>; request(method: string): Promise<unknown>; notificationWaiters: Map<string, unknown[]> };
+  internal.ensureThread = async () => {};
+  internal.request = async () => { throw new Error("acknowledgement failed"); };
+  assert.equal((await a.compact()).ok, false);
+  assert.equal([...internal.notificationWaiters.values()].flat().length, 0);
+  assert.ok(phases.includes("waiter-registered")); assert.ok(phases.includes("waiter-cancelled")); assert.ok(phases.includes("compaction-failed"));
+  await a.close();
+});
+
+test("wrong-session compaction completion times out without accepting stale usage", async () => {
+  const a = adapter({ resumeSessionId: "session-1", compactionTimeoutMs: 20 });
+  const internal = a as unknown as { ensureThread(): Promise<void>; request(method: string): Promise<unknown>; handle(message: unknown): void; notificationWaiters: Map<string, unknown[]> };
+  internal.ensureThread = async () => {};
+  internal.request = async () => {
+    internal.handle({ method: "item/completed", params: { threadId: "foreign", item: { type: "contextCompaction" } } });
+    return {};
+  };
+  const result = await a.compact(); assert.equal(result.ok, false); assert.match(result.error!, /20 ms/);
+  assert.equal([...internal.notificationWaiters.values()].flat().length, 0);
   await a.close();
 });
 
@@ -332,7 +357,7 @@ test("Codex automatic compaction discovers the provider window before restarting
 test("Codex records provider-triggered compactions when completion follows usage", async () => {
   const a = adapter({ resumeSessionId: "session-1" });
   const internal = a as unknown as { handle(message: unknown): void; nativeCompactions: unknown[] };
-  internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 80 }, last: {}, modelContextWindow: 100 } } });
+  internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 80 }, last: { totalTokens: 25 }, modelContextWindow: 100 } } });
   internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { type: "contextCompaction" } } });
   const recorded = a.drainNativeCompactions();
   assert.equal(recorded.length, 1);
@@ -347,7 +372,7 @@ test("Codex records provider-triggered compactions when usage follows completion
   const internal = a as unknown as { handle(message: unknown): void; nativeCompactions: unknown[] };
   internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { type: "contextCompaction" } } });
   assert.equal(a.drainNativeCompactions().length, 1);
-  internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 25 }, last: {}, modelContextWindow: 100 } } });
+  internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 25 }, last: { totalTokens: 25 }, modelContextWindow: 100 } } });
   assert.equal(a.drainNativeCompactions().length, 0, "a later usage event must not duplicate the completion");
   await a.close();
 });
@@ -378,4 +403,110 @@ test("CodexAdapter normalizes 401 process failures into repair guidance", async 
     assert.match(result.text, /codex login/);
     assert.match(result.text, /401 Invalid authentication credentials/);
   });
+});
+
+test("Codex host-turn accounting sums cumulative deltas and rejects foreign or missing occupancy", async () => {
+  const a = adapter({ resumeSessionId: "session-1" });
+  const internal = a as unknown as { handle(message: unknown): void; ensureThread(): Promise<void>; request(method: string): Promise<unknown> };
+  const usage = (input: number, output: number, latest?: number, threadId = "session-1") => internal.handle({ method: "thread/tokenUsage/updated", params: { threadId, tokenUsage: { total: { inputTokens: input, outputTokens: output, totalTokens: input + output }, last: { totalTokens: latest }, modelContextWindow: 1000 } } });
+  internal.ensureThread = async () => {};
+  usage(100, 20, 30);
+  internal.request = async () => {
+    usage(140, 30, 50);
+    usage(200, 45, 70);
+    usage(200, 45, 70); // Duplicate notification does not double-charge.
+    usage(900, 90, 990, "other-session");
+    internal.handle({ method: "turn/completed", params: { threadId: "session-1", turn: { status: "completed" } } });
+    return {};
+  };
+  const turn = await a.sendTurn("work");
+  assert.equal(turn.inputTokens, 100);
+  assert.equal(turn.outputTokens, 25);
+  assert.equal((await a.contextUsage())?.used, 70);
+  usage(210, 46);
+  assert.equal(await a.contextUsage(), undefined, "missing latest sample remains unknown");
+  internal.request = async () => {
+    usage(1, 1, 2); // Counter reset: no invented negative or final-request delta.
+    internal.handle({ method: "turn/completed", params: { threadId: "session-1", turn: { status: "completed" } } });
+    return {};
+  };
+  assert.equal((await a.sendTurn("next")).inputTokens, undefined);
+  await a.close();
+});
+
+test("recorded slow compactions and a ninety-second completion fit the default deadline", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const duration of [27_935, 39_096, 48_495, 50_122, 53_314, 90_000]) {
+    const a = adapter({ resumeSessionId: "session-1" });
+    const internal = a as unknown as { ensureThread(): Promise<void>; request(method: string): Promise<unknown>; handle(message: unknown): void };
+    internal.ensureThread = async () => {};
+    internal.request = async () => {
+      setTimeout(() => {
+        internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 1000000 }, last: { totalTokens: 20 }, modelContextWindow: 100 } } });
+        internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { id: `compact-${duration}`, type: "contextCompaction" } } });
+      }, duration);
+      return {};
+    };
+    const completion = a.compact();
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+    t.mock.timers.tick(duration);
+    assert.equal((await completion).ok, true, `${duration}ms compaction must not trigger replacement`);
+    assert.equal((await a.contextUsage())?.used, 20);
+    assert.equal(a.drainNativeCompactions().length, 0, "manual completion is not counted again as native");
+    await a.close();
+  }
+});
+
+test("explicit compaction completion reconciles a lost acknowledgement", async () => {
+  const a = adapter({ resumeSessionId: "session-1", compactionTimeoutMs: 100 });
+  const internal = a as unknown as { ensureThread(): Promise<void>; request(method: string): Promise<unknown>; handle(message: unknown): void };
+  internal.ensureThread = async () => {};
+  internal.request = () => {
+    queueMicrotask(() => {
+      internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { id: "compaction", type: "contextCompaction" } } });
+      internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { total: { totalTokens: 9000 }, last: { totalTokens: 10 }, modelContextWindow: 100 } } });
+    });
+    return new Promise(() => {});
+  };
+  assert.equal((await a.compact()).ok, true);
+  await a.close();
+});
+
+test("only the current compaction item extends the normal deadline, within a hard bound", async () => {
+  for (const mode of ["correlated", "foreign-session", "generic-status", "wrong-completion", "never-completes"] as const) {
+    const a = adapter({ resumeSessionId: "session-1", compactionTimeoutMs: 100 });
+    const internal = a as unknown as { ensureThread(): Promise<void>; request(method: string): Promise<unknown>; handle(message: unknown): void };
+    internal.ensureThread = async () => {};
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    internal.request = async () => {
+      if (mode === "generic-status") internal.handle({ method: "thread/status/changed", params: { threadId: "session-1", status: { type: "active" } } });
+      else internal.handle({ method: "item/started", params: { threadId: mode === "foreign-session" ? "other" : "session-1", item: { id: "our-compaction", type: "contextCompaction" } } });
+      if (mode !== "never-completes") timer = setTimeout(() => {
+        internal.handle({ method: "thread/tokenUsage/updated", params: { threadId: "session-1", tokenUsage: { last: { totalTokens: 10 }, modelContextWindow: 100 } } });
+        internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { id: mode === "wrong-completion" ? "another-compaction" : "our-compaction", type: "contextCompaction" } } });
+      }, 125);
+      return {};
+    };
+    try {
+      const result = await a.compact();
+      assert.equal(result.ok, mode === "correlated", mode);
+      if (!result.ok) assert.equal(result.failure?.dispatchState, "unknown");
+    } finally { if (timer) clearTimeout(timer); await a.close(); }
+  }
+});
+
+
+test("Codex tool use cannot turn a response-only correction into success", async () => {
+  const a = adapter({ resumeSessionId: "session-1" });
+  const internal = a as unknown as { ensureThread(): Promise<void>; request(method: string): Promise<unknown>; handle(message: unknown): void };
+  internal.ensureThread = async () => {};
+  internal.request = async () => {
+    internal.handle({ method: "item/started", params: { threadId: "session-1", item: { id: "tool-1", type: "commandExecution", command: "echo unexpected" } } });
+    internal.handle({ method: "turn/completed", params: { threadId: "session-1", turn: { status: "completed" } } });
+    return {};
+  };
+  const turn = await a.sendTurn("format only", { responseOnly: true });
+  assert.equal(turn.isError, true);
+  assert.match(turn.text, /Response-only correction used tools/);
+  await a.close();
 });

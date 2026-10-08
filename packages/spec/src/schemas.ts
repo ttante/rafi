@@ -88,6 +88,30 @@ export const builderQaRemediationReportV2Schema = {
   },
 } as const;
 
+export const builderQaRemediationReportV3Schema = {
+  ...builderQaRemediationReportV2Schema,
+  $id: "rafi/builderQaRemediationReportV3",
+  properties: {
+    ...builderQaRemediationReportV2Schema.properties,
+    version: { const: 3 },
+    findings: {
+      ...builderQaRemediationReportV2Schema.properties.findings,
+      items: {
+        ...builderQaRemediationReportV2Schema.properties.findings.items,
+        properties: {
+          ...builderQaRemediationReportV2Schema.properties.findings.items.properties,
+          disposition: { enum: ["fixed", "disputed", "blocked"] },
+          blocker: {
+            type: "object", additionalProperties: false,
+            required: ["category", "reason", "recovery", "capability", "evidence"],
+            properties: { category: { enum: ["environment", "permission", "decision", "dependency", "other"] }, reason: qaString, recovery: qaString, capability: qaString, evidence: qaString },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
 export const rulePackSchema = {
   $id: "rafi/rulePack",
   type: "object",
@@ -241,6 +265,7 @@ const ticketsSetupConfig = {
       type: "object",
       additionalProperties: false,
       properties: {
+        mode: { enum: ["approved_plan", "external_import"] },
         source_handling: { enum: ["saved", "prompt", "manual"] },
         agent_preference: { enum: ["configured", "claude", "codex"] },
         import_cap: { type: "integer", minimum: 1 },
@@ -356,6 +381,7 @@ const autonomyConfig = {
   properties: {
     profile: { enum: ["supervised", "balanced", "unattended"] },
     continue_independent_tickets: { type: "boolean" },
+    runtime_deadlines: { type: "object", additionalProperties: false, properties: Object.fromEntries(["preparation_ms", "rpc_ms", "compaction_ms", "shutdown_ms", "turn_ms"].map(key => [key, { type: "integer", minimum: 1, maximum: key === "compaction_ms" ? 180000 : 86400000 }])) },
     rules: {
       type: "object",
       additionalProperties: false,

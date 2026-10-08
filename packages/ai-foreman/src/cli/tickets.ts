@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { DeletedTicketResetPolicy, RequestedTicketResetTarget, StructuredPlanV1, TicketGroupId } from "rafi-spec";
+import type { DeletedTicketResetPolicy, RequestedTicketResetTarget, SourceRegistryConfig, StructuredPlanV1, TicketGroupId } from "rafi-spec";
 import { select, text, confirm, isCancel, multiselect } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
@@ -56,12 +56,23 @@ import {
   recommendedBuildDefaults,
   saveTicketSetupConfig,
   syncTicketLimits,
+  ticketSourcesFromRegistry,
   urlSources,
   type HarnessTarget,
   type TicketBuildCompletionMode,
+  type TicketPopulateRuntimeMode,
   type TicketSourceConfig,
   type TicketsSetupConfig,
 } from "../tickets/setupConfig.js";
+import {
+  deactivateSource,
+  discardStagedSourceCaptures,
+  loadSourceRegistry,
+  refreshSourceRegistry,
+  registerSourceRequests,
+  removeSource,
+  saveSourceRegistry,
+} from "../sources/sourceRegistry.js";
 import { fetchAndSnapshotUrl, snapshotExternalLocalFile } from "../tickets/sourceFetch.js";
 import {
   checkpointInterview,
@@ -257,6 +268,7 @@ interface SetupCommandOptions {
   autoMergeWait?: boolean;
   autoMergeTimeoutMinutes?: string;
   agentPreference?: string;
+  populationMode?: string;
   skipAccessCheck?: boolean;
 }
 
@@ -271,9 +283,29 @@ interface PopulateCommandOptions {
   authorizeRetire?: string[];
 }
 
+interface TicketSetupPatch {
+  sources?: TicketSourceConfig[];
+  limits?: TicketsSetupConfig["limits"];
+  populate?: Partial<TicketsSetupConfig["populate"]>;
+  build?: Partial<TicketsSetupConfig["build"]>;
+  /** A staged shared-registry edit, saved only after the setup interview succeeds. */
+  sourceRegistry?: SourceRegistryConfig;
+  sourceRegistryOriginal?: SourceRegistryConfig;
+}
+
+interface CollectedTicketSetup {
+  setup: TicketsSetupConfig;
+  sourceRegistry?: SourceRegistryConfig;
+  sourceRegistryOriginal?: SourceRegistryConfig;
+}
+
 async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
   const dir = cwd(opts);
   if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
+  if (opts.populationMode === "approved_plan") {
+    const path = findPopulationPlan(dir, activePopulationPlanCandidates(dir, DEFAULT_TICKETS_CONFIG))?.path;
+    if (path) console.log(`foreman tickets setup: Approved plan found: ${path}. Ticket generation will use this plan.`);
+  }
   let interview = beginTicketSetupInterview(dir, "tickets-setup-init", opts);
   if (hasTicketSetupConfig(dir)) {
     console.log("foreman tickets setup: existing setup found; opening setup:update");
@@ -283,8 +315,24 @@ async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
     if (interview) completeInterview(dir, interview);
     return;
   }
+  let stagedRegistry: SourceRegistryConfig | undefined;
+  let stagedRegistryOriginal: SourceRegistryConfig | undefined;
+  let registrySaved = false;
   try {
-    const answers = await collectTicketSetup(dir, opts, undefined);
+    const initialMode = await resolveInitialSetupMode(dir, opts);
+    if (initialMode === "plan_first") {
+      console.log(`foreman tickets setup: create and approve a plan first with \`rafi plan ${shellQuote(dir)}\`, then rerun ticket setup.`);
+      if (interview) completeInterview(dir, interview);
+      return;
+    }
+    if (!opts.populationMode && initialMode === "approved_plan") {
+      const path = findPopulationPlan(dir, activePopulationPlanCandidates(dir, DEFAULT_TICKETS_CONFIG))?.path;
+      if (path) console.log(`foreman tickets setup: Approved plan found: ${path}. Ticket generation will use this plan.`);
+    }
+    const collected = await collectTicketSetup(dir, { ...opts, ...(initialMode ? { populationMode: initialMode } : {}) }, undefined);
+    const answers = collected.setup;
+    stagedRegistry = collected.sourceRegistry;
+    stagedRegistryOriginal = collected.sourceRegistryOriginal;
     if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "save-setup", answers: { setup: answers } });
     await validateConfiguredSourcesIfRequested(dir, answers, Boolean(opts.skipAccessCheck));
     ensureRafiConfigForTicketSetup(dir, {
@@ -297,15 +345,45 @@ async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
       docsRoot: opts.docsRoot,
       targets: parseRuntimeTargets(opts.runtime),
     });
+    if (collected.sourceRegistry) saveSourceRegistry(dir, collected.sourceRegistry);
+    registrySaved = true;
     console.log(`foreman tickets setup: saved ticket setup in ${join(dir, "rafi-config.yaml")}`);
 
     if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "initialize-tracker" });
     await continueTrackerSetup(dir, opts, answers);
     if (interview) completeInterview(dir, interview);
   } catch (error) {
+    if (!registrySaved && stagedRegistry && stagedRegistryOriginal) discardStagedSourceCaptures(dir, stagedRegistryOriginal, stagedRegistry);
     if (interview && !(error instanceof TicketInterviewCancelled)) failInterview(dir, interview, interview.checkpoint, error);
     throw error;
   }
+}
+
+/** Choose a strategy before a fresh standalone setup interview begins. */
+async function resolveInitialSetupMode(
+  dir: string,
+  opts: SetupCommandOptions,
+): Promise<Exclude<TicketPopulateRuntimeMode, "legacy"> | "plan_first" | undefined> {
+  if (opts.populationMode) return parsePopulationMode(opts.populationMode);
+  const hasPlan = Boolean(findPopulationPlan(dir, activePopulationPlanCandidates(dir, DEFAULT_TICKETS_CONFIG)));
+  const registrySources = ticketSourcesFromRegistry(loadSourceRegistry(dir).registry.entries);
+  const hasExternal = externalSources({ ...DEFAULT_TICKET_SETUP, sources: registrySources }).length > 0
+    || Boolean(opts.linear || opts.linearTeamKey || opts.linearFilter || opts.jiraSite || opts.jiraJql);
+  if (hasPlan) return "approved_plan";
+  if (hasExternal) return "external_import";
+  if (!shouldPrompt(opts)) {
+    fail("no approved plan or external import connection was found; pass --population-mode approved_plan|external_import, or run `rafi plan` before non-interactive ticket setup");
+  }
+  const action = await select({
+    message: "No approved plan or external import connection was found. What should ticket setup prepare for?",
+    options: [
+      { value: "plan_first", label: "Plan first (Recommended)", hint: "Create an approved Rafi plan before generating tickets." },
+      { value: "external_import", label: "Configure external import", hint: "Add Linear or Jira, then import existing tickets." },
+      { value: "later", label: "Set up the tracker and populate later", hint: "Do not select a population strategy yet." },
+    ],
+  });
+  if (isCancel(action)) cancelTicketInterview();
+  return action === "later" ? undefined : action as Exclude<TicketPopulateRuntimeMode, "legacy"> | "plan_first";
 }
 
 async function continueTrackerSetup(dir: string, opts: SetupCommandOptions, setup: TicketsSetupConfig): Promise<void> {
@@ -331,7 +409,10 @@ async function continueTrackerSetup(dir: string, opts: SetupCommandOptions, setu
     console.log("foreman tickets setup: initialized .tickets/");
   }
   if (shouldPrompt(opts)) {
-    const populate = await confirm({ message: "Populate tickets now?", initialValue: true });
+    const populate = await confirm({
+      message: setup.populate.mode === "approved_plan" ? "Populate tickets from the approved plan now?" : "Populate tickets now?",
+      initialValue: true,
+    });
     if (isCancel(populate)) return;
     if (populate) await retrySetupStage("ticket population", () => runNestedTicketCommand(() => cmdPopulateCli({ project: dir, yes: true })), true);
     else {
@@ -360,9 +441,14 @@ async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
   const dir = cwd(opts);
   if (!existsSync(dir)) fail(`project directory not found: ${dir}`);
   let interview = beginTicketSetupInterview(dir, "tickets-setup-update", opts);
+  let stagedRegistry: SourceRegistryConfig | undefined;
+  let stagedRegistryOriginal: SourceRegistryConfig | undefined;
+  let registrySaved = false;
   try {
     const current = loadTicketSetupConfigWithDefaults(dir);
     const patch = await collectTicketSetupPatch(dir, opts, current);
+    stagedRegistry = patch.sourceRegistry;
+    stagedRegistryOriginal = patch.sourceRegistryOriginal;
     const next = mergeTicketSetup(current, patch);
     if (interview) interview = checkpointInterview(dir, interview, { checkpoint: "save-setup", answers: { setup: next } });
     await validateConfiguredSourcesIfRequested(dir, next, Boolean(opts.skipAccessCheck));
@@ -376,6 +462,8 @@ async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
       docsRoot: opts.docsRoot,
       targets: parseRuntimeTargets(opts.runtime),
     });
+    if (patch.sourceRegistry) saveSourceRegistry(dir, patch.sourceRegistry);
+    registrySaved = true;
     syncTicketLimits(dir, next.limits);
     console.log(`foreman tickets setup: updated ticket setup in ${join(dir, "rafi-config.yaml")}`);
 
@@ -387,6 +475,7 @@ async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
     }
     if (interview) completeInterview(dir, interview);
   } catch (error) {
+    if (!registrySaved && stagedRegistry && stagedRegistryOriginal) discardStagedSourceCaptures(dir, stagedRegistryOriginal, stagedRegistry);
     if (interview && !(error instanceof TicketInterviewCancelled)) failInterview(dir, interview, interview.checkpoint, error);
     throw error;
   }
@@ -411,25 +500,34 @@ async function collectTicketSetup(
   dir: string,
   opts: SetupCommandOptions,
   current: TicketsSetupConfig | undefined,
-): Promise<TicketsSetupConfig> {
+): Promise<CollectedTicketSetup> {
   const patch = await collectTicketSetupPatch(dir, opts, current ?? DEFAULT_TICKET_SETUP);
   const build = patch.build ?? {};
-  return mergeTicketSetup(current, {
+  const setup = mergeTicketSetup(current, {
     ...patch,
     build: Object.keys(build).length > 0 ? build : recommendedBuildDefaults(dir),
   });
+  // New non-interactive setup has no opportunity to select a strategy. A
+  // validated plan is sufficient intent for the normal plan-derived path;
+  // explicit external connection flags are sufficient intent for import.
+  if (!current && setup.populate.mode === "legacy") {
+    if (findPopulationPlan(dir, activePopulationPlanCandidates(dir, DEFAULT_TICKETS_CONFIG))) setup.populate.mode = "approved_plan";
+    else if (externalSources({ ...setup }).length > 0) setup.populate.mode = "external_import";
+  }
+  return { setup, sourceRegistry: patch.sourceRegistry, sourceRegistryOriginal: patch.sourceRegistryOriginal };
 }
 
 async function collectTicketSetupPatch(
   dir: string,
   opts: SetupCommandOptions,
   current: TicketsSetupConfig,
-): Promise<Partial<{ sources: TicketSourceConfig[]; limits: TicketsSetupConfig["limits"]; populate: Partial<TicketsSetupConfig["populate"]>; build: Partial<TicketsSetupConfig["build"]> }>> {
+): Promise<TicketSetupPatch> {
   const nonInteractiveSources = sourcesFromSetupOptions(opts);
   const populatePatch: Partial<TicketsSetupConfig["populate"]> = {};
   const buildPatch: Partial<TicketsSetupConfig["build"]> = {};
 
   if (opts.agentPreference) populatePatch.agent_preference = parseAgentPreference(opts.agentPreference);
+  if (opts.populationMode) populatePatch.mode = parsePopulationMode(opts.populationMode);
   if (opts.branchStrategy) buildPatch.branch_strategy = parseBranchStrategy(opts.branchStrategy);
   if (opts.branchPrefix) buildPatch.branch_prefix = validateBranchPrefix(opts.branchPrefix);
   if (opts.completion) buildPatch.completion = parseCompletionMode(opts.completion);
@@ -461,8 +559,8 @@ async function collectTicketSetupPatch(
   const section = await select({
     message: "What would you like to configure for tickets?",
     options: [
-      { value: "sources", label: "Where tickets come from", hint: "Choose planning files, issue trackers, or other sources." },
-      { value: "populate", label: "How Rafi creates tickets from those sources", hint: "Set import and enrichment behavior." },
+      { value: "sources", label: "Supporting context and external connections", hint: "Manage documents/URLs separately from Linear or Jira imports." },
+      { value: "populate", label: "Ticket population strategy", hint: "Choose approved-plan generation or external import." },
       { value: "build", label: "How Rafi implements tickets", hint: "Set branches, validation, and completion behavior." },
       { value: "limits", label: "Ticket tracker limits", hint: "Set how many tickets Rafi can show or work on at once." },
       { value: "all", label: "Configure everything", hint: "Walk through every ticket setting." },
@@ -476,9 +574,14 @@ async function collectTicketSetupPatch(
     ? configuredPlanningSources(dir).map((path) => ({ type: "local" as const, paths: [path] }))
     : current.sources;
   let sources = nonInteractiveSources.length > 0 ? nonInteractiveSources : planningPrefill;
+  let sourceRegistry: SourceRegistryConfig | undefined;
+  let sourceRegistryOriginal: SourceRegistryConfig | undefined;
   let limits = current.limits;
   if (section === "sources" || section === "all") {
-    sources = await promptTicketSources(dir, current.sources);
+    const managed = await promptTicketSources(dir, current.sources);
+    sources = managed.sources;
+    sourceRegistry = managed.registry;
+    sourceRegistryOriginal = managed.original;
   }
   if (section === "limits" || section === "all") {
     console.log("The defaults are a 500-ticket implementation window and a 20,000-ticket view limit. After initialization these live in .tickets/config.yaml.");
@@ -501,8 +604,32 @@ async function collectTicketSetupPatch(
     ].join("\n"));
     const defaults = await confirm({ message: "Use the recommended population settings?", initialValue: true });
     if (isCancel(defaults)) cancelTicketInterview();
-    if (defaults) Object.assign(populatePatch, DEFAULT_TICKET_SETUP.populate);
+    if (defaults) {
+      const requestedMode = populatePatch.mode;
+      Object.assign(populatePatch, DEFAULT_TICKET_SETUP.populate);
+      if (requestedMode) populatePatch.mode = requestedMode;
+      else if (current.populate.mode !== "legacy") populatePatch.mode = current.populate.mode;
+      else if (findPopulationPlan(dir, activePopulationPlanCandidates(dir, DEFAULT_TICKETS_CONFIG))) populatePatch.mode = "approved_plan";
+    }
     else {
+      const plan = findPopulationPlan(dir, activePopulationPlanCandidates(dir, DEFAULT_TICKETS_CONFIG));
+      const strategy = await select({
+        message: "Ticket population strategy:",
+        initialValue: current.populate.mode === "legacy" ? (plan ? "approved_plan" : "external_import") : current.populate.mode,
+        options: [
+          { value: "approved_plan", label: "Generate from the approved plan", hint: plan ? `Uses ${plan.path}; documents are supporting context.` : "Requires a valid rafi-plan.json." },
+          { value: "external_import", label: "Import existing Linear or Jira tickets", hint: "Does not generate tickets from the approved plan." },
+        ],
+      });
+      if (isCancel(strategy)) cancelTicketInterview();
+      if (strategy === "external_import" && plan) {
+        const switchMode = await confirm({
+          message: "Switch population mode to external import? The approved plan will not be used to create tickets in this run.",
+          initialValue: false,
+        });
+        if (isCancel(switchMode) || !switchMode) cancelTicketInterview();
+      }
+      populatePatch.mode = strategy as TicketsSetupConfig["populate"]["mode"];
       const handling = await select({ message: "How should saved sources be handled?", initialValue: current.populate.source_handling, options: [
         { value: "saved", label: "Use saved sources" }, { value: "prompt", label: "Ask each time" }, { value: "manual", label: "Manual only" },
       ] });
@@ -515,11 +642,8 @@ async function collectTicketSetupPatch(
       populatePatch.agent_preference = agent as TicketsSetupConfig["populate"]["agent_preference"];
       populatePatch.import_cap = await promptPositiveInteger("Maximum tickets imported in one population run (separate from the implementation window):", current.populate.import_cap);
       populatePatch.comment_limit = await promptNonNegativeInteger("Maximum comments imported per external ticket:", current.populate.comment_limit);
-      const enrichment = await select({ message: "Population enrichment policy:", initialValue: current.populate.enrichment, options: [
-        { value: "recommendations", label: "Deterministic recommendations" }, { value: "agent", label: "Agent enrichment" }, { value: "none", label: "No enrichment" },
-      ] });
-      if (isCancel(enrichment)) cancelTicketInterview();
-      populatePatch.enrichment = enrichment as TicketsSetupConfig["populate"]["enrichment"];
+      // `enrichment` was historically visible but did not affect execution.
+      // Keep accepting old values for compatibility; do not present a no-op.
       const split = await confirm({ message: "Recommend splitting XL tickets?", initialValue: current.populate.recommend_split_for_xl });
       if (isCancel(split)) cancelTicketInterview();
       populatePatch.recommend_split_for_xl = Boolean(split);
@@ -592,6 +716,8 @@ async function collectTicketSetupPatch(
         limits,
         populate: populatePatch,
         build: buildPatch,
+        sourceRegistry,
+        sourceRegistryOriginal,
       };
     }
     const completion = await select({
@@ -669,6 +795,8 @@ async function collectTicketSetupPatch(
     limits,
     populate: populatePatch,
     build: buildPatch,
+    sourceRegistry,
+    sourceRegistryOriginal,
   };
 }
 
@@ -752,70 +880,108 @@ export function combineRequirementSelections(selected: string[], additions: stri
   return [...new Set([...selected, ...splitCommaList(additions)])];
 }
 
-async function promptTicketSources(dir: string, current: TicketSourceConfig[]): Promise<TicketSourceConfig[]> {
-  const kind = await select({
-    message: "Primary ticket source:",
-    options: [
-      { value: "local", label: "Local docs, files, folders, or globs" },
-      { value: "linear", label: "Linear" },
-      { value: "jira", label: "Jira Cloud" },
-      { value: "url", label: "Public URL (HTML, text, Markdown, or PDF)" },
-      { value: "none", label: "No saved source" },
-    ],
-  });
-  if (isCancel(kind)) cancelTicketInterview();
-  if (kind === "none") return [];
-  if (kind === "local") {
-    const existing = current.find((source) => source.type === "local") as Extract<TicketSourceConfig, { type: "local" }> | undefined;
-    const answer = await text({
-      message: "Local source paths or globs, comma-separated:",
-      initialValue: existing?.paths.join(", ") || `${configuredDocsPlanPath(dir)}`,
-      defaultValue: existing?.paths.join(", ") || `${configuredDocsPlanPath(dir)}`,
+async function promptTicketSources(dir: string, current: TicketSourceConfig[]): Promise<{ sources: TicketSourceConfig[]; registry: SourceRegistryConfig; original: SourceRegistryConfig }> {
+  // The shared registry is the durable home for planning and ticket context.
+  // Stage changes here and persist them only after the enclosing setup succeeds.
+  const original = loadSourceRegistry(dir).registry;
+  let registry = original;
+  if (registry.entries.length === 0 && current.length > 0) {
+    // Older in-memory callers can still arrive with setup sources before a
+    // registry has been saved. Save-time migration will materialize them.
+    registry = (await registerSourceRequests(dir, registry, current.flatMap(sourceToRegistryRequests), { capture: false })).registry;
+  }
+  try {
+    while (true) {
+    const active = registry.entries.filter((entry) => entry.active);
+    console.log([
+      "Supporting context informs planning and ticket details; it never replaces an approved plan.",
+      ...(active.length ? active.map((entry) => `  • ${entry.label} (${entry.type})`) : ["  • No active supporting context or import connections."]),
+      ...(registry.pending?.length ? ["Pending source descriptions:", ...registry.pending.map((item) => `  • ${item.description}`)] : []),
+    ].join("\n"));
+    const action = await select({
+      message: "Manage shared supporting context and import connections:",
+      options: [
+        { value: "local", label: "Add local documents, folders, or globs" },
+        { value: "url", label: "Add a supporting public URL" },
+        { value: "external", label: "Add a Linear or Jira external-import connection" },
+        { value: "refresh", label: "Refresh active context snapshots" },
+        { value: "deactivate", label: "Deactivate a source (keep its history)" },
+        { value: "remove", label: "Remove a source from shared context" },
+        { value: "pending", label: "Discard a pending source description" },
+        { value: "done", label: "Done" },
+      ],
     });
-    if (isCancel(answer)) cancelTicketInterview();
-    return [{ type: "local", paths: splitCommaList(String(answer)) }];
+    if (isCancel(action)) cancelTicketInterview();
+    if (action === "done") return { sources: ticketSourcesFromRegistry(registry.entries), registry, original };
+    if (action === "local") {
+      const answer = await text({ message: "Local context paths or globs, comma-separated:" });
+      if (isCancel(answer)) cancelTicketInterview();
+      const paths = splitCommaList(String(answer));
+      registry = (await registerSourceRequests(dir, registry, paths.map((path) => ({ type: "local", label: path, locator: { path } })), { capture: false })).registry;
+      continue;
+    }
+    if (action === "url") {
+      const answer = await text({ message: "Supporting public HTTP(S) URL:", validate: (value) => /^https?:\/\//i.test(String(value ?? "")) ? undefined : "Enter an HTTP(S) URL" });
+      if (isCancel(answer)) cancelTicketInterview();
+      registry = (await registerSourceRequests(dir, registry, [{ type: "url", label: String(answer).trim(), locator: { url: String(answer).trim() } }], { capture: false })).registry;
+      continue;
+    }
+    if (action === "external") {
+      const provider = await select({ message: "External ticket provider:", options: [
+        { value: "linear", label: "Linear — import existing Linear tickets" },
+        { value: "jira", label: "Jira Cloud — import existing Jira tickets" },
+      ] });
+      if (isCancel(provider)) cancelTicketInterview();
+      if (provider === "linear") {
+        const team = await text({ message: "Linear team key (optional):" });
+        if (isCancel(team)) cancelTicketInterview();
+        const filter = await text({ message: "Linear IssueFilter JSON or title search text (optional):" });
+        if (isCancel(filter)) cancelTicketInterview();
+        const teamKey = String(team).trim() || undefined;
+        registry = (await registerSourceRequests(dir, registry, [{ type: "linear", label: teamKey ? `Linear ${teamKey}` : "Linear", locator: { api_key_env: "LINEAR_API_KEY", team_key: teamKey, filter: String(filter).trim() || undefined } }], { capture: false })).registry;
+      } else {
+        const site = await text({ message: "Jira Cloud site URL:", placeholder: "https://your-domain.atlassian.net", validate: (value) => String(value ?? "").trim() ? undefined : "Enter a Jira Cloud site URL" });
+        if (isCancel(site)) cancelTicketInterview();
+        const jql = await text({ message: "Jira JQL:", initialValue: "resolution = Unresolved ORDER BY priority DESC, updated DESC", defaultValue: "resolution = Unresolved ORDER BY priority DESC, updated DESC" });
+        if (isCancel(jql)) cancelTicketInterview();
+        registry = (await registerSourceRequests(dir, registry, [{ type: "jira", label: `Jira ${String(site).trim()}`, locator: { site: String(site).trim(), email_env: "JIRA_EMAIL", token_env: "JIRA_API_TOKEN", jql: String(jql).trim() } }], { capture: false })).registry;
+      }
+      continue;
+    }
+    if (action === "refresh") {
+      if (active.length === 0) { console.log("foreman tickets setup: no active sources to refresh"); continue; }
+      const ids = await multiselect({ message: "Refresh which active source snapshots?", options: active.map((entry) => ({ value: entry.id, label: `${entry.label} (${entry.type})` })), initialValues: active.map((entry) => entry.id), required: false });
+      if (isCancel(ids)) cancelTicketInterview();
+      registry = (await refreshSourceRegistry(dir, registry, ids as string[])).registry;
+      continue;
+    }
+    if (action === "pending") {
+      const pending = registry.pending ?? [];
+      if (pending.length === 0) { console.log("foreman tickets setup: no pending source descriptions"); continue; }
+      const descriptions = await multiselect({ message: "Discard which pending descriptions?", options: pending.map((item) => ({ value: item.description, label: item.description })), required: false });
+      if (isCancel(descriptions)) cancelTicketInterview();
+      const discarded = new Set(descriptions as string[]);
+      registry = { ...registry, pending: pending.filter((item) => !discarded.has(item.description)) };
+      continue;
+    }
+    if (active.length === 0 && action === "deactivate") { console.log("foreman tickets setup: no active sources to deactivate"); continue; }
+    const candidates = action === "deactivate" ? active : registry.entries;
+    if (candidates.length === 0) { console.log("foreman tickets setup: no sources to remove"); continue; }
+    const id = await select({ message: action === "deactivate" ? "Deactivate which source?" : "Remove which source?", options: candidates.map((entry) => ({ value: entry.id, label: `${entry.label} (${entry.type}${entry.active ? "" : ", inactive"})` })) });
+    if (isCancel(id)) cancelTicketInterview();
+    registry = action === "deactivate" ? deactivateSource(registry, String(id)) : removeSource(registry, String(id));
+    }
+  } catch (error) {
+    discardStagedSourceCaptures(dir, original, registry);
+    throw error;
   }
-  if (kind === "linear") {
-    const team = await text({ message: "Linear team key (optional):" });
-    if (isCancel(team)) cancelTicketInterview();
-    const filter = await text({ message: "Linear IssueFilter JSON or title search text (optional):" });
-    if (isCancel(filter)) cancelTicketInterview();
-    return [{
-      type: "linear",
-      api_key_env: "LINEAR_API_KEY",
-      team_key: String(team).trim() || null,
-      filter: String(filter).trim() || null,
-    }];
-  }
-  if (kind === "url") {
-    const existing = current.find((source) => source.type === "url") as Extract<TicketSourceConfig, { type: "url" }> | undefined;
-    const answer = await text({
-      message: "Public HTTP(S) URL:",
-      initialValue: existing?.url,
-      validate: (value) => /^https?:\/\//i.test(String(value ?? "")) ? undefined : "Enter an HTTP(S) URL",
-    });
-    if (isCancel(answer)) cancelTicketInterview();
-    return [{ type: "url", url: String(answer).trim() }];
-  }
-  const site = await text({
-    message: "Jira Cloud site URL:",
-    placeholder: "https://your-domain.atlassian.net",
-    validate: (value) => String(value ?? "").trim() ? undefined : "Enter a Jira Cloud site URL",
-  });
-  if (isCancel(site)) cancelTicketInterview();
-  const jql = await text({
-    message: "Jira JQL:",
-    initialValue: "resolution = Unresolved ORDER BY priority DESC, updated DESC",
-    defaultValue: "resolution = Unresolved ORDER BY priority DESC, updated DESC",
-  });
-  if (isCancel(jql)) cancelTicketInterview();
-  return [{
-    type: "jira",
-    site: String(site).trim(),
-    email_env: "JIRA_EMAIL",
-    token_env: "JIRA_API_TOKEN",
-    jql: String(jql).trim(),
-  }];
+}
+
+function sourceToRegistryRequests(source: TicketSourceConfig): Array<{ type: "local" | "url" | "linear" | "jira"; label: string; locator: Record<string, string | undefined> }> {
+  if (source.type === "local") return source.paths.map((path) => ({ type: "local", label: path, locator: { path } }));
+  if (source.type === "url") return [{ type: "url", label: source.url, locator: { url: source.url } }];
+  if (source.type === "linear") return [{ type: "linear", label: source.team_key ? `Linear ${source.team_key}` : "Linear", locator: { api_key_env: source.api_key_env, team_key: source.team_key ?? undefined, filter: source.filter ?? undefined } }];
+  return [{ type: "jira", label: `Jira ${source.site}`, locator: { site: source.site, email_env: source.email_env, token_env: source.token_env, jql: source.jql } }];
 }
 
 function sourcesFromSetupOptions(opts: SetupCommandOptions): TicketSourceConfig[] {
@@ -892,6 +1058,11 @@ function parseAgentPreference(value: string): TicketsSetupConfig["populate"]["ag
   fail("--agent-preference must be one of: configured, claude, codex");
 }
 
+function parsePopulationMode(value: string): Exclude<TicketPopulateRuntimeMode, "legacy"> {
+  if (value === "approved_plan" || value === "external_import") return value;
+  fail("--population-mode must be approved_plan or external_import");
+}
+
 function parseResetScope(value: string): TicketResetScope {
   if (["all", "completed-and-unfinished", "unfinished"].includes(value)) return value as TicketResetScope;
   throw new Error("--scope must be all, completed-and-unfinished, or unfinished");
@@ -927,19 +1098,6 @@ function splitCommaList(value: string): string[] {
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, "'\"'\"'")}'`;
-}
-
-function configuredDocsPlanPath(dir: string): string {
-  const raw = loadTicketSetupConfig(dir);
-  const local = localSourcePaths(raw)[0];
-  if (local) return local;
-  const configPath = join(dir, "rafi-config.yaml");
-  if (existsSync(configPath)) {
-    const parsed = parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown> | undefined;
-    const docs = parsed?.docs as Record<string, unknown> | undefined;
-    if (typeof docs?.root === "string") return `${docs.root}/rafi-plan.md`;
-  }
-  return "docs/rafi-plan.md";
 }
 
 async function resolveInitAppName(dir: string, yes: boolean): Promise<string | undefined> {
@@ -1058,16 +1216,45 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
 
   const ticketsConfig = loadTicketsConfig(dir);
   const setup = loadTicketSetupConfig(dir);
-  const explicitSources = opts.sources ? await prepareDocumentSources(dir, opts.sources) : undefined;
-  const configuredExternalSources = explicitSources?.length ? [] : externalSources(setup);
-  const configuredUrlSources = explicitSources?.length ? [] : urlSources(setup);
-  const savedLocalSources = explicitSources?.length ? [] : localSourcePaths(setup);
-  const selectedLocalHints = configuredExternalSources.length > 0 && savedLocalSources.length === 0 && configuredUrlSources.length === 0
-    ? undefined
-    : await resolvePopulateSourceSelection(dir, explicitSources, ticketsConfig, Boolean(opts.yes));
+  const configuredExternal = externalSources(setup);
+  const mode = resolvePopulationMode(setup);
+
+  // Explicit import is intentionally terminal. In particular, a valid plan or
+  // supplementary documents must never cause a second Ticket Maker run.
+  if (mode === "external_import") {
+    if (configuredExternal.length === 0) {
+      fail("external_import ticket population requires a configured Linear or Jira source; run `rafi tickets setup:update` first");
+    }
+    await runExternalImport(dir, configuredExternal, setup, ticketsConfig, Boolean(opts.yes));
+    return;
+  }
+
+  // In plan mode, validate the authoritative structured plan before reading
+  // or fetching any supplemental context. An explicit JSON plan remains a
+  // supported convenience, but ordinary --sources entries never become plan
+  // authority.
+  const approvedPlanForMode = mode === "approved_plan"
+    ? resolvePopulationPlan(dir, opts.sources ?? [], ticketsConfig)
+    : undefined;
+  const rawContextSources = mode === "approved_plan"
+    ? opts.sources?.filter((source) => !isApprovedPlanArtifact(dir, source, approvedPlanForMode!.path))
+    : opts.sources;
+  const explicitSources = rawContextSources?.length ? await prepareDocumentSources(dir, rawContextSources) : undefined;
+  const contextSelection = mode === "approved_plan"
+    ? await resolveContextSources(dir, explicitSources, setup, Boolean(opts.yes))
+    : undefined;
+  const configuredExternalSources = mode === "legacy" && explicitSources?.length ? [] : configuredExternal;
+  const configuredUrlSources = mode === "legacy" && explicitSources?.length ? [] : urlSources(setup);
+  const savedLocalSources = mode === "legacy" && explicitSources?.length ? [] : localSourcePaths(setup);
+  const selectedLocalHints = mode === "approved_plan"
+    ? contextSelection?.local
+    : configuredExternalSources.length > 0 && savedLocalSources.length === 0 && configuredUrlSources.length === 0
+      ? undefined
+      : await resolvePopulateSourceSelection(dir, explicitSources, ticketsConfig, Boolean(opts.yes));
   const localHints = selectedLocalHints ? await prepareDocumentSources(dir, selectedLocalHints) : undefined;
   const urlHints: string[] = [];
-  for (const source of configuredUrlSources) {
+  const urlsToFetch = mode === "approved_plan" ? contextSelection?.urls ?? [] : configuredUrlSources;
+  for (const source of urlsToFetch) {
     const fetched = await fetchAndSnapshotUrl(dir, source.url);
     urlHints.push(fetched.snapshotPath);
     console.log(`foreman tickets: fetched ${source.url} -> ${fetched.snapshotPath}`);
@@ -1078,43 +1265,12 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
       ? setup.populate.agent_preference
       : undefined);
 
-  if (configuredExternalSources.length > 0) {
-    if (!opts.yes) {
-      const action = await select({
-        message: `Import ${configuredExternalSources.length} configured external ticket source(s)?`,
-        options: [
-          { value: "proceed", label: "Proceed - fetch external tickets and update .tickets" },
-          { value: "cancel", label: "Cancel" },
-        ],
-      });
-      if (isCancel(action) || action === "cancel") {
-        console.log("foreman tickets: cancelled");
-        return;
-      }
-    }
-    const results = await importExternalSources(dir, configuredExternalSources, {
-      importCap: setup?.populate.import_cap ?? DEFAULT_TICKET_SETUP.populate.import_cap,
-      commentLimit: setup?.populate.comment_limit ?? DEFAULT_TICKET_SETUP.populate.comment_limit,
-      recommendSplitForXl: setup?.populate.recommend_split_for_xl ?? DEFAULT_TICKET_SETUP.populate.recommend_split_for_xl,
-    });
-    for (const result of results) {
-      console.log(`foreman tickets: imported ${result.fetched} ${result.provider} item(s) from ${result.sourceLabel} (${result.created} created, ${result.updated} updated)`);
-      console.log(`foreman tickets: snapshot ${result.snapshotPath}`);
-    }
-    cmdRender(dir);
-    const validation = cmdValidate(dir);
-    if (validation.issues.length > 0) {
-      console.log(`foreman tickets: ${validation.issues.length} validation issue(s) found:`);
-      console.log(formatValidationIssues(validation.issues));
-      if (!validation.clean) throw new Error("external ticket import failed tracker validation");
-    }
-    if (!sourceHints.length) {
-      console.log(`foreman tickets: imported external tickets and rendered ${ticketsConfig.paths.progressDoc}`);
-      return;
-    }
+  if (mode === "legacy" && configuredExternalSources.length > 0) {
+    if (!await runExternalImport(dir, configuredExternalSources, setup, ticketsConfig, Boolean(opts.yes))) return;
+    if (!sourceHints.length) return;
   }
 
-  const approvedPlan = resolvePopulationPlan(dir, sourceHints, ticketsConfig);
+  const approvedPlan = approvedPlanForMode ?? resolvePopulationPlan(dir, sourceHints, ticketsConfig);
   const contextSources = sourceHints.filter((source) => !isApprovedPlanArtifact(dir, source, approvedPlan.path));
 
   if (!opts.yes) {
@@ -1204,6 +1360,92 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     await viewer?.catch(() => {});
     fail(String(err instanceof Error ? err.message : err));
   }
+}
+
+/** Resolve only the strategy. Context documents never select an import mode. */
+export function resolvePopulationMode(
+  setup: TicketsSetupConfig | undefined,
+): TicketPopulateRuntimeMode {
+  const configured = setup?.populate.mode ?? "legacy";
+  if (configured === "approved_plan" || configured === "external_import") return configured;
+  // A missing field is intentionally not normalized on read. The caller keeps
+  // the former importer-first branch for this compatibility state.
+  return "legacy";
+}
+
+export interface PopulationContextSelection {
+  local: string[];
+  urls: Extract<TicketSourceConfig, { type: "url" }>[];
+}
+
+/** Select supplemental context for an approved-plan run, never its authority. */
+export async function resolveContextSources(
+  _projectDir: string,
+  explicitSources: string[] | undefined,
+  setup: TicketsSetupConfig | undefined,
+  yes: boolean,
+): Promise<PopulationContextSelection> {
+  const explicit = unique(explicitSources ?? []);
+  const handling = setup?.populate.source_handling ?? DEFAULT_TICKET_SETUP.populate.source_handling;
+  const saved = { local: localSourcePaths(setup), urls: urlSources(setup) };
+  if (handling === "manual") return { local: explicit, urls: [] };
+  if (handling === "saved" || yes || !process.stdin.isTTY || !process.stdout.isTTY) {
+    return { local: unique([...saved.local, ...explicit]), urls: saved.urls };
+  }
+  if (saved.local.length === 0 && saved.urls.length === 0) return { local: explicit, urls: [] };
+  const action = await select({
+    message: `Saved supporting context: ${[...saved.local, ...saved.urls.map((source) => source.url)].join(", ")}`,
+    options: [
+      { value: "saved", label: "Use saved context (Recommended)" },
+      { value: "amend", label: "Use saved context and add context for this run" },
+      { value: "plan_only", label: "Continue with only the approved plan and explicit --sources" },
+    ],
+  });
+  if (isCancel(action)) return { local: explicit, urls: [] };
+  if (action === "plan_only") return { local: explicit, urls: [] };
+  if (action === "amend") {
+    const answer = await text({ message: "Additional local paths, globs, or URLs for this run (comma-separated, optional):", defaultValue: "" });
+    if (isCancel(answer)) return { local: unique([...saved.local, ...explicit]), urls: saved.urls };
+    return { local: unique([...saved.local, ...explicit, ...splitCommaList(String(answer))]), urls: saved.urls };
+  }
+  return { local: unique([...saved.local, ...explicit]), urls: saved.urls };
+}
+
+async function runExternalImport(
+  dir: string,
+  sources: Extract<TicketSourceConfig, { type: "linear" | "jira" }>[],
+  setup: TicketsSetupConfig | undefined,
+  ticketsConfig: TicketsConfig,
+  yes: boolean,
+): Promise<boolean> {
+  if (!yes) {
+    const action = await select({
+      message: `Import ${sources.length} configured external ticket source(s)?`,
+      options: [
+        { value: "proceed", label: "Proceed - fetch external tickets and update .tickets" },
+        { value: "cancel", label: "Cancel" },
+      ],
+    });
+    if (isCancel(action) || action === "cancel") { console.log("foreman tickets: cancelled"); return false; }
+  }
+  const results = await importExternalSources(dir, sources, {
+    importCap: setup?.populate.import_cap ?? DEFAULT_TICKET_SETUP.populate.import_cap,
+    commentLimit: setup?.populate.comment_limit ?? DEFAULT_TICKET_SETUP.populate.comment_limit,
+    recommendSplitForXl: setup?.populate.recommend_split_for_xl ?? DEFAULT_TICKET_SETUP.populate.recommend_split_for_xl,
+  });
+  for (const result of results) {
+    console.log(`foreman tickets: imported ${result.fetched} ${result.provider} item(s) from ${result.sourceLabel} (${result.created} created, ${result.updated} updated)`);
+    console.log(`foreman tickets: snapshot ${result.snapshotPath}`);
+  }
+  cmdRender(dir);
+  const validation = cmdValidate(dir);
+  if (validation.issues.length > 0) {
+    console.log(`foreman tickets: ${validation.issues.length} validation issue(s) found:`);
+    console.log(formatValidationIssues(validation.issues));
+    if (!validation.clean) throw new Error("external ticket import failed tracker validation");
+  }
+  console.log(`foreman tickets: imported external tickets and rendered ${ticketsConfig.paths.progressDoc}`);
+  return true;
 }
 
 async function prepareDocumentSources(projectDir: string, sources: string[]): Promise<string[]> {
@@ -1417,20 +1659,21 @@ export function buildTicketsCommand(options: {
 
   tickets
     .command("setup:init")
-    .description("Configure ticket sources, populate defaults, and build defaults in rafi-config.yaml.")
+    .description("Configure ticket population, supporting context, and build defaults in rafi-config.yaml.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--defaults", "skip prompts and use recommended ticket setup defaults")
     .option("-y, --yes", "skip prompts where possible")
     .option("--app-name <name>", "application name for a new minimal rafi-config.yaml")
     .option("--docs-root <dir>", "repo-relative docs root for a new minimal rafi-config.yaml and ticket docs")
     .option("--runtime <runtime>", "runtime targets for a new minimal rafi-config.yaml (both | claude | codex)")
-    .option("--local-source <paths...>", "saved local ticket source files, folders, or globs")
+    .option("--local-source <paths...>", "saved local supporting files, folders, or globs")
     .option("--linear", "add a Linear source using LINEAR_API_KEY")
     .option("--linear-team-key <key>", "Linear team key filter")
     .option("--linear-filter <filter>", "Linear IssueFilter JSON or title search text")
     .option("--jira-site <url>", "Jira Cloud site URL")
     .option("--jira-jql <jql>", "Jira JQL query")
     .option("--url-source <urls...>", "add public HTTP(S) source URLs")
+    .option("--population-mode <mode>", "ticket population strategy (approved_plan | external_import)")
     .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
     .option("--branch-strategy <strategy>", "build branch strategy default (current | batch | branch-per-ticket)")
     .option("--branch-prefix <prefix>", "prefix for Rafi-generated branches (for example team/feature)")
@@ -1450,20 +1693,21 @@ export function buildTicketsCommand(options: {
 
   tickets
     .command("setup:update")
-    .description("Update selected ticket setup sections in rafi-config.yaml.")
+    .description("Update ticket population, supporting context, and build settings in rafi-config.yaml.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--defaults", "skip prompts and keep existing values unless explicit options are provided")
     .option("-y, --yes", "skip prompts where possible")
     .option("--app-name <name>", "application name for a new minimal rafi-config.yaml")
     .option("--docs-root <dir>", "repo-relative docs root for a new minimal rafi-config.yaml and ticket docs")
     .option("--runtime <runtime>", "runtime targets for a new minimal rafi-config.yaml (both | claude | codex)")
-    .option("--local-source <paths...>", "replace saved local ticket source files, folders, or globs")
+    .option("--local-source <paths...>", "replace saved local supporting files, folders, or globs")
     .option("--linear", "replace saved sources with a Linear source using LINEAR_API_KEY")
     .option("--linear-team-key <key>", "Linear team key filter")
     .option("--linear-filter <filter>", "Linear IssueFilter JSON or title search text")
     .option("--jira-site <url>", "Jira Cloud site URL")
     .option("--jira-jql <jql>", "Jira JQL query")
     .option("--url-source <urls...>", "replace saved sources with public HTTP(S) URLs")
+    .option("--population-mode <mode>", "ticket population strategy (approved_plan | external_import)")
     .option("--agent-preference <agent>", "populate runtime preference (configured | claude | codex)")
     .option("--branch-strategy <strategy>", "build branch strategy default (current | batch | branch-per-ticket)")
     .option("--branch-prefix <prefix>", "prefix for Rafi-generated branches (for example team/feature)")
@@ -1532,12 +1776,12 @@ export function buildTicketsCommand(options: {
 
   tickets
     .command("populate")
-    .description("Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.")
+    .description("Populate tickets from an approved Rafi plan or configured external import.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("-a, --agent <agent>", "builder agent (claude | codex)")
     .option("-m, --model <model>", "override the builder's model")
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
-    .option("--sources <paths...>", "source hint files, folders, or globs to check first")
+    .option("--sources <paths...>", "supporting files, folders, URLs, or globs to check first")
     .option("--fast", "fast mode - lower latency")
     .option("--authorize-retire <ids...>", "exact ticket IDs authorized to become obsolete in computer-run mode")
     .option("-y, --yes", "computer-run approval; retirements still require --authorize-retire exact IDs")

@@ -67,3 +67,17 @@ test("session display prefers authoritative provider cost, falls back to tokens,
   assert.match(lines.at(-1) ?? "", /session usage unavailable/);
   reporter.stop();
 });
+
+
+test("ending observation does not imply completion and explicit pause remains visible", () => {
+  for (const phase of [undefined, "paused", "completed"]) {
+    const lines: string[] = [];
+    const reporter = new AgentStatusReporter({
+      runId: "run-1", role: "builder", provider: "codex", model: "test", reasoning: "high", fast: false,
+      step: 1, total: 1, phase: "building", sessionTransition: "initial", settingsRevision: 1,
+      displaySessionCost: false, adapter: new StatusAdapter(),
+    }, line => lines.push(line), clock);
+    reporter.start(); reporter.stop(phase);
+    assert.ok(lines.at(-1)?.includes(`activity=${phase ?? "stopped"}`));
+  }
+});

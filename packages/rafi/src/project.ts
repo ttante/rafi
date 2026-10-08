@@ -95,6 +95,7 @@ export const RAFI_SKILL_NAMES = [
   "better-sqlite3-rebuild",
   "grill-me",
   "handoff",
+  "implementor",
   "improve-codebase-architecture",
   "prd-to-issues",
   "tdd",

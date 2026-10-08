@@ -333,8 +333,8 @@ test("pre-dispatch exact-session loss pauses without degrading or issuing a repa
 test("accepted handoff promotes the live and durable successor generation together", async () => {
   const projectDir = temp("rafi-handoff-generation-");
   execFileSync("git", ["init", "-q"], { cwd: projectDir });
-  const predecessorRef = scopedRef("codex", projectDir, "thread-1");
-  const successorRef = scopedRef("codex", projectDir, "thread-2");
+  const predecessorRef = { ...scopedRef("codex", projectDir, "thread-1"), validatedAt: new Date().toISOString() };
+  const successorRef = { ...scopedRef("codex", projectDir, "thread-2"), validatedAt: new Date().toISOString() };
   const delta: ContinuityDelta = {
     version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: ["continue"], nextAction: "continue",
   };

@@ -75,7 +75,7 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
     phase: "created",
     qaEnabled: input.qaEnabled ?? Boolean(input.qa),
     recoveryAttempts: [],
-    supervisor: { status: frozenPolicy.supervisorEnabled ? "starting" : "disabled", generation: 0, workerGeneration: 0, checkpointRestarts: 0, runRestarts: 0 },
+    supervisor: { status: frozenPolicy.supervisorEnabled ? "stopped" : "disabled", generation: 0, workerGeneration: 0, checkpointRestarts: 0, runRestarts: 0 },
     pendingDecisions: [],
     deferredTickets: [],
     runDecisions: input.runDecisions,
@@ -93,7 +93,7 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
 export function resumeBuildRun(projectDir: string, runId: string, patch: { builder?: LegacyResolvedAgentSettings; qa?: LegacyResolvedAgentSettings; builderSessionId?: string | null; builderSessionRef?: ProviderSessionRefV1 | null; expectedRecoveryDecisionDigest?: string }, now = new Date()): BuildRunRecordV2 {
   let existing = readBuildRuns(projectDir).find((run) => run.runId === runId);
   if (!existing) throw new Error(`recoverable build run not found: ${runId}`);
-  if (existing.status === "completed") throw new Error(`build run ${runId} is already complete`);
+  if (existing.status === "completed" || existing.status === "superseded") throw new Error(`build run ${runId} is ${existing.status} and cannot resume`);
   const workflow = new WorkflowDb(projectDir);
   try {
     const held = workflow.currentLease();
@@ -111,7 +111,7 @@ export function resumeBuildRun(projectDir: string, runId: string, patch: { build
       }
     }
     existing = readBuildRuns(projectDir).find((run) => run.runId === runId)!;
-    if (!existing || existing.status === "completed") {
+    if (!existing || existing.status === "completed" || existing.status === "superseded") {
       const lease = workflow.currentLease();
       if (lease?.runId === runId && lease.pid === process.pid) workflow.releaseLease(lease, now);
       throw new Error("Recovery run completed or disappeared before lease acquisition");
@@ -154,10 +154,14 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
     updatedAt: now.toISOString(),
   };
   const workflow = new WorkflowDb(projectDir);
+  const target = join(directory, `${run.runId}.json`);
+  let publicationId: string | undefined;
   try {
+    workflow.atomic(() => {
     const frozenPolicy = workflow.freezeAutonomyPolicy(next.runId, next.frozenPolicy, now);
     next = { ...next, frozenPolicy, recoveryAttempts: workflow.recoveryAttempts(next.runId), pendingDecisions: workflow.pendingHumanDecisions(next.runId), supervisor: workflow.supervisorState(next.runId) ?? next.supervisor };
     const existing = workflow.getRun(next.runId);
+    if (existing?.status === "superseded" && next.status !== "superseded") throw new Error("cannot rewrite a superseded build run as active");
     if (!existing) workflow.createRun({
       runId: next.runId, kind: "build", checkpoint: next.checkpoint,
       originalWork: { tickets: next.tickets, deliveryUnit: next.deliveryUnit, branchMode: next.branchMode },
@@ -169,11 +173,22 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
     }, now);
     if (next.builder?.sessionId) workflow.recordSession(next.runId, "builder", "builder", latestSessionBinding(next.sessionBindings, "builder", next.builder.sessionId) ?? next.builder.sessionId, "checkpoint", next.builder.settings, now);
     if (next.qa?.sessionId) workflow.recordSession(next.runId, "qa", "qa", latestSessionBinding(next.sessionBindings, "qa", next.qa.sessionId) ?? next.qa.sessionId, "checkpoint", next.qa.settings, now);
+    publicationId = workflow.beginPublication(next.runId, { operation: "build-run-projection", target,
+      revision: createHash("sha256").update(JSON.stringify(next)).digest("hex"), updatedAt: next.updatedAt }, {}, now).transactionId;
+    });
+    const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    renameSync(temp, target);
+    workflow.atomic(() => {
+      workflow.updatePublication(publicationId!, "committed", now);
+      // Publishing the latest authoritative revision also reconciles any older
+      // interrupted publication of this same projection; never write old bytes.
+      for (const pending of workflow.incompletePublications()) {
+        const intent = pending.intent as { operation?: string; target?: string };
+        if (pending.runId === next.runId && intent.operation === "build-run-projection" && intent.target === target) workflow.updatePublication(pending.transactionId, "committed", now);
+      }
+    });
   } finally { workflow.close(); }
-  const target = join(directory, `${run.runId}.json`);
-  const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  renameSync(temp, target);
   return next;
 }
 
@@ -264,15 +279,29 @@ export function completeBuildRun(projectDir: string, run: BuildRunRecordV2, now 
 
 export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
   const directory = join(resolve(projectDir), BUILD_RUN_DIRECTORY);
-  if (!existsSync(directory)) return [];
-  const workflow = existsSync(join(resolve(projectDir), ".rafi", "recovery.sqlite3")) ? new WorkflowDb(projectDir) : undefined;
-  const runs = readdirSync(directory).filter((name) => name.endsWith(".json")).flatMap((name) => {
+  const workflow = new WorkflowReader(projectDir);
+  const candidates = new Map<string, BuildRunRecord>();
+  if (existsSync(directory)) for (const name of readdirSync(directory).filter(name => name.endsWith(".json"))) {
+    try { const value = JSON.parse(readFileSync(join(directory, name), "utf8")) as BuildRunRecord; candidates.set(value.runId, value); } catch { /* authoritative DB state can repair an absent or partial projection */ }
+  }
+  for (const stored of workflow.buildRuns()) {
+    const value = stored.state as unknown as BuildRunRecord;
+    if (value?.runId) candidates.set(value.runId, value);
+  }
+  const runs = [...candidates.values()].flatMap((projection) => {
     try {
-      const projection = JSON.parse(readFileSync(join(directory, name), "utf8")) as BuildRunRecord;
       validateBuildRun(projection);
       const authoritative = workflow?.getRun(projection.runId)?.state as unknown as BuildRunRecord | undefined;
       const run = authoritative?.runId ? authoritative : projection;
-      const upgraded = upgradeBuildRun(run, projectDir);
+      let upgraded = upgradeBuildRun(run, projectDir);
+      if (workflow?.getRun(run.runId)?.status === "superseded") upgraded = { ...upgraded, status: "superseded" };
+      if (!["completed", "superseded", "cancelled"].includes(workflow?.getRun(run.runId)?.status ?? "")) {
+        for (const role of ["builder", "qa"] as const) {
+          const lease = workflow?.roleMutationLease(run.runId, role);
+          const ref = lease?.sessionRef;
+          if (ref && lease!.generation > 0 && upgraded[role]) upgraded = { ...upgraded, [role]: { ...upgraded[role]!, sessionId: ref.sessionId }, sessionBindings: upsertSessionBinding(upgraded.sessionBindings, ref) };
+        }
+      }
       return [{ ...upgraded, frozenPolicy: workflow?.autonomyPolicy(run.runId) ?? upgraded.frozenPolicy, recoveryAttempts: workflow?.recoveryAttempts(run.runId) ?? upgraded.recoveryAttempts, pendingDecisions: workflow?.pendingHumanDecisions(run.runId) ?? upgraded.pendingDecisions, supervisor: workflow?.supervisorState(run.runId) ?? upgraded.supervisor }];
     } catch {
       return [];

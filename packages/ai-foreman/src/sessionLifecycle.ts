@@ -392,6 +392,7 @@ export class ThresholdCompactionController {
   }
 
   async atSafeBoundary(adapter: BuilderAdapter, frozenAction: string): Promise<ContextBoundaryResult> {
+    this.assertCompactionReconciled(adapter);
     adapter = await this.adoptSettings(adapter, frozenAction);
     this.syncProviderEffectiveThreshold(adapter);
     if (!adapter.sessionId() && !this.bootstrapScheduled) {
@@ -471,6 +472,8 @@ export class ThresholdCompactionController {
     frozenAction: string,
     strategy: SessionStrategy = this.settings.session_strategy,
   ): Promise<ContextBoundaryResult> {
+    this.assertCompactionReconciled(adapter);
+    if (strategy === "compact") return this.atSafeBoundary(adapter, frozenAction);
     adapter = await this.adoptSettings(adapter, frozenAction);
     this.syncProviderEffectiveThreshold(adapter);
     const nativeCount = await this.observeNativeCompactions(adapter);
@@ -486,6 +489,15 @@ export class ThresholdCompactionController {
     }
     const crossingKey = `${adapterSessionKey(adapter) ?? "missing"}:ordinary:${count + 1}:${sha(frozenAction).slice(0, 20)}`;
     return this.compactSession(adapter, sample, count, frozenAction, crossingKey, false, false);
+  }
+
+  private assertCompactionReconciled(adapter: BuilderAdapter): void {
+    const key = adapterSessionKey(adapter);
+    if (!key) return;
+    const db = new WorkflowDb(this.options.projectDir);
+    try {
+      if (db.unresolvedCompactions(this.options.runId, this.options.role, key).length) throw new ContextCapabilityError(this.options.runId, this.options.role, "A previous compaction has an unresolved outcome; reconcile the original session before another boundary or settings transition");
+    } finally { db.close(); }
   }
 
   effectiveSettings(): ResolvedAgentSettings { return this.settings; }
@@ -554,29 +566,49 @@ export class ThresholdCompactionController {
 
     const idempotencyKey = `compact:${this.options.runId}:${this.options.role}:${sha(crossingKey).slice(0, 24)}`;
     const attemptDb = new WorkflowDb(this.options.projectDir);
+    const existing = attemptDb.compactionAttempt(idempotencyKey);
     const prior = attemptDb.startCompactionAttempt({ idempotencyKey, runId: this.options.runId, role: this.options.role, providerSessionId: sessionId, sessionRef, sessionKey, crossingKey, beforeSample: sample });
     attemptDb.close();
+    if (existing && ["started", "uncertain"].includes(existing.status)) throw new ContextCapabilityError(this.options.runId, this.options.role, "Prior compaction is unresolved; reconcile its outcome before another provider operation");
     if (prior.status === "succeeded" && prior.afterSample) {
       const replayDb = new WorkflowDb(this.options.projectDir);
       try { count = replayDb.successfulCompactionCount(this.options.runId, this.options.role, sessionRef ?? sessionId); }
       finally { replayDb.close(); }
       return { adapter, action: "compacted", sample: prior.afterSample, effectiveThreshold: threshold, compactionCount: count };
     }
+    if (existing?.status === "succeeded") throw new ContextCapabilityError(this.options.runId, this.options.role, "Prior compaction completed but its occupancy measurement remains unresolved");
+    if (existing?.status === "failed") return this.performHandoff(adapter, sample, count, frozenAction, "Previously failed compaction requires a validated recovery transfer");
 
     this.options.report?.({ kind: "compacting", detail: thresholdCrossing
       ? `context ${sample.percentage?.toFixed(1)}% reached ${threshold}%`
       : `ordinary compact session boundary (${count}/${this.settings.compact_maximum ?? 10})`, sample });
     let compacted;
+    let waitFinished = false;
+    const stopObserving = adapter.observeEvents?.(event => {
+      if (event.kind !== "session-transition" || event.transition !== "compacted" || adapterSessionKey(adapter) !== sessionKey) return;
+      const db = new WorkflowDb(this.options.projectDir);
+      try {
+        if (db.compactionAttempt(idempotencyKey)?.status === "succeeded") return;
+        db.finishCompactionAttempt(idempotencyKey, { ok: true });
+        if (waitFinished) db.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "late_compaction_completion", payload: { idempotencyKey, providerSessionId: sessionId }, authoritativeStateRevision: this.settings.settings_revision, sessionRef });
+      } finally { db.close(); }
+    });
     try { compacted = await adapter.compact(); }
     catch (error) {
       compacted = error instanceof SessionUnavailableError
         ? { ok: false, error: error.message, failure: error.failure }
         : { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+    waitFinished = true;
+    if (compacted.failure?.dispatchState === "unknown") {
+      // Retain original-attempt evidence through the bounded shutdown window.
+      // It never restores mutation authority or updates a successor's count.
+      const cleanup = setTimeout(() => stopObserving?.(), 15_000); cleanup.unref();
+    } else stopObserving?.();
     if (compacted.failure?.category === "session-unavailable") {
       const failedDb = new WorkflowDb(this.options.projectDir);
       try {
-        failedDb.finishCompactionAttempt(idempotencyKey, { ok: false, error: compacted.error ?? compacted.failure.diagnostics });
+        failedDb.finishCompactionAttempt(idempotencyKey, { ok: false, uncertain: compacted.failure.dispatchState === "unknown", error: compacted.error ?? compacted.failure.diagnostics });
         failedDb.appendContinuityEvent({
           runId: this.options.runId,
           role: "host",
@@ -607,14 +639,15 @@ export class ThresholdCompactionController {
     try { after = await this.measure(adapter, "post-compact"); }
     catch (error) {
       const failedDb = new WorkflowDb(this.options.projectDir);
-      try { failedDb.finishCompactionAttempt(idempotencyKey, { ok: false, error: error instanceof Error ? error.message : String(error) }); }
+      try { failedDb.finishCompactionAttempt(idempotencyKey, { ok: true, error: error instanceof Error ? error.message : String(error) }); }
       finally { failedDb.close(); }
-      return this.performHandoff(adapter, sample, count, frozenAction, "provider reported compaction but no authoritative post-compact occupancy sample was available");
+      throw new ContextCapabilityError(this.options.runId, this.options.role, "Provider completed compaction but its authoritative occupancy measurement is unresolved; pause and reconcile before continuing");
     }
     const completedDb = new WorkflowDb(this.options.projectDir);
     try {
       completedDb.recordContextSample(after);
       completedDb.finishCompactionAttempt(idempotencyKey, { ok: true, afterSample: after });
+      completedDb.recordCompactionAfterSample(idempotencyKey, after);
       count = completedDb.successfulCompactionCount(this.options.runId, this.options.role, sessionRef ?? sessionId);
     } finally { completedDb.close(); }
     this.options.report?.({ kind: "compacted", detail: `context reduced to ${after.percentage?.toFixed(1)}%`, sample: after });

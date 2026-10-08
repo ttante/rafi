@@ -1,4 +1,4 @@
-import type { BuilderQaRemediationReportV2, QaFailureReportV1, QaFindingRefV2 } from "./types.js";
+import type { BuilderQaRemediationReport, QaFailureReportV1, QaFindingRefV2 } from "./types.js";
 import { validateBuilderQaRemediationReport, validateQaFailureReport, type ValidationResult } from "./validate.js";
 
 export const QA_FAILURE_REPORT_START = "RAFI_QA_FAILURE_REPORT_START";
@@ -24,7 +24,7 @@ export interface QaResponseContract {
 }
 
 export interface ParsedBuilderQaRemediation {
-  report?: BuilderQaRemediationReportV2;
+  report?: BuilderQaRemediationReport;
   rawJson?: string;
   validation: ValidationResult;
 }
@@ -34,7 +34,7 @@ export interface BuilderQaRemediationContract {
   errors: string[];
   status: "done" | "blocked" | "needs_input" | "qa_pass" | "qa_fail" | "unknown";
   fields: Record<string, string>;
-  report?: BuilderQaRemediationReportV2;
+  report?: BuilderQaRemediationReport;
   rawReportJson?: string;
 }
 
@@ -75,12 +75,20 @@ export function parseBuilderQaRemediationReport(input: string): ParsedBuilderQaR
   }
   const validation = validateBuilderQaRemediationReport(value);
   return validation.valid
-    ? { rawJson: raw, report: value as BuilderQaRemediationReportV2, validation: { valid: true, errors: [] } }
+    ? { rawJson: raw, report: value as BuilderQaRemediationReport, validation: { valid: true, errors: [] } }
     : { rawJson: raw, validation };
 }
-export const parseBuilderQaRemediationReportV2 = parseBuilderQaRemediationReport;
+export function parseBuilderQaRemediationReportV2(input: string): ParsedBuilderQaRemediation {
+  const parsed = parseBuilderQaRemediationReport(input);
+  return parsed.report && parsed.report.version !== 2 ? invalidBuilder("expected Builder remediation V2") : parsed;
+}
+export function parseBuilderQaRemediationReportV3(input: string): ParsedBuilderQaRemediation {
+  const parsed = parseBuilderQaRemediationReport(input);
+  return parsed.report && parsed.report.version !== 3 ? invalidBuilder("expected Builder remediation V3") : parsed;
+}
 
 export function parseBuilderQaRemediationContract(text: string, expected?: { handoffId?: string; findings?: QaFindingRefV2[] }): BuilderQaRemediationContract {
+  if (Buffer.byteLength(text) > BUILDER_QA_REMEDIATION_MAX_BYTES + 4096) return { valid: false, errors: ["Builder response exceeds maximum bytes"], status: "unknown", fields: {} };
   const lines = text.split(/\r?\n/);
   const start = indexes(lines, BUILDER_QA_REMEDIATION_START);
   const end = indexes(lines, BUILDER_QA_REMEDIATION_END);
@@ -99,7 +107,7 @@ export function parseBuilderQaRemediationContract(text: string, expected?: { han
   const firstNonempty = lines.findIndex((line) => line.trim());
   if (start[0] !== undefined && firstNonempty !== start[0]) errors.push("Builder remediation envelope must be the first non-empty content");
 
-  let report: BuilderQaRemediationReportV2 | undefined;
+  let report: BuilderQaRemediationReport | undefined;
   let rawReportJson: string | undefined;
   if (start.length === 1 && end.length === 1 && start[0]! < end[0]!) {
     const parsed = parseBuilderQaRemediationReport(lines.slice(start[0]! + 1, end[0]).join("\n"));
@@ -108,7 +116,14 @@ export function parseBuilderQaRemediationContract(text: string, expected?: { han
     rawReportJson = parsed.rawJson;
   }
   if (parsedStatus.status === "done" && start.length !== 1) errors.push("done requires one valid Builder remediation report");
-  if (parsedStatus.status !== "done" && start.length) errors.push(`${parsedStatus.status} must not include a Builder remediation report`);
+  const partialBlocked = report?.version === 3 && report.findings.some(f => f.disposition === "blocked");
+  if (parsedStatus.status !== "done" && start.length && !(parsedStatus.status === "blocked" && partialBlocked)) errors.push(`${parsedStatus.status} must not include a Builder remediation report`);
+  if (partialBlocked && parsedStatus.status !== "blocked") errors.push("blocked findings require STEP_STATUS: blocked");
+  if (report?.version === 3) for (const finding of report.findings) {
+    if (finding.disposition === "blocked" && !finding.blocker) errors.push(`blocked finding ${finding.finding_key} requires a structured blocker`);
+    if (finding.disposition !== "blocked" && finding.blocker) errors.push(`nonblocked finding ${finding.finding_key} must not contain a blocker`);
+  }
+  if (end[0] !== undefined && statusLine && lines.slice(end[0] + 1, statusLine.index).some(line => line.trim())) errors.push("unexpected content between remediation envelope and status");
   if (parsedStatus.status === "done" && !report && start.length === 1) errors.push("done Builder remediation report is invalid");
   if (report && expected?.handoffId && report.handoff_id !== expected.handoffId) errors.push(`handoff_id ${report.handoff_id} does not match expected ${expected.handoffId}`);
   if (report && expected?.findings) errors.push(...validateBuilderFindingCoverage(report, expected.findings));
@@ -223,6 +238,11 @@ function parseBuilderStatus(line: string): { status: BuilderQaRemediationContrac
     if (fields[name] !== undefined) return { status: match[1] as BuilderQaRemediationContract["status"], fields, error: `duplicate STEP_STATUS field: ${name}` };
     fields[name] = value; rest = rest.slice(i).trim();
   }
+  if (match[1] === "blocked" || match[1] === "needs_input") {
+    const required = match[1] === "blocked" ? "reason" : "question";
+    const unknown = Object.keys(fields).filter(key => key !== required);
+    return { status: match[1], fields, ...(!fields[required]?.trim() ? { error: `${match[1]} requires ${required}` } : unknown.length ? { error: `unknown STEP_STATUS field(s): ${unknown.join(", ")}` } : {}) };
+  }
   if (match[1] !== "done") return { status: match[1] as BuilderQaRemediationContract["status"], fields, error: `${match[1]} is not a valid successful Builder QA remediation status` };
   const unknown = Object.keys(fields).filter((key) => key !== "summary");
   return unknown.length
@@ -230,7 +250,7 @@ function parseBuilderStatus(line: string): { status: BuilderQaRemediationContrac
     : { status: "done", fields };
 }
 
-function validateBuilderFindingCoverage(report: BuilderQaRemediationReportV2, expected: QaFindingRefV2[]): string[] {
+function validateBuilderFindingCoverage(report: BuilderQaRemediationReport, expected: QaFindingRefV2[]): string[] {
   const errors: string[] = [];
   const expectedByKey = new Map(expected.map((finding) => [finding.findingKey, finding]));
   const seen = new Set<string>();

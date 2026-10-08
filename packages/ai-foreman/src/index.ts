@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { HumanDecisionRequired } from "./humanDecision.js";
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { buildTicketsCommand } from "./cli/tickets.js";
@@ -37,5 +38,5 @@ if (argv[2] === "--") argv.splice(2, 1);
 const command = argv.slice(2).filter((arg) => !arg.startsWith("-")).slice(0, 3).join(" ") || "ai-foreman";
 withActivityContext(command, () => program.parseAsync(argv)).catch((err) => {
   console.error(`foreman: ${String(err)}`);
-  process.exit(1);
+  process.exit(err instanceof HumanDecisionRequired ? 2 : 1);
 });

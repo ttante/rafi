@@ -260,15 +260,15 @@ program
         checkpointCreateAnswer("compile-config", "planningSources", planningSources);
       } else {
         const hasPlanningSources = await confirm({
-          message: "Do you have existing ticket or planning docs you want the populate agent to use? (Enter to accept)",
+          message: "Do you have requirements, existing plans, or backlog documents that should inform planning and later ticket generation? (Enter to accept)",
           initialValue: false,
         });
         if (isCancel(hasPlanningSources)) process.exit(0);
         checkpointCreateAnswer("planning-sources", "hasPlanningSources", Boolean(hasPlanningSources));
         if (hasPlanningSources) {
-        log.info("Any format is OK: Markdown, YAML, text notes, folders, or globs. `rafi tickets populate` will scan relevant docs too.");
+        log.info("These inputs inform the plan and ticket details. After approval, rafi-plan.json determines ticket slices.");
         const planningSourcesRaw = await text({
-          message: "Files, folders, or globs for existing tickets/plans:",
+          message: "Files, folders, URLs, or globs with supporting context:",
           placeholder: `e.g. ${docsRoot}/tickets.md, ${docsRoot}/plans.md, ${docsRoot}/planning/**`,
         });
         if (isCancel(planningSourcesRaw)) process.exit(0);
@@ -717,8 +717,7 @@ export async function runCreateTicketHandoff(
 ): Promise<CreateHandoffResult> {
   let interview = opts.interview;
   const docsRoot = config.docs?.root ?? DEFAULT_DOCS_ROOT;
-  const setupCommand = setupInitCommand(targetDir, answers, docsRoot);
-  const setupArgs = setupInitArgs(targetDir, answers, docsRoot);
+  let approvedPlanIntent = false;
   const planCommand = `rafi plan ${shellQuote(targetDir)}`;
   const populateCommand = `rafi tickets populate --project ${shellQuote(targetDir)}`;
   const interactive = dependencies.interactive ?? (!defaultsMode && process.stdin.isTTY && process.stdout.isTTY);
@@ -726,7 +725,7 @@ export async function runCreateTicketHandoff(
   if (!interactive) {
     console.log("\nrafi: next steps:");
     console.log(`  ${planCommand}`);
-    console.log(`  ${setupCommand}`);
+    console.log(`  ${setupInitCommand(targetDir, answers, docsRoot)}`);
     console.log(`  ${populateCommand}`);
     return { journeyComplete: true, interview };
   }
@@ -792,6 +791,7 @@ export async function runCreateTicketHandoff(
       console.log(`rafi create: after plan completes, resume with:\n  rafi resume ${shellQuote(targetDir)}`);
       return { journeyComplete: false, interview };
     }
+    approvedPlanIntent = true;
     updateCreateGitignore(targetDir, opts.gitignoreMode);
   }
 
@@ -805,11 +805,12 @@ export async function runCreateTicketHandoff(
   ] });
   if (isCancel(setupChoice)) return { journeyComplete: false, interview };
   if (setupChoice === "setup") {
+    const setupArgs = setupInitArgs(targetDir, answers, docsRoot, approvedPlanIntent);
     await buildTicketsCommand().parseAsync(["node", "rafi-tickets", ...setupArgs]);
     updateCreateGitignore(targetDir, opts.gitignoreMode);
   } else {
     console.log("\nrafi: ticket setup commands:");
-    console.log(`  ${setupCommand}`);
+    console.log(`  ${setupInitCommand(targetDir, answers, docsRoot, approvedPlanIntent)}`);
     console.log(`  ${populateCommand}`);
     console.log(`  rafi resume ${shellQuote(targetDir)}`);
     return { journeyComplete: false, interview };
@@ -827,13 +828,13 @@ function hasExistingPlanOrTickets(targetDir: string, docsRoot: string): boolean 
   } catch { return false; }
 }
 
-function setupInitCommand(targetDir: string, answers: WalkthroughAnswers, docsRoot: string): string {
-  const [command, ...args] = setupInitArgs(targetDir, answers, docsRoot);
+function setupInitCommand(targetDir: string, answers: WalkthroughAnswers, docsRoot: string, approvedPlan = false): string {
+  const [command, ...args] = setupInitArgs(targetDir, answers, docsRoot, approvedPlan);
   const shellArgs = args.map((arg, index) => index % 2 === 1 ? shellQuote(arg) : arg);
   return ["rafi", "tickets", command, ...shellArgs].join(" ");
 }
 
-function setupInitArgs(targetDir: string, answers: WalkthroughAnswers, docsRoot: string): string[] {
+function setupInitArgs(targetDir: string, answers: WalkthroughAnswers, docsRoot: string, approvedPlan = false): string[] {
   const args = [
     "setup:init",
     "--project",
@@ -843,6 +844,7 @@ function setupInitArgs(targetDir: string, answers: WalkthroughAnswers, docsRoot:
   ];
   if (docsRoot !== DEFAULT_DOCS_ROOT) args.push("--docs-root", docsRoot);
   if (answers.branchStrategy) args.push("--branch-strategy", answers.branchStrategy);
+  if (approvedPlan) args.push("--population-mode", "approved_plan");
   return args;
 }
 
@@ -1107,7 +1109,7 @@ export async function runRafiCli(argv = process.argv): Promise<void> {
 if (isDirectCliEntrypoint()) {
   runRafiCli().catch((err) => {
     console.error(`rafi: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
+    process.exit(err instanceof Error && err.name === "HumanDecisionRequired" ? 2 : 1);
   });
 }
 

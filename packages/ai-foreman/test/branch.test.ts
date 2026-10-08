@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 
 import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/types.js";
 import { runBranchPlan } from "../src/branch/runner.js";
+import { WorkflowDb } from "../src/workflowDb.js";
 import { buildDoctorCommand } from "../src/cli/doctor.js";
 import { buildStartCommand } from "../src/cli/start.js";
 import { buildStatusCommand } from "../src/cli/status.js";
@@ -183,6 +184,49 @@ function makeNode(ticket: TicketDef): BranchPlanNode {
     depth: 1,
   };
 }
+
+test("branch answers resume the preserved ticket once and release deferred dependencies", async () => {
+  const { root, project, allowedBaseDirtyPaths } = initTicketGitRepo("branch-answers-");
+  const tickets = [makeDef("T001", 1000), makeDef("T002", 2000, { depends_on: ["T001"] }), makeDef("T003", 3000)];
+  saveTickets(join(project, ".tickets/tickets.yaml"), tickets);
+  git(project, ["add", ".tickets/tickets.yaml"]); git(project, ["commit", "-m", "three tickets"]);
+  const nodes = tickets.map(makeNode); nodes[1]!.dependencies = ["T001"];
+  const calls: string[] = [];
+  let firstWorktree: string | undefined;
+  try {
+    const summaries = await runBranchPlan({ projectDir: project, runId: "run", plan: { baseRef: "main", nodes, issues: [] },
+      log: new Log(join(project, ".foreman/answers.jsonl")), agent: "codex", notificationsEnabled: false, qaEnabled: false,
+      createPr: false, prReady: false, keepWorktrees: true, completionMode: "none", allowedBaseDirtyPaths,
+      builderSessionBoundary: async adapter => adapter,
+      createBuilder: async cwd => {
+        const ticket = nodes.find(node => node.worktreePath === cwd)!.ticket.id;
+        const builder = new FakeBuilder(cwd, `session-${ticket}`, false);
+        builder.sendTurn = async instruction => {
+          calls.push(ticket);
+          if (calls.length === 1) {
+            firstWorktree = cwd;
+            return { text: 'STEP_STATUS: needs_input | question="Which registry?" choices="Public|Local"', isError: false, numTurns: 1, costUsd: 0 };
+          }
+          if (ticket === "T003") {
+            const db = new WorkflowDb(project);
+            try { db.answerHumanDecision("run", db.pendingHumanDecisions("run")[0]!.decisionId, "custom", undefined, "Use the local mirror"); }
+            finally { db.close(); }
+          }
+          if (ticket === "T001") { assert.equal(cwd, firstWorktree); assert.match(instruction, /Answer: Use the local mirror/); }
+          writeFileSync(join(cwd, `${ticket}.txt`), "implemented\n");
+          return { text: `STEP_STATUS: done | ticket="${ticket}" summary="implemented"`, isError: false, numTurns: 1, costUsd: 0 };
+        };
+        return builder;
+      },
+    });
+    assert.deepEqual(calls, ["T001", "T003", "T001", "T002"]);
+    assert.equal(summaries.length, 3);
+    assert.ok(summaries.every(summary => summary.buildStatus === "done"), JSON.stringify(summaries));
+    const db = new WorkflowDb(project);
+    try { assert.equal(db.operations("run").filter(item => item.kind === "decision-continuation" && item.status === "confirmed").length, 1); }
+    finally { db.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("branch planner includes later tickets unblocked by earlier selected tickets", () => {
   const plan = buildBranchPlan([

@@ -1,3 +1,5 @@
+import { WorkflowReader } from "../workflowReader.js";
+import { buildScopeRevision } from "../buildApproval.js";
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
 import type { RunObserver } from "../observability.js";
 import type { ProviderSessionRefV1, SessionStrategy } from "rafi-spec";
@@ -35,13 +37,23 @@ import { SessionUnavailableError } from "../adapters/sessionFailure.js";
 import { SessionUnavailableContinuityError } from "../continuity.js";
 import type { QaRecoveryPacket } from "../qaRecovery.js";
 
-export interface DeliveryUnitSession { unitId: string; branch: string; worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1; ticket: string; }
+export interface DeliveryUnitSession { runId?: string; unitId: string; branch: string; worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1; ticket: string; }
 export type BaseWorktreePolicy = "enforce" | "warn" | "skip";
 
 export function readDeliveryUnitSession(projectDir: string, unitId: string): DeliveryUnitSession | undefined {
   const path = deliverySessionPath(projectDir, unitId);
   if (!existsSync(path)) return undefined;
-  try { return JSON.parse(readFileSync(path, "utf8")) as DeliveryUnitSession; } catch { return undefined; }
+  try {
+    const cached = JSON.parse(readFileSync(path, "utf8")) as DeliveryUnitSession;
+    const reader = new WorkflowReader(projectDir);
+    try {
+      const known = reader.branchResumeSessions(false);
+      const active = reader.branchResumeSessions().filter(row => row.deliveryUnitId === unitId && row.worktreePath === cached.worktreePath && row.branch === cached.branch).at(-1);
+      if (active) return { ...cached, sessionId: active.sessionId, sessionRef: active.sessionRef, ticket: active.ticket };
+      if (known.some(row => row.deliveryUnitId === unitId) || reader.buildRuns().length || (cached.runId && reader.getRun(cached.runId))) return undefined;
+      return cached;
+    } finally { reader.close(); }
+  } catch { return undefined; }
 }
 
 function deliverySessionPath(projectDir: string, unitId: string): string {
@@ -49,6 +61,7 @@ function deliverySessionPath(projectDir: string, unitId: string): string {
 }
 
 export interface BranchRunnerOptions {
+  continueIndependentTickets?: boolean;
   projectDir: string;
   runId: string;
   plan: BranchPlan;
@@ -166,7 +179,36 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
   }
   if (opts.plan.issues.some((issue) => issue.blocking)) return summaries;
 
-  for (const node of orderNodes(opts.plan.nodes)) {
+  const pendingNodes = orderNodes(opts.plan.nodes);
+  while (true) {
+    const decisionDb = new WorkflowDb(opts.projectDir);
+    const answered = decisionDb.answeredTicketDecisions(opts.runId, buildScopeRevision(opts.projectDir));
+    decisionDb.close();
+    for (let index = summaries.length - 1; index >= 0; index--) {
+      const summary = summaries[index]!;
+      if (summary.buildStatus === "done") continue;
+      const candidate = opts.plan.nodes.find(item => item.ticket.id === summary.ticket);
+      if (!candidate || pendingNodes.some(item => item.ticket.id === candidate.ticket.id)) continue;
+      const hasAnswer = answered.some(decision => decision.interruptionId === `ticket:${candidate.ticket.id}`);
+      const dependencyDeferred = summary.detail === "deferred because a dependency or shared delivery unit is blocked";
+      const dependenciesReady = candidate.dependencies.every(id => successfulBranches.has(id));
+      const sharedReady = !summaries.some(prior => prior.ticket !== candidate.ticket.id && prior.buildStatus !== "done" && prior.detail !== "deferred because a dependency or shared delivery unit is blocked" && opts.plan.nodes.some(item => item.ticket.id === prior.ticket && item.deliveryUnitId && item.deliveryUnitId === candidate.deliveryUnitId));
+      if ((hasAnswer || dependencyDeferred) && dependenciesReady && sharedReady) {
+        summaries.splice(index, 1);
+        pendingNodes.push(candidate);
+      }
+    }
+    const node = pendingNodes.shift();
+    if (!node) break;
+    const continuations = answered.filter(decision => decision.interruptionId === `ticket:${node.ticket.id}`);
+    const continuationSuffix = continuations.length ? `:answers:${continuations.map(decision => decision.decisionId).join(",")}` : "";
+    const blocked = summaries.filter(summary => summary.buildStatus !== "done");
+    if (blocked.length && opts.continueIndependentTickets === false) break;
+    if (blocked.some(summary => node.dependencies.includes(summary.ticket)
+      || opts.plan.nodes.some(prior => prior.ticket.id === summary.ticket && prior.deliveryUnitId && prior.deliveryUnitId === node.deliveryUnitId))) {
+      summaries.push(summaryFor(node, "blocked", "deferred because a dependency or shared delivery unit is blocked"));
+      continue;
+    }
     const protocolDb = new WorkflowDb(opts.projectDir);
     const protocolHead = protocolDb.qaTicketHead(opts.runId, node.ticket.id);
     const finalizationRecovery = protocolHead.state === "finalizing";
@@ -279,7 +321,10 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
     });
     workflowCheckpoint(opts.projectDir, opts.runId, "builder-before", node.ticket.id, { branch: node.branch, worktree: node.worktreePath });
 
-    const resumeSession = opts.resumeSessions?.get(node.ticket.id);
+    const continuationDb = new WorkflowDb(opts.projectDir);
+    const continuationSession = continuations.length ? continuationDb.branchResumeSession(opts.runId, node.ticket.id) : undefined;
+    continuationDb.close();
+    const resumeSession = continuationSession ?? opts.resumeSessions?.get(node.ticket.id);
     const worktreePath = resumeSession?.worktreePath
       ?? (sharedUnit ? findWorktreeForBranch(opts.projectDir, node.branch) : undefined)
       ?? await observeNode(opts, node, "git", "creating ticket worktree", () => createTicketWorktree(opts.projectDir, opts.runId, node.branch, node.baseBranch));
@@ -299,7 +344,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         });
       }
 
-      if (!qaOnlyRecovery) journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:in-progress`, { ticket: node.ticket.id, status: "in_progress" }, () => {
+      if (!qaOnlyRecovery) journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:in-progress${continuationSuffix}`, { ticket: node.ticket.id, status: "in_progress" }, () => {
         if (resumeSession) cmdUnblock(opts.projectDir, node.ticket.id, { actor: "foreman", summary: `Reopened by explicit branch recovery for ${node.branch}` });
         cmdUpdate(opts.projectDir, node.ticket.id, {
           status: "in_progress", actor: "foreman",
@@ -307,7 +352,8 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         });
       });
 
-      const ticketInstruction = resumeSession ? buildBranchTicketResumeInstruction(node, opts.trackerPaths) : buildBranchTicketInstruction(node, opts.trackerPaths);
+      let ticketInstruction = resumeSession ? buildBranchTicketResumeInstruction(node, opts.trackerPaths) : buildBranchTicketInstruction(node, opts.trackerPaths);
+      if (continuations.length) ticketInstruction += "\n\nScoped answers authorizing this ticket continuation:\n" + continuations.map(decision => `${decision.prompt}\nAnswer: ${decision.answer ?? decision.selectedChoiceId}`).join("\n");
       // Reattach the predecessor even for a `fresh` strategy so the host can
       // publish and validate a cumulative handoff before creating its successor.
       const sameWorktreeStream = builderStream && canonical(builderStream.worktreePath) === canonical(worktreePath) ? builderStream : undefined;
@@ -333,7 +379,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         { desktop: opts.notificationsEnabled, terminalBell: opts.terminalBellEnabled ?? true },
         opts.qaEnabled,
         3,
-        undefined,
+        opts.projectDir,
         undefined,
         undefined,
         opts.qaSessionStrategy ?? "compact",
@@ -345,9 +391,23 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         undefined,
         undefined,
         async (adapter) => opts.observeBuilderNativeCompactions?.(adapter, worktreePath),
+        opts.observer, undefined, false, undefined, undefined, opts.runId,
+        opts.continueIndependentTickets ?? true, node.ticket.id,
       );
 
-      const turn = () => foreman.runInstruction(ticketInstruction);
+      const turn = async () => {
+        const db = new WorkflowDb(opts.projectDir);
+        try {
+          db.atomic(() => { for (const decision of continuations) {
+            const key = `decision-continuation:${decision.decisionId}`;
+            db.planOperation({ runId: opts.runId, idempotencyKey: key, kind: "decision-continuation", intent: { decisionId: decision.decisionId, ticketId: node.ticket.id } });
+            db.updateOperation(key, "in_progress");
+          } });
+          const response = await foreman.runInstruction(ticketInstruction);
+          for (const decision of continuations) db.updateOperation(`decision-continuation:${decision.decisionId}`, response.result.failure?.dispatchState === "unknown" ? "uncertain" : "confirmed", { result: { isError: response.result.isError } });
+          return response;
+        } finally { db.close(); }
+      };
       const { result, status } = qaOnlyRecovery
         ? { result: { text: "Exact QA-only recovery; Builder work dispatch was intentionally skipped.", isError: false, numTurns: 0, costUsd: 0 }, status: { kind: "done" as const, summary: "Resuming exact QA boundary", ticket: node.ticket.id } }
         : opts.observer
@@ -390,7 +450,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         if (node.deliveryUnitId) {
           const path = deliverySessionPath(opts.projectDir, node.deliveryUnitId);
           mkdirSync(join(opts.projectDir, ".foreman", "delivery-sessions"), { recursive: true });
-          writeFileSync(path, `${JSON.stringify({ unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, sessionRef: builder.sessionRef?.(), ticket: node.ticket.id }, null, 2)}\n`, "utf8");
+          writeFileSync(path, `${JSON.stringify({ runId: opts.runId, unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, sessionRef: builder.sessionRef?.(), ticket: node.ticket.id }, null, 2)}\n`, "utf8");
         }
       }
       opts.log.write("step", {
@@ -409,7 +469,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       }
       if (status.kind !== "done" && status.kind !== "plan_complete") {
         const detail = status.reason ?? status.error ?? `builder emitted ${status.kind}`;
-        journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:builder-block`, { ticket: node.ticket.id, status: "blocked", detail }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: detail, actor: "foreman" }));
+        journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:builder-block${continuationSuffix}`, { ticket: node.ticket.id, status: "blocked", detail }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: detail, actor: "foreman" }));
         summaries.push(summaryFor(node, status.kind === "blocked" ? "blocked" : "needs-human", detail));
         continue;
       }
@@ -461,10 +521,14 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
                 const sessionRef = typeof session === "string" ? undefined : session;
                 const sessionId = typeof session === "string" ? session : session.sessionId;
                 builderStream = { sessionId, ...(sessionRef ? { sessionRef } : {}), worktreePath };
+                const resumeDb = new WorkflowDb(opts.projectDir);
+                try { resumeDb.recordBranchResumeSession(opts.runId, { ticket: node.ticket.id, branch: node.branch, base: node.baseBranch, worktreePath, sessionId, sessionRef, logPath: "structured-recovery", deliveryUnitId: node.deliveryUnitId }); }
+                finally { resumeDb.close(); }
                 opts.recordBuilderSession?.(sessionRef ?? sessionId, node.ticket.id, worktreePath);
                 workflowCheckpoint(opts.projectDir, opts.runId, "builder-session-scoped", node.ticket.id, { sessionId, sessionRef, worktree: worktreePath, branch: node.branch });
               },
             });
+            opts.log.write("qa-fix", { ticket: node.ticket.id, outcome: result.outcome, operationId: result.operationId, turnRecordId: result.turnRecordId, detail: result.detail });
             return result;
           },
           onNonconvergence: opts.qaNonconvergence,
@@ -478,7 +542,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         workflowCheckpoint(opts.projectDir, opts.runId, "qa-after", node.ticket.id, { outcome: qa.outcome, detail: qa.detail });
         if (qa.outcome !== "passed" && qa.outcome !== "waived") {
           const detail = qa.detail ?? "QA did not pass";
-          journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:qa-block`, { ticket: node.ticket.id, status: "blocked", detail }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: detail, actor: "foreman" }));
+          journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:qa-block${continuationSuffix}`, { ticket: node.ticket.id, status: "blocked", detail }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: detail, actor: "foreman" }));
           summaries.push(summaryFor(node, qa.outcome === "blocked" ? "blocked" : "needs-human", detail)); continue;
         }
         qaWaived = qa.outcome === "waived";
@@ -733,7 +797,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         : "builder_error";
       opts.log.write("branch-issue", { ticket: node.ticket.id, code, message, blocking: false });
       notifyIssue(opts.notificationsEnabled, `${node.ticket.id}: ${message}`);
-      journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:runtime-block`, { ticket: node.ticket.id, status: "blocked", detail: message }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: message, actor: "foreman" }));
+      journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:runtime-block${continuationSuffix}`, { ticket: node.ticket.id, status: "blocked", detail: message }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: message, actor: "foreman" }));
       summaries.push(summaryFor(node, "blocked", message));
     } finally {
       await builder?.close().catch(() => {});

@@ -669,7 +669,8 @@ export class RunObserver {
     this.store.updateCurrentState({ runId: this.runId, role: parent.role ?? "host", stream: parent.stream ?? "host", executionId: this.executionId, ticketId: parent.ticketId, deliveryUnitId: parent.deliveryUnitId, providerSessionId: parent.providerSessionId, phase: name, activeSpanId: spanId, activeSpanKind: kind, lastSemanticProgressAt: new Date().toISOString() });
     try {
       const value = await this.withContext({ parentSpanId: spanId }, fn);
-      this.store.finishSpan(spanId, { outcome: "completed" });
+      const failed = value && typeof value === "object" && (("ok" in value && value.ok === false) || ("isError" in value && value.isError === true));
+      this.store.finishSpan(spanId, { outcome: failed ? "failed" : "completed" });
       return value;
     } catch (error) {
       this.store.finishSpan(spanId, { outcome: "failed", attributes: { error: sanitizeText(String(error)).slice(0, 500) } });

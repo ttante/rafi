@@ -20,6 +20,7 @@ const EXPECTED = [
   "better-sqlite3-rebuild",
   "grill-me",
   "handoff",
+  "implementor",
   "improve-codebase-architecture",
   "prd-to-issues",
   "tdd",

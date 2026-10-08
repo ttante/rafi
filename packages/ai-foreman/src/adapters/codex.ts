@@ -1,3 +1,4 @@
+import { OperationDeadline } from "../util/deadline.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -49,6 +50,7 @@ export class CodexAdapter implements BuilderAdapter {
   private usage?: ContextUsage;
   private usageRevision = 0;
   private providerSessionUsage?: ProviderSessionUsage;
+  private turnUsageBaseline?: ProviderSessionUsage;
   private lastTurnTokens?: { inputTokens?: number; outputTokens?: number };
   private stderr = "";
   private nativeAutoCompactTokenLimit?: number;
@@ -58,6 +60,9 @@ export class CodexAdapter implements BuilderAdapter {
   private nativeCompactions: NativeCompaction[] = [];
   private nativeCompactionSequence = 0;
   private manualCompactionInFlight = false;
+  private compactionPromise?: Promise<CompactResult>;
+  private compactionActive = false;
+  private compactionUncertain = false;
   private observedToolCalls = 0;
   private activeProviderTurnId?: string;
   private activeProviderTurnSpanId?: string;
@@ -93,12 +98,12 @@ export class CodexAdapter implements BuilderAdapter {
     args.push(instruction); return args;
   }
 
-  async sendTurn(instruction: string): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string }): Promise<TurnResult> {
     const turnId = randomUUID();
     this.activeProviderTurnId = turnId;
     const observer = this.opts.observer;
     if (!observer) {
-      try { return await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction)); }
+      try { return await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction, policy)); }
       finally { this.activeProviderTurnId = undefined; }
     }
     const context = this.observationContext();
@@ -106,7 +111,7 @@ export class CodexAdapter implements BuilderAdapter {
     this.activeProviderTurnSpanId = spanId;
     observer.store.updateCurrentState({ runId: observer.runId, role: context.role ?? "host", stream: context.stream ?? "codex", executionId: observer.executionId, ticketId: context.ticketId, deliveryUnitId: context.deliveryUnitId, providerSessionId: context.providerSessionId, phase: "provider turn", activeSpanId: spanId, activeSpanKind: "provider_turn", lastSemanticProgressAt: new Date().toISOString() });
     try {
-      const result = await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction));
+      const result = await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction, policy));
       observer.store.finishSpan(spanId, { outcome: result.isError ? "failed" : "completed", attributes: { usage: result.usage } });
       return result;
     } catch (error) {
@@ -118,15 +123,17 @@ export class CodexAdapter implements BuilderAdapter {
     }
   }
 
-  private async sendTurnInternal(instruction: string): Promise<TurnResult> {
+  private async sendTurnInternal(instruction: string, policy?: { responseOnly?: boolean }): Promise<TurnResult> {
     if (this.closed) throw new Error("builder is closed");
     this.eventQueue.push({ kind: "activity", state: "starting Codex turn", provider: "codex", model: this.opts.model });
     let turnStartDispatched = false;
     const providerInstruction = this.buildInstruction(instruction);
     try {
       await this.ensureThread();
+      const toolsBefore = this.observedToolCalls;
       this.activeText = [];
       this.lastTurnTokens = undefined;
+      this.turnUsageBaseline = this.providerSessionUsage ? { ...this.providerSessionUsage } : undefined;
       const completion = this.waitFor("turn/completed", (params) => params.threadId === this._sessionId, this.providerIdleTimeoutMs(), true);
       turnStartDispatched = true;
       await this.request("turn/start", {
@@ -136,16 +143,17 @@ export class CodexAdapter implements BuilderAdapter {
         model: this.opts.model ?? null,
         effort: this.opts.effort ?? (this.opts.fast ? "low" : null),
       });
-      const params = await completion;
+      const params = await new OperationDeadline("Codex active turn", this.opts.turnDeadlineMs ?? 3_600_000).run(() => completion);
       const turn = params.turn as Record<string, unknown> | undefined;
-      const failed = turn?.status === "failed";
+      const responseOnlyViolation = Boolean(policy?.responseOnly && this.observedToolCalls !== toolsBefore);
+      const failed = turn?.status === "failed" || responseOnlyViolation;
       const error = turn?.error as Record<string, unknown> | null | undefined;
       const text = this.activeText.join("\n");
       const result: TurnResult = {
-        text: failed ? normalizeRuntimeErrorText("codex", String(error?.message ?? text), null, "app-server turn") : text,
+        text: failed ? normalizeRuntimeErrorText("codex", String(responseOnlyViolation ? "Response-only correction used tools; its result cannot authorize completion" : error?.message ?? text), null, "app-server turn") : text,
         isError: failed, numTurns: 1, costUsd: 0, costAuthoritative: false,
         turnId: this.activeProviderTurnId, hostInstruction: instruction, providerInstruction,
-        rawResponse: text, cleanedResponse: failed ? normalizeRuntimeErrorText("codex", String(error?.message ?? text), null, "app-server turn") : text,
+        rawResponse: text, cleanedResponse: failed ? normalizeRuntimeErrorText("codex", String(responseOnlyViolation ? "Response-only correction used tools; its result cannot authorize completion" : error?.message ?? text), null, "app-server turn") : text,
         providerMetadata: { provider: "codex", sessionId: this._sessionId, sessionRef: this._sessionRef },
         ...(this.lastTurnTokens ?? {}),
       };
@@ -173,7 +181,7 @@ export class CodexAdapter implements BuilderAdapter {
           executable: this.opts.runtimeExecutable ?? "codex", cwd: this.opts.cwd, diagnostics: text,
           availability: { version: 1, status: turnStartDispatched ? "unknown" : "unavailable", checkedAt: new Date().toISOString(), reason: turnStartDispatched ? "probe-failed" : "attach-failed", detail: text, sessionRef: this.opts.resumeSessionRef },
         }))
-        : { text, isError: true, numTurns: 1, costUsd: 0, costAuthoritative: false };
+        : { text, isError: true, numTurns: 1, costUsd: 0, costAuthoritative: false, failure: { runtime: "codex", phase: turnStartDispatched ? "turn" : "attach", category: "agent-stream", executable: this.opts.runtimeExecutable ?? "codex", cwd: this.opts.cwd, diagnostics: text, dispatchState: turnStartDispatched ? "unknown" : "not-sent" } };
       this.eventQueue.push({ kind: "error", message: text });
       result.turnId = this.activeProviderTurnId; result.hostInstruction = instruction; result.providerInstruction = providerInstruction;
       result.rawResponse = result.text; result.cleanedResponse = result.text;
@@ -184,14 +192,28 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   async compact(): Promise<CompactResult> {
-    return this.opts.observer
+    if (this.compactionPromise) return this.compactionPromise;
+    const operation = this.opts.observer
       ? this.opts.observer.span("compaction", "Codex context compaction", () => this.compactInternal())
       : this.compactInternal();
+    this.compactionPromise = operation;
+    try { return await operation; }
+    finally { if (this.compactionPromise === operation) this.compactionPromise = undefined; }
   }
 
   private async compactInternal(): Promise<CompactResult> {
+    if (this.compactionUncertain) return { ok: false, error: "Prior compaction outcome is uncertain; validate a fresh successor before further work" };
+    if (this.compactionActive) return { ok: false, error: "Compaction is already in progress for this session" };
+    if (this.manualCompactionInFlight) return { ok: false, error: "Codex compaction already in flight" };
+    this.compactionActive = true;
+    const controller = new AbortController();
+    const began = performance.now();
+    const timeoutMs = Math.min(180_000, Math.max(1, this.opts.compactionTimeoutMs ?? 120_000));
+    const hardTimeoutMs = Math.min(180_000, timeoutMs * 1.5);
+    this.traceLifecycle("compaction-started", { timeoutMs });
+    const deadline = new OperationDeadline("Codex compaction", timeoutMs, hardTimeoutMs);
     try {
-      await this.ensureThread();
+      await deadline.run(() => this.ensureThread());
       this.eventQueue.push({ kind: "session-transition", transition: "compacting" });
       const usageRevision = this.usageRevision;
       // A pre-compaction observation must never be mistaken for proof that the
@@ -199,32 +221,65 @@ export class CodexAdapter implements BuilderAdapter {
       // usage notification for the compacted thread; require it alongside the
       // explicit contextCompaction completion item.
       this.usage = undefined;
+      let compactionItemId: string | undefined;
+      const progress = this.waitFor("item/started", params => {
+        const item = params.item as Record<string, unknown> | undefined;
+        if (params.threadId !== this._sessionId || item?.type !== "contextCompaction" || typeof item.id !== "string") return false;
+        compactionItemId = item.id;
+        deadline.extendForCorrelatedProgress();
+        this.traceLifecycle("compaction-deadline-extended", { timeoutMs: hardTimeoutMs });
+        return true;
+      }, hardTimeoutMs, false, controller.signal);
+      void progress.catch(() => {});
       const done = this.waitFor("item/completed", (params) => {
         const item = params.item as Record<string, unknown> | undefined;
-        return params.threadId === this._sessionId && item?.type === "contextCompaction";
-      }, 30_000);
+        return params.threadId === this._sessionId && item?.type === "contextCompaction" && (!compactionItemId || item.id === compactionItemId);
+      }, hardTimeoutMs, false, controller.signal);
       const postCompactUsage = this.waitFor("thread/tokenUsage/updated", (params) => {
-        return (params.threadId === undefined || params.threadId === this._sessionId)
+        return params.threadId === this._sessionId
           && this.usageRevision > usageRevision
           && this.usage !== undefined;
-      }, 30_000);
+      }, hardTimeoutMs, false, controller.signal);
       this.manualCompactionInFlight = true;
       try {
-        await Promise.all([
-          this.request("thread/compact/start", { threadId: this._sessionId }),
-          done,
-          postCompactUsage,
-        ]);
+        const acknowledgementFailure = this.request("thread/compact/start", { threadId: this._sessionId }).then(
+          () => { this.traceLifecycle("compaction-acknowledged"); return new Promise<never>(() => {}); },
+          error => {
+            // A missing acknowledgement is not failure evidence. Explicit
+            // completion plus fresh occupancy is sufficient to reconcile it.
+            if (/deadline|timed out/i.test(String(error))) return new Promise<never>(() => {});
+            throw error;
+          },
+        );
+        await deadline.run(() => Promise.race([Promise.all([done, postCompactUsage]), acknowledgementFailure]));
       } finally { this.manualCompactionInFlight = false; }
       this.eventQueue.push({ kind: "session-transition", transition: "compacted" });
+      this.traceLifecycle("compaction-completed", { elapsedMs: performance.now() - began });
       return { ok: true };
     } catch (error) {
       if (error instanceof SessionUnavailableError) return { ok: false, error: error.message, failure: error.failure };
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
+      this.compactionUncertain = true;
+      this.usage = undefined;
+      this.traceLifecycle("compaction-failed", { elapsedMs: performance.now() - began });
+      const detail = error instanceof Error ? error.message : String(error);
+      if (/deadline|timed out/i.test(detail)) {
+        // Waiting expired, not the provider operation. Quarantine this adapter;
+        // the host must reconcile it instead of automatically starting a writer.
+        const failure = new SessionUnavailableError({ runtime: "codex", phase: "turn", dispatchState: "unknown", executable: this.opts.runtimeExecutable ?? "codex", cwd: this.opts.cwd, diagnostics: detail });
+        this.closed = true;
+        this.disconnect(failure);
+        this.eventQueue.close();
+        return { ok: false, error: detail, failure: failure.failure };
+      }
+      return { ok: false, error: detail };
+    } finally { controller.abort(); this.compactionActive = false; }
   }
 
   async prepareAutoCompaction(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<NativeAutoCompactionPolicy | void> {
+    return new OperationDeadline("Codex auto-compaction preparation", this.opts.preparationTimeoutMs ?? 120_000).run(() => this.prepareAutoCompactionInternal(thresholdPercent), () => this.disconnect(new Error("Codex preparation expired")));
+  }
+
+  private async prepareAutoCompactionInternal(thresholdPercent = this.opts.autoCompactThresholdPercent): Promise<NativeAutoCompactionPolicy | void> {
     if (thresholdPercent === undefined) return;
     const threshold = validThreshold(thresholdPercent);
     if (this.autoCompactionPrepared && this.preparedAutoCompactThreshold === threshold) return this.preparedAutoCompactionPolicy;
@@ -308,16 +363,33 @@ export class CodexAdapter implements BuilderAdapter {
       return { version: 1, status: "unknown", checkedAt, reason: "probe-failed", detail: error instanceof Error ? error.message : String(error), sessionRef: this._sessionRef };
     }
   }
+  observeEvents(listener: (event: BuilderEvent) => void): () => void { return this.eventQueue.observe(listener); }
+
   events(): AsyncIterable<BuilderEvent> { return this.eventQueue; }
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    const child = this.process;
+    let onExit: (() => void) | undefined;
+    const exited = child && child.exitCode === null ? new Promise<void>(resolve => { onExit = resolve; child.once("exit", resolve); }) : Promise.resolve();
     this.disconnect(new Error("app-server closed"));
     this.eventQueue.close();
+    try {
+      try { await new OperationDeadline("Codex shutdown", this.opts.shutdownTimeoutMs ?? 10_000).run(() => exited); }
+      catch {
+        child?.kill("SIGKILL");
+        await new OperationDeadline("Codex forced shutdown", 5_000).run(() => exited);
+      }
+    }
+    finally { if (onExit) child?.off("exit", onExit); }
   }
 
   private async ensureThread(): Promise<void> {
+    return new OperationDeadline("Codex preparation", this.opts.preparationTimeoutMs ?? 120_000).run(() => this.ensureThreadInternal(), () => this.disconnect(new Error("Codex preparation deadline exceeded")));
+  }
+
+  private async ensureThreadInternal(): Promise<void> {
     if (this._sessionRef && !this.threadAttached) {
       if (this._sessionRef.source === "legacy-inferred") {
         const availability: SessionAvailabilityV1 = { version: 1, status: "unknown", checkedAt: new Date().toISOString(), reason: "legacy-unscoped", detail: "legacy Codex thread IDs cannot be proven exact without an observed scoped binding", sessionRef: this._sessionRef };
@@ -430,10 +502,10 @@ export class CodexAdapter implements BuilderAdapter {
 
   private request(method: string, params: Record<string, unknown>): Promise<unknown> {
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    return new OperationDeadline(`Codex RPC ${method}`, this.opts.rpcTimeoutMs ?? 60_000).run(() => new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       try { this.write({ id, method, params }); } catch (error) { this.pending.delete(id); reject(error as Error); }
-    });
+    }), () => { this.pending.delete(id); });
   }
 
   private write(message: RpcMessage): void {
@@ -512,7 +584,8 @@ export class CodexAdapter implements BuilderAdapter {
       const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
       const total = tokenUsage?.total as Record<string, unknown> | undefined;
       const last = tokenUsage?.last as Record<string, unknown> | undefined;
-      const used = Number(total?.totalTokens);
+      if (this._sessionId && params.threadId !== this._sessionId) return;
+      const used = optionalNonNegative(last?.totalTokens);
       const maximum = Number(tokenUsage?.modelContextWindow);
       const observedAt = new Date().toISOString();
       const totalInput = optionalNonNegative(total?.inputTokens);
@@ -521,11 +594,13 @@ export class CodexAdapter implements BuilderAdapter {
       if (totalInput !== undefined || totalOutput !== undefined || sessionTotal !== undefined) {
         this.providerSessionUsage = { inputTokens: totalInput, outputTokens: totalOutput, totalTokens: sessionTotal, observedAt, source: "provider" };
       }
+      if ((totalInput !== undefined && this.turnUsageBaseline?.inputTokens !== undefined && totalInput < this.turnUsageBaseline.inputTokens) || (totalOutput !== undefined && this.turnUsageBaseline?.outputTokens !== undefined && totalOutput < this.turnUsageBaseline.outputTokens)) this.turnUsageBaseline = undefined;
       this.lastTurnTokens = {
-        inputTokens: optionalNonNegative(last?.inputTokens),
-        outputTokens: optionalNonNegative(last?.outputTokens),
+        inputTokens: cumulativeDelta(this.turnUsageBaseline?.inputTokens, totalInput),
+        outputTokens: cumulativeDelta(this.turnUsageBaseline?.outputTokens, totalOutput),
       };
-      if (Number.isFinite(used) && used >= 0 && Number.isFinite(maximum) && maximum > 0) {
+      this.usage = undefined;
+      if (used !== undefined && Number.isFinite(maximum) && maximum > 0) {
         this.usage = { used, maximum, percentage: used / maximum * 100, observedAt, source: "provider-event" };
         this.usageRevision += 1;
         this.eventQueue.push({ kind: "context-usage", ...this.usage });
@@ -562,15 +637,25 @@ export class CodexAdapter implements BuilderAdapter {
       parentSpanId: this.activeProviderTurnSpanId ?? inherited.parentSpanId, providerTurnId: this.activeProviderTurnId ?? inherited.providerTurnId };
   }
 
-  private waitFor(method: string, predicate: Waiter["predicate"], timeoutMs?: number, resetOnProviderActivity = false): Promise<Record<string, unknown>> {
+  private waitFor(method: string, predicate: Waiter["predicate"], timeoutMs?: number, resetOnProviderActivity = false, signal?: AbortSignal): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const clear = () => { if (timeout) clearTimeout(timeout); timeout = undefined; };
+      const began = performance.now();
+      const clear = () => { if (timeout) clearTimeout(timeout); timeout = undefined; signal?.removeEventListener("abort", abort); };
       const waiter: Waiter = {
         predicate,
-        resolve: (params) => { clear(); resolve(params); },
+        resolve: (params) => { clear(); this.traceLifecycle("waiter-completed", { method, elapsedMs: performance.now() - began }); resolve(params); },
         reject: (error) => { clear(); reject(error); },
       };
+      const abort = () => {
+        this.notificationWaiters.set(method, (this.notificationWaiters.get(method) ?? []).filter(candidate => candidate !== waiter));
+        clear();
+        this.traceLifecycle("waiter-cancelled", { method });
+        reject(new Error(`Codex waiter cancelled: ${method}`));
+      };
+      if (signal?.aborted) { abort(); return; }
+      signal?.addEventListener("abort", abort, { once: true });
+      this.traceLifecycle("waiter-registered", { method, timeoutMs });
       const waiters = this.notificationWaiters.get(method) ?? [];
       waiters.push(waiter);
       this.notificationWaiters.set(method, waiters);
@@ -578,12 +663,18 @@ export class CodexAdapter implements BuilderAdapter {
         const arm = () => { timeout = setTimeout(() => {
           const active = this.notificationWaiters.get(method) ?? [];
           this.notificationWaiters.set(method, active.filter((candidate) => candidate !== waiter));
-          reject(new Error(`Codex provider was silent for ${Math.round(timeoutMs / 60_000)} minutes while waiting for ${method}; the turn may have been dispatched and will not be retried automatically`));
+          clear();
+          this.traceLifecycle("waiter-timeout", { method, timeoutMs, elapsedMs: performance.now() - began });
+          reject(new Error(`Codex provider wait timed out after ${timeoutMs} ms while waiting for ${method}; the turn may have been dispatched and will not be retried automatically`));
         }, timeoutMs); };
         if (resetOnProviderActivity) waiter.touch = () => { clear(); arm(); };
         arm();
       }
     });
+  }
+
+  private traceLifecycle(phase: string, data: { method?: string; timeoutMs?: number; elapsedMs?: number } = {}): void {
+    try { this.opts.onLifecycleTrace?.({ phase, at: new Date().toISOString(), sessionId: this._sessionId, ...data }); } catch { /* diagnostics cannot change execution */ }
   }
 
   private touchWaiters(): void {
@@ -625,6 +716,7 @@ export class CodexAdapter implements BuilderAdapter {
 }
 
 function optionalNonNegative(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : undefined;
 }
@@ -677,4 +769,8 @@ function loadSkillMarkdown(cwd: string, skill: string): string | undefined {
   const projectPath = [join(cwd, ".codex", "skills", skill, "SKILL.md"), join(cwd, ".agents", "skills", skill, "SKILL.md")].find(existsSync);
   if (projectPath) return `## ${skill}\n${readFileSync(projectPath, "utf8").trim()}`;
   try { const bundled = loadSkill(skill); return bundled.body?.trim() ? `## ${bundled.name}\n${bundled.body.trim()}` : undefined; } catch { return undefined; }
+}
+
+function cumulativeDelta(before: number | undefined, after: number | undefined): number | undefined {
+  return before !== undefined && after !== undefined && after >= before ? after - before : undefined;
 }

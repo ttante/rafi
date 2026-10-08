@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { loadDefaults } from "special-agents";
+import type { TicketPopulateMode as SpecTicketPopulateMode } from "rafi-spec";
 import { appendLegacyTicketSources, loadSourceRegistry } from "../sources/sourceRegistry.js";
 import { BUILTIN_BRANCH_PREFIX, validateBranchPrefix } from "../branch/prefix.js";
 
@@ -17,6 +18,10 @@ export type TicketBuildBranchStrategy = "current" | "batch" | "branch-per-ticket
 export type TicketBranchPolicyMode = "global" | "size";
 export type TicketTitleStyle = "ticket-title" | "conventional" | "none" | "custom";
 export type TicketPopulateAgentPreference = "configured" | "claude" | "codex";
+/** Persisted population modes are owned by the canonical project-config spec. */
+export type TicketPopulateMode = SpecTicketPopulateMode;
+/** `legacy` is never serialized. It represents a configuration that predates modes. */
+export type TicketPopulateRuntimeMode = TicketPopulateMode | "legacy";
 export type TicketPopulateEnrichmentPolicy = "none" | "recommendations" | "agent";
 
 export type TicketSourceConfig =
@@ -26,6 +31,7 @@ export type TicketSourceConfig =
   | { type: "url"; url: string };
 
 export interface TicketPopulateSetupConfig {
+  mode: TicketPopulateRuntimeMode;
   source_handling: "saved" | "prompt" | "manual";
   agent_preference: TicketPopulateAgentPreference;
   import_cap: number;
@@ -87,6 +93,7 @@ export const DEFAULT_TICKET_SETUP: TicketsSetupConfig = {
   sources: [],
   limits: { implementation: 500, view: 20_000 },
   populate: {
+    mode: "legacy",
     source_handling: "saved",
     agent_preference: "configured",
     import_cap: 500,
@@ -159,7 +166,10 @@ export function saveTicketSetupConfig(
   opts: MinimalRafiConfigOptions = {},
 ): void {
   const config = loadRafiConfigObject(projectDir) ?? minimalRafiConfig(projectDir, opts);
-  const normalized = normalizeTicketsSetupConfig(setup, "tickets");
+  // `legacy` is a runtime-only sentinel. Convert it back to the persisted
+  // shape before validating so an unrelated setup update neither fails nor
+  // silently migrates an older project.
+  const normalized = normalizeTicketsSetupConfig(persistedTicketSetupInput(setup), "tickets");
   const ticketConfig = denormalizeTicketsSetupConfig(normalized);
   delete ticketConfig.sources;
   config.tickets = ticketConfig;
@@ -212,10 +222,13 @@ export function normalizeTicketsSetupConfig(value: unknown, label = "tickets"): 
 }
 
 export function denormalizeTicketsSetupConfig(setup: TicketsSetupConfig): Record<string, unknown> {
+  const { mode, ...populate } = setup.populate;
   return {
     sources: setup.sources.map((source) => ({ ...source })),
     limits: { ...setup.limits },
-    populate: { ...setup.populate },
+    // Preserve omission for old configurations unless the user deliberately
+    // selected a population strategy.
+    populate: mode === "legacy" ? populate : { mode, ...populate },
     build: { ...setup.build },
   };
 }
@@ -230,12 +243,35 @@ export function mergeTicketSetup(
   }>,
 ): TicketsSetupConfig {
   const base = current ? cloneTicketSetup(current) : cloneTicketSetup(DEFAULT_TICKET_SETUP);
+  const populatePatch = { ...(patch.populate ?? {}) };
+  // Callers operate on the runtime shape, so defensively erase the sentinel
+  // if a broad defaults object was used as a patch.
+  if (populatePatch.mode === "legacy") delete populatePatch.mode;
   return normalizeTicketsSetupConfig({
     sources: patch.sources ?? base.sources,
     limits: patch.limits ?? base.limits,
-    populate: { ...base.populate, ...(patch.populate ?? {}) },
+    populate: { ...persistedPopulateInput(base.populate), ...populatePatch },
     build: { ...base.build, ...(patch.build ?? {}) },
   });
+}
+
+/**
+ * Convert the normalized runtime representation into the public persisted
+ * input representation. Keeping this at the persistence boundary prevents the
+ * internal `legacy` marker from becoming a third public config value.
+ */
+function persistedTicketSetupInput(setup: TicketsSetupConfig): Record<string, unknown> {
+  return {
+    sources: setup.sources,
+    limits: setup.limits,
+    populate: persistedPopulateInput(setup.populate),
+    build: setup.build,
+  };
+}
+
+function persistedPopulateInput(populate: TicketPopulateSetupConfig): Record<string, unknown> {
+  const { mode, ...rest } = populate;
+  return mode === "legacy" ? rest : { mode, ...rest };
 }
 
 export function localSourcePaths(setup: TicketsSetupConfig | undefined): string[] {
@@ -473,6 +509,9 @@ function normalizeSource(value: unknown, label: string): TicketSourceConfig {
 function normalizePopulate(value: unknown, label: string): TicketPopulateSetupConfig {
   const raw = objectOrEmpty(value, label);
   return {
+    mode: raw.mode === undefined
+      ? "legacy"
+      : enumField(raw.mode, ["approved_plan", "external_import"], "legacy", `${label}.mode`) as TicketPopulateMode,
     source_handling: enumField(raw.source_handling, ["saved", "prompt", "manual"], DEFAULT_TICKET_SETUP.populate.source_handling, `${label}.source_handling`),
     agent_preference: enumField(raw.agent_preference, ["configured", "claude", "codex"], DEFAULT_TICKET_SETUP.populate.agent_preference, `${label}.agent_preference`),
     import_cap: positiveInteger(raw.import_cap, DEFAULT_TICKET_SETUP.populate.import_cap, `${label}.import_cap`),
@@ -625,7 +664,8 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-function legacySourcesFromRegistry(entries: import("rafi-spec").ProjectSourceEntry[]): TicketSourceConfig[] {
+/** Convert active shared-registry entries into the ticket setup representation. */
+export function ticketSourcesFromRegistry(entries: import("rafi-spec").ProjectSourceEntry[]): TicketSourceConfig[] {
   const out: TicketSourceConfig[] = [];
   for (const entry of entries.filter((item) => item.active)) {
     if (entry.type === "local" && entry.locator.path) out.push({ type: "local", paths: [entry.locator.path] });
@@ -635,3 +675,5 @@ function legacySourcesFromRegistry(entries: import("rafi-spec").ProjectSourceEnt
   }
   return dedupeTicketSources(out);
 }
+
+const legacySourcesFromRegistry = ticketSourcesFromRegistry;

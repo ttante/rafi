@@ -1,4 +1,4 @@
-import { formatRuntimeProbeFailure, probeRuntime } from "./runtimeReadiness.js";
+import { formatRuntimeProbeFailure, probeRuntime, type ProbeRuntimeOptions } from "./runtimeReadiness.js";
 
 export type AgentRuntime = "claude" | "codex";
 
@@ -29,8 +29,8 @@ export class RuntimeAuthError extends Error {
   }
 }
 
-export async function checkRuntimeReady(projectDir: string, runtime: AgentRuntime) {
-  const result = await probeRuntime(projectDir, runtime);
+export async function checkRuntimeReady(projectDir: string, runtime: AgentRuntime, options: ProbeRuntimeOptions = {}) {
+  const result = await probeRuntime(projectDir, runtime, options);
   if (!result.ok) throw new RuntimeAuthError({
     runtime,
     context: "readiness check",

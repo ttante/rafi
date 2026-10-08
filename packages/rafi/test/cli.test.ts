@@ -46,7 +46,7 @@ function docsHelpBlock(docs: string, heading: string): string {
 function installReadyClaude(binDir: string): void {
   mkdirSync(binDir, { recursive: true });
   const claudePath = join(binDir, "claude");
-  writeFileSync(claudePath, "#!/bin/sh\nexit 0\n", "utf8");
+  writeFileSync(claudePath, "#!/bin/sh\necho OK\nexit 0\n", "utf8");
   chmodSync(claudePath, 0o755);
 }
 

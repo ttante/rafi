@@ -14,7 +14,8 @@ export interface ActivityReporterOptions {
   tickMs?: number;
   heartbeatMs?: number;
   quietWarningMs?: number;
-  /** Override automatic TTY capability detection for tests or embedding hosts. */
+  usefulProgressWarningMs?: number;
+  /** Override the safe automatic TTY rendering mode for tests or embedding hosts. */
   ttyMode?: ActivityTtyMode;
 }
 
@@ -32,6 +33,10 @@ export class ActivityReporter {
   private readonly tickMs: number;
   private readonly heartbeatMs: number;
   private readonly quietWarningMs: number;
+  private readonly usefulProgressWarningMs: number;
+  private lastUsefulProgressAt = 0;
+  private usefulProgressWarningPrinted = false;
+  private pauseStartedAt = 0;
   private readonly ttyMode: Exclude<ActivityTtyMode, "auto">;
   private readonly commandStartedAt: number;
   private readonly phases = new Map<number, ActivePhase>();
@@ -59,6 +64,7 @@ export class ActivityReporter {
     this.tickMs = options.tickMs ?? 1_000;
     this.heartbeatMs = options.heartbeatMs ?? 30_000;
     this.quietWarningMs = options.quietWarningMs ?? 60_000;
+    this.usefulProgressWarningMs = options.usefulProgressWarningMs ?? 300_000;
     this.ttyMode = resolveTtyMode(options.ttyMode);
     this.commandStartedAt = this.now();
   }
@@ -68,6 +74,8 @@ export class ActivityReporter {
     this.phases.set(phase.id, phase);
     if (this.phases.size === 1) {
       this.lastSignalAt = phase.startedAt;
+      this.lastUsefulProgressAt = phase.startedAt;
+      this.usefulProgressWarningPrinted = false;
       this.lastHeartbeatAt = phase.startedAt;
       this.quietWarningPrinted = false;
       this.startTimer();
@@ -101,6 +109,12 @@ export class ActivityReporter {
     this.render(this.output.isTTY);
   }
 
+  /** A completed tool or turn is distinct from transport/status activity. */
+  completedWork(): void {
+    this.lastUsefulProgressAt = this.now();
+    this.usefulProgressWarningPrinted = false;
+  }
+
   note(message: string): void {
     this.clearLine();
     this.output.write(`${clean(message, 500)}\n`);
@@ -131,6 +145,7 @@ export class ActivityReporter {
   }
 
   pause(): () => void {
+    if (this.paused === 0) this.pauseStartedAt = this.now();
     this.paused++;
     this.clearLine();
     let resumed = false;
@@ -138,6 +153,11 @@ export class ActivityReporter {
       if (resumed) return;
       resumed = true;
       this.paused = Math.max(0, this.paused - 1);
+      if (this.paused === 0) {
+        const duration = this.now() - this.pauseStartedAt;
+        this.lastUsefulProgressAt += duration;
+        this.lastSignalAt += duration;
+      }
       this.render(true);
     };
   }
@@ -183,9 +203,17 @@ export class ActivityReporter {
     const elapsed = phase ? now - phase.startedAt : now - this.commandStartedAt;
     if (!force && elapsed < this.displayDelayMs) return;
     const quietFor = now - this.lastSignalAt;
+    if (phase && now - this.lastUsefulProgressAt >= this.usefulProgressWarningMs && !this.usefulProgressWarningPrinted) {
+      this.usefulProgressWarningPrinted = true;
+      this.note(`rafi: no completed tool or agent turn observed for ${formatDuration(now - this.lastUsefulProgressAt)}; current phase: ${phase.label}. The operation remains subject to its configured deadline.`);
+      return;
+    }
     if (phase && quietFor >= this.quietWarningMs && !this.quietWarningPrinted) {
       this.quietWarningPrinted = true;
-      this.note(`rafi: ${this.provider ?? "provider"} has been quiet for ${formatDuration(quietFor)}; RAFI is still responsive and will keep waiting`);
+      const status = phase.label === "answer sent; waiting for Claude"
+        ? `Claude has not resumed its stream yet after your answer was sent (${formatDuration(quietFor)})`
+        : `${this.provider ?? "provider"} has been quiet for ${formatDuration(quietFor)}`;
+      this.note(`rafi: ${status}; RAFI is still responsive and will keep waiting`);
       return;
     }
     const provider = [this.provider, this.model].filter(Boolean).join("/");
@@ -265,17 +293,39 @@ export function reportBuilderEvent(event: BuilderEvent): void {
     const delay = event.delayMs ? ` in ${formatDuration(event.delayMs)}` : "";
     reporter.note(`rafi: ${event.provider} ${clean(event.reason, 300)}; retrying${attempt}${delay}`);
     reporter.update(`retrying ${event.provider}`, event.reason, { provider: event.provider });
-  } else if (event.kind === "tool") reporter.update(`running ${event.name}`, briefInput(event.input));
-  else if (event.kind === "text") reporter.update("processing agent response");
+  } else if (event.kind === "tool") {
+    switch (event.lifecycle) {
+      case "progress":
+        reporter.pulse();
+        break;
+      case "completed":
+        reporter.completedWork();
+        if (isFailedToolCompletion(event)) reporter.update("tool failed", event.name);
+        else reporter.pulse();
+        break;
+      case "started":
+      case undefined:
+        // Older event producers omitted lifecycle for a tool start.
+        reporter.update(`running ${event.name}`, briefInput(event.input));
+        break;
+    }
+  } else if (event.kind === "text") reporter.update("processing agent response");
   else if (event.kind === "session-transition") reporter.update(`session ${event.transition}`, event.detail);
   else if (event.kind === "context-usage") reporter.pulse(event.percentage === undefined ? undefined : `context ${event.percentage.toFixed(0)}%`);
-  else if (event.kind === "turn-complete") reporter.update(event.result.isError ? "agent turn failed" : "agent turn complete");
+  else if (event.kind === "turn-complete") { reporter.completedWork(); reporter.update(event.result.isError ? "agent turn failed" : "agent turn complete"); }
   else if (event.kind === "error") reporter.update("provider error", event.message);
 }
 
 /** Async event queue that also feeds the active CLI reporter without consuming the stream. */
 export class BuilderEventQueue extends AsyncQueue<BuilderEvent> {
+  private readonly observers = new Set<(event: BuilderEvent) => void>();
+  /** Synchronous fan-out; never consumes or competes with the owning iterator. */
+  observe(listener: (event: BuilderEvent) => void): () => void {
+    this.observers.add(listener);
+    return () => { this.observers.delete(listener); };
+  }
   override push(event: BuilderEvent): void {
+    for (const listener of this.observers) listener(event);
     reportBuilderEvent(event);
     super.push(event);
   }
@@ -286,6 +336,13 @@ function briefInput(input: unknown): string | undefined {
   const value = input as Record<string, unknown>;
   const detail = value.command ?? value.file_path ?? value.path ?? value.pattern ?? value.query;
   return detail === undefined ? undefined : clean(String(detail), 100);
+}
+
+function isFailedToolCompletion(event: Extract<BuilderEvent, { kind: "tool" }>): boolean {
+  const status = event.status?.toLowerCase();
+  return status === "failed"
+    || status === "error"
+    || (typeof event.exitCode === "number" && Number.isFinite(event.exitCode) && event.exitCode !== 0);
 }
 
 function clean(value: string, maximum: number): string {
@@ -303,22 +360,17 @@ function semanticStatusKey(body: string): string {
 }
 
 function resolveTtyMode(requested?: ActivityTtyMode): Exclude<ActivityTtyMode, "auto"> {
-  const configured = requested ?? configuredTtyMode(process.env.RAFI_ACTIVITY_RENDER_MODE);
+  const configured = requested === "cursor" || requested === "records"
+    ? requested
+    : configuredTtyMode(process.env.RAFI_ACTIVITY_RENDER_MODE);
   if (configured === "cursor" || configured === "records") return configured;
-  return truthyEnvironmentValue(process.env.CODEX_CI)
-    || truthyEnvironmentValue(process.env.CI)
-    || process.env.TERM?.toLowerCase() === "dumb"
-    ? "records"
-    : "cursor";
+  // A TTY-like output can still be an append-only transcript.  Cursor redraws
+  // are therefore an explicit opt-in rather than an unsafe capability guess.
+  return "records";
 }
 
 function configuredTtyMode(value: string | undefined): ActivityTtyMode {
   return value === "cursor" || value === "records" || value === "auto" ? value : "auto";
-}
-
-function truthyEnvironmentValue(value: string | undefined): boolean {
-  if (value === undefined) return false;
-  return !["", "0", "false"].includes(value.trim().toLowerCase());
 }
 
 function formatDuration(milliseconds: number): string {

@@ -122,6 +122,20 @@ export function deactivateSource(registry: SourceRegistryConfig, id: string): So
   return next;
 }
 
+/**
+ * Remove a source from the shared registry configuration. Capture files are
+ * intentionally retained: they may be referenced by historical plans or
+ * tickets and can be cleaned up separately under the project's retention
+ * policy.
+ */
+export function removeSource(registry: SourceRegistryConfig, id: string): SourceRegistryConfig {
+  const next = cloneRegistry(registry);
+  const position = next.entries.findIndex((entry) => entry.id === id);
+  if (position < 0) throw new Error(`unknown source: ${id}`);
+  next.entries.splice(position, 1);
+  return next;
+}
+
 /** Remove only capture files introduced by a staged registry; existing history is never touched. */
 export function discardStagedSourceCaptures(projectDir: string, original: SourceRegistryConfig, staged: SourceRegistryConfig): void {
   const root = resolve(projectDir);

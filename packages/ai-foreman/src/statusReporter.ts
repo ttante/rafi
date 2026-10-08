@@ -122,7 +122,7 @@ export class AgentStatusReporter {
     this.emitSnapshot(contextSample, sessionUsage, now);
   }
 
-  stop(finalPhase = "completed"): void {
+  stop(finalPhase = "stopped"): void {
     if (this.handle === undefined) return;
     this.clock.clearInterval(this.handle);
     this.handle = undefined;
@@ -211,7 +211,7 @@ export class AgentStatusReporter {
 export class RoleStatusAdapter implements BuilderAdapter {
   readonly agent: "claude" | "codex";
   constructor(private readonly adapter: BuilderAdapter, private readonly onActive: (adapter: BuilderAdapter) => void, private readonly onClose: () => void) { this.agent = adapter.agent; }
-  async sendTurn(text: string): Promise<TurnResult> { this.onActive(this.adapter); return this.adapter.sendTurn(text); }
+  async sendTurn(text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> { this.onActive(this.adapter); return this.adapter.sendTurn(text, policy); }
   sessionId(): string | undefined { return this.adapter.sessionId(); }
   sessionRef(): import("rafi-spec").ProviderSessionRefV1 | undefined { return this.adapter.sessionRef?.(); }
   prepareSession(): Promise<import("rafi-spec").ProviderSessionRefV1> {
@@ -231,6 +231,11 @@ export class RoleStatusAdapter implements BuilderAdapter {
   sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.adapter.sessionUsage?.() ?? Promise.resolve(undefined); }
   switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> { return this.adapter.switchSettings?.(settings) ?? Promise.resolve({ ok: false, error: "settings switch unavailable" }); }
   events(): AsyncIterable<BuilderEvent> { return this.adapter.events(); }
+  observeEvents(listener: (event: BuilderEvent) => void): () => void {
+    if (!this.adapter.observeEvents) throw new Error("wrapped provider does not expose turn observation");
+    return this.adapter.observeEvents(listener);
+  }
+  acceptHandbackTurn(turn: TurnResult): void { this.adapter.acceptHandbackTurn?.(turn); }
   async close(): Promise<void> { try { await this.adapter.close(); } finally { this.onClose(); } }
 }
 

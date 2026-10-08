@@ -150,6 +150,12 @@ export interface BuilderRemediationReceiptV2 {
   completedAt: string;
 }
 
+export interface BuilderRemediationReceiptV3 extends Omit<BuilderRemediationReceiptV2, "version"> {
+  version: 3;
+  reportOccurrenceId: string;
+  turnRecordId: string;
+}
+
 export interface QaPassCertificateV2 {
   version: 2;
   certificateId: string;
@@ -180,6 +186,8 @@ export interface QaReducerStateV2 {
   sessionGeneration: number;
   retrySlot?: string;
   openReportDigests: string[];
+  /** V3 occurrence projection; old persisted digests remain content identities. */
+  openReportOccurrenceIds?: string[];
   passCertificateId?: string;
 }
 
@@ -189,7 +197,7 @@ export type QaReducerEventV2 =
   | { type: "turn-intended"; slot: string }
   | { type: "turn-uncertain" }
   | { type: "source-drift" }
-  | { type: "review-failed"; reportDigest: string }
+  | { type: "review-failed"; reportDigest: string; reportOccurrenceId?: string }
   | { type: "remediation-intended" }
   | { type: "remediation-uncertain" }
   | { type: "remediation-failed" }
@@ -229,7 +237,7 @@ export function reduceQaState(current: QaReducerStateV2, event: QaReducerEventV2
       return { ...next, state: "recheck-required", retrySlot: undefined };
     case "review-failed":
       if (current.state !== "turn-intended") invalid(current, event);
-      return { ...next, state: "review-failed", retrySlot: undefined, openReportDigests: unique([...current.openReportDigests, event.reportDigest]) };
+      return { ...next, state: "review-failed", retrySlot: undefined, openReportDigests: unique([...current.openReportDigests, event.reportDigest]), openReportOccurrenceIds: unique([...(current.openReportOccurrenceIds ?? []), ...(event.reportOccurrenceId ? [event.reportOccurrenceId] : [])]) };
     case "remediation-intended":
       if (current.state !== "review-failed") invalid(current, event);
       return { ...next, state: "remediation-intended", remediationGeneration: current.remediationGeneration + 1 };
@@ -253,10 +261,10 @@ export function reduceQaState(current: QaReducerStateV2, event: QaReducerEventV2
       return { ...next, state: "operator-menu", retrySlot: undefined };
     case "review-passed":
       if (current.state !== "turn-intended") invalid(current, event);
-      return { ...next, state: "passed", retrySlot: undefined, openReportDigests: [], passCertificateId: event.passCertificateId };
+      return { ...next, state: "passed", retrySlot: undefined, openReportDigests: [], openReportOccurrenceIds: [], passCertificateId: event.passCertificateId };
     case "waived":
       if (current.state !== "operator-menu" && current.state !== "review-failed") invalid(current, event);
-      return { ...next, state: "waived", openReportDigests: [] };
+      return { ...next, state: "waived", openReportDigests: [], openReportOccurrenceIds: [] };
     case "pass-invalidated":
       if (current.state !== "passed" || !event.reason.trim()) invalid(current, event);
       return { ...next, state: "operator-menu", retrySlot: undefined, passCertificateId: undefined };

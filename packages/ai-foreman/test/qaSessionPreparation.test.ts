@@ -15,7 +15,7 @@ const options: BuilderAdapterOptions = {
   permission: async () => ({ behavior: "deny", message: "QA is read-only" }),
 };
 
-function claudeFixture(initialization: Promise<unknown> = Promise.resolve({})) {
+function claudeFixture(initialization: Promise<unknown> = Promise.resolve({}), localContext = false) {
   const messages = new AsyncQueue<SDKMessage>();
   let hook!: HookCallback;
   let prompts = 0;
@@ -26,10 +26,23 @@ function claudeFixture(initialization: Promise<unknown> = Promise.resolve({})) {
   }): Query => {
     hook = input.options.hooks.SessionStart[0].hooks[0];
     input.options.abortController.signal.addEventListener("abort", () => messages.close());
-    promptPump = (async () => { for await (const _prompt of input.prompt) prompts += 1; })();
+    promptPump = (async () => { for await (const prompt of input.prompt) {
+      prompts += 1;
+      if (localContext) {
+        assert.equal(prompt.message.content, "/context");
+        messages.push({ type: "system", subtype: "init", session_id: "context-session", cwd: testCwd } as SDKMessage);
+        messages.push({ type: "result", subtype: "success", session_id: "context-session", result: "Context usage", is_error: false, num_turns: 0, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 }, modelUsage: {} } as unknown as SDKMessage);
+      }
+    } })();
     return {
       [Symbol.asyncIterator]: () => messages[Symbol.asyncIterator](),
       initializationResult: () => initialization,
+      applyFlagSettings: async () => {},
+      getContextUsage: async () => {
+        assert.ok(prompts > 0, "context control requests must follow local initialization");
+        return { maxTokens: 1000, autoCompactThreshold: 650, isAutoCompactEnabled: true };
+      },
+      ...(localContext ? { supportedCommands: async () => [{ name: "context", builtin: true }] } : {}),
       interrupt: async () => { messages.close(); },
     } as unknown as Query;
   };
@@ -154,4 +167,27 @@ test("Codex fresh QA fails closed when provider cwd is missing or different", as
       assert.equal(adapter.sessionRef(), undefined);
     } finally { await adapter.close(); }
   }
+});
+
+
+test("Claude QA initializes through an advertised local context command when startup identity is lazy", async () => {
+  const fixture = claudeFixture(Promise.resolve({}), true);
+  try {
+    const ref = await fixture.adapter.prepareSession(1000);
+    assert.equal(ref.sessionId, "context-session");
+    assert.ok(ref.validatedAt);
+    assert.equal(fixture.prompts(), 1, "only the advertised no-model local command is sent");
+  } finally { await fixture.close(); }
+});
+
+test("Claude compaction preparation initializes before context control requests", async () => {
+  const fixture = claudeFixture(Promise.resolve({}), true);
+  try {
+    const policy = await fixture.adapter.prepareAutoCompaction(65);
+    assert.equal(policy?.effectiveThresholdPercent, 65);
+    assert.equal(fixture.prompts(), 1);
+    assert.ok(fixture.adapter.sessionRef()?.validatedAt);
+    await fixture.adapter.prepareAutoCompaction(65);
+    assert.equal(fixture.prompts(), 1, "prepared sessions do not repeat initialization");
+  } finally { await fixture.close(); }
 });

@@ -38,9 +38,9 @@ export function captureCurrentWorkflowSessionIdentity(cwd: string): string {
 export class CurrentWorkflowGuardAdapter implements BuilderAdapter {
   readonly agent: BuilderAdapter["agent"];
   constructor(private readonly adapter: BuilderAdapter, private readonly cwd: string, private readonly expected = captureCurrentWorkflowIdentity(cwd)) { this.agent = adapter.agent; }
-  async sendTurn(text: string): Promise<TurnResult> {
+  async sendTurn(text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     assertCurrentWorkflowIdentity(this.cwd, this.expected);
-    const result = await this.adapter.sendTurn(text);
+    const result = await this.adapter.sendTurn(text, policy);
     assertCurrentWorkflowIdentity(this.cwd, this.expected);
     return result;
   }
@@ -66,6 +66,14 @@ export class CurrentWorkflowGuardAdapter implements BuilderAdapter {
   sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.adapter.sessionUsage?.() ?? Promise.resolve(undefined); }
   switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> { return this.adapter.switchSettings?.(settings) ?? Promise.resolve({ ok: false, error: "settings switch unavailable" }); }
   events(): AsyncIterable<BuilderEvent> { return this.adapter.events(); }
+  observeEvents(listener: (event: BuilderEvent) => void): () => void {
+    if (!this.adapter.observeEvents) throw new Error("wrapped provider does not expose turn observation");
+    return this.adapter.observeEvents(listener);
+  }
+  acceptHandbackTurn(turn: TurnResult): void {
+    assertCurrentWorkflowIdentity(this.cwd, this.expected);
+    this.adapter.acceptHandbackTurn?.(turn);
+  }
   close(): Promise<void> { return this.adapter.close(); }
 }
 

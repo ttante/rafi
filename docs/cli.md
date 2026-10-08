@@ -31,7 +31,8 @@ Runtime behavior not fully expressible in Commander help:
 - Interactive `create`, `plan`, and ticket setup runs save compact, local recovery records under `.rafi/interviews/`, which Rafi adds to `.gitignore`. Records hold answers/checkpoints and redacted failure context—not transcripts or agent output. Use `rafi resume [project] --id <id>` to continue or `rafi resume [project] --discard <id>` to remove a record. Completed records are pruned after 30 days; incompatible records remain until discarded.
 - `rafi create` preserves the complete source description in the project-wide `sources` registry. It performs no source reads when planning is skipped; the next `rafi plan` or `rafi tickets plan` resolves it.
 - Both planners append immutable source versions to the same registry. Private copies live under ignored `.rafi/source-cache/`; team-visible copies live under `.rafi/sources/`. Use `rafi sources list|refresh|remove|storage` to manage them.
-- `rafi tickets populate` uses explicit `--sources` first, then compatible active registry sources. When omitted, it checks `<docs.root>/rafi-plan.md`; interactive runs ask before using it, while non-interactive runs print next-step options when no source is available.
+- Ticket setup has two population strategies. `approved_plan` generates tickets from validated `<docs.root>/rafi-plan.json`; `external_import` imports configured Linear/Jira records only. A configuration with no mode retains its legacy behavior.
+- In approved-plan mode, `--sources` and saved local/URL entries are supporting context only. They cannot replace plan identity, revision, or slice mapping. `source_handling: saved` uses active context, `prompt` asks in an interactive terminal (and uses saved context for `--yes`/non-TTY), and `manual` uses only explicit `--sources`.
 - `rafi start` and `ai-foreman start` can read saved `tickets.build` defaults from `rafi-config.yaml`; explicit flags such as `--completion`, `--no-branch-per-ticket`, `--no-create-pr`, and `--auto-merge-wait` / `--no-auto-merge-wait` win for the current run.
 - Automatic ticket branches use `feature/<ticket-id>-<title>`. Explicit prefixes and delivery branch names, including `rafi/...`, remain exact. The default size policy shares compatible XS/S tickets selected in one invocation and isolates M/L/XL; this creates one review for a shared group and never creates stack edges. Explicit delivery topology always wins.
 - `rafi tickets show <id> --json` returns the complete canonical definition (including unknown fields), active state, recalculated blockers, historical validation, events, and delivery context. `rafi tickets reset` is tracker-only; `rafi build:start-over` is the Git/session/delivery-aware whole-run operation.
@@ -243,15 +244,14 @@ Options:
   -h, --help                                   display help for command
 
 Commands:
-  setup:init [options]                         Configure ticket sources, populate defaults, and
+  setup:init [options]                         Configure ticket population, supporting context, and
                                                build defaults in rafi-config.yaml.
-  setup:update [options]                       Update selected ticket setup sections in
-                                               rafi-config.yaml.
+  setup:update [options]                       Update ticket population, supporting context, and
+                                               build settings in rafi-config.yaml.
   init [options]                               Initialize .tickets/ structure in a project
                                                directory.
-  populate [options]                           Ask the ticket-maker role to populate
-                                               .tickets/tickets.yaml from existing project
-                                               ticket/backlog docs.
+  populate [options]                           Populate tickets from an approved Rafi plan or
+                                               configured external import.
   show [options] [ticketId]                    Show one or all complete canonical tickets,
                                                including state, validation, delivery, and history.
   groups                                       List and repair durable ticket creation groups.
@@ -307,7 +307,7 @@ Options:
 ```text
 Usage: rafi tickets setup:init [options]
 
-Configure ticket sources, populate defaults, and build defaults in rafi-config.yaml.
+Configure ticket population, supporting context, and build defaults in rafi-config.yaml.
 
 Options:
   -p, --project <dir>               project directory (default: cwd)
@@ -318,13 +318,14 @@ Options:
                                     ticket docs
   --runtime <runtime>               runtime targets for a new minimal rafi-config.yaml (both |
                                     claude | codex)
-  --local-source <paths...>         saved local ticket source files, folders, or globs
+  --local-source <paths...>         saved local supporting files, folders, or globs
   --linear                          add a Linear source using LINEAR_API_KEY
   --linear-team-key <key>           Linear team key filter
   --linear-filter <filter>          Linear IssueFilter JSON or title search text
   --jira-site <url>                 Jira Cloud site URL
   --jira-jql <jql>                  Jira JQL query
   --url-source <urls...>            add public HTTP(S) source URLs
+  --population-mode <mode>          ticket population strategy (approved_plan | external_import)
   --agent-preference <agent>        populate runtime preference (configured | claude | codex)
   --branch-strategy <strategy>      build branch strategy default (current | batch |
                                     branch-per-ticket)
@@ -345,7 +346,7 @@ Options:
 ```text
 Usage: rafi tickets setup:update [options]
 
-Update selected ticket setup sections in rafi-config.yaml.
+Update ticket population, supporting context, and build settings in rafi-config.yaml.
 
 Options:
   -p, --project <dir>               project directory (default: cwd)
@@ -357,13 +358,14 @@ Options:
                                     ticket docs
   --runtime <runtime>               runtime targets for a new minimal rafi-config.yaml (both |
                                     claude | codex)
-  --local-source <paths...>         replace saved local ticket source files, folders, or globs
+  --local-source <paths...>         replace saved local supporting files, folders, or globs
   --linear                          replace saved sources with a Linear source using LINEAR_API_KEY
   --linear-team-key <key>           Linear team key filter
   --linear-filter <filter>          Linear IssueFilter JSON or title search text
   --jira-site <url>                 Jira Cloud site URL
   --jira-jql <jql>                  Jira JQL query
   --url-source <urls...>            replace saved sources with public HTTP(S) URLs
+  --population-mode <mode>          ticket population strategy (approved_plan | external_import)
   --agent-preference <agent>        populate runtime preference (configured | claude | codex)
   --branch-strategy <strategy>      build branch strategy default (current | batch |
                                     branch-per-ticket)
@@ -403,15 +405,14 @@ Options:
 ```text
 Usage: rafi tickets populate [options]
 
-Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog
-docs.
+Populate tickets from an approved Rafi plan or configured external import.
 
 Options:
   -p, --project <dir>          project directory (default: cwd)
   -a, --agent <agent>          builder agent (claude | codex)
   -m, --model <model>          override the builder's model
   --effort <level>             reasoning effort level (low|medium|high|xhigh)
-  --sources <paths...>         source hint files, folders, or globs to check first
+  --sources <paths...>         supporting files, folders, URLs, or globs to check first
   --fast                       fast mode - lower latency
   --authorize-retire <ids...>  exact ticket IDs authorized to become obsolete in computer-run mode
   -y, --yes                    computer-run approval; retirements still require --authorize-retire
@@ -780,10 +781,10 @@ Options:
   -h, --help                                   display help for command
 
 Commands:
-  setup:init [options]                         Configure ticket sources, populate defaults, and build defaults in rafi-config.yaml.
-  setup:update [options]                       Update selected ticket setup sections in rafi-config.yaml.
+  setup:init [options]                         Configure ticket population, supporting context, and build defaults in rafi-config.yaml.
+  setup:update [options]                       Update ticket population, supporting context, and build settings in rafi-config.yaml.
   init [options]                               Initialize .tickets/ structure in a project directory.
-  populate [options]                           Ask the ticket-maker role to populate .tickets/tickets.yaml from existing project ticket/backlog docs.
+  populate [options]                           Populate tickets from an approved Rafi plan or configured external import.
   show [options] [ticketId]                    Show one or all complete canonical tickets, including state, validation, delivery, and history.
   groups                                       List and repair durable ticket creation groups.
   reset [options] [ticketId]                   Reset one ticket or an explicit ticket scope to pristine active state while retaining history.

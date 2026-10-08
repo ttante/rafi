@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
-import type { PendingHumanDecision, RecoveryAttemptReceipt, SupervisorState, WorkflowIssue } from "rafi-spec";
-import { WORKFLOW_DB_FILE, type OperationRecord, type ProjectLease, type WorkflowKind, type WorkflowRunSnapshot, type WorkflowRunStatus } from "./workflowDb.js";
+import type { PendingHumanDecision, RecoveryAttemptReceipt, ResolvedAutonomyPolicy, SupervisorState, WorkflowIssue } from "rafi-spec";
+import { WORKFLOW_DB_FILE, type OperationRecord, type RoleMutationLease, type ProjectLease, type WorkflowKind, type WorkflowRunSnapshot, type WorkflowRunStatus } from "./workflowDb.js";
 import type { BranchResumeSession } from "./branch/resume.js";
 
 type DbRun = { run_id: string; kind: WorkflowKind; status: WorkflowRunStatus; checkpoint: string; original_work_json: string; remaining_work_json: string; state_json: string; lease_generation: number | null; legacy: number; created_at: string; updated_at: string };
@@ -51,9 +51,16 @@ export class WorkflowReader {
     if (!this.db) return [];
     try { return (this.db.prepare("SELECT * FROM continuity_heads WHERE run_id=? ORDER BY role").all(runId) as Array<Record<string, unknown>>).map(row => ({ role: String(row.role), state: String(row.state), sequence: Number(row.event_sequence), digest: String(row.digest), updatedAt: String(row.updated_at) })); } catch { return []; }
   }
+  adoptionMilestones(runId: string): Array<{ sequence: number; role: string; sessionKey?: string; at: string }> {
+    if (!this.db) return [];
+    try {
+      return (this.db.prepare("SELECT sequence,role,session_key,created_at FROM continuity_events WHERE run_id=? AND kind='handoff_adopted' ORDER BY sequence DESC LIMIT 20").all(runId) as Array<Record<string, unknown>>)
+        .map(row => ({ sequence: Number(row.sequence), role: String(row.role), ...(row.session_key ? { sessionKey: String(row.session_key) } : {}), at: String(row.created_at) }));
+    } catch { return []; }
+  }
   branchResumeSessions(activeOnly = true): BranchResumeSession[] {
     if (!this.db) return [];
-    try { return (this.db.prepare(`SELECT session_json FROM branch_resume_sessions${activeOnly ? " WHERE status='active'" : ""} ORDER BY updated_at,ticket`).all() as Array<{ session_json: string }>).map(row => JSON.parse(row.session_json)); } catch { return []; }
+    try { return (this.db.prepare(`SELECT s.session_json FROM branch_resume_sessions s JOIN workflow_runs r ON r.run_id=s.run_id${activeOnly ? " WHERE s.status='active' AND r.status NOT IN ('superseded','completed','cancelled')" : ""} ORDER BY s.updated_at,s.ticket`).all() as Array<{ session_json: string }>).map(row => JSON.parse(row.session_json)); } catch { return []; }
   }
   recoveryAttempts(runId: string): RecoveryAttemptReceipt[] {
     if (!this.db) return [];
@@ -66,6 +73,18 @@ export class WorkflowReader {
   supervisorState(runId: string): SupervisorState | undefined {
     if (!this.db) return undefined;
     try { const row = this.db.prepare("SELECT state_json FROM supervisor_leases WHERE run_id=?").get(runId) as { state_json: string } | undefined; return row ? JSON.parse(row.state_json) : undefined; } catch { return undefined; }
+  }
+  autonomyPolicy(runId: string): ResolvedAutonomyPolicy | undefined {
+    if (!this.db) return undefined;
+    try { const row = this.db.prepare("SELECT policy_json FROM run_autonomy_policy WHERE run_id=?").get(runId) as { policy_json: string } | undefined; return row ? JSON.parse(row.policy_json) : undefined; } catch { return undefined; }
+  }
+  roleMutationLease(runId: string, role: "builder" | "qa"): RoleMutationLease | undefined {
+    if (!this.db) return undefined;
+    try {
+      const row = this.db.prepare("SELECT * FROM role_mutation_leases WHERE run_id=? AND role=?").get(runId, role) as Record<string, unknown> | undefined;
+      return row ? { runId, role, generation: Number(row.generation), providerSessionId: String(row.provider_session_id), movedAt: String(row.moved_at),
+        ...(row.provider_session_key ? { sessionKey: String(row.provider_session_key) } : {}), ...(row.provider_session_ref_json ? { sessionRef: JSON.parse(String(row.provider_session_ref_json)) } : {}) } : undefined;
+    } catch { return undefined; }
   }
   /** Bounded bulk evidence read. Uses one query per table, never one connection or query per run. */
   runEvidence(runIds: readonly string[], perKindLimit = 100): Record<string, { events: ReturnType<WorkflowReader["events"]>; issues: WorkflowIssue[]; operations: OperationRecord[]; continuity: ReturnType<WorkflowReader["continuityHeads"]> }> {

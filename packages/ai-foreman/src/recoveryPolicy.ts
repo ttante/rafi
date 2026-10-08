@@ -66,7 +66,7 @@ export function resolveQaEnablement(input: { cli?: boolean; frozen?: boolean; pr
 export function validateAutonomyConfig(value: unknown): AutonomyConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("autonomy must be an object");
   const input = value as Record<string, unknown>;
-  rejectUnknown(input, ["profile", "continue_independent_tickets", "rules", "supervisor"], "autonomy");
+  rejectUnknown(input, ["profile", "continue_independent_tickets", "rules", "supervisor", "runtime_deadlines"], "autonomy");
   if (!(["supervised", "balanced", "unattended"] as unknown[]).includes(input.profile)) throw new Error("autonomy.profile must be supervised, balanced, or unattended");
   if (typeof input.continue_independent_tickets !== "boolean") throw new Error("autonomy.continue_independent_tickets must be a boolean");
   if (!input.supervisor || typeof input.supervisor !== "object" || Array.isArray(input.supervisor)) throw new Error("autonomy.supervisor must be an object");
@@ -75,6 +75,12 @@ export function validateAutonomyConfig(value: unknown): AutonomyConfig {
   if (typeof supervisor.enabled !== "boolean") throw new Error("autonomy.supervisor.enabled must be a boolean");
   positiveInteger(supervisor.max_worker_restarts_per_checkpoint, "autonomy.supervisor.max_worker_restarts_per_checkpoint", true);
   positiveInteger(supervisor.max_worker_restarts_per_run, "autonomy.supervisor.max_worker_restarts_per_run", true);
+  const deadlines = input.runtime_deadlines as Record<string, unknown> | undefined;
+  if (deadlines !== undefined) {
+    if (!deadlines || typeof deadlines !== "object" || Array.isArray(deadlines)) throw new Error("autonomy.runtime_deadlines must be an object");
+    rejectUnknown(deadlines, ["preparation_ms", "rpc_ms", "compaction_ms", "shutdown_ms", "turn_ms"], "autonomy.runtime_deadlines");
+    for (const [key, value] of Object.entries(deadlines)) if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > (key === "compaction_ms" ? 180_000 : 86_400_000)) throw new Error(`invalid runtime deadline ${key}`);
+  }
   const overrides: AutonomyConfig["rules"] = {};
   if (input.rules !== undefined) {
     if (!input.rules || typeof input.rules !== "object" || Array.isArray(input.rules)) throw new Error("autonomy.rules must be an object");
@@ -93,6 +99,7 @@ export function validateAutonomyConfig(value: unknown): AutonomyConfig {
     profile: input.profile as AutonomyProfile,
     continue_independent_tickets: input.continue_independent_tickets,
     rules: overrides,
+    ...(deadlines ? { runtime_deadlines: deadlines as AutonomyConfig["runtime_deadlines"] } : {}),
     supervisor: { enabled: supervisor.enabled, max_worker_restarts_per_checkpoint: Number(supervisor.max_worker_restarts_per_checkpoint), max_worker_restarts_per_run: Number(supervisor.max_worker_restarts_per_run) },
   };
 }
@@ -104,11 +111,12 @@ export function resolveAutonomyPolicy(config: Partial<AutonomyConfig> | undefine
   const defaultRules: ResolvedAutonomyPolicy["rules"] = {
     "qa.nonconvergence": { action: profile === "supervised" ? "human_required" : "retry_builder", max_attempts: defaults.limits.builderQaFixesPerTicket },
     "runtime.transient": { action: defaults.limits.transientPreDispatchRetries ? "retry" : "human_required", max_attempts: defaults.limits.transientPreDispatchRetries },
-    "plan.material_change": { action: profile === "unattended" ? "retry" : "human_required", max_attempts: profile === "unattended" ? 1 : 0 },
+    "plan.material_change": { action: "human_required", max_attempts: 0 },
   };
   const policyWithoutDigest = {
     version: 1 as const, profile,
-    continueIndependentTickets: config?.continue_independent_tickets ?? profile !== "supervised",
+    runtimeDeadlines: { preparation_ms: 120_000, rpc_ms: 60_000, compaction_ms: 120_000, shutdown_ms: 10_000, turn_ms: 3_600_000, ...config?.runtime_deadlines },
+    continueIndependentTickets: config?.continue_independent_tickets ?? true,
     limits: {
       ...defaults.limits,
       workerRestartsPerCheckpoint: supervisor.max_worker_restarts_per_checkpoint,

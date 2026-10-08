@@ -35,6 +35,8 @@ test("special-agents pack includes dist/ output", () => {
 test("special-agents pack includes content/ source", () => {
   const files = packList();
   assert.ok(files.some((f) => f.startsWith("content/")), "no content/ files in pack");
+  assert.ok(files.includes("content/skills/implementor/SKILL.md"), "implementor skill missing from pack");
+  assert.ok(files.includes("content/skills/implementor/references/review.md"), "implementor review checklist missing from pack");
 });
 
 test("special-agents pack excludes test/ files", () => {

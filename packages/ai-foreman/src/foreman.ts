@@ -1,3 +1,5 @@
+import { buildScopeRevision } from "./buildApproval.js";
+import { durableHumanDecision, HumanDecisionRequired } from "./humanDecision.js";
 import { select, text, isCancel } from "@clack/prompts";
 import { MARKER_SPEC, QA_MARKER_SPEC } from "./markers.js";
 import type {
@@ -11,6 +13,7 @@ import type {
 import type { PermissionPolicy } from "./permissions/policy.js";
 import { countProviderQuestions, handleProviderQuestionTool, type AnsweredProviderQuestion } from "./providerQuestions.js";
 import type { Log } from "./log.js";
+import { bestEffortDiagnostic } from "./questionTrace.js";
 import { signalAttention } from "./notify.js";
 import { pauseActivityForInput } from "./activity.js";
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
@@ -228,6 +231,7 @@ export function createPermissionHandler(
   log: Log,
   opts: {
     interactive?: boolean;
+    durable?: () => { projectDir: string; runId: string; ticketId?: string };
     onAnsweredQuestion?: (event: AnsweredProviderQuestion) => void;
     onProviderQuestion?: (request: PermissionRequest) => void;
   } = {},
@@ -236,15 +240,16 @@ export function createPermissionHandler(
     if (req.toolName === "AskUserQuestion") opts.onProviderQuestion?.(req);
     const providerQuestion = await handleProviderQuestionTool(req, {
       interactive: opts.interactive ?? true,
+      durable: opts.durable?.(),
       onAnsweredQuestion: opts.onAnsweredQuestion,
     });
     if (providerQuestion) {
-      log.write("permission", {
+      bestEffortDiagnostic(() => log.write("permission", {
         tool: req.toolName,
         decision: providerQuestion.behavior,
         reason: "provider question prompt",
         questionCount: countProviderQuestions(req.input),
-      });
+      }));
       return providerQuestion;
     }
 
@@ -290,6 +295,7 @@ export class Foreman {
   private readonly terminalBellEnabled: boolean;
   private readonly qaStream: QaStreamState = { reviews: 0, modificationViolations: 0 };
   private builderWorkSessions = 0;
+  private currentTicketId?: string;
 
   constructor(
     private builder: BuilderAdapter,
@@ -318,8 +324,11 @@ export class Foreman {
     private qaResumedRecovery?: QaRecoveryPacket,
     /** Exact durable build-run scope. Observability is never an identity authority. */
     private readonly qaRunId: string = `qa-${randomUUID()}`,
+    private readonly continueIndependentTickets = true,
+    initialTicketId?: string,
   ) {
     void _deprecatedSameSessionReviewer;
+    this.currentTicketId = initialTicketId;
     this.notificationsEnabled = typeof notifications === "boolean" ? notifications : notifications.desktop;
     this.terminalBellEnabled = typeof notifications === "boolean" ? true : notifications.terminalBell;
     this.ticketsEnabled = !!(projectDir && isTicketsInitialized(projectDir));
@@ -395,10 +404,11 @@ export class Foreman {
       this.builder = await this.beforeBuilderTurn(this.builder, instruction);
       adapter = this.builder;
     }
-    let result = await adapter.sendTurn(instruction);
+    const turnPolicy = { logicalActionId: this.currentTicketId ?? createHash("sha256").update(instruction).digest("hex") };
+    let result = await adapter.sendTurn(instruction, turnPolicy);
     await this.observeBuilderNative(adapter);
     let status = parseStepStatus(result.text);
-    if (result.failure?.category === "session-unavailable") return { result, status };
+    if (result.isError || result.failure) return { result: { ...result, isError: true }, status };
     if (status.kind === "unknown") {
       if (!status.error && looksLikeQuestion(result.text)) {
         status = { kind: "needs_input", question: lastLine(result.text), choices: ["Continue", "Cancel"] };
@@ -407,15 +417,23 @@ export class Foreman {
           this.builder = await this.beforeBuilderTurn(this.builder, instruction);
           adapter = this.builder;
         }
+        if (this.projectDir) {
+          const budget = new WorkflowDb(this.projectDir);
+          try {
+            if (!budget.reserveRecoveryAllowance(this.qaRunId, turnPolicy.logicalActionId, "protocol-correction", budget.autonomyPolicy(this.qaRunId)?.limits.protocolCorrections ?? 1)) return { result, status: { kind: "blocked", reason: "shared protocol correction budget exhausted" } };
+          } finally { budget.close(); }
+        }
         result = await adapter.sendTurn(mode === "qa"
           ? "Protocol correction only: based on the review already completed, return exactly one final STEP_STATUS: qa_pass or STEP_STATUS: qa_fail marker. Do not repeat QA, tests, tools, or compaction."
-          : "Protocol correction only: based on the work already completed, return exactly one final STEP_STATUS: done, plan_complete, blocked, or needs_input marker. Do not repeat implementation, tools, or compaction.");
+          : "Protocol correction only: based on the work already completed, return exactly one final STEP_STATUS: done, plan_complete, blocked, or needs_input marker. Do not repeat implementation, tools, or compaction.", { ...turnPolicy, responseOnly: true });
         await this.observeBuilderNative(adapter);
+        if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
         status = parseStepStatus(result.text);
         if (status.kind === "unknown") status = { ...status, error: `protocol correction exhausted: ${status.error ?? "missing final marker"}` };
       }
     }
 
+    let blockerExplanations = 0;
     while (true) {
       while (status.kind === "needs_input") {
         const question = status.question ?? "The builder has a question";
@@ -423,15 +441,7 @@ export class Foreman {
         this.log.write("needs_input", { question, choices });
         signalAttention("Foreman needs your input", question, this.notificationsEnabled, this.terminalBellEnabled);
 
-        if (!process.stdin.isTTY || !process.stdout.isTTY) {
-          console.error(`foreman: input required: ${question}`);
-          console.error("foreman: resume this run in an interactive terminal, or provide explicit guidance through the printed resume command");
-          result = { text: result.text, isError: false, numTurns: result.numTurns, costUsd: result.costUsd };
-          status = { kind: "blocked", reason: `input required in an interactive terminal: ${question}` };
-          break;
-        }
-
-        const answer = await this.waitForUserInput(async () => {
+        const prompt = async () => this.waitForUserInput(async () => {
           console.log();
           const selected = await select<string>({
             message: question,
@@ -446,6 +456,20 @@ export class Foreman {
           const custom = await text({ message: "Custom response:", validate: (value) => String(value ?? "").trim() ? undefined : "Enter a response" });
           return isCancel(custom) ? undefined : String(custom);
         });
+        if (!this.projectDir && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+          status = { kind: "blocked", reason: `input required in an interactive terminal: ${question}` };
+          break;
+        }
+        let answer: string | undefined;
+        try {
+          answer = this.projectDir ? await durableHumanDecision({ projectDir: this.projectDir, runId: this.qaRunId, key: `builder:${this.currentTicketId ?? "step"}:${buildScopeRevision(this.projectDir)}`, ticketId: this.currentTicketId,
+            prompt: question, choices: [...choices.map(choice => ({ id: choice, label: choice })), { id: "custom", label: "Custom response" }],
+            defer: Boolean(this.currentTicketId && this.continueIndependentTickets), operation: prompt }) : await prompt();
+        } catch (error) {
+          if (!(error instanceof HumanDecisionRequired)) throw error;
+          status = { kind: "blocked", reason: error.message };
+          break;
+        }
         console.log();
 
         if (answer === undefined) {
@@ -458,13 +482,20 @@ export class Foreman {
           this.builder = await this.beforeBuilderTurn(this.builder, answer);
           adapter = this.builder;
         }
-        result = await adapter.sendTurn(answer);
+        result = await adapter.sendTurn(answer, turnPolicy);
         await this.observeBuilderNative(adapter);
+        if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
         status = parseStepStatus(result.text);
       }
 
-      if (status.kind !== "blocked" || status.reason?.startsWith("user chose safe pause") || !process.stdin.isTTY || !process.stdout.isTTY) break;
+      if (status.kind !== "blocked" || (status.reason?.startsWith("user chose safe pause") || status.reason?.includes("Rafi is waiting for input")) || !process.stdin.isTTY || !process.stdout.isTTY) break;
 
+      if (blockerExplanations++ >= 1) break;
+      if (this.projectDir) {
+        const budget = new WorkflowDb(this.projectDir);
+        try { if (!budget.reserveRecoveryAllowance(this.qaRunId, this.currentTicketId ?? "instruction", "blocker-explanation", 1)) break; }
+        finally { budget.close(); }
+      }
       const reason = status.reason ?? "the agent reported an unspecified blocker";
       this.log.write("blocked-recovery", { reason, role: adapter === this.builder ? "builder" : "qa" });
       const recoveryInstruction = buildBlockerRecoveryInstruction(reason);
@@ -472,12 +503,20 @@ export class Foreman {
         this.builder = await this.beforeBuilderTurn(this.builder, recoveryInstruction);
         adapter = this.builder;
       }
-      result = await adapter.sendTurn(recoveryInstruction);
+      result = await adapter.sendTurn(recoveryInstruction, turnPolicy);
       await this.observeBuilderNative(adapter);
+      if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
       status = parseStepStatus(result.text);
       if (status.kind === "unknown") {
-        result = await adapter.sendTurn('Protocol correction only: return the blocker approaches now using exactly one final STEP_STATUS: needs_input marker with question="..." and choices="recommended (Recommended)|alternative|alternative". Do not repeat tools or implementation.');
+        if (this.projectDir && this.qaRunId) {
+          const budget = new WorkflowDb(this.projectDir);
+          try {
+            if (!budget.reserveRecoveryAllowance(this.qaRunId, turnPolicy.logicalActionId, "protocol-correction", budget.autonomyPolicy(this.qaRunId)?.limits.protocolCorrections ?? 1)) break;
+          } finally { budget.close(); }
+        }
+        result = await adapter.sendTurn('Protocol correction only: return the blocker approaches now using exactly one final STEP_STATUS: needs_input marker with question="..." and choices="recommended (Recommended)|alternative|alternative". Do not repeat tools or implementation.', { ...turnPolicy, responseOnly: true });
         await this.observeBuilderNative(adapter);
+        if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
         status = parseStepStatus(result.text);
       }
     }
@@ -573,7 +612,7 @@ export class Foreman {
               this.log.write("qa-fix", { stepIndex, sessionId });
             },
           });
-          this.log.write("qa-fix", { stepIndex, ok: result.ok, detail: result.detail, providerTurnId: result.providerTurnId, handoffId: result.handoffId, operationId: result.operationId });
+          this.log.write("qa-fix", { stepIndex, ok: result.ok, outcome: result.outcome, turnRecordId: result.turnRecordId, detail: result.detail, providerTurnId: result.providerTurnId, handoffId: result.handoffId, operationId: result.operationId });
           return result;
         },
         evidence: ({ cycle, outcome, detail, qaDiff }) => this.log.write("qa", { stepIndex, cycle, outcome, detail, qaDiff, disposable: true }),
@@ -691,8 +730,22 @@ export class Foreman {
     let completed = 0;
     let outcome: BatchResult["outcome"] = "all-done";
     let detail: string | undefined;
+    const deferred = new Set<string>();
 
-    for (let i = 1; i <= n; i++) {
+    for (let i = 1; completed < n; i++) {
+      const answered = this.projectDir ? (() => {
+        const db = new WorkflowDb(this.projectDir!);
+        try { return db.answeredTicketDecisions(this.qaRunId, buildScopeRevision(this.projectDir!)); }
+        finally { db.close(); }
+      })() : [];
+      for (const decision of answered) {
+        const id = decision.interruptionId.slice("ticket:".length);
+        const row = cmdImplementationQueue(this.projectDir!).find(item => item.ticket === id);
+        if (row?.status === "blocked") {
+          cmdUnblock(this.projectDir!, id, { actor: "foreman", summary: `Scoped question answered: ${decision.decisionId}` });
+          deferred.delete(id);
+        }
+      }
       // Determine which ticket we're about to work on (for in_progress marking)
       let pendingTicketId: string | undefined;
       if (this.ticketsEnabled && this.projectDir) {
@@ -713,6 +766,7 @@ export class Foreman {
             detail = `recovery ticket ${preferredTicketId} cannot resume while its status is ${next.status}`;
             break;
           }
+          if ((!next || deferred.has(next.ticket)) && deferred.size) break;
           if (next) {
             pendingTicketId = next.ticket;
             await onTicketStart?.(next.ticket);
@@ -729,9 +783,24 @@ export class Foreman {
         }
       }
 
-      const instruction = i === 1
+      this.currentTicketId = pendingTicketId;
+      let instruction = i === 1
         ? buildPrimer(n, trackerPath, this.ticketsEnabled, preferredTicketId)
         : buildNextStepInstruction(i, n);
+      const continuations = answered.filter(decision => decision.interruptionId === `ticket:${pendingTicketId}`);
+      if (continuations.length) {
+        instruction += "\n\nScoped answers authorizing this ticket continuation:\n" + continuations.map(decision => `${decision.prompt}\nAnswer: ${decision.answer ?? decision.selectedChoiceId}`).join("\n");
+        const db = new WorkflowDb(this.projectDir!);
+        try {
+          db.atomic(() => {
+            for (const decision of continuations) {
+              const key = `decision-continuation:${decision.decisionId}`;
+              db.planOperation({ runId: this.qaRunId, idempotencyKey: key, kind: "decision-continuation", intent: { decisionId: decision.decisionId, ticketId: pendingTicketId } });
+              db.updateOperation(key, "in_progress");
+            }
+          });
+        } finally { db.close(); }
+      }
       if (i > 1) await this.prepareBuilderBoundary(instruction);
       this.builderWorkSessions += 1;
       const turn = () => this.doTurn(instruction);
@@ -739,6 +808,11 @@ export class Foreman {
         ? await this.observer.withContext({ role: "builder", stream: "builder", ticketId: pendingTicketId }, turn)
         : await turn();
 
+      if (continuations.length) {
+        const db = new WorkflowDb(this.projectDir!);
+        try { for (const decision of continuations) db.updateOperation(`decision-continuation:${decision.decisionId}`, result.failure?.dispatchState === "unknown" ? "uncertain" : "confirmed", { result: { isError: result.isError } }); }
+        finally { db.close(); }
+      }
       this.log.write("step", {
         index: i,
         statusKind: status.kind,
@@ -763,14 +837,14 @@ export class Foreman {
         let qaSourceStateDigest: string | undefined;
         if (this.qaEnabled) {
           const qa = await this.runQa(i, status.ticket ?? pendingTicketId, result.text);
-          if (qa.outcome === "blocked") {
-            outcome = "blocked";
+          if (qa.outcome === "blocked" || qa.outcome === "needs-human") {
+            outcome = qa.outcome;
             detail = qa.detail;
-            break;
-          }
-          if (qa.outcome === "needs-human") {
-            outcome = "needs-human";
-            detail = qa.detail;
+            if (pendingTicketId && this.continueIndependentTickets && this.ticketsEnabled && this.projectDir) {
+              cmdBlock(this.projectDir, pendingTicketId, { summary: qa.detail ?? "QA requires recovery", actor: "foreman" });
+              deferred.add(pendingTicketId);
+              continue;
+            }
             break;
           }
           qaWaived = qa.outcome === "waived";
@@ -836,6 +910,7 @@ export class Foreman {
         }
         outcome = "blocked";
         detail = detail ?? status.reason ?? "builder reported blocked";
+        if (pendingTicketId && this.continueIndependentTickets && this.ticketsEnabled) { deferred.add(pendingTicketId); continue; }
         break;
       }
 
@@ -849,6 +924,7 @@ export class Foreman {
       break;
     }
 
+    if (deferred.size) { outcome = "blocked"; detail = `Deferred tickets: ${[...deferred].join(", ")}. ${detail ?? "Input or prerequisite recovery is required."}`; }
     this.log.write("batch-end", { completed, requested: n, outcome, detail, sessionId: this.builder.sessionId() });
     return { completed, requested: n, outcome, detail };
   }

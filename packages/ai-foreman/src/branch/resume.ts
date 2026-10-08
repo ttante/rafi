@@ -33,7 +33,7 @@ export function findResumableBranchSessions(foremanDir: string): BranchResumeSes
   const reader = new WorkflowReader(dirname(foremanDir));
   try {
     const structured = reader.branchResumeSessions().filter(session => existsSync(session.worktreePath));
-    if (structured.length) return structured.sort((a, b) => a.ticket.localeCompare(b.ticket, undefined, { numeric: true }));
+    if (structured.length || reader.branchResumeSessions(false).length || reader.buildRuns().length) return structured.sort((a, b) => a.ticket.localeCompare(b.ticket, undefined, { numeric: true }));
   } finally { reader.close(); }
 
   const byTicket = new Map<string, BranchResumeSession>();

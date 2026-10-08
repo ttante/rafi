@@ -1,3 +1,8 @@
+import { durableReadOnlyProposal } from "../readOnlyProposal.js";
+import { captureFrozenQaSource } from "../qaSnapshot.js";
+import { superviseStart, supervisedRunId } from "../supervisedStart.js";
+import { durableHumanDecision, HumanDecisionRequired } from "../humanDecision.js";
+import { requiresBuildApproval, buildScopeRevision } from "../buildApproval.js";
 import { Command } from "commander";
 import { resolve, join, relative } from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -157,7 +162,17 @@ export function formatResumeGuidance(
   projectDir: string,
   steps: number,
   sessionId?: string,
+  run?: { runId: string; decisions: Array<{ decisionId: string; prompt: string; choices: Array<{ id: string; label: string }> }> },
 ): string[] {
+  if (run) return [
+    ...run.decisions.flatMap(decision => [
+      `foreman: input required: ${decision.prompt}`,
+      `foreman: choices: ${decision.choices.map(choice => `${choice.id} (${choice.label})`).join(", ")}`,
+      `  rafi build:decide ${shellQuote(projectDir)} --run ${shellQuote(run.runId)} --decision ${shellQuote(decision.decisionId)} --choice <choice-id>`,
+    ]),
+    "foreman: resume this run with:",
+    `  rafi build:resume ${shellQuote(projectDir)} --run ${shellQuote(run.runId)}`,
+  ];
   if (executable === "rafi") {
     return [
       "foreman: resume this run with:",
@@ -467,6 +482,8 @@ export function buildStartCommand(): Command {
       const frozenPolicy = recoveryRecord && "frozenPolicy" in recoveryRecord
         ? (recoveryRecord as BuildRunRecordV3).frozenPolicy
         : resolveAutonomyPolicy(loadProjectAutonomyConfig(cwd), autonomyProfile);
+      const supervisedInvocationId = recoveryRecord?.runId ?? supervisedRunId() ?? (process.env.RAFI_DETACHED_SUPERVISOR_RUN || undefined) ?? randomUUID();
+      if (await superviseStart(cwd, supervisedInvocationId, opts.supervisor === false ? { ...frozenPolicy, supervisorEnabled: false } : frozenPolicy, { steps: opts.steps, stacks: opts.stacks, detach: opts.detach })) return;
       const autoApprovePlanUpdates = recoveryRecord
         ? recoveryRecord.recoveryDecision?.planUpdateApproval === "auto"
         : Boolean(opts.yes);
@@ -517,6 +534,15 @@ export function buildStartCommand(): Command {
       const branchDefaults = resolveStartBranchDefaults(cwd, opts as Record<string, unknown>, command, deliveryRun);
       const resolvedPrefix = resolveStartBranchPrefix(cwd, opts as Record<string, unknown>, recoveryRecord);
       const branchPrefix = resolvedPrefix.value;
+      const approvalConsequences = {
+        branch_strategy: branchDefaults.branchMode ? "branch-per-ticket" : "current",
+        branch_prefix: branchPrefix,
+        ...(optionWasProvided(command, "completion") || optionWasProvided(command, "createPr") ? { completion: branchDefaults.completionMode } : {}),
+        ...(optionWasProvided(command, "mergeMethod") ? { merge_method: branchDefaults.mergeMethod } : {}),
+        ...(optionWasProvided(command, "prReady") ? { pr_ready: branchDefaults.prReady } : {}),
+        ...(optionWasProvided(command, "provider") ? { provider: branchDefaults.reviewProvider } : {}),
+      };
+
       if (opts.showSessionCost && opts.hideSessionCost) fail("choose either --show-session-cost or --hide-session-cost");
       const sessionCostOverride = opts.showSessionCost ? true : opts.hideSessionCost ? false : undefined;
       const thresholdOverride = opts.autoCompactThreshold === undefined ? undefined : Number(opts.autoCompactThreshold);
@@ -678,7 +704,7 @@ export function buildStartCommand(): Command {
       });
       const qaEnabled = qaResolution.enabled;
       if (qaResolution.deprecationWarning) console.error(`rafi: warning: ${qaResolution.deprecationWarning}`);
-      const invocationRunId = recoveryRecord?.runId ?? randomUUID();
+      const invocationRunId = supervisedInvocationId;
       let observabilityStore: ObservabilityStore | undefined;
       if (config.observability.enabled) {
         try { observabilityStore = new ObservabilityStore(cwd, { config: config.observability }); }
@@ -709,6 +735,11 @@ export function buildStartCommand(): Command {
           cwd: builderCwd,
           runtimeExecutable: agentExecutable,
           runtimePhase: "builder" as const,
+          preparationTimeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+          rpcTimeoutMs: frozenPolicy.runtimeDeadlines?.rpc_ms,
+          compactionTimeoutMs: frozenPolicy.runtimeDeadlines?.compaction_ms,
+          shutdownTimeoutMs: frozenPolicy.runtimeDeadlines?.shutdown_ms,
+          turnDeadlineMs: frozenPolicy.runtimeDeadlines?.turn_ms,
           model,
           ...(sessionRef ? { resumeSessionRef: sessionRef } : sessionId ? { resumeSessionId: sessionId } : {}),
           configRoot: cwd,
@@ -718,7 +749,9 @@ export function buildStartCommand(): Command {
           workspaceIdentity: !branchMode ? captureCurrentWorkflowSessionIdentity(builderCwd) : captureWorkspaceIdentity(builderCwd),
           ticketId: sessionRef?.ticketId,
           deliveryUnitId: sessionRef?.deliveryUnitId,
-          permission: createPermissionHandler(builderPolicy, log),
+          permission: createPermissionHandler(builderPolicy, log, { durable: () => ({ projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, ticketId: activeObserver?.context().ticketId }) }),
+          onQuestionTrace: (trace: import("../questionTrace.js").QuestionTrace) => log.write("question-round-trip", { ...trace }),
+          onLifecycleTrace: (trace: Parameters<NonNullable<import("../adapters/types.js").BuilderAdapterOptions["onLifecycleTrace"]>>[0]) => log.write("provider-lifecycle", { ...trace }),
           effort: builderEffort,
           fast: builderFast,
           systemPromptAppend: roleBundle.system || undefined,
@@ -835,8 +868,9 @@ export function buildStartCommand(): Command {
       };
 
       const createBuilderForSettings = async (builderCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
-        const ready = await ensureRuntimeReadyForCommand(builderCwd, settings.make, {
+        const ready = await ensureRuntimeReadyForCommand(builderCwd, settings.make, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
           label: "live Builder settings",
+          onTrace: trace => log.write("runtime-readiness", { ...trace, role: "builder" }),
           yes: true,
           allowSwitch: false,
           model: settings.model === "default" ? undefined : settings.model,
@@ -851,8 +885,15 @@ export function buildStartCommand(): Command {
           workspaceIdentity: !branchMode ? captureCurrentWorkflowSessionIdentity(builderCwd) : captureWorkspaceIdentity(builderCwd),
           runtimeExecutable: ready.executable,
           runtimePhase: "builder" as const,
+          preparationTimeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+          rpcTimeoutMs: frozenPolicy.runtimeDeadlines?.rpc_ms,
+          compactionTimeoutMs: frozenPolicy.runtimeDeadlines?.compaction_ms,
+          shutdownTimeoutMs: frozenPolicy.runtimeDeadlines?.shutdown_ms,
+          turnDeadlineMs: frozenPolicy.runtimeDeadlines?.turn_ms,
           model: settings.model === "default" ? undefined : settings.model,
-          permission: createPermissionHandler(policy, log),
+          permission: createPermissionHandler(policy, log, { durable: () => ({ projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, ticketId: activeObserver?.context().ticketId }) }),
+          onQuestionTrace: (trace: import("../questionTrace.js").QuestionTrace) => log.write("question-round-trip", { ...trace }),
+          onLifecycleTrace: (trace: Parameters<NonNullable<import("../adapters/types.js").BuilderAdapterOptions["onLifecycleTrace"]>>[0]) => log.write("provider-lifecycle", { ...trace }),
           effort: explicitEffort(settings.reasoning),
           fast: settings.fast,
           systemPromptAppend: roleBundle.system || undefined,
@@ -866,8 +907,9 @@ export function buildStartCommand(): Command {
       };
 
       const createQaForSettings = async (qaCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
-        const ready = await ensureRuntimeReadyForCommand(qaCwd, settings.make, {
+        const ready = await ensureRuntimeReadyForCommand(qaCwd, settings.make, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
           label: "live QA settings",
+          onTrace: trace => log.write("runtime-readiness", { ...trace, role: "qa" }),
           yes: true,
           allowSwitch: false,
           model: settings.model === "default" ? undefined : settings.model,
@@ -881,8 +923,15 @@ export function buildStartCommand(): Command {
           sessionStream: "qa",
           runtimeExecutable: ready.executable,
           runtimePhase: "qa" as const,
+          preparationTimeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+          rpcTimeoutMs: frozenPolicy.runtimeDeadlines?.rpc_ms,
+          compactionTimeoutMs: frozenPolicy.runtimeDeadlines?.compaction_ms,
+          shutdownTimeoutMs: frozenPolicy.runtimeDeadlines?.shutdown_ms,
+          turnDeadlineMs: frozenPolicy.runtimeDeadlines?.turn_ms,
           model: settings.model === "default" ? undefined : settings.model,
-          permission: createPermissionHandler(policy, log),
+          permission: createPermissionHandler(policy, log, { durable: () => ({ projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, ticketId: activeObserver?.context().ticketId }) }),
+          onQuestionTrace: (trace: import("../questionTrace.js").QuestionTrace) => log.write("question-round-trip", { ...trace }),
+          onLifecycleTrace: (trace: Parameters<NonNullable<import("../adapters/types.js").BuilderAdapterOptions["onLifecycleTrace"]>>[0]) => log.write("provider-lifecycle", { ...trace }),
           effort: explicitEffort(settings.reasoning),
           fast: settings.fast,
           sandboxMode: "read-only" as const,
@@ -928,7 +977,7 @@ export function buildStartCommand(): Command {
           enabled: Boolean(process.stdin.isTTY && process.stdout.isTTY),
           allowSwitch: !(opts.resume || opts.continue),
           recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
-            const nextReady = await ensureRuntimeReadyForCommand(builderCwd, nextRuntime, {
+            const nextReady = await ensureRuntimeReadyForCommand(builderCwd, nextRuntime, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
               label: "builder recovery",
               allowSwitch: false,
               model: nextRuntime === agent ? model : undefined,
@@ -1105,8 +1154,9 @@ export function buildStartCommand(): Command {
         // QA settings for each one so a threshold-only update applies to the
         // very next review instead of waiting for a nonexistent session reuse.
         const qaSettings = liveRoleSettings("qa", resolvedContinuitySettings("qa"));
-        const ready = await ensureRuntimeReadyForCommand(qaCwd, qaSettings.make, {
+        const ready = await ensureRuntimeReadyForCommand(qaCwd, qaSettings.make, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
           label: "live QA settings",
+          onTrace: trace => log.write("runtime-readiness", { ...trace, role: "qa" }),
           yes: true,
           allowSwitch: false,
           model: qaSettings.model === "default" ? undefined : qaSettings.model,
@@ -1120,11 +1170,18 @@ export function buildStartCommand(): Command {
           sessionStream: "qa",
           runtimeExecutable: ready.executable,
           runtimePhase: "qa" as const,
+          preparationTimeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+          rpcTimeoutMs: frozenPolicy.runtimeDeadlines?.rpc_ms,
+          compactionTimeoutMs: frozenPolicy.runtimeDeadlines?.compaction_ms,
+          shutdownTimeoutMs: frozenPolicy.runtimeDeadlines?.shutdown_ms,
+          turnDeadlineMs: frozenPolicy.runtimeDeadlines?.turn_ms,
           model: qaSettings.model === "default" ? undefined : qaSettings.model,
           ...(sessionRef ? { resumeSessionRef: sessionRef } : {}),
           sessionGeneration: sessionRef?.generation ?? 0,
           workspaceIdentity: captureWorkspaceIdentity(qaCwd),
-          permission: createPermissionHandler(qaPolicy, log),
+          permission: createPermissionHandler(qaPolicy, log, { durable: () => ({ projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, ticketId: activeObserver?.context().ticketId }) }),
+          onQuestionTrace: (trace: import("../questionTrace.js").QuestionTrace) => log.write("question-round-trip", { ...trace }),
+          onLifecycleTrace: (trace: Parameters<NonNullable<import("../adapters/types.js").BuilderAdapterOptions["onLifecycleTrace"]>>[0]) => log.write("provider-lifecycle", { ...trace }),
           effort: explicitEffort(qaSettings.reasoning),
           fast: qaSettings.fast,
           sandboxMode: "read-only" as const,
@@ -1157,7 +1214,7 @@ export function buildStartCommand(): Command {
           enabled: false,
           allowSwitch: false,
           recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
-            const nextReady = await ensureRuntimeReadyForCommand(qaCwd, nextRuntime, {
+            const nextReady = await ensureRuntimeReadyForCommand(qaCwd, nextRuntime, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
               label: "QA recovery",
               allowSwitch: false,
               model: nextRuntime === qaAgent ? qaModel : undefined,
@@ -1484,8 +1541,8 @@ export function buildStartCommand(): Command {
         });
         await controller.observeNativeCompactions(adapter);
       };
-      const qaNonconvergence = createQaNonconvergenceHandler(cwd, !process.stdin.isTTY || !process.stdout.isTTY, roleDefaults.planner, () => activeObserver);
-      const qaReportRecovery = createQaReportRecoveryHandler(!process.stdin.isTTY || !process.stdout.isTTY, () => activeObserver);
+      const qaNonconvergence = createQaNonconvergenceHandler(cwd, !process.stdin.isTTY || !process.stdout.isTTY, roleDefaults.planner, () => activeObserver, () => activeContinuityRunId ?? invocationRunId);
+      const qaReportRecovery = createQaReportRecoveryHandler(cwd, !process.stdin.isTTY || !process.stdout.isTTY, () => activeObserver);
 
       if (branchMode) {
         const ticketsConfig = loadTicketsConfig(cwd);
@@ -1512,7 +1569,7 @@ export function buildStartCommand(): Command {
           await ensureReviewProviderReady(cwd, branchDefaults.reviewProvider, log, Boolean(opts.yes));
         }
 
-        const ready = await ensureRuntimeReadyForCommand(cwd, agent, {
+        const ready = await ensureRuntimeReadyForCommand(cwd, agent, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
           label: "start",
           yes: Boolean(opts.yes),
           allowSwitch: !(opts.resume || opts.continue),
@@ -1662,19 +1719,6 @@ export function buildStartCommand(): Command {
         }
         console.log();
 
-        if (!autoApprovePlanUpdates && plan.issues.every((issue) => !issue.blocking)) {
-          const action = await withObservedUserWait(activeObserver, "branch plan approval", () => select({
-            message: branchPresentation.prompt,
-            options: [
-              { value: "proceed", label: "Proceed" },
-              { value: "cancel", label: "Cancel" },
-            ],
-          }));
-          if (isCancel(action) || action === "cancel") {
-            console.log("ai-foreman: cancelled");
-            process.exit(0);
-          }
-        }
 
         for (const [ticketId, session] of resumeSessionByTicket) {
           const ref = session.sessionRef;
@@ -1716,6 +1760,20 @@ export function buildStartCommand(): Command {
           runDecisions: { workMode: "branch-per-ticket", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBranchBuilder.auto_compact_threshold_percent ?? 50, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
         });
         activeContinuityRunId = masterRun.runId;
+        if (requiresBuildApproval(cwd, plan.nodes.map(node => node.ticket.id), autoApprovePlanUpdates, approvalConsequences) && plan.issues.every((issue) => !issue.blocking)) {
+          const action = await durableHumanDecision({ projectDir: cwd, runId: invocationRunId, key: `branch-plan:${buildScopeRevision(cwd, approvalConsequences)}`, prompt: branchPresentation.prompt, choices: [{ id: "proceed", label: "Proceed" }, { id: "cancel", label: "Cancel" }], operation: () => select({
+            message: branchPresentation.prompt,
+            options: [
+              { value: "proceed", label: "Proceed" },
+              { value: "cancel", label: "Cancel" },
+            ],
+          }) });
+          if (isCancel(action) || action === "cancel") {
+            console.log("ai-foreman: cancelled");
+            process.exit(0);
+          }
+        }
+
         const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, masterRun.runId, typeof opts.ticket === "string" ? opts.ticket : undefined) : undefined;
         let qaProtocolResumeTicket: string | undefined;
         if (recoveryRecord && !qaResumedRecovery) {
@@ -1785,6 +1843,7 @@ export function buildStartCommand(): Command {
           projectDir: cwd,
           runId: masterRun.runId,
           plan,
+          continueIndependentTickets: frozenPolicy.continueIndependentTickets,
           log,
           agent,
           model,
@@ -1836,7 +1895,7 @@ export function buildStartCommand(): Command {
             }, (line, snapshot) => {
               const activity = currentActivity();
               if (activity) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, "")); else console.log(line);
-              activeObserver?.store.updateCurrentState({ runId: masterRun.runId, role: "builder", stream: "builder", executionId: activeObserver.executionId, ticketId: masterRun.currentTicket, providerSessionId: snapshot.contextSample.providerSessionId, phase: "builder ticket session", lastSignalAt: snapshot.contextSample.observedAt });
+              activeObserver?.store.updateCurrentState({ runId: masterRun.runId, role: "builder", stream: "builder", executionId: activeObserver.executionId, ticketId: masterRun.currentTicket, providerSessionId: snapshot.contextSample.providerSessionId, phase: snapshot.phase, lastSignalAt: snapshot.contextSample.observedAt });
               if (snapshot.contextSample.used !== undefined) activeObserver?.store.recordMetric({ runId: masterRun.runId, executionId: activeObserver.executionId, role: "builder", stream: "builder", providerSessionId: snapshot.contextSample.providerSessionId }, "context_used_tokens", snapshot.contextSample.used, { unit: "tokens" });
             });
             reporter.start();
@@ -1939,7 +1998,7 @@ export function buildStartCommand(): Command {
         process.exit(failed ? 2 : 0);
       }
 
-      const ready = await ensureRuntimeReadyForCommand(cwd, agent, {
+      const ready = await ensureRuntimeReadyForCommand(cwd, agent, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
         label: "start",
         yes: Boolean(opts.yes),
         allowSwitch: !(opts.resume || opts.continue),
@@ -1962,7 +2021,7 @@ export function buildStartCommand(): Command {
         resumeSessionRef = availability.sessionRef;
       }
       if (qaEnabled) {
-        const qaReady = await ensureRuntimeReadyForCommand(cwd, qaAgent, { label: "independent QA", yes: Boolean(opts.yes), model: qaModel });
+        const qaReady = await ensureRuntimeReadyForCommand(cwd, qaAgent, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms, label: "independent QA", yes: Boolean(opts.yes), model: qaModel });
         qaAgent = qaReady.runtime;
         qaModel = qaReady.model;
         qaExecutable = qaReady.executable;
@@ -2076,7 +2135,7 @@ export function buildStartCommand(): Command {
             await adapter.adoptValidatedSuccessor(transfer.successor);
             return adapter;
           }
-          await adapter.close().catch(() => {});
+          await adapter.close();
           return continuousBuilder(transfer.successor, cwd, buildRun.runId, settings);
         },
       });
@@ -2096,6 +2155,7 @@ export function buildStartCommand(): Command {
         qaReportRecovery,
         qaResumedRecovery,
         buildRun.runId,
+        frozenPolicy.continueIndependentTickets,
       );
       activeBuilderForStatus = () => foreman.builderAdapter();
       const statusReporter = liveStatusReporter = new AgentStatusReporter({
@@ -2111,7 +2171,7 @@ export function buildStartCommand(): Command {
         const activity = currentActivity();
         if (activity) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, ""));
         else console.log(line);
-        activeObserver?.store.updateCurrentState({ runId: buildRun.runId, role: "builder", stream: "builder", executionId: activeObserver.executionId, ticketId: buildRun.currentTicket, providerSessionId: snapshot.contextSample.providerSessionId, phase: "builder work session", lastSignalAt: snapshot.contextSample.observedAt });
+        activeObserver?.store.updateCurrentState({ runId: buildRun.runId, role: "builder", stream: "builder", executionId: activeObserver.executionId, ticketId: buildRun.currentTicket, providerSessionId: snapshot.contextSample.providerSessionId, phase: snapshot.phase, lastSignalAt: snapshot.contextSample.observedAt });
         if (snapshot.contextSample.used !== undefined) activeObserver?.store.recordMetric({ runId: buildRun.runId, executionId: activeObserver.executionId, role: "builder", stream: "builder", providerSessionId: snapshot.contextSample.providerSessionId }, "context_used_tokens", snapshot.contextSample.used, { unit: "tokens" });
       });
       statusReporter.start();
@@ -2134,7 +2194,7 @@ export function buildStartCommand(): Command {
           console.log(`ai-foreman: reconciling the interrupted QA finalization for ${qaFinalizationTicket}; Builder dispatch is disabled.\n`);
           await foreman.completePendingQaFinalization(qaFinalizationTicket);
           buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "qa-finalization-complete", { status: "recoverable", currentTicket: qaFinalizationTicket }), "recoverable");
-          clearInterval(heartbeat); statusReporter.stop(); await foreman.close(); await viewer;
+          clearInterval(heartbeat); statusReporter.stop("QA finalization complete"); await foreman.close(); await viewer;
           activeObserver?.finish(buildRun.status, observationSummaryMetadata(cwd, buildRun, qaEnabled, capturedBuilder.make));
           observabilityStore?.closeLogFile(logPath, buildRun.status); observabilityStore?.close(); activeObserver = undefined;
           process.off("exit", finishObservationOnExit);
@@ -2155,7 +2215,7 @@ export function buildStartCommand(): Command {
             status: "recoverable", currentTicket: ticketId,
           }), "recoverable");
           clearInterval(heartbeat);
-          statusReporter.stop();
+          statusReporter.stop(qa.outcome === "passed" || qa.outcome === "waived" ? "QA recovery complete" : "paused");
           await foreman.close();
           await viewer;
           activeObserver?.finish(buildRun.status, observationSummaryMetadata(cwd, buildRun, qaEnabled, capturedBuilder.make));
@@ -2177,21 +2237,22 @@ export function buildStartCommand(): Command {
         if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
         buildRun = checkpointBuildRun(cwd, buildRun, "preflight-complete");
 
-        if (!autoApprovePlanUpdates) {
+        let planDecisionRevision = 0;
+        if (requiresBuildApproval(cwd, preferredTicket ? [preferredTicket] : undefined, autoApprovePlanUpdates, approvalConsequences)) {
           while (true) {
             console.log();
-            const action = await withObservedUserWait(activeObserver, "build plan decision", () => select({
+            const action = await durableHumanDecision({ projectDir: cwd, runId: invocationRunId, key: `build-plan:${buildScopeRevision(cwd, approvalConsequences)}:${planDecisionRevision}`, observer: activeObserver, prompt: "How does this plan look?", choices: [{ id: "proceed", label: "Proceed" }, { id: "feedback", label: "Feedback" }, { id: "cancel", label: "Cancel" }], operation: () => select({
               message: "How does this plan look?",
               options: [
                 { value: "proceed", label: "Proceed — start implementing" },
                 { value: "feedback", label: "Give feedback — revise the plan" },
                 { value: "cancel", label: "Cancel" },
               ],
-            }));
+            }) });
 
             if (isCancel(action) || action === "cancel") {
               console.log("ai-foreman: cancelled");
-              statusReporter.stop();
+              statusReporter.stop("cancelled");
               await foreman.close();
               await viewer;
               process.exit(0);
@@ -2201,19 +2262,20 @@ export function buildStartCommand(): Command {
               break;
             }
 
-            const fb = await withObservedUserWait(activeObserver, "build plan feedback", () => text({
+            const fb = await durableHumanDecision({ projectDir: cwd, runId: invocationRunId, key: `build-plan-feedback:${buildScopeRevision(cwd, approvalConsequences)}:${planDecisionRevision}`, observer: activeObserver, prompt: "Your build plan feedback:", choices: [{ id: "custom", label: "Provide feedback" }], operation: () => text({
               message: "Your feedback:",
               validate: (v) => (v?.trim() ? undefined : "Please enter some feedback"),
-            }));
+            }) });
             if (isCancel(fb)) {
               console.log("ai-foreman: cancelled");
-              statusReporter.stop();
+              statusReporter.stop("cancelled");
               await foreman.close();
               await viewer;
               process.exit(0);
             }
             console.log();
             await foreman.sendPreflightFeedback(String(fb));
+            planDecisionRevision++;
           }
         }
 
@@ -2236,7 +2298,7 @@ export function buildStartCommand(): Command {
           ? completeBuildRun(cwd, buildRun)
           : releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "builder-or-qa-interrupted", { status: "recoverable" }), "recoverable");
         clearInterval(heartbeat);
-        statusReporter.stop();
+        statusReporter.stop(buildRun.status === "completed" ? "completed" : "paused");
         await foreman.close();
         await viewer;
         activeObserver?.finish(buildRun.status, observationSummaryMetadata(cwd, buildRun, qaEnabled, capturedBuilder.make));
@@ -2255,15 +2317,18 @@ export function buildStartCommand(): Command {
         if (result.outcome !== "all-done" && result.outcome !== "plan-complete") {
           const executable = command.parent?.name() === "rafi" ? "rafi" : "ai-foreman";
           const remainingSteps = Math.max(1, result.requested - result.completed);
-          for (const line of formatResumeGuidance(executable, cwd, remainingSteps, foreman.builderSessionId())) {
-            console.log(line);
-          }
+          const decisionsDb = new WorkflowDb(cwd);
+          try {
+            for (const line of formatResumeGuidance(executable, cwd, remainingSteps, foreman.builderSessionId(), {
+              runId: buildRun.runId, decisions: decisionsDb.pendingHumanDecisions(buildRun.runId),
+            })) console.log(line);
+          } finally { decisionsDb.close(); }
         }
         fireTerminalBell(config.notifications.terminal_bell);
         process.exit(result.outcome === "needs-human" || result.outcome === "blocked" ? 2 : 0);
       } catch (err) {
         clearInterval(heartbeat);
-        statusReporter.stop();
+        statusReporter.stop("interrupted");
         if (err instanceof ContextCapabilityError || err instanceof CurrentWorkflowChangedError) {
           const summary = err.message.slice(0, 1000);
           buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "safe-boundary-paused", {
@@ -2303,6 +2368,12 @@ export function buildStartCommand(): Command {
           console.error(`foreman: resume this run with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)}`);
           process.exit(2);
         }
+        if (err instanceof HumanDecisionRequired) {
+          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "waiting-for-human", { status: "recoverable" }), "recoverable");
+          await foreman.close().catch(() => {});
+          console.error(err.message);
+          process.exit(2);
+        }
         if (err instanceof HandoffLoopError || err instanceof ContinuityRecoveryRequiredError) {
           const summary = err.message.slice(0, 1000);
           buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "guided-recovery-required", {
@@ -2321,10 +2392,6 @@ export function buildStartCommand(): Command {
         fail(`run failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
-}
-
-function withObservedUserWait<T>(observer: RunObserver | undefined, label: string, operation: () => Promise<T>): Promise<T> {
-  return observer ? observer.span("user_wait", label, operation) : operation();
 }
 
 function ticketSizeBucket(projectDir: string, ticketIds: readonly string[]): string | undefined {
@@ -2395,11 +2462,19 @@ async function prepareNativeAutoCompaction(adapter: BuilderAdapter): Promise<voi
   }
 }
 
-function createQaNonconvergenceHandler(projectDir: string, noninteractive: boolean, planner?: AgentRoleDefaultsV1, observer?: () => RunObserver | undefined): (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision> {
+export function createQaNonconvergenceHandler(projectDir: string, noninteractive: boolean, planner?: AgentRoleDefaultsV1, observer?: () => RunObserver | undefined, activeRunId?: () => string): (context: QaNonconvergenceContext) => Promise<QaNonconvergenceDecision> {
   return async (context) => {
-    if (noninteractive || !process.stdin.isTTY || !process.stdout.isTTY) return { action: "pause" };
+    const runId = activeRunId?.();
+    if (!runId) throw new Error("QA nonconvergence requires its owning build run");
+    const scope = createHash("sha256").update(JSON.stringify([buildScopeRevision(projectDir), context.ticket, context.history])).digest("hex");
+    let round = 0;
+    const ask = <T>(phase: string, choices: Array<{ id: string; label: string }>, operation: () => Promise<T>) => durableHumanDecision({
+      projectDir, runId, ticketId: context.ticket.id, observer: observer?.(), defer: noninteractive,
+      key: `qa-nonconvergence:${scope}:${round}:${phase}`, prompt: `${context.ticket.id}: ${phase}`, choices, operation,
+    });
     while (true) {
-      const choice = await withObservedUserWait(observer?.(), "QA nonconvergence decision", () => select({ message: `QA did not converge for ${context.ticket.id}. What next?`, options: [
+      round++;
+      const choice = await ask("QA nonconvergence decision", [{ id: "retry", label: "Retry Builder fix" }, { id: "pause", label: "Pause" }, { id: "waive", label: "Consider explicit QA waiver" }, { id: "planner", label: "Discuss with Planner" }], () => select({ message: `QA did not converge for ${context.ticket.id}. What next?`, options: [
         { value: "retry", label: "Retry another Builder fix" },
         { value: "pause", label: "Pause at this checkpoint" },
         { value: "waive", label: "Explicitly waive QA" },
@@ -2408,7 +2483,7 @@ function createQaNonconvergenceHandler(projectDir: string, noninteractive: boole
       if (isCancel(choice) || choice === "pause") return { action: "pause" };
       if (choice === "retry") return { action: "retry" };
       if (choice === "waive") {
-        const approved = await withObservedUserWait(observer?.(), "QA waiver confirmation", () => select({ message: "Waive QA and record validation_result=failed with all unresolved issues?", options: [
+        const approved = await ask("QA waiver confirmation: record validation_result=failed and retain unresolved issues?", [{ id: "no", label: "No" }, { id: "yes", label: "Waive and continue" }], () => select({ message: "Waive QA and record validation_result=failed with all unresolved issues?", options: [
           { value: "no", label: "No (Recommended)" }, { value: "yes", label: "Yes, waive and continue" },
         ] }));
         if (approved === "yes") {
@@ -2426,7 +2501,7 @@ function createQaNonconvergenceHandler(projectDir: string, noninteractive: boole
         }
         continue;
       }
-      const discussion = await withObservedUserWait(observer?.(), "QA remediation guidance", () => text({ message: "What should the Planner focus on?", defaultValue: "Explain the QA failures and propose the safest concrete remediation." }));
+      const discussion = await ask("QA remediation guidance", [{ id: "custom", label: "Planner focus" }], () => text({ message: "What should the Planner focus on?", defaultValue: "Explain the QA failures and propose the safest concrete remediation." }));
       if (isCancel(discussion)) continue;
       const rawDiff = execFileSync("git", ["-C", context.builderWorktree, "diff", "--binary", "HEAD"], { encoding: "buffer", maxBuffer: 128 * 1024 * 1024 });
       const diffLimit = 128 * 1024;
@@ -2449,39 +2524,41 @@ function createQaNonconvergenceHandler(projectDir: string, noninteractive: boole
         "End with STEP_STATUS: plan_complete | summary=\"QA remediation proposed\"",
       ].join("\n\n");
       let resumeSessionId: string | undefined;
+      let revision = 0;
       while (true) {
-        const run = await runRoleInstruction({
+        revision++;
+        const proposalDigest = createHash("sha256").update(JSON.stringify([scope, round, revision, instruction, planner, captureFrozenQaSource(context.builderWorktree).digest])).digest("hex");
+        const run = await durableReadOnlyProposal({ projectDir, runId, ticketId: context.ticket.id, digest: proposalDigest, operation: () => runRoleInstruction({
           projectDir, role: "planner", instruction, label: "QA Planner remediation", agent: planner?.make,
           model: explicitDefaultValue(planner?.model), effort: explicitEffort(planner?.reasoning), fast: planner?.fast,
           resumeSessionId, permissionConfig: readOnlyPermissionConfig(), sandboxMode: "read-only",
           logPath: makeRoleLogPath(projectDir, "qa-remediation"), logEvent: "rafi-plan",
-        });
+        }) });
         if (run.turn.result.isError || run.turn.status.kind !== "plan_complete") throw new Error(`Planner remediation failed: ${run.turn.status.error ?? run.turn.result.text.slice(0, 500)}`);
         const match = /RAFI_QA_REMEDIATION_START\s*([\s\S]*?)\s*RAFI_QA_REMEDIATION_END/.exec(run.turn.result.text);
         if (!match) throw new Error("Planner remediation did not return the required structured proposal");
         const proposal = JSON.parse(match[1]!.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")) as { summary?: string; fix_instructions?: string[] };
         if (!proposal.summary || !Array.isArray(proposal.fix_instructions) || !proposal.fix_instructions.every((item) => typeof item === "string")) throw new Error("Planner remediation proposal is malformed");
         console.log(`\nPlanner remediation: ${proposal.summary}\n${proposal.fix_instructions.map((item) => `- ${item}`).join("\n")}`);
-        const decision = await withObservedUserWait(observer?.(), "QA remediation approval", () => select({ message: "Use this remediation for a new Builder fix session?", options: [
+        const decision = await ask(`QA remediation approval ${revision}: ${JSON.stringify(proposal)}`, [{ id: "approve", label: "Approve" }, { id: "revise", label: "Revise" }, { id: "cancel", label: "Return to choices" }], () => select({ message: "Use this remediation for a new Builder fix session?", options: [
           { value: "approve", label: "Approve (Recommended)" }, { value: "revise", label: "Discuss/revise" }, { value: "cancel", label: "Cancel and return to choices" },
         ] }));
         if (decision === "approve") return { action: "remediate", remediation: [proposal.summary, ...proposal.fix_instructions].join("\n") };
         if (isCancel(decision) || decision === "cancel") break;
-        const feedback = await withObservedUserWait(observer?.(), "QA Planner revision feedback", () => text({ message: "Planner revision feedback:" })); if (isCancel(feedback)) break;
+        const feedback = await ask(`QA Planner revision feedback ${revision}`, [{ id: "custom", label: "Revision feedback" }], () => text({ message: "Planner revision feedback:" })); if (isCancel(feedback)) break;
         resumeSessionId = run.sessionId; instruction = `Revise the complete QA remediation proposal using this feedback: ${String(feedback)}. Keep the exact structured envelope and final plan_complete marker.`;
       }
     }
   };
 }
 
-function createQaReportRecoveryHandler(noninteractive: boolean, observer?: () => RunObserver | undefined): QaReportRecoveryHandler {
+export function createQaReportRecoveryHandler(projectDir: string, noninteractive: boolean, observer?: () => RunObserver | undefined): QaReportRecoveryHandler {
   return async ({ packet, liveSession, contextUsage }) => {
-    if (noninteractive || !process.stdin.isTTY || !process.stdout.isTTY) {
-      console.error(`foreman: QA report recovery requires input; saved packet ${packet.directory}`);
-      console.error(`foreman: resume with the run ID recorded in ${join(packet.directory, "manifest.json")}`);
-      return { action: "pause" };
-    }
-    const choice = await withObservedUserWait(observer?.(), "QA report recovery decision", () => select({
+    const ask = <T>(phase: string, choices: Array<{ id: string; label: string }>, operation: () => Promise<T>) => durableHumanDecision({
+      projectDir, runId: packet.manifest.runId, ticketId: packet.manifest.ticketId, observer: observer?.(), defer: noninteractive,
+      key: `qa-report:${packet.manifest.packetDigest}:${phase}`, prompt: `${packet.manifest.ticketId}: ${phase}`, choices, operation,
+    });
+    const choice = await ask("QA report recovery decision", [{ id: "fresh", label: "Fresh QA" }, { id: "manual", label: "Inspect saved report" }, { id: "guidance", label: "Provide fresh-review guidance" }, { id: "pause", label: "Pause" }], () => select({
       message: "QA report recovery:",
       options: [
         { value: "fresh", label: "Run complete fresh QA." },
@@ -2494,7 +2571,7 @@ function createQaReportRecoveryHandler(noninteractive: boolean, observer?: () =>
     if (choice === "fresh") return { action: "fresh" };
     if (choice === "manual") return { action: "manual" };
     console.log(`foreman: current QA context usage: ${JSON.stringify(contextUsage).slice(0, 500)}`);
-    const guidance = await withObservedUserWait(observer?.(), "QA recovery guidance", () => text({ message: "Specific QA report-recovery instructions:" }));
+    const guidance = await ask("QA recovery guidance", [{ id: "custom", label: "Recovery instructions" }], () => text({ message: "Specific QA report-recovery instructions:" }));
     if (isCancel(guidance) || !String(guidance).trim()) return { action: "pause" };
     void liveSession;
     return { action: "guidance", instructions: String(guidance), route: "fresh" };

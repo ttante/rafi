@@ -10,6 +10,9 @@ import { resolveExecutablePath } from "../runtimeReadiness.js";
 import type { RuntimeProbeResult } from "rafi-spec";
 import { otherRuntime, runtimeDisplayName } from "./runtimeSelection.js";
 import { currentActivity } from "../activity.js";
+import { durableHumanDecision } from "../humanDecision.js";
+import { WorkflowDb } from "../workflowDb.js";
+import { createHash } from "node:crypto";
 
 export type RuntimeCommandRecoveryChoice = "retry" | "switch" | "cancel";
 
@@ -20,6 +23,9 @@ export interface RuntimeCommandRecoveryContext {
 
 export interface RuntimeReadyForCommandOptions {
   label: string;
+  timeoutMs?: number;
+  durable?: { projectDir: string; runId: string; scopeRevision: string };
+  onTrace?: import("../runtimeReadiness.js").ProbeRuntimeOptions["onTrace"];
   yes?: boolean;
   allowSwitch?: boolean;
   model?: string | undefined;
@@ -46,7 +52,7 @@ export async function ensureRuntimeReadyForCommand(
   const opts = typeof labelOrOptions === "string"
     ? { label: labelOrOptions }
     : labelOrOptions;
-  const check = opts.check ?? checkRuntimeReady;
+  const check = opts.check ?? ((projectDir: string, runtime: AgentRuntime) => checkRuntimeReady(projectDir, runtime, { onTrace: opts.onTrace, timeoutMs: opts.timeoutMs }));
   const checkClaudeSdk = opts.checkClaudeSdk ?? requireClaudeSDK;
   const allowSwitch = opts.allowSwitch !== false;
   const nonInteractive = !opts.choose && (Boolean(opts.yes) || !process.stdin.isTTY || !process.stdout.isTTY);
@@ -68,12 +74,14 @@ export async function ensureRuntimeReadyForCommand(
             cause: err,
           });
 
-      if (nonInteractive) {
+      if (nonInteractive && !opts.durable) {
         throw failure;
       }
 
       const fallbackRuntime = otherRuntime(runtime);
-      const choice = opts.choose
+      const choice = opts.durable && !opts.choose
+        ? await durableRuntimeRecovery(opts.durable, failure, opts.label, fallbackRuntime, allowSwitch)
+        : opts.choose
         ? await opts.choose(failure, { otherRuntime: fallbackRuntime, allowSwitch })
         : await promptRuntimeRecovery(failure, opts.label, fallbackRuntime, allowSwitch);
 
@@ -112,6 +120,7 @@ export async function ensureRuntimeReadyForCommand(
       }
 
       if (choice === "cancel") {
+        if (opts.durable) throw failure;
         console.log("foreman: cancelled");
         process.exit(0);
       }
@@ -119,6 +128,35 @@ export async function ensureRuntimeReadyForCommand(
       throw failure;
     }
   }
+}
+
+async function durableRuntimeRecovery(
+  scope: NonNullable<RuntimeReadyForCommandOptions["durable"]>,
+  failure: RuntimeAuthError, label: string, fallbackRuntime: AgentRuntime, allowSwitch: boolean,
+): Promise<RuntimeCommandRecoveryChoice> {
+  const db = new WorkflowDb(scope.projectDir);
+  try {
+    db.ensureRun(scope.runId);
+    const identity = createHash("sha256").update(JSON.stringify([scope.scopeRevision, failure.runtime, label, allowSwitch])).digest("hex");
+    const prefix = `runtime-recovery:${scope.runId}:${identity}:`;
+    const attempt = db.operations(scope.runId).filter(item => item.kind === "runtime-recovery-decision" && item.idempotencyKey.startsWith(prefix)).length;
+    const key = `${prefix}${attempt}`;
+    console.error(failure.message);
+    const choice = await durableHumanDecision<RuntimeCommandRecoveryChoice>({
+      projectDir: scope.projectDir, runId: scope.runId, key,
+      prompt: `${runtimeCommandLabel(failure.runtime)} is not ready for ${label}. Choose how to recover.`,
+      choices: [{ id: "retry", label: "Fix manually and retry" }, ...(allowSwitch ? [{ id: "switch", label: `Use ${runtimeDisplayName(fallbackRuntime)}` }] : []), { id: "cancel", label: "Stop and preserve work" }],
+      operation: () => promptRuntimeRecovery(failure, label, fallbackRuntime, allowSwitch),
+    });
+    // Spend this authorization before executing it. A later failure must never
+    // reuse an old retry answer and turn a human decision into an infinite loop.
+    db.atomic(() => {
+      db.planOperation({ runId: scope.runId, idempotencyKey: key, kind: "runtime-recovery-decision", intent: { choice } });
+      db.updateOperation(key, "in_progress");
+      db.updateOperation(key, "confirmed", { result: { choice } });
+    });
+    return choice;
+  } finally { db.close(); }
 }
 
 async function promptRuntimeRecovery(

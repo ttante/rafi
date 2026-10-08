@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,8 +22,8 @@ test("runtime probe reports the absolute executable actually invoked", async () 
   const executable = join(dir, "claude");
   writeFileSync(executable, "#!/bin/sh\nprintf OK\n", "utf8");
   chmodSync(executable, 0o755);
-  const result = await probeRuntime(dir, "claude", { env: { PATH: dir }, timeoutMs: 2_000 });
-  assert.equal(result.ok, true);
+  const result = await probeRuntime(dir, "claude", { env: { PATH: dir }, timeoutMs: 10_000 });
+  assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.executable, executable);
 });
 
@@ -41,4 +41,32 @@ test("runtime diagnostics remove ANSI and secrets and enforce the byte cap", () 
   assert.doesNotMatch(value, /sk_a/);
   assert.ok(Buffer.byteLength(value) <= 512);
   assert.match(value, /<redacted>/);
+});
+
+for (const scenario of ["hung-shutdown", "inherited-stdio", "redirected-stdio-child", "invalid-completion", "cancelled"] as const) test(`readiness ${scenario} remains bounded and cannot turn stdout into success`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-readiness-lifecycle-"));
+  try {
+    const script = scenario === "inherited-stdio"
+      ? "printf 'OK\\n'; /bin/sleep 30 & exit 0"
+      : scenario === "redirected-stdio-child" ? "/bin/sh -c 'trap \"\" TERM; /bin/sleep 8; printf alive > orphan-marker; /bin/sleep 2' >/dev/null 2>&1 & printf 'OK\\n'; /bin/sleep 30"
+      : scenario === "invalid-completion" ? "printf 'unrelated output\\n'"
+      : "printf 'OK\\n'; /bin/sleep 30";
+    const executable = join(root, "codex"); writeFileSync(executable, `#!/bin/sh\n${script}\n`); chmodSync(executable, 0o755);
+    const controller = new AbortController(); const traces: string[] = [];
+    if (scenario === "cancelled") setTimeout(() => controller.abort(), 40);
+    const began = performance.now();
+    // Leave enough time for the shell to start under workspace-suite load; a
+    // 200 ms deadline can kill it before the behavior under test even begins.
+    const result = await probeRuntime(root, "codex", { env: { PATH: root }, timeoutMs: scenario === "invalid-completion" ? 5000 : 3000, signal: controller.signal, onTrace: event => traces.push(event.phase) });
+    assert.equal(result.ok, false); assert.ok(performance.now() - began < (scenario === "invalid-completion" ? 6500 : 4500));
+    assert.ok(traces.includes("spawn")); assert.ok(traces.includes("settled"));
+    if (scenario === "invalid-completion") assert.equal(result.category, "malformed-protocol");
+    else if (scenario === "cancelled") assert.match(result.diagnostics, /cancelled/);
+    else { assert.equal(result.category, "timeout"); assert.ok(traces.includes("output"), `fixture must produce output before timeout: ${JSON.stringify(traces)}`); }
+    if (scenario === "redirected-stdio-child") {
+      await new Promise(resolve => setTimeout(resolve, 8100));
+      assert.equal(existsSync(join(root, "orphan-marker")), false, "owned descendant must not survive just because the parent closed stdio");
+      assert.ok(traces.includes("owned-child-cleanup"));
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

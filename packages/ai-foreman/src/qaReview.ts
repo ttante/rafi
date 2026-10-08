@@ -1,3 +1,5 @@
+import { checkQaPrerequisites } from "./qaPrerequisites.js";
+import { boundedQaHistory } from "./qaHandbackHistory.js";
 import {
   QA_FAILURE_REPORT_END, QA_FAILURE_REPORT_START, parseQaResponseContract, qaFailureReportV1Schema,
   type ProviderSessionRefV1, type QaFailureReportV1, type QaFindingRefV2, type SessionStrategy,
@@ -41,8 +43,8 @@ export type QaFixRequest =
   | { kind: "validated-report"; report: QaFailureReportV1; reportDigest: string; history: QaReportHistoryEntry[]; latestBuilderResult: string }
   | { kind: "planner-remediation"; report: QaFailureReportV1; reportDigest: string; remediation: string; history: QaReportHistoryEntry[]; latestBuilderResult: string };
 export type QaFixResult =
-  | { ok: true; response: string; summary: string; detail?: string; providerTurnId?: string }
-  | { ok: false; detail?: string; response?: string; summary?: string; providerTurnId?: string };
+  | { outcome?: import("./qaDeliveryJournal.js").QaDeliveryOutcome; ok: true; response: string; summary: string; detail?: string; providerTurnId?: string }
+  | { outcome?: import("./qaDeliveryJournal.js").QaDeliveryOutcome; ok: false; detail?: string; response?: string; summary?: string; providerTurnId?: string };
 export interface QaSessionHandle {
   adapter: BuilderAdapter;
   sessionIdentity(): ProviderSessionRefV1;
@@ -93,6 +95,9 @@ export interface IsolatedQaOptions {
   /** Resolve a QA blocker with the same still-open QA session before disposal. */
   resolveBlocked?: (adapter: BuilderAdapter, reason: string) => Promise<{ result: import("./adapters/types.js").TurnResult; status: import("./foreman.js").StepStatus }>;
   onReportRecovery?: (context: { packet: QaRecoveryPacket; menu: readonly string[]; originalIssues?: string; liveSession: boolean; contextUsage?: unknown }) => Promise<QaReportRecoveryDecision>;
+  /** Single-use operator retry authorization, consumed with durable intent. */
+  qaRemediationAuthorization?: string;
+  qaOperatorAnswer?: { decisionId: string; answer: string };
   /** Accumulated authoritative QA/fix history, populated by runIsolatedQa. */
   qaHistory?: QaReportHistoryEntry[];
   qaRuntimeContext?: unknown;
@@ -191,6 +196,15 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
   try {
     scopeDb.ensureRun(opts.recovery.runId);
     durablePolicy = scopeDb.autonomyPolicy(opts.recovery.runId) ?? scopeDb.freezeAutonomyPolicy(opts.recovery.runId, resolveAutonomyPolicy(loadProjectAutonomyConfig(opts.recovery.projectDir)));
+    const stop = scopeDb.qaRemediationStop(opts.recovery.runId, opts.ticket.id);
+    if (stop) {
+      const decision = stop.decisionId ? scopeDb.humanDecision(stop.decisionId) : undefined;
+      if (decision?.status === "answered" && decision.answer) {
+        opts.qaOperatorAnswer = { decisionId: decision.decisionId, answer: decision.answer };
+        opts.builderSummary += `\nAuthorized operator answer (${decision.decisionId}): ${JSON.stringify(decision.answer)}`;
+      }
+      if (!opts.resumedRecovery || stop.outcome === "needs-input" && !opts.qaOperatorAnswer) return { outcome: stop.outcome === "needs-input" ? "needs-human" : "blocked", detail: stop.detail };
+    }
     let protocolHead = scopeDb.qaTicketHead(opts.recovery.runId, opts.ticket.id);
     if (protocolHead.state === "turn-intended") {
       protocolHead = scopeDb.transitionQa(opts.recovery.runId, opts.ticket.id, protocolHead.revision, { type: "turn-uncertain" });
@@ -270,7 +284,7 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
       kind: "validated-report", report, reportDigest: resumedReport.reportDigest, history: [...history], latestBuilderResult: latestBuilderResponse(opts),
     };
     const fix = await observedQaFix(opts, "resuming pending QA remediation", request, causing);
-    if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA remediation failed during restart recovery", "blocked");
+    if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA remediation failed during restart recovery", fix.outcome === "needs-input" ? "needs-human" : "blocked");
     const fixSummary = boundedBuilderSummary(fix.summary ?? fix.response ?? "Builder reported remediation complete");
     opts.state.builderResponseHistory.push({ ticketId: opts.ticket.id, cycle: durableReport.reviewNumber, kind: "remediation", response: fix.response!, summary: fixSummary });
     opts.builderSummary = fix.response!;
@@ -314,7 +328,7 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
     if (automaticFixes < maxBuilderFixes) {
       const request: QaFixRequest = { kind: "validated-report", report: review.report, reportDigest: review.reportDigest, history: [...history], latestBuilderResult: latestBuilderResponse(opts) };
       const fix = await observedQaFix(opts, "applying QA fixes", request, review.reviewAttemptId);
-      if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA fix failed", "blocked");
+      if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA fix failed", fix.outcome === "needs-input" ? "needs-human" : "blocked");
       const fixSummary = boundedBuilderSummary(fix.summary ?? fix.response ?? fix.detail ?? "Builder reported remediation complete");
       opts.state.builderResponseHistory.push({
         ticketId: opts.ticket.id,
@@ -348,8 +362,12 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
     const request: QaFixRequest = remediation
       ? { kind: "planner-remediation", report: latest.report, reportDigest: latest.reportDigest, remediation, history: [...history], latestBuilderResult: latestBuilderResponse(opts) }
       : { kind: "validated-report", report: latest.report, reportDigest: latest.reportDigest, history: [...history], latestBuilderResult: latestBuilderResponse(opts) };
+    const authorizationDb = new WorkflowDb(opts.recovery.projectDir);
+    try { opts.qaRemediationAuthorization = authorizationDb.authorizeQaRemediation(opts.recovery.runId, opts.ticket.id, review.reviewAttemptId, `Operator selected ${decision.action}`); }
+    finally { authorizationDb.close(); }
     const fix = await observedQaFix(opts, "applying QA remediation", request, review.reviewAttemptId, true);
-    if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA fix failed", "blocked");
+    opts.qaRemediationAuthorization = undefined;
+    if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA fix failed", fix.outcome === "needs-input" ? "needs-human" : "blocked");
     const fixSummary = boundedBuilderSummary(fix.summary ?? fix.response ?? fix.detail ?? "Builder reported remediation complete");
     opts.state.builderResponseHistory.push({
       ticketId: opts.ticket.id,
@@ -467,11 +485,14 @@ function deliverQaFailureOrLegacyFix(opts: IsolatedQaOptions, request: QaFixRequ
         remediationGeneration: attempt.remediationGeneration,
         latestBuilderResult: request.latestBuilderResult,
         history: request.history,
+        maxRemediationOperations: opts.maxCycles,
+        authorizationId: opts.qaRemediationAuthorization,
+        operatorAnswer: opts.qaOperatorAnswer,
         ...(request.kind === "planner-remediation" ? { plannerRemediation: request.remediation } : {}),
       };
       return opts.deliverFailure(input).then((result): QaFixResult => result.ok
-        ? { ok: true, response: result.response ?? "", summary: result.summary ?? result.response ?? "Builder reported QA remediation complete", detail: result.detail, providerTurnId: result.providerTurnId }
-        : { ok: false, detail: result.detail, response: result.response, summary: result.summary, providerTurnId: result.providerTurnId });
+        ? { ok: true, response: result.response ?? "", summary: result.summary ?? result.response ?? "Builder reported QA remediation complete", detail: result.detail, providerTurnId: result.providerTurnId, outcome: result.outcome }
+        : { ok: false, detail: result.detail, response: result.response, summary: result.summary, providerTurnId: result.providerTurnId, outcome: result.outcome });
     } finally { headDb.close(); }
   }
   if (!opts.fix) throw new Error("QA failure remediation requires the canonical delivery service");
@@ -486,8 +507,7 @@ function persistedQaFixCount(opts: IsolatedQaOptions): number {
   if (!opts.recovery) return 0;
   const db = new WorkflowDb(opts.recovery.projectDir);
   try {
-    const scope = qaFixScope(opts);
-    return db.recoveryAttemptCount(opts.recovery.runId, opts.ticket.id, scope.phase, scope.cause, scope.operationKey);
+    return db.qaAutomaticRemediationCount(opts.recovery.runId, opts.ticket.id);
   } finally { db.close(); }
 }
 
@@ -581,7 +601,13 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
   let durableReviewStarted = false;
   let durableReviewFinished = false;
   try {
+    const prerequisiteEvidence = await checkQaPrerequisites({ snapshotPath: snapshot.path, sourceDigest: snapshot.frozenState.digest, ticket: opts.ticket, runtimeContext: opts.qaRuntimeContext });
+    const prerequisiteDb = new WorkflowDb(opts.recovery.projectDir);
+    try { prerequisiteDb.putEvidence("qa", Buffer.from(JSON.stringify(prerequisiteEvidence))); } finally { prerequisiteDb.close(); }
+    const missingPrerequisites = prerequisiteEvidence.checks.filter(check => check.outcome === "not_run");
+    if (missingPrerequisites.length && !prerequisiteEvidence.sourceDefects.length) return { outcome: "blocked", detail: `QA verification prerequisites unavailable; required checks were not_run: ${missingPrerequisites.map(check => check.evidence).join("; ")}. Restore the required environment with existing authority, then resume for fresh QA.` };
     let handoff = buildQaReviewHandoff(opts.ticket, opts.builderSummary, snapshot.manifest.diffDigest, loadTicketSetupConfigWithDefaults(opts.builderWorktree).build.validation_checklist, snapshot.frozenState.changeSummary, opts.qaHistory);
+    handoff += `\nHost prerequisite evidence (availability does not prove provider sandbox access): ${JSON.stringify(prerequisiteEvidence)}\nRecord tests prevented from executing as not_run with the actual reason. Never install dependencies, create a lockfile, provision services, or claim an unconditional pass when required verification was not run.`;
     // Every disposable snapshot has a distinct cwd and therefore must have a
     // fresh provider conversation. Cumulative QA state remains in the durable
     // continuity/checkpoint stream; an old provider session is never moved
@@ -611,6 +637,9 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
       try {
         if (qaHandle.handoffReceipt.kind !== "accepted") throw new Error("QA recovery resume requires a validated fresh-session acceptance receipt");
         validateBoundaryReceipt(qaHandle.handoffReceipt.receipt, opts.resumedRecovery, qaHandle);
+        const recoveryDb = new WorkflowDb(opts.recovery.projectDir);
+        try { recoveryDb.clearQaRemediationStop(opts.recovery.runId, opts.ticket.id, "Validated fresh-session recovery acceptance; QA must re-evaluate current source and prerequisites"); }
+        finally { recoveryDb.close(); }
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         const synthetic: TurnResult = { text: "", rawResponse: "", cleanedResponse: "", isError: true, numTurns: 0, costUsd: 0 };
@@ -765,6 +794,7 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
       if (status.kind === "qa_pass") {
       const contract = responseContract;
       if (!contract.valid) return pauseQaReview(opts, "invalid-pass-contract", `invalid QA pass response: ${contract.errors.join("; ")}`, reviewedSnapshot.frozenState);
+      if (missingPrerequisites.length) return pauseQaReview(opts, "verification-not-run", "Required verification remains not_run; prerequisite recovery and fresh QA required", reviewedSnapshot.frozenState);
       const certificate = finishV2Pass(opts, qa, status.summary ?? "qa_pass");
       markQaRecoveryResolved(opts);
       durableReviewFinished = true;
@@ -801,6 +831,7 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
           return { outcome: "retry-modification" };
         }
         if (contract.valid && contract.status === "qa_pass") {
+          if (missingPrerequisites.length) return pauseQaReview(opts, "verification-not-run", "Required verification remains not_run; prerequisite recovery and fresh QA required", reviewedSnapshot.frozenState);
           const certificate = finishV2Pass(opts, qa, contract.fields.summary ?? "qa_pass");
           markQaRecoveryResolved(opts);
           durableReviewFinished = true;
@@ -886,11 +917,10 @@ async function repairResumedFailureReport(
 export function buildQaReviewHandoff(ticket: TicketDef, builderSummary: string, diffDigest: string, validationChecklist: string[], changeSummary?: unknown, history: QaReportHistoryEntry[] = []): string {
   return [
     buildQaInstruction(), "", "QA handoff:", `Complete ticket definition: ${JSON.stringify(ticket)}`,
-    `Acceptance criteria: ${JSON.stringify(ticket.acceptance)}`, `Actual Builder result: ${builderSummary}`,
+    `Actual Builder result: ${boundedBuilderSummary(builderSummary)}`,
     `Builder worktree change digest: ${diffDigest}`, `Deterministic change summary: ${JSON.stringify(changeSummary ?? { diffDigest })}`,
-    `Required tests: ${JSON.stringify(ticket.required_tests)}`,
     `Project validation checklist: ${validationChecklist.join("; ")}`,
-    `Prior authoritative QA/report and Builder-remediation history: ${history.length ? JSON.stringify(history) : "(none; perform a complete first review)"}`,
+    `Prior authoritative QA/report and Builder-remediation history: ${history.length ? JSON.stringify(boundedQaHistory(history)) : "(none; perform a complete first review)"}`,
     `Failure report JSON Schema: ${JSON.stringify(qaFailureReportV1Schema)}`,
     `A failing response must use exactly:\n${QA_FAILURE_REPORT_START}\n{...valid QaFailureReportV1 JSON...}\n${QA_FAILURE_REPORT_END}\nSTEP_STATUS: qa_fail | issues="short plain-text synopsis"`,
     "Be very thorough. Don't leave anything out. Make sure all required fields are added. Triple check your work to ensure nothing is left out and all required fields are added and populated correctly.",

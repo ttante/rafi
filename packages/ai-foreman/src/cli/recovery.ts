@@ -1,3 +1,4 @@
+import { isLiveProcessIdentity } from "../processIdentity.js";
 import { Command } from "commander";
 import { resolve } from "node:path";
 import { readBuildRuns } from "../buildRuns.js";
@@ -31,10 +32,11 @@ export function buildDecideCommand(): Command {
     .requiredOption("--run <id>", "build run ID")
     .requiredOption("--decision <id>", "decision ID")
     .requiredOption("--choice <id>", "stable choice ID")
-    .action((project: string, opts: { run: string; decision: string; choice: string }) => {
+    .option("--answer <text>", "actual answer to a scoped QA handback question")
+    .action((project: string, opts: { run: string; decision: string; choice: string; answer?: string }) => {
       const db = new WorkflowDb(resolve(project));
       try {
-        const decision = db.answerHumanDecision(opts.run, opts.decision, opts.choice);
+        const decision = db.answerHumanDecision(opts.run, opts.decision, opts.choice, new Date(), opts.answer);
         console.log(`rafi: recorded ${decision.decisionId}=${opts.choice}`);
       } finally { db.close(); }
     });
@@ -50,10 +52,12 @@ export function buildStopCommand(): Command {
       try {
         const state = db.supervisorState(opts.run);
         if (!state) throw new Error(`supervisor state not found for run ${opts.run}`);
+        if (!state.pid || !state.processStart || !isLiveProcessIdentity(state.pid, state.processStart)) throw new Error("supervisor process identity cannot be verified; refusing to signal a potentially reused PID");
         const next = { ...state, status: "stopping" as const, stopRequestedAt: new Date().toISOString() };
         db.putSupervisorState(opts.run, next);
-        if (state.workerPid) { try { process.kill(state.workerPid, "SIGTERM"); } catch { /* stale worker */ } }
-        if (state.pid && state.pid !== process.pid) { try { process.kill(state.pid, "SIGTERM"); } catch { /* stale supervisor */ } }
+        // The verified parent owns child cleanup; raw persisted worker PIDs may
+        // have been reused and must never be signalled independently.
+        if (state.pid !== process.pid) process.kill(state.pid, "SIGTERM");
         console.log(`rafi: stop requested for ${opts.run}`);
       } finally { db.close(); }
     });

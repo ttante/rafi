@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import {
   extractSourceRequests,
+  deactivateSource,
   loadSourceRegistry,
+  removeSource,
   registerSourceRequests,
   saveSourceRegistry,
   sourceRequestFromAnswer,
@@ -115,5 +117,22 @@ test("source-aware writes backfill unique legacy ticket links and report ambiguo
     writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify(ticketFile));
     saveSourceRegistry(dir, loaded.registry);
     assert.match(loadSourceRegistry(dir).warnings.join("\n"), /ambiguous legacy source reference/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("deactivating or removing shared context is immutable and does not delete capture history", async () => {
+  const dir = temp();
+  try {
+    mkdirSync(join(dir, "docs"));
+    writeFileSync(join(dir, "docs", "context.md"), "context\n");
+    const registered = await registerSourceRequests(dir, { version: 1, snapshot_storage: "local", entries: [] }, [sourceRequestFromAnswer("docs/context.md", dir)]);
+    const entry = registered.registry.entries[0]!;
+    const snapshot = join(dir, entry.versions[0]!.snapshot_path);
+    const deactivated = deactivateSource(registered.registry, entry.id);
+    assert.equal(registered.registry.entries[0]!.active, true);
+    assert.equal(deactivated.entries[0]!.active, false);
+    const removed = removeSource(deactivated, entry.id);
+    assert.equal(removed.entries.length, 0);
+    assert.equal(existsSync(snapshot), true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
