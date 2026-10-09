@@ -20,7 +20,7 @@ import { WorkflowDb } from "../src/workflowDb.js";
 const ticket: TicketDef = { id: "T001", order: 1000, title: "Guard", area: "core", priority: "P2", size: "S", risk: "Low", depends_on: [], summary: "Guard", acceptance: ["guard"], required_tests: ["static inspection"], likely_files: ["source.txt"] };
 const qaReport = { version: 1, summary: "Needs a guard", checks_run: [{ check: "static", outcome: "failed", evidence: "missing" }], findings: [{ id: "QA-1", requirement: "guard", locations: ["source.txt"], problem: "missing guard", evidence: "source", expected: "guard", fix_direction: "add guard", verification: ["inspect"] }], observations: [] };
 
-for (const caller of ["foreman", "branch"] as const) for (const mode of ["blocked", "tool-correction"] as const) test(`${caller} production delivery preserves ${mode} and never finalizes`, async () => {
+for (const caller of ["foreman", "branch"] as const) for (const mode of ["blocked", "tool-correction", "missing-continuity"] as const) test(`${caller} production QA handles ${mode} without unsafe replay`, async () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-handback-caller-"));
   const adapters: BuilderAdapter[] = [];
   let remediationTurns = 0, reviewTurns = 0, observedRunId = "run", envelope = "";
@@ -32,10 +32,10 @@ for (const caller of ["foreman", "branch"] as const) for (const mode of ["blocke
     const make = (cwd: string, role: "builder" | "qa"): BuilderAdapter => {
       const provider = caller === "foreman" ? "claude" : "codex";
       const queue = new BuilderEventQueue();
-      const ref: ProviderSessionRefV1 = { version: 1, provider, sessionId: `${role}-session`, role, stream: role, generation: 0, cwd, configRoot: role === "builder" ? root : cwd, ticketId: "T001", source: "observed", createdAt: new Date(0).toISOString(), validatedAt: new Date(0).toISOString() };
+      const ref: ProviderSessionRefV1 = { version: 1, provider, sessionId: `${role}-session-${adapters.length}`, role, stream: role, generation: 0, cwd, configRoot: role === "builder" ? root : cwd, ticketId: "T001", source: "observed", createdAt: new Date(0).toISOString(), validatedAt: new Date(0).toISOString() };
       const adapter: BuilderAdapter = { agent: provider, sessionId: () => ref.sessionId, sessionRef: () => ref, observeEvents: listener => queue.observe(listener), events: () => queue, close: async () => { queue.close(); }, sendTurn: async prompt => {
         let text: string;
-        if (role === "qa") { reviewTurns++; text = `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify(qaReport)}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="missing guard"`; }
+        if (role === "qa") { reviewTurns++; text = mode === "missing-continuity" ? 'STEP_STATUS: qa_pass | summary="reviewed"' : `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify(qaReport)}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="missing guard"`; }
         else if (prompt.includes("QA failure handoff ID:")) {
           remediationTurns++;
           observedRunId = /Run ID: (.+)/.exec(prompt)?.[1] ?? observedRunId;
@@ -47,7 +47,9 @@ for (const caller of ["foreman", "branch"] as const) for (const mode of ["blocke
           }
         } else { writeFileSync(join(cwd, "source.txt"), "implementation\n"); text = 'STEP_STATUS: done | ticket="T001" summary="implemented"'; }
         const result: TurnResult = { text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: false, numTurns: 1, costUsd: 0, turnId: role === "qa" ? `qa-${reviewTurns}` : `turn-${remediationTurns}`, providerMetadata: { provider, sessionId: ref.sessionId, sessionRef: ref } };
-        queue.push({ kind: "turn-complete", result, turnId: result.turnId }); return result;
+        queue.push({ kind: "turn-complete", result, turnId: result.turnId });
+        if (mode === "missing-continuity" && role === "qa" && reviewTurns === 1) return { ...result, isError: true, text: "QA continuity record was invalid: missing continuity marker", continuityErrors: ["missing continuity marker"] };
+        return result;
       } };
       adapters.push(adapter); return adapter;
     };
@@ -59,11 +61,16 @@ for (const caller of ["foreman", "branch"] as const) for (const mode of ["blocke
     const log = new Log(join(root, ".foreman/test.jsonl"));
     if (caller === "foreman") {
       const foreman = new Foreman(make(root, "builder"), log, false, true, 1, root, undefined, createQa, "compact", undefined, "compact", undefined, undefined, async adapter => adapter);
-      const result = await foreman.runBatch(1); assert.equal(result.outcome, "blocked", result.detail);
+      const result = await foreman.runBatch(1); assert.equal(result.outcome, mode === "missing-continuity" ? "all-done" : "blocked", result.detail);
     } else {
       const result = await runBranchPlan({ projectDir: root, runId: "run", plan: { baseRef: "main", nodes: [{ ticket, branch: "ticket/t001", baseRef: "main", baseBranch: "main", dependencies: [], depth: 1 }], issues: [] }, log, notificationsEnabled: false, qaEnabled: true, qaMaxFixAttempts: 1, createPr: false, prReady: false, keepWorktrees: true, baseWorktreePolicy: "skip", createBuilder: async cwd => make(cwd, "builder"), builderSessionBoundary: async adapter => adapter, createQa });
-      assert.equal(result[0]?.buildStatus, "blocked", result[0]?.detail);
+      assert.equal(result[0]?.buildStatus, mode === "missing-continuity" ? "done" : "blocked", result[0]?.detail);
       assert.ok(reviewTurns, result[0]?.detail);
+    }
+    if (mode === "missing-continuity") {
+      assert.equal(reviewTurns, 2, "the same build completes a fresh QA review");
+      assert.equal(remediationTurns, 0, "a metadata failure must not replay Builder");
+      return;
     }
     assert.equal(reviewTurns, 1, "blockers and unsafe corrections do not cause repeated full reviews");
     assert.equal(remediationTurns, mode === "blocked" ? 1 : 2);

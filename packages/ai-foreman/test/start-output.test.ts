@@ -10,19 +10,19 @@ test("standalone Foreman resume guidance includes the subcommand, project, steps
   );
 });
 
-test("Rafi advertises only the canonical build recovery command", () => {
+test("Rafi advertises the flag-free resume picker", () => {
   assert.deepEqual(
     formatResumeGuidance("rafi", "/tmp/example project", 3, "session-123"),
     [
       "foreman: resume this run with:",
-      "  rafi build:resume '/tmp/example project'",
+      "  rafi resume '/tmp/example project'",
     ],
   );
   assert.deepEqual(
     formatResumeGuidance("rafi", "/tmp/project", 1),
     [
       "foreman: resume this run with:",
-      "  rafi build:resume /tmp/project",
+      "  rafi resume /tmp/project",
     ],
   );
 });
@@ -32,7 +32,7 @@ test("standalone Foreman omits unusable resume guidance without a session ID", (
 });
 
 
-test("durable run guidance lists pending choices and resumes the exact run for either executable", () => {
+test("durable run guidance lists pending choices and offers the picker for either executable", () => {
   for (const executable of ["rafi", "ai-foreman"] as const) {
     const lines = formatResumeGuidance(executable, "/tmp/project", 1, "old-session", {
       runId: "run-1", decisions: [{ decisionId: "decision-1", prompt: "Continue?", choices: [{ id: "continue", label: "Continue" }] }],
@@ -40,7 +40,7 @@ test("durable run guidance lists pending choices and resumes the exact run for e
     assert.match(lines, /input required: Continue\?/);
     assert.match(lines, /choices: continue \(Continue\)/);
     assert.match(lines, /rafi build:decide \/tmp\/project --run run-1 --decision decision-1 --choice <choice-id>/);
-    assert.match(lines, /rafi build:resume \/tmp\/project --run run-1/);
+    assert.match(lines, /rafi resume \/tmp\/project/);
     assert.doesNotMatch(lines, /old-session/);
   }
 });

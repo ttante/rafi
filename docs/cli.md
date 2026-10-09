@@ -82,8 +82,8 @@ Commands:
                                                       rafi-config.yaml.
   create [options] <project>                          Run the walkthrough, write rafi-config.yaml,
                                                       and compile the target repo.
-  resume [options] [project]                          Resume or discard a saved interactive create,
-                                                      plan, or ticket-setup interview.
+  resume [options] [project]                          Select an unfinished build or saved create,
+                                                      plan, or ticket-setup interview to resume.
   plan [options] [project]                            Create a ticket-maker-ready implementation
                                                       plan from a brief and repo inspection.
   tickets                                             Manage the structured ticket tracker for a
@@ -153,15 +153,29 @@ Options:
 ```text
 Usage: rafi resume [options] [project]
 
-Resume or discard a saved interactive create, plan, or ticket-setup interview.
+Select an unfinished build or saved create, plan, or ticket-setup interview to resume.
 
 Arguments:
-  project         path to the target repo (default: ".")
+  project                 path to the target repo (default: ".")
 
 Options:
-  --id <id>       saved interview id (or unique prefix) to resume
-  --discard <id>  discard a saved interview id (or unique prefix)
-  -h, --help      display help for command
+  --run <id>              build run ID or unique prefix
+  --id <id>               saved interview id (or unique prefix) to resume
+  --discard <id>          discard a saved interview id (or unique prefix)
+  --ticket <id>           narrow mutation scope to one ticket while retaining run-wide context
+  --qa-revision <number>  exact durable QA protocol revision to resume
+  --inspect               show recovery state and planned actions without mutation
+  --yes                   auto-approve the implementation plan and later plan updates for this
+                          resumed process
+  --no                    review the implementation plan and later plan updates for this resumed
+                          process
+  --fresh-with-handoff    start a genuinely fresh session from validated cumulative context
+  --fresh-session         compatibility mode: ordinary fresh recovery without cumulative handoff
+  --guided-recovery       repair a degraded role checkpoint interactively, then start a validated
+                          successor
+  --agent <runtime>       fresh-mode provider (claude | codex)
+  --model <model>         fresh-mode model override
+  -h, --help              display help for command
 ```
 
 ### `rafi create --help`

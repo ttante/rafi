@@ -201,7 +201,7 @@ for (const crash of ["staged", "committed", "cleaned", "changed"] as const) {
         assert.equal(verified.qaTicketHead("run", "T1").state, crash === "changed" ? "operator-menu" : "completed");
         assert.equal(verified.operation("run:direct-merge:T1")?.status, crash === "changed" ? "failed" : "confirmed");
         if (crash === "changed") {
-          assert.match(summaries[0]?.detail ?? "", /--qa-revision \d+ --fresh-with-handoff/);
+          assert.match(summaries[0]?.detail ?? "", /Resume with: rafi resume/);
           assert.equal(readFileSync(join(f.worktree, "ticket.txt"), "utf8"), "new unreviewed work\n");
         }
       } finally { verified.close(); }

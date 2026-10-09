@@ -13,7 +13,7 @@ test("expired heartbeat cannot steal a live or unverified writer; a proven dead 
   try {
     first.ensureRun("run"); const lease = first.acquireLease("run", "owner", new Date(0));
     assert.throws(() => second.acquireLease("run", "competitor", new Date(), 1), /held by owner/);
-    const raw = new Database(first.path); registerHandbackWriter(raw);
+    const raw = new Database(first.path); registerHandbackWriter(raw); raw.function("rafi_protocol_v3", () => 1);
     try { raw.prepare("UPDATE project_lease SET pid=2147483647,process_start='dead'").run(); } finally { raw.close(); }
     const successor = second.acquireLease("run", "successor"); assert.equal(successor.generation, lease.generation + 1);
     assert.throws(() => first.heartbeatLease(lease), /ownership changed/);

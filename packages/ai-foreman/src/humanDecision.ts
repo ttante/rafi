@@ -1,3 +1,4 @@
+import { formatRecoveryCommand, shellArgument } from "./recoveryGuidance.js";
 import { createHash } from "node:crypto";
 import { isCancel } from "@clack/prompts";
 import { WorkflowDb } from "./workflowDb.js";
@@ -6,8 +7,8 @@ import type { RunObserver } from "./observability.js";
 import type { HumanDecisionChoice } from "rafi-spec";
 
 export class HumanDecisionRequired extends Error {
-  constructor(readonly decisionId: string, readonly runId: string, prompt: string) {
-    super(`${prompt}\nRafi is waiting for input (${decisionId}). Answer with rafi build:decide --run ${runId} --decision ${decisionId} --choice <choice-id>. Resume with rafi build:resume --run ${runId}`);
+  constructor(readonly decisionId: string, readonly runId: string, prompt: string, projectDir = process.cwd()) {
+    super(`${prompt}\nRafi is waiting for input (${decisionId}). Answer with rafi build:decide ${shellArgument(projectDir)} --run ${runId} --decision ${decisionId} --choice <choice-id>. Resume with ${formatRecoveryCommand(projectDir, "rafi")}`);
     this.name = "HumanDecisionRequired";
   }
 }
@@ -23,7 +24,7 @@ export async function durableHumanDecision<T>(input: {
     console.error(`rafi: input required: ${input.prompt} [decision ${decision.decisionId}]`);
     const previous = db.getRun(input.runId)!;
     if (!input.defer) db.transition(input.runId, { status: "paused", checkpoint: "waiting-for-human", state: { ...previous.state, status: "recoverable", checkpoint: "waiting-for-human", phase: "waiting-for-human", pendingDecisionId: decision.decisionId } });
-    if (input.defer || !process.stdin.isTTY || !process.stdout.isTTY) throw new HumanDecisionRequired(decision.decisionId, input.runId, input.prompt);
+    if (input.defer || !process.stdin.isTTY || !process.stdout.isTTY) throw new HumanDecisionRequired(decision.decisionId, input.runId, input.prompt, input.projectDir);
     const wait = () => pauseActivityForInput(input.operation);
     const answer = await (input.observer ? input.observer.span("user_wait", input.prompt, wait) : wait());
     if (isCancel(answer) || answer === undefined) return answer;

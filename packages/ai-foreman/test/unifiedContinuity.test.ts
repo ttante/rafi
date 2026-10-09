@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
-import type { ContinuityDelta, ProviderSessionRefV1, ResolvedAgentSettings } from "rafi-spec";
+import { parseQaResponseContract, type ContinuityDelta, type ProviderSessionRefV1, type ResolvedAgentSettings } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, TurnResult } from "../src/adapters/types.js";
 import { ContinuityAdapter } from "../src/continuity.js";
 import { HANDOFF_ACCEPTED, HandoffAcceptanceError, HandoffLoopError, HandoffService } from "../src/handoffs.js";
@@ -610,4 +610,82 @@ test("legacy continuity successor fallback requires an exact first-line acceptan
   await assert.rejects(adapter.sendTurn("do work"), /fresh successor did not validate/);
   assert.equal(successor.closed, true);
   await adapter.close();
+});
+
+test("QA single-turn continuity errors remain typed and preserve the completed provider evidence", async () => {
+  const projectDir = root("rafi-qa-continuity-error-");
+  const original = { text: 'STEP_STATUS: qa_pass | summary="reviewed"', isError: false, numTurns: 1, costUsd: 0, turnId: "observed-review" };
+  const adapter = new FakeAdapter("qa-missing-marker", [original]);
+  adapter.adoptSessionRef({ ...adapter.sessionRef()!, role: "qa", stream: "qa", cwd: projectDir, configRoot: projectDir });
+  let dispatchedInstruction = "";
+  const send = adapter.sendTurn.bind(adapter);
+  adapter.sendTurn = async (...args: unknown[]) => { dispatchedInstruction = String(args[0]); return send(); };
+  const wrapper = new ContinuityAdapter({ projectDir, runId: "run", role: "qa", settings: { ...SETTINGS, role: "qa" }, adapter, durableSingleTurn: true });
+  try {
+    const result = await wrapper.sendTurn("review current source");
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.continuityErrors, ["missing continuity marker"]);
+    assert.match(dispatchedInstruction, /required even when the review requests only a report or status/);
+    assert.match(dispatchedInstruction, /before RAFI_QA_FAILURE_REPORT_START/);
+    assert.equal(result.rawResponse, original.text);
+    assert.equal(result.turnId, original.turnId);
+    assert.equal(result.failure, undefined);
+    const db = new WorkflowDb(projectDir);
+    try {
+      assert.equal(db.unresolvedRoleDispatches("run", "qa").length, 0);
+      assert.equal(db.continuityHead("run", "qa")?.state, "current", "the valid baseline remains available for a fresh handoff");
+    } finally { db.close(); }
+  } finally { await wrapper.close(); }
+});
+
+
+test("QA continuity can precede the failure envelope without breaking report validation", async () => {
+  const projectDir = root("rafi-qa-continuity-format-");
+  const report = { version: 1, summary: "Missing guard", checks_run: [{ check: "inspection", outcome: "failed", evidence: "guard absent" }],
+    findings: [{ id: "F1", requirement: "guard", locations: ["source.ts"], problem: "guard absent", evidence: "inspection", expected: "guard present", fix_direction: "add guard", verification: ["inspect source"] }], observations: [] };
+  const text = `${MARKER}\nRAFI_QA_FAILURE_REPORT_START\n${JSON.stringify(report)}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="Missing guard"`;
+  const adapter = new FakeAdapter("qa-complete-marker", [{ text, isError: false, numTurns: 1, costUsd: 0 }]);
+  adapter.adoptSessionRef({ ...adapter.sessionRef()!, role: "qa", stream: "qa", cwd: projectDir, configRoot: projectDir });
+  const wrapper = new ContinuityAdapter({ projectDir, runId: "run", role: "qa", settings: { ...SETTINGS, role: "qa" }, adapter, durableSingleTurn: true });
+  try {
+    const result = await wrapper.sendTurn("return the exact QA report");
+    assert.equal(result.isError, false);
+    assert.equal(parseQaResponseContract(result.text).valid, true);
+    assert.equal(result.rawResponse, text);
+    assert.doesNotMatch(result.text, /RAFI_CONTINUITY_DELTA/);
+  } finally { await wrapper.close(); }
+});
+
+for (const role of ["builder", "qa"] as const) for (const outcome of ["valid", "invalid", "error", "unknown"] as const) test(`fresh recovery validates new ownership before context probes: ${role}/${outcome}`, async () => {
+  const { rmSync } = await import("node:fs");
+  const projectDir = root("rafi-fresh-owner-");
+  const db = new WorkflowDb(projectDir);
+  try {
+    db.claimInitialRoleLease("run", role, { ...new FakeAdapter("old").sessionRef()!, role });
+    if (outcome === "unknown") {
+      db.planOperation({ runId: "run", idempotencyKey: "old-dispatch", kind: "provider-dispatch", intent: { role } });
+      db.updateOperation("old-dispatch", "in_progress");
+      db.updateOperation("old-dispatch", "uncertain");
+    }
+    let turns = 0;
+    const adapter = new FakeAdapter("fresh");
+    adapter.adoptSessionRef({ ...adapter.sessionRef()!, role });
+    adapter.sendTurn = async (...args: unknown[]) => {
+      turns++;
+      assert.equal((args[1] as { responseOnly?: boolean }).responseOnly, true);
+      return { text: outcome === "invalid" ? "missing continuity" : MARKER, isError: outcome === "error", numTurns: 1, costUsd: 0 };
+    };
+    const continuous = new ContinuityAdapter({ adapter, projectDir, runId: "run", role, settings: { ...SETTINGS, role }, durableSingleTurn: role === "qa", replaceRecoveryLeaseAfterCheckpoint: true });
+    if (outcome === "valid") {
+      await continuous.validateFreshRecovery();
+      assert.equal(db.roleMutationLease("run", role)?.providerSessionId, "fresh");
+      await continuous.validateFreshRecovery(); assert.equal(turns, 1);
+    } else {
+      await assert.rejects(continuous.validateFreshRecovery(), /checkpoint|completion/);
+      assert.equal(db.roleMutationLease("run", role)?.providerSessionId, "old");
+      assert.equal(turns, outcome === "unknown" ? 0 : 1);
+      assert.equal(adapter.closed, true, "failed validation must close the unused replacement");
+    }
+    await continuous.close();
+  } finally { db.close(); rmSync(projectDir, { recursive: true, force: true }); }
 });

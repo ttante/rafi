@@ -73,7 +73,7 @@ test("blocked ticket and its dependent defer while an independent ticket complet
 test("approved unchanged scope starts automatically, but a material ticket change needs approval even with yes", async t => {
   const { createHash } = await import("node:crypto");
   const { mkdirSync } = await import("node:fs");
-  const { approvedBuildScope, requiresBuildApproval } = await import("../src/buildApproval.js");
+  const { approvedBuildScope, requiresBuildApproval, createBuildApprovalGate } = await import("../src/buildApproval.js");
   const dir = fixture(t);
   cmdInit(dir, { appName: "Test", timezone: "UTC" });
   const ticket = { id: "T001", order: 1, title: "Implement", area: "test", priority: "P1", size: "S", risk: "Low", summary: "work", acceptance: ["works"], required_tests: ["tests"], likely_files: [], depends_on: [], plan_ref: { plan_id: "plan", revision: 1, slice_ref: "slice" } };
@@ -95,6 +95,15 @@ test("approved unchanged scope starts automatically, but a material ticket chang
   assert.equal(requiresBuildApproval(dir, ["T001"], false), false);
   assert.equal(requiresBuildApproval(dir, ["T001"], true, { branch_strategy: "branch-per-ticket" }), true);
   assert.equal(requiresBuildApproval(dir, ["T001"], false, { branch_strategy: "current" }), false);
+  const later = { ...ticket, id: "T002", acceptance: ["unapproved later ticket"] };
+  writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [ticket, later] }));
+  let prompts = 0;
+  const gate = createBuildApprovalGate(dir, ["T001", "T002"], true, { branch_strategy: "current" }, async () => { prompts++; });
+  assert.equal(requiresBuildApproval(dir, ["T001"], true), false);
+  await gate(); assert.equal(prompts, 1, "later ticket requires approval");
+  await gate(); assert.equal(prompts, 1, "same invocation and source reuses approval");
+  writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [ticket, { ...later, summary: "changed between turns" }] }));
+  await gate(); assert.equal(prompts, 2, "later work cannot reuse a stale revision");
   writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [{ ...ticket, acceptance: ["changed scope"] }] }));
   const edited = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
   edited.updateTicketDefinitionSnapshot("T001", { ...ticket, acceptance: ["changed scope"] });

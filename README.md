@@ -39,13 +39,13 @@ Return to a configured project with these everyday commands:
 ```sh
 rafi status
 rafi tickets queue
-rafi resume .
+rafi resume
 rafi tickets plan
-rafi build:resume .
+rafi build:resume
 rafi start . --steps <n>
 ```
 
-Use `rafi tickets plan` for a new feature, milestone, audit, or backlog update. It gathers context and produces the exact ticket set you approve. `rafi resume .` continues an interrupted setup or planning interview.
+Use `rafi tickets plan` for a new feature, milestone, audit, or backlog update. It gathers context and produces the exact ticket set you approve. `rafi resume` selects unfinished builds and interviews in the current project, newest first; `rafi build:resume` lists builds only. Pass a project path to resume elsewhere. Failed preparation can retry its existing successor after launch ownership is reconciled, without copying internal recovery flags.
 
 ## Helpful features
 

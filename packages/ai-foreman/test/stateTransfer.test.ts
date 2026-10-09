@@ -383,3 +383,15 @@ test("state export refuses DB-era tickets without ticket-state sqlite", async ()
     rmSync(bundle, { force: true });
   }
 });
+
+test("state export refuses live preparation before an implementation lease exists", async () => {
+  const root = tempDir();
+  const bundleDir = tempDir();
+  const db = new WorkflowDb(root);
+  try {
+    const authority = db.acquireBuildAdmission("preparing", "worker");
+    assert.equal(db.currentLease(), undefined);
+    await assert.rejects(exportStateBundle(root, join(bundleDir, "state.rafi.gz")), /live or unknown build admission/);
+    db.releaseBuildAdmission(authority);
+  } finally { db.close(); rmSync(root, { recursive: true, force: true }); rmSync(bundleDir, { recursive: true, force: true }); }
+});

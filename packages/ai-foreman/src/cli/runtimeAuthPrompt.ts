@@ -6,7 +6,8 @@ import {
   runtimeCommandLabel,
   type AgentRuntime,
 } from "../runtimeAuth.js";
-import { resolveExecutablePath } from "../runtimeReadiness.js";
+import { BuildOwnershipError } from "../buildAdmission.js";
+import { RuntimeCleanupError, type BuildReadinessContext, resolveExecutablePath } from "../runtimeReadiness.js";
 import type { RuntimeProbeResult } from "rafi-spec";
 import { otherRuntime, runtimeDisplayName } from "./runtimeSelection.js";
 import { currentActivity } from "../activity.js";
@@ -23,6 +24,7 @@ export interface RuntimeCommandRecoveryContext {
 
 export interface RuntimeReadyForCommandOptions {
   label: string;
+  build?: BuildReadinessContext;
   timeoutMs?: number;
   durable?: { projectDir: string; runId: string; scopeRevision: string };
   onTrace?: import("../runtimeReadiness.js").ProbeRuntimeOptions["onTrace"];
@@ -44,6 +46,11 @@ export interface RuntimeReadyForCommandResult {
   executable: string;
 }
 
+export async function ensureBuildRuntimeReadyForCommand(projectDir: string, runtime: AgentRuntime, opts: RuntimeReadyForCommandOptions & { build: BuildReadinessContext }): Promise<RuntimeReadyForCommandResult> {
+  if (!opts.build?.authority) throw new BuildOwnershipError("stale-owner", "Build readiness requires original owning-project context");
+  return ensureRuntimeReadyForCommand(projectDir, runtime, opts);
+}
+
 export async function ensureRuntimeReadyForCommand(
   projectDir: string,
   runtime: AgentRuntime,
@@ -52,7 +59,10 @@ export async function ensureRuntimeReadyForCommand(
   const opts = typeof labelOrOptions === "string"
     ? { label: labelOrOptions }
     : labelOrOptions;
-  const check = opts.check ?? ((projectDir: string, runtime: AgentRuntime) => checkRuntimeReady(projectDir, runtime, { onTrace: opts.onTrace, timeoutMs: opts.timeoutMs }));
+  const check = opts.check ?? (async (projectDir: string, runtime: AgentRuntime) => {
+    if (opts.durable && !opts.build) throw new BuildOwnershipError("stale-owner", "Build readiness requires its original owning-project context");
+    return checkRuntimeReady(projectDir, runtime, { build: opts.build, onTrace: opts.onTrace, timeoutMs: opts.timeoutMs });
+  });
   const checkClaudeSdk = opts.checkClaudeSdk ?? requireClaudeSDK;
   const allowSwitch = opts.allowSwitch !== false;
   const nonInteractive = !opts.choose && (Boolean(opts.yes) || !process.stdin.isTTY || !process.stdout.isTTY);
@@ -65,6 +75,7 @@ export async function ensureRuntimeReadyForCommand(
       if (!executable) throw new Error(`${runtime} executable disappeared after readiness`);
       return { runtime, model: opts.model, fellBack: false, executable };
     } catch (err) {
+      if (err instanceof RuntimeCleanupError || err instanceof BuildOwnershipError) throw err;
       const failure = err instanceof RuntimeAuthError
         ? err
         : new RuntimeAuthError({
@@ -106,6 +117,7 @@ export async function ensureRuntimeReadyForCommand(
           if (!executable) throw new Error(`${fallbackRuntime} executable disappeared after readiness`);
           return { runtime: fallbackRuntime, model: undefined, fellBack: true, executable };
         } catch (switchErr) {
+          if (switchErr instanceof RuntimeCleanupError || switchErr instanceof BuildOwnershipError) throw switchErr;
           const switchFailure = switchErr instanceof RuntimeAuthError
             ? switchErr
             : new RuntimeAuthError({

@@ -1,9 +1,18 @@
+import { addBuildRecoveryOptions } from "./buildRecoveryOptions.js";
+import { ResumeSpawnError, resumeExitCode, type ResumeLaunchResult, type ResumeLaunchContext } from "./resumeLauncher.js";
+import { realpathSync } from "node:fs";
+import { validatePreparationArguments, validateRecoveryArguments } from "ai-foreman/cli/start.js";
+import { WorkflowReader } from "ai-foreman/workflow-reader.js";
 import { createHash } from "node:crypto";
 import { Command } from "commander";
 import { resolve } from "node:path";
 import {
+  withBuildRecoveryInvocation,
+  launchArgumentDigest,
+  bindBuildAuthority,
   formatBuildRecoveryProjection,
   projectBuildRecovery,
+  currentBranchRecoveryTicket,
   readBuildRuns,
   recoverableBuildRuns,
   resolveBuildRecoveryProjection,
@@ -17,10 +26,13 @@ import { loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaReco
 import type { BuildRecoveryDecisionReceipt, BuildRecoveryMode, BuildRunRecordV2, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 
-type RecoverableRun = BuildRunRecordV2 & { active: boolean };
+export type RecoverableRun = BuildRunRecordV2 & { active: boolean; ownership?: "live" | "dead" | "unknown"; ownershipReason?: string; cleanupOnly?: boolean };
 
 export interface BuildResumeCommandOptions {
-  executeStart: (args: string[]) => Promise<number> | number;
+  executeStart: (args: string[], context?: ResumeLaunchContext) => Promise<number | ResumeLaunchResult> | number | ResumeLaunchResult;
+  correctPreparationArguments?: (saved: string[], error: Error) => Promise<string[] | undefined>;
+  selectRun?: (runs: RecoverableRun[]) => Promise<RecoverableRun | undefined>;
+  selectTicket?: (tickets: string[]) => Promise<string | undefined>;
   /** Deterministic provider probe injection for unit tests. */
   resolveProjection?: typeof resolveBuildRecoveryProjection;
   /** Deterministic plan-approval prompt injection for unit tests. */
@@ -28,27 +40,33 @@ export interface BuildResumeCommandOptions {
 }
 
 export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions): Command {
-  return new Command("build:resume")
+  return addBuildRecoveryOptions(new Command("build:resume")
     .description("Inspect and resume one interrupted implementation run using an exact recovery mode.")
     .argument("[project]", "project directory", ".")
-    .option("--run <id>", "run ID or unique prefix")
-    .option("--ticket <id>", "narrow mutation scope to one ticket while retaining run-wide context")
-    .option("--qa-revision <number>", "exact durable QA protocol revision to resume")
-    .option("--inspect", "show recovery state and planned actions without mutation")
-    .option("--yes", "auto-approve the implementation plan and later plan updates for this resumed process")
-    .option("--no", "review the implementation plan and later plan updates for this resumed process")
-    .option("--fresh-with-handoff", "start a genuinely fresh session from validated cumulative context")
-    .option("--fresh-session", "compatibility mode: ordinary fresh recovery without cumulative handoff")
-    .option("--guided-recovery", "repair a degraded role checkpoint interactively, then start a validated successor")
-    .option("--agent <runtime>", "fresh-mode provider (claude | codex)")
-    .option("--model <model>", "fresh-mode model override")
-    .action(async (project: string, opts: Record<string, unknown>) => {
+    .option("--run <id>", "run ID or unique prefix"))
+    .action(async (project: string, opts: Record<string, unknown>) => withBuildRecoveryInvocation(async () => {
       const root = resolve(project);
+      let recoveryAuthority: ReturnType<WorkflowDb["acquireBuildRecoveryAdmission"]> | undefined;
+      try {
       assertLifecycleForCommand(root, "build-resume");
       validateModeFlags(opts);
       validateApprovalFlags(opts);
       if (opts.agent && !["claude", "codex"].includes(String(opts.agent))) throw new Error("--agent must be claude or codex");
       if (opts.qaRevision !== undefined && (!/^\d+$/.test(String(opts.qaRevision)) || Number(opts.qaRevision) < 0)) throw new Error("--qa-revision must be a non-negative integer");
+      if (opts.run) {
+        const reader = new WorkflowReader(root);
+        try {
+          const matches = reader.buildRuns().filter(run => run.runId === opts.run || run.runId.startsWith(String(opts.run)));
+          if (matches.length > 1) throw new Error("selection is ambiguous; provide a longer run ID");
+          if (matches[0]) {
+            const successor = reader.readinessProcesses().some(row => row.run_id === matches[0].runId) ? matches[0].runId : reader.preparationSuccessor(matches[0].runId);
+            if (successor !== matches[0].runId) console.log(`rafi resume: ${matches[0].runId} was superseded by ${successor}`);
+            opts.run = successor;
+            const state = reader.getRun(successor);
+            if (state && ["completed", "cancelled"].includes(state.status) && !reader.readinessProcesses().some(row => row.run_id === successor)) { console.log(`rafi resume: build ${successor} is ${state.status}`); return; }
+          }
+        } finally { reader.close(); }
+      }
       const runs = recoverableBuildRuns(root);
       if (runs.length === 0) { console.log("rafi build:resume: no unfinished or recoverable runs found"); return; }
       let selected = selectByFlags(runs, opts);
@@ -57,28 +75,108 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         const knownTickets = [...new Set(runs.flatMap((run) => run.tickets))].sort();
         throw new Error(`no recoverable build run found for ticket ${String(opts.ticket)}${knownTickets.length ? `; recoverable tickets: ${knownTickets.join(", ")}` : ""}`);
       }
-      if (!selected) selected = await promptRun(runs);
+      if (!selected) selected = await (commandOpts.selectRun ?? promptRun)(runs);
       if (!selected) return;
+      const cleanupPreview = new WorkflowReader(root);
+      const blockers = cleanupPreview.readinessProcesses();
+      cleanupPreview.close();
+      const ownBlockers = blockers.filter(row => row.run_id === selected!.runId);
+      if (ownBlockers.length) {
+        if (opts.inspect || selected.active) { console.log(`rafi resume: build ${selected.runId} has readiness cleanup pending (${ownBlockers.map(row => row.id).join(", ")}); ${selected.active ? "owner is active" : "inspection only"}`); return; }
+        const cleanup = new WorkflowDb(root, undefined, { runId: selected.runId });
+        let unresolved: string[];
+        let details: string[] = [];
+        try { unresolved = await cleanup.reconcileReadiness(selected.runId); details = cleanup.readinessCleanupDetails(selected.runId); } finally { cleanup.close(); }
+        if (unresolved.length) { console.log(`rafi resume: readiness ownership or cleanup remains unverified for ${selected.runId}; ${details.join("; ")}`); process.exitCode = 2; return; }
+        if (selected.cleanupOnly) { console.log(`rafi resume: readiness cleanup complete for ${selected.runId}; build status unchanged`); return; }
+        selected = recoverableBuildRuns(root).find(run => run.runId === selected!.runId) ?? selected;
+      }
+      if (!opts.inspect && !selected.active) {
+        const other = blockers.filter(row => row.run_id !== selected!.runId);
+        if (other.length) throw new Error(`Readiness cleanup belongs to build(s) ${[...new Set(other.map(row => row.run_id))].join(", ")}; select their cleanup entries with rafi resume first`);
+      }
+      if (!opts.inspect && !selected.active && selected.ownership === "unknown") {
+        const reconciliation = new WorkflowDb(root);
+        try {
+          if (reconciliation.reconcileBuildLaunches(selected.runId) === "retired") selected = recoverableBuildRuns(root).find(run => run.runId === selected!.runId) ?? selected;
+        } finally { reconciliation.close(); }
+      }
       // Inspection and active-run diagnostics are strictly read-only. In
       // particular, do not reconcile filesystem projections while another
       // supervisor may still be publishing them.
-      if (selected.active || opts.inspect) {
-        const previewDb = new WorkflowDb(root);
+      if (selected.active || selected.ownership === "unknown" || opts.inspect) {
+        const previewDb = new WorkflowReader(root);
         let previewTicket = opts.ticket ? String(opts.ticket) : undefined;
         try {
-          if (!previewTicket) previewTicket = previewDb.pendingQaRecoveryHeads(selected.runId).at(0)?.ticketId
-            ?? previewDb.pendingQaTicketHeads(selected.runId).at(0)?.ticketId;
+          if (!previewTicket) previewTicket = previewDb.pendingQaTicketIds(selected.runId)[0];
         } finally { previewDb.close(); }
-        const preview = await (commandOpts.resolveProjection ?? resolveBuildRecoveryProjection)(root, selected, new Date(), previewTicket);
+        const preview = projectBuildRecovery(root, selected, new Date(), previewTicket);
         console.log("rafi build:resume preview:");
         for (const line of formatBuildRecoveryProjection(preview)) console.log(`  ${line}`);
+        if (selected.ownership === "unknown") console.log(`rafi build:resume: ownership requires reconciliation: ${selected.ownershipReason}. No new work was started.`);
         if (selected.active) console.log("rafi build:resume: the original process is verified live; return to it or stop it before recovery. No mutation was performed.");
+        return;
+      }
+      if (selected.failure?.category === "preparation-incomplete" && !selected.builder) {
+        let preparationDb: WorkflowDb | undefined;
+        let retry: ReturnType<WorkflowDb["reservePreparationRetry"]> | undefined;
+        try {
+          const preview = new WorkflowReader(root);
+          let saved: unknown;
+          try { saved = preview.getRun(selected.runId)?.state.startArgs; } finally { preview.close(); }
+          let args: string[];
+          if (!Array.isArray(saved) || saved.some(arg => typeof arg !== "string") || saved[0] !== "start" || !saved[1]) {
+            const corrected = await (commandOpts.correctPreparationArguments ?? correctPreparationArguments)(["start", root], new Error("Saved preparation arguments are missing or incomplete"));
+            if (!corrected) return;
+            args = corrected.filter(arg => arg !== "--yes");
+          } else {
+            if (realpathSync(resolve(saved[1])) !== realpathSync(root)) throw new Error("Saved preparation arguments belong to another project");
+            args = [...saved as string[]];
+          }
+          for (const flag of ["--recover-run", "--recovery-mode", "--recovery-decision-digest", "--accept-handoff", "--accept-handoff-role", "--qa-revision", "--launch-token", "--preparation-run"]) {
+            if (args.some(arg => arg === flag || arg.startsWith(`${flag}=`))) throw new Error("Preparation contains recovery authority; use established-work recovery instead");
+          }
+          if (opts.yes || opts.no) args = args.filter(arg => arg !== "--yes");
+          if (opts.yes) args.push("--yes");
+          for (const name of ["agent", "model"] as const) if (opts[name]) {
+            const index = args.indexOf(`--${name}`);
+            if (index >= 0) args.splice(index, 2);
+            args.push(`--${name}`, String(opts[name]));
+          }
+          try { args = validatePreparationArguments(args, root); }
+          catch (error) {
+            const corrected = await (commandOpts.correctPreparationArguments ?? correctPreparationArguments)(args, error as Error);
+            if (!corrected) return;
+            args = validatePreparationArguments(corrected, root);
+            // Re-enter normal scope approval; correcting argv cannot inherit --yes.
+            args = args.filter(arg => arg !== "--yes");
+          }
+          preparationDb = new WorkflowDb(root);
+          retry = preparationDb.reservePreparationRetry(selected.runId, args, JSON.stringify(saved ?? null));
+          preparationDb.dispatchBuildLaunch(retry.authority, retry.launch.token);
+          console.log(`rafi resume: retrying preparation as ${retry.runId}`);
+          let code: number;
+          try { code = resumeExitCode(await commandOpts.executeStart([...args, "--preparation-run", retry.runId, "--launch-token", retry.launch.token], { authority: retry.authority })); }
+          catch (error) {
+            // Only an OS spawn error proves no child was created. Other failures
+            // retain the dispatching intent for reconciliation.
+            if (error instanceof ResumeSpawnError) { preparationDb.failBuildLaunch(retry.authority, retry.launch.token); preparationDb.releaseBuildAdmission(retry.authority); }
+            throw error;
+          }
+          const outcome = preparationDb.reconcileBuildLaunches(retry.runId, retry.authority);
+          if (preparationDb.buildLaunch(retry.launch.token)?.state === "failed") {
+            preparationDb.releaseBuildAdmission(retry.authority);
+            console.log("rafi resume: launch stopped before work began; select this build with rafi resume to retry");
+          } else if (outcome === "unknown") console.log("rafi resume: launch registration is incomplete; retry rafi resume after the launcher stops for reconciliation");
+          if (code !== 0) process.exitCode = code;
+        } finally { preparationDb?.close(); }
         return;
       }
       let preloadedQaRecoveryPacket: QaRecoveryPacket | undefined;
       let pendingQaProtocolTicket: string | undefined;
       let pendingQaProtocolRevision: number | undefined;
       const reconciliationDb = new WorkflowDb(root);
+      recoveryAuthority = reconciliationDb.acquireBuildRecoveryAdmission(selected.runId);
       const reconciliationLease = reconciliationDb.acquireLease(selected.runId);
       try { recoverPendingQaRecoveryPublications(root, selected.runId); }
       finally { reconciliationDb.releaseLease(reconciliationLease); reconciliationDb.close(); }
@@ -93,7 +191,10 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
           loadQaRecoveryPacket(legacyQaState.packetPath);
         }
         const pendingRecoveryHeads = recoveryDb.pendingQaRecoveryHeads(selected.runId);
-        if (pendingRecoveryHeads.length > 1 && !opts.ticket) throw new Error(`run ${selected.runId} has multiple pending QA recovery packets; resume one with --ticket`);
+        if (pendingRecoveryHeads.length > 1 && !opts.ticket) {
+          opts.ticket = await (commandOpts.selectTicket ?? promptQaTicket)(pendingRecoveryHeads.map(item => item.ticketId));
+          if (!opts.ticket) return;
+        }
         const selectedHead = opts.ticket
           ? pendingRecoveryHeads.find((item) => item.ticketId === String(opts.ticket))
           : pendingRecoveryHeads[0];
@@ -111,7 +212,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
           }
           if (!selected.tickets.includes(packet.manifest.ticketId)) throw new Error(`QA recovery packet ticket ${packet.manifest.ticketId} is not part of run ${selected.runId}`);
           if (opts.ticket && String(opts.ticket) !== packet.manifest.ticketId) throw new Error(`--ticket ${String(opts.ticket)} conflicts with pending QA recovery ticket ${packet.manifest.ticketId}`);
-          if (!opts.ticket) throw new Error(`pending QA recovery must be resumed with --ticket ${packet.manifest.ticketId}`);
+          opts.ticket ??= packet.manifest.ticketId;
           const qaHead = recoveryDb.qaTicketHead(selected.runId, packet.manifest.ticketId);
           const attempts = recoveryDb.qaReviewAttempts(selected.runId, packet.manifest.ticketId);
           const attempt = attempts.find((item) => item.attemptId === packet.manifest.reviewAttemptId);
@@ -126,27 +227,32 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
           if (!exactBinding && !packetMayLagOneUndispatchedReview) {
             throw new Error("saved QA recovery packet does not match its durable review/source binding");
           }
-          if (opts.qaRevision === undefined) throw new Error(`pending QA recovery must be resumed with --qa-revision ${qaHead.revision}`);
+          opts.qaRevision ??= qaHead.revision;
           if (Number(opts.qaRevision) !== qaHead.revision) throw new Error(`stale QA recovery revision: requested ${String(opts.qaRevision)}, current revision is ${qaHead.revision}`);
           preloadedQaRecoveryPacket = packet;
           pendingQaProtocolTicket = packet.manifest.ticketId;
           pendingQaProtocolRevision = qaHead.revision;
         } else {
           const pendingHeads = recoveryDb.pendingQaTicketHeads(selected.runId);
-          if (pendingHeads.length > 1) throw new Error(`run ${selected.runId} has multiple pending QA tickets; resume one explicitly after inspecting durable state`);
-          const qaHead = pendingHeads[0];
+          if (pendingHeads.length > 1 && !opts.ticket) {
+            opts.ticket = await (commandOpts.selectTicket ?? promptQaTicket)(pendingHeads.map(item => item.ticketId));
+            if (!opts.ticket) return;
+          }
+          const qaHead = opts.ticket ? pendingHeads.find(item => item.ticketId === String(opts.ticket)) : pendingHeads[0];
+          if (pendingHeads.length && !qaHead) throw new Error(`--ticket ${String(opts.ticket)} conflicts with pending QA protocol tickets`);
           if (qaHead) {
             if (!selected.tickets.includes(qaHead.ticketId)) throw new Error(`pending QA protocol ticket ${qaHead.ticketId} is not part of run ${selected.runId}`);
-            if (!opts.ticket) throw new Error(`pending QA protocol must be resumed with --ticket ${qaHead.ticketId}`);
+            opts.ticket ??= qaHead.ticketId;
             if (String(opts.ticket) !== qaHead.ticketId) throw new Error(`--ticket ${String(opts.ticket)} conflicts with pending QA protocol ticket ${qaHead.ticketId}`);
-            if (opts.qaRevision === undefined) throw new Error(`pending QA protocol must be resumed with --qa-revision ${qaHead.revision}`);
+            opts.qaRevision ??= qaHead.revision;
             if (Number(opts.qaRevision) !== qaHead.revision) throw new Error(`stale QA protocol revision: requested ${String(opts.qaRevision)}, current revision is ${qaHead.revision}`);
             pendingQaProtocolTicket = qaHead.ticketId;
             pendingQaProtocolRevision = qaHead.revision;
           }
         }
       } finally { recoveryDb.close(); }
-      const effectiveTicket = pendingQaProtocolTicket ?? (opts.ticket ? String(opts.ticket) : undefined);
+      const effectiveTicket = pendingQaProtocolTicket ?? (opts.ticket ? String(opts.ticket) : selected.branchMode === "current" ? currentBranchRecoveryTicket(root, selected) : undefined);
+      if (effectiveTicket && !selected.tickets.includes(effectiveTicket)) throw new Error(`Recovery ticket ${effectiveTicket} is outside the saved run scope`);
       let projection = await (commandOpts.resolveProjection ?? resolveBuildRecoveryProjection)(root, selected, new Date(), effectiveTicket);
       console.log("rafi build:resume preview:");
       for (const line of formatBuildRecoveryProjection(projection)) console.log(`  ${line}`);
@@ -160,7 +266,11 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       let reconstructable = Boolean(head && head.state === "current" && db.latestContinuityCheckpoint(selected.runId, role));
       const guidedAvailable = Boolean(head && ["degraded", "invalid"].includes(head.state));
       let mode = explicitMode(opts);
-      if (!mode && process.stdin.isTTY && process.stdout.isTTY) mode = await promptMode(!qaRecoveryPacket && Boolean(projection.exactSessionId), reconstructable, guidedAvailable);
+      if (!mode && qaRecoveryPacket && reconstructable) mode = "fresh-with-handoff";
+      if (!mode && process.stdin.isTTY && process.stdout.isTTY) {
+        mode = await promptMode(!qaRecoveryPacket && Boolean(projection.exactSessionId), reconstructable, guidedAvailable, Boolean(qaRecoveryPacket));
+        if (!mode) { db.close(); return; }
+      }
       if (!mode && !qaRecoveryPacket) mode = projection.exactSessionId ? "exact-session" : undefined;
       if (!mode) { db.close(); throw new Error(`this run has no compatible exact session; choose ${reconstructable ? "--fresh-with-handoff or " : ""}--fresh-session`); }
       if (qaRecoveryPacket && mode !== "fresh-with-handoff" && mode !== "guided-recovery") {
@@ -182,6 +292,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       // From this point onward recovery may publish checkpoints, stage handoffs,
       // or update decisions. Hold the supervisor lease before any such mutation.
       const mutationLease = db.acquireLease(selected.runId);
+      let launchAuthority: ReturnType<WorkflowDb["admitLeasedBuild"]> | undefined;
       let handoffGeneration: number | undefined;
       let receipt!: BuildRecoveryDecisionReceipt;
       try {
@@ -233,11 +344,13 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         handoffGeneration = staged.manifest.generation;
         handoffDigest = staged.lineage.manifestDigest;
       }
+      launchAuthority = db.admitLeasedBuild(mutationLease);
       receipt = {
         version: 1,
         mode,
         runId: selected.runId,
         tickets: [...selected.tickets],
+        executionTickets: opts.ticket ? [String(opts.ticket)] : [...selected.tickets],
         role,
         ...(head ? { checkpointDigest: head.digest } : {}),
         ...(handoffDigest ? { handoffDigest } : {}),
@@ -253,7 +366,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         decidedAt: new Date().toISOString(),
       };
       db.recordRecoveryDecision(receipt);
-      selected = { ...saveBuildRun(root, { ...selected, checkpoint: "recovery-decision-frozen", recoveryDecision: receipt }), active: false };
+      selected = { ...saveBuildRun(root, bindBuildAuthority({ ...selected, checkpoint: "recovery-decision-frozen", recoveryDecision: receipt }, mutationLease)), active: false };
       } finally {
         // executeStart launches a new supervisor process. Transfer ownership by
         // releasing the CLI's lease before spawning it; the child acquires and
@@ -261,7 +374,11 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         db.releaseLease(mutationLease);
         db.close();
       }
-      const args = ["start", root, "--steps", String(effectiveTicket ? 1 : Math.max(1, selected.tickets.length)), "--recover-run", selected.runId, "--recovery-mode", mode];
+      // Inferring the interrupted ticket selects the first work item; only an
+      // explicit ticket or QA boundary narrows the requested recovery to one.
+      const remainingSteps = selected.branchMode === "current" ? selected.progress.remainingTickets.length || selected.tickets.length : selected.tickets.length;
+      const recoverySteps = pendingQaProtocolTicket || opts.ticket ? 1 : Math.max(1, remainingSteps);
+      const args = ["start", root, "--steps", String(recoverySteps), "--recover-run", selected.runId, "--recovery-mode", mode];
       args.push("--recovery-decision-digest", digest(receipt));
       if (effectiveTicket) args.push("--ticket", effectiveTicket);
       if (pendingQaProtocolRevision !== undefined) args.push("--qa-revision", String(pendingQaProtocolRevision));
@@ -274,9 +391,33 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       else if (settings.model !== "default") args.push("--model", settings.model);
       if (settings.reasoning !== "default") args.push("--effort", settings.reasoning);
       if (settings.fast) args.push("--fast");
-      const code = await commandOpts.executeStart(args);
-      if (code !== 0) process.exitCode = code;
-    });
+      const launchDb = new WorkflowDb(root);
+      try {
+        if (!launchAuthority) throw new Error("Recovery launch authority is missing");
+        validateRecoveryArguments(args, root);
+        const launch = launchDb.reserveBuildLaunch(launchAuthority, "coordinator", launchArgumentDigest(args), "registered-v2");
+        launchDb.dispatchBuildLaunch(launchAuthority, launch.token);
+        try {
+          const code = resumeExitCode(await commandOpts.executeStart([...args, "--launch-token", launch.token], { authority: launchAuthority }));
+          launchDb.reconcileBuildLaunches(selected.runId, launchAuthority);
+          if (code !== 0) process.exitCode = code;
+        } catch (error) {
+          if (error instanceof ResumeSpawnError) launchDb.failBuildLaunch(launchAuthority, launch.token);
+          throw error;
+        }
+      } finally { launchDb.close(); }
+      } finally {
+        if (recoveryAuthority) {
+          const cleanup = new WorkflowDb(root);
+          try {
+            if (cleanup.buildAdmission()?.token === recoveryAuthority.token) {
+              try { cleanup.releaseBuildAdmission(recoveryAuthority); }
+              catch { /* A durable launch/owned process remains for reconciliation. */ }
+            }
+          } finally { cleanup.close(); }
+        }
+      }
+    }));
 }
 
 function recoveryStateVersion(db: WorkflowDb, runId: string): string {
@@ -336,20 +477,20 @@ function explicitMode(opts: Record<string, unknown>): BuildRecoveryMode | undefi
   return undefined;
 }
 
-async function promptRun(runs: RecoverableRun[]): Promise<RecoverableRun | undefined> {
+export async function promptRun(runs: RecoverableRun[]): Promise<RecoverableRun | undefined> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("provide --run <id> or --ticket <id> when not running in a TTY");
   const { select, isCancel } = await import("@clack/prompts");
   const projections = new Map(runs.map((run) => [run.runId, projectBuildRecovery(run.repository.root, run)]));
-  const answer = await select({ message: "Which interrupted build should Rafi recover?", options: runs.map((run) => ({ value: run.runId, label: `${run.runId.slice(0, 8)} — ${projections.get(run.runId)!.compactLabel}`, hint: `${run.active ? "verified process active; " : ""}${projections.get(run.runId)!.compactHint}` })) });
+  const answer = await select({ message: "Which interrupted build should Rafi recover?", options: runs.map((run) => ({ value: run.runId, label: `${run.runId.slice(0, 8)} — ${run.cleanupOnly ? "Readiness cleanup only (no build replay)" : projections.get(run.runId)!.compactLabel}`, hint: `${run.active ? "verified process active; " : ""}${projections.get(run.runId)!.compactHint}` })) });
   return isCancel(answer) ? undefined : runs.find((run) => run.runId === answer);
 }
 
-async function promptMode(exact: boolean, reconstructable: boolean, guided: boolean): Promise<BuildRecoveryMode | undefined> {
+async function promptMode(exact: boolean, reconstructable: boolean, guided: boolean, packet = false): Promise<BuildRecoveryMode | undefined> {
   const { select, isCancel } = await import("@clack/prompts");
   const answer = await select<BuildRecoveryMode | "cancel">({ message: "How should Rafi continue?", options: [
     ...(exact ? [{ value: "exact-session" as const, label: "Resume exact compatible session (Recommended)" }] : []),
     ...(reconstructable ? [{ value: "fresh-with-handoff" as const, label: "Fresh session with validated cumulative handoff" }] : []),
-    { value: "fresh-recovery-only", label: "Ordinary fresh recovery (compatibility; conversation continuity is not transferred)" },
+    ...(!packet ? [{ value: "fresh-recovery-only" as const, label: "Ordinary fresh recovery (compatibility; conversation continuity is not transferred)" }] : []),
     ...(guided ? [{ value: "guided-recovery" as const, label: "Guided recovery for degraded role checkpoint" }] : []),
     { value: "cancel", label: "Cancel" },
   ] });
@@ -454,3 +595,21 @@ function selectByFlags(runs: RecoverableRun[], opts: Record<string, unknown>): R
 }
 
 function digest(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+
+async function promptQaTicket(tickets: string[]): Promise<string | undefined> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("multiple QA tickets require --ticket <id> when not running in a TTY");
+  const { select, isCancel } = await import("@clack/prompts");
+  const answer = await select({ message: "Which ticket should Rafi recover first?", options: tickets.map(value => ({ value, label: value })) });
+  return isCancel(answer) ? undefined : answer;
+}
+
+
+async function correctPreparationArguments(saved: string[], error: Error): Promise<string[] | undefined> {
+  console.error(`rafi resume: saved start options need correction: ${error.message}`);
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Run rafi resume interactively to correct the saved options before retrying");
+  const { text, isCancel } = await import("@clack/prompts");
+  const answer = await text({ message: "Correct saved start options (JSON array; normal scope approval follows)", initialValue: JSON.stringify(saved.slice(2)), validate: value => {
+    try { const parsed = JSON.parse(value ?? ""); return Array.isArray(parsed) && parsed.every(x => typeof x === "string") ? undefined : "Enter a JSON array of option strings"; } catch { return "Enter a JSON array of option strings"; }
+  } });
+  return isCancel(answer) ? undefined : [...saved.slice(0, 2), ...JSON.parse(answer)];
+}

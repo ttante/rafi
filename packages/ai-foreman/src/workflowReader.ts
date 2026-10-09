@@ -1,3 +1,5 @@
+import { type ReadinessProcess } from "./readinessCleanup.js";
+import { checkBuildOwnershipSchema, canonicalProject } from "./buildAdmission.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
@@ -11,13 +13,19 @@ type DbRun = { run_id: string; kind: WorkflowKind; status: WorkflowRunStatus; ch
 export class WorkflowReader {
   readonly path: string;
   private readonly db?: Database.Database;
-  constructor(projectDir: string, path = join(resolve(projectDir), WORKFLOW_DB_FILE)) {
+  constructor(private readonly projectDir: string, path = join(resolve(projectDir), WORKFLOW_DB_FILE)) {
     this.path = path;
     if (!existsSync(path)) return;
     this.db = new Database(path, { readonly: true, fileMustExist: true });
     this.db.pragma("query_only = ON");
+    try { checkBuildOwnershipSchema(this.db); } catch (error) { this.db.close(); throw error; }
   }
   close(): void { this.db?.close(); }
+  readinessProcesses(): ReadinessProcess[] {
+    if (!this.db) return [];
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='build_owned_processes'").get()) return [];
+    return this.db.prepare("SELECT * FROM build_owned_processes WHERE state<>'quiescent'").all() as ReadinessProcess[];
+  }
   available(): boolean { return Boolean(this.db); }
   getRun(runId: string): WorkflowRunSnapshot | undefined {
     if (!this.db) return undefined;
@@ -46,6 +54,39 @@ export class WorkflowReader {
   currentLease(): ProjectLease | undefined {
     if (!this.db) return undefined;
     try { const row = this.db.prepare("SELECT * FROM project_lease WHERE singleton=1").get() as Record<string, unknown> | undefined; return row ? { owner: String(row.owner), generation: Number(row.generation), pid: Number(row.pid), host: String(row.host), processStart: String(row.process_start), heartbeatAt: String(row.heartbeat_at), runId: String(row.run_id) } : undefined; } catch { return undefined; }
+  }
+  pendingQaTicketIds(runId: string): string[] {
+    if (!this.db) return [];
+    const ids: string[] = [];
+    for (const query of ["SELECT ticket_id FROM qa_recovery_heads WHERE run_id=? AND pending_action<>'resolved' ORDER BY updated_at,ticket_id", "SELECT ticket_id FROM qa_ticket_heads WHERE run_id=? AND state NOT IN ('completed','waived') ORDER BY updated_at,ticket_id"]) {
+      try { for (const row of this.db.prepare(query).all(runId) as Array<{ticket_id:string}>) if (!ids.includes(row.ticket_id)) ids.push(row.ticket_id); }
+      catch (error) { if (!String(error).includes("no such table")) throw error; }
+    }
+    return ids;
+  }
+  preparationSuccessor(runId: string): string {
+    if (!this.db) return runId;
+    const seen = new Set<string>();
+    while (true) {
+      if (seen.has(runId)) throw new Error("Preparation retry lineage contains a cycle");
+      seen.add(runId);
+      let row: {successor:string;project:string}|undefined;
+      try { row = this.db.prepare("SELECT successor,project FROM build_retry_lineage WHERE predecessor=?").get(runId) as typeof row; }
+      catch (error) { if (String(error).includes("no such table")) return runId; throw error; }
+      if (!row) return runId;
+      if (canonicalProject(row.project) !== canonicalProject(this.projectDir)) throw new Error("Preparation lineage belongs to another project");
+      runId = row.successor;
+    }
+  }
+  pendingBuildLaunches(runId: string): import("./buildAdmission.js").BuildLaunch[] {
+    if (!this.db) return [];
+    try { return (this.db.prepare("SELECT record_json FROM build_launches WHERE run_id=? AND state IN ('reserved','dispatching')").all(runId) as Array<{record_json:string}>).map(row => JSON.parse(row.record_json)); }
+    catch (error) { if (!String(error).includes("no such table")) throw error; return []; }
+  }
+  buildAdmission(): import("./buildAdmission.js").BuildAdmission | undefined {
+    if (!this.db) return undefined;
+    try { const row = this.db.prepare("SELECT record_json FROM build_admission WHERE singleton=1").get() as {record_json:string}|undefined; return row ? JSON.parse(row.record_json) : undefined; }
+    catch (error) { if (!String(error).includes("no such table")) throw error; return undefined; }
   }
   continuityHeads(runId: string): Array<{ role: string; state: string; sequence: number; digest: string; updatedAt: string }> {
     if (!this.db) return [];

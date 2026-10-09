@@ -1,3 +1,4 @@
+import { localBuildAuthority, type BuildAdmission } from "./buildAdmission.js";
 import { randomUUID, createHash } from "node:crypto";
 import type { ContinuityCheckpoint, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
 import type { BuilderAdapter, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, ProviderSessionUsage, ProviderSettingSwitch, RuntimeFailure, TurnResult } from "./adapters/types.js";
@@ -87,10 +88,11 @@ export function baselineContinuityDelta(nextAction = "Await the first role actio
   return { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: [], nextAction };
 }
 
-export function continuityInstruction(): string {
+export function continuityInstruction(role?: "builder" | "qa"): string {
   return [
     "Before your final STEP_STATUS line (or as the final line when STEP_STATUS is not requested), emit exactly one single-line continuity record:",
     `${CONTINUITY_MARKER} {"version":1,"decisions":[],"constraints":[],"discoveries":[],"completedActions":[],"evidence":[],"failures":[],"blockers":[],"openWork":[],"nextAction":"specific next action"}`,
+    ...(role === "qa" ? ["QA protocol: this continuity record is required even when the review requests only a report or status. Put it before RAFI_QA_FAILURE_REPORT_START when returning a failure envelope, outside the report JSON. Rafi strips the record before validating the report, so keep the report envelope immediately followed by STEP_STATUS."] : []),
     "Keep it concise and cumulative for facts learned this turn. Do not include credentials, hidden reasoning, or raw transcripts.",
   ].join("\n");
 }
@@ -124,9 +126,12 @@ export class ContinuityAdapter implements BuilderAdapter {
   private readonly queue = new BuilderEventQueue();
   private sourcePump?: Promise<void>;
   private recoveryLeasePending: boolean;
+  private validatingFreshRecovery = false;
+  private readonly buildAuthority?: BuildAdmission;
 
   constructor(private readonly options: ContinuityAdapterOptions) {
     this.adapter = options.adapter;
+    this.buildAuthority = localBuildAuthority(options.projectDir);
     this.recoveryLeasePending = Boolean(options.replaceRecoveryLeaseAfterCheckpoint);
     const db = new WorkflowDb(options.projectDir);
     try {
@@ -141,6 +146,24 @@ export class ContinuityAdapter implements BuilderAdapter {
     this.pumpEvents();
   }
 
+  /** Establish an explicitly requested fresh owner before context probes or work. */
+  async validateFreshRecovery(): Promise<void> {
+    if (!this.recoveryLeasePending) return;
+    const db = new WorkflowDb(this.options.projectDir);
+    let owner;
+    try { owner = db.roleMutationLease(this.options.runId, this.options.role); } finally { db.close(); }
+    const current = this.adapter.sessionRef?.();
+    if (!owner || (current && owner.sessionKey === providerSessionKey(current))) { this.recoveryLeasePending = false; return; }
+    this.validatingFreshRecovery = true;
+    try {
+      const result = await this.sendTurn("Fresh recovery validation only. Do not use tools, change files, implement work, or request a handoff. Acknowledge this new session and emit the required continuity record using only the supplied instructions.", { responseOnly: true });
+      if (result.isError || result.failure || this.recoveryLeasePending) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "fresh recovery did not establish a valid continuity checkpoint");
+    } catch (error) {
+      await this.close().catch(() => {});
+      throw error;
+    } finally { this.validatingFreshRecovery = false; }
+  }
+
   get agent(): "claude" | "codex" { return this.adapter.agent; }
 
   async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string }): Promise<TurnResult> {
@@ -149,12 +172,14 @@ export class ContinuityAdapter implements BuilderAdapter {
       db.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "turn_started", payload: { role: this.options.role, instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) }, authoritativeStateRevision: this.revision() });
     } finally { db.close(); }
 
-    const providerInstruction = `${instruction}\n\n${continuityInstruction()}`;
+    const providerInstruction = `${instruction}\n\n${continuityInstruction(this.options.role)}`;
     const journal = new WorkflowDb(this.options.projectDir);
     const dispatchId = `dispatch:${this.options.runId}:${this.options.role}:${randomUUID()}`;
     let original: TurnResult;
     try {
       journal.atomic(() => {
+        if (this.buildAuthority) journal.assertBuildAdmission(this.buildAuthority);
+        else if (journal.buildAdmission()) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "dispatch requires original build admission authority");
         if (process.send && process.env.RAFI_BUILD_WORKER_RUN === this.options.runId) {
           const supervisor = journal.supervisorState(this.options.runId);
           if (!process.connected || supervisor?.status !== "running" || supervisor.workerGeneration !== Number(process.env.RAFI_BUILD_WORKER_GENERATION)) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "supervised worker no longer owns dispatch authority");
@@ -162,7 +187,7 @@ export class ContinuityAdapter implements BuilderAdapter {
         const owner = journal.roleMutationLease(this.options.runId, this.options.role);
         const ref = this.adapter.sessionRef?.();
         const session = ref?.sessionId ?? this.adapter.sessionId();
-        if (owner && session && (owner.providerSessionId !== session || (owner.sessionKey && ref && owner.sessionKey !== providerSessionKey(ref)))) {
+        if (!(this.validatingFreshRecovery && this.recoveryLeasePending && policy?.responseOnly) && owner && session && (owner.providerSessionId !== session || (owner.sessionKey && ref && owner.sessionKey !== providerSessionKey(ref)))) {
           throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "provider session no longer owns role dispatch authority");
         }
         if (journal.unresolvedRoleDispatches(this.options.runId, this.options.role).length) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "a previous dispatched turn has no durable completion; reconcile it before sending more work");
@@ -198,7 +223,7 @@ export class ContinuityAdapter implements BuilderAdapter {
     if (parsed.delta && !original.isError && !original.failure) {
       this.publish(parsed.delta, "turn_completed", original);
       this.moveRecoveryLeaseAfterCheckpoint();
-      if (this.options.durableSingleTurn) {
+      if (this.options.durableSingleTurn || this.validatingFreshRecovery) {
         return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
           rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
       }
@@ -214,12 +239,12 @@ export class ContinuityAdapter implements BuilderAdapter {
         rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
     }
 
-    if (this.options.durableSingleTurn) {
+    if (this.options.durableSingleTurn || (this.validatingFreshRecovery && this.recoveryLeasePending && policy?.responseOnly)) {
       const invalidDb = new WorkflowDb(this.options.projectDir);
       try {
         invalidDb.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "continuity_invalid", payload: { problems: parsed.error?.problems }, authoritativeStateRevision: this.revision() });
       } finally { invalidDb.close(); }
-      return { ...original, isError: true, text: `QA continuity record was invalid: ${parsed.error?.problems.join("; ") ?? "unknown error"}`,
+      return { ...original, isError: true, continuityErrors: parsed.error?.problems ?? ["unknown continuity error"], text: `QA continuity record was invalid: ${parsed.error?.problems.join("; ") ?? "unknown error"}`,
         hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
         rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
     }

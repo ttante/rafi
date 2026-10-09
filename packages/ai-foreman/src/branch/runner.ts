@@ -1,3 +1,4 @@
+import { formatRecoveryCommand } from "../recoveryGuidance.js";
 import { WorkflowReader } from "../workflowReader.js";
 import { buildScopeRevision } from "../buildApproval.js";
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
@@ -830,7 +831,7 @@ function invalidateUnpublishedMergeDrift(projectDir: string, runId: string, tick
     // and source edits, but retire its dispatch slot before scheduling new QA.
     db.updateOperation(operationId, "failed", { error: error.message });
     const paused = db.invalidateQaFinalization(runId, ticketId, head.revision, error.message, intent.branch);
-    return new Error(`${error.message}. A complete QA recheck is required. Resume with: rafi build:resume ${projectDir} --run ${runId} --ticket ${ticketId} --qa-revision ${paused.revision} --fresh-with-handoff`);
+    return new Error(`${error.message}. A complete QA recheck is required. Resume with: ${formatRecoveryCommand(projectDir)}`);
   } catch { return error; }
   finally { db.close(); }
 }

@@ -1,3 +1,5 @@
+import { WorkflowReader } from "./workflowReader.js";
+import { classifyProcess } from "./processIdentity.js";
 import Database from "better-sqlite3";
 import { registerHandbackWriter } from "./qaHandbackMigration.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -306,10 +308,13 @@ function assertDbBackedTickets(root: string): void {
 }
 
 function assertNoLiveLease(root: string, operation = "export"): void {
-  const lease = readCurrentWorkflowLease(root);
-  if (!lease) return;
-  const ageMs = Date.now() - new Date(lease.heartbeatAt).getTime();
-  if (ageMs <= 45_000) throw new Error(`refusing to ${operation} while live workflow lease exists for run ${lease.runId}; stop or pause the active run first, then retry the state ${operation}`);
+  const reader = new WorkflowReader(root);
+  try {
+    const admission = reader.buildAdmission();
+    if (admission && classifyProcess(admission.pid, admission.processStart, admission.host).state !== "dead") throw new Error(`refusing to ${operation} while live or unknown build admission exists for run ${admission.runId}`);
+    const lease = reader.currentLease();
+    if (lease && classifyProcess(lease.pid, lease.processStart, lease.host).state !== "dead") throw new Error(`refusing to ${operation} while live workflow lease exists for run ${lease.runId}; stop or pause the active run first, then retry the state ${operation}`);
+  } finally { reader.close(); }
 }
 
 function runCurrentMigrations(root: string): void {
@@ -463,7 +468,26 @@ function rewriteWorkflowDb(root: string, sourceRoot: string): void {
   if (!existsSync(path)) return;
   const db = new Database(path);
   registerHandbackWriter(db);
+  // This connection only rewrites an offline imported snapshot. It cannot
+  // dispatch; preserve imported ownership as unknown instead of adopting it.
+  const importedOwner = tableExists(db, "build_admission") ? db.prepare("SELECT record_json FROM build_admission WHERE singleton=1").get() as {record_json:string}|undefined : undefined;
+  const owner = importedOwner ? JSON.parse(importedOwner.record_json) : undefined;
+  db.function("rafi_protocol_v3", () => 1);
+  db.function("rafi_build_lease_owner", () => "");
+  db.function("rafi_build_lease_generation", () => -1);
+  db.function("rafi_build_writer_run", () => "");
+  db.function("rafi_build_writer_token", () => owner?.token ?? "");
   try {
+    if (owner) {
+      db.exec("CREATE TABLE IF NOT EXISTS imported_build_ownership(record_json TEXT NOT NULL,imported_at TEXT NOT NULL)");
+      db.prepare("INSERT INTO imported_build_ownership VALUES(?,?)").run(importedOwner!.record_json, new Date().toISOString());
+      db.prepare("UPDATE build_admission SET record_json=? WHERE singleton=1").run(JSON.stringify({ ...owner, project: root, host: `imported:${owner.host}` }));
+    }
+    if (tableExists(db, "build_retry_lineage")) db.transaction(() => {
+      db.exec("DROP TRIGGER IF EXISTS build_lineage_immutable");
+      db.prepare("UPDATE build_retry_lineage SET project=? WHERE project=?").run(root, sourceRoot);
+      db.exec("CREATE TRIGGER build_lineage_immutable BEFORE UPDATE ON build_retry_lineage BEGIN SELECT RAISE(ABORT,'Retry lineage is immutable'); END;");
+    })();
     rewriteSqlJsonColumn(db, "workflow_runs", "run_id", ["original_work_json", "remaining_work_json", "state_json"], sourceRoot, root);
     rewriteSqlJsonColumn(db, "branch_resume_sessions", "rowid", ["session_json"], sourceRoot, root);
     if (tableExists(db, "qa_recovery_heads")) {

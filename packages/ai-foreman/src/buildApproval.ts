@@ -95,3 +95,18 @@ export function buildScopeRevision(projectDir: string, consequences?: Record<str
   });
   return createHash("sha256").update(JSON.stringify([contents, consequences])).digest("hex");
 }
+
+/** Reuse a decision only while its source and consequences remain unchanged. */
+export function createBuildApprovalGate(projectDir: string, ticketIds: readonly string[] | undefined, explicitYes: boolean, consequences: Record<string, unknown> | undefined, requestApproval: () => Promise<void>): () => Promise<void> {
+  let approvedRevision: string | undefined;
+  return async () => {
+    while (true) {
+      const revision = buildScopeRevision(projectDir, consequences);
+      if (revision === approvedRevision) return;
+      if (requiresBuildApproval(projectDir, ticketIds, explicitYes, consequences)) await requestApproval();
+      if (revision !== buildScopeRevision(projectDir, consequences)) continue;
+      approvedRevision = revision;
+      return;
+    }
+  };
+}

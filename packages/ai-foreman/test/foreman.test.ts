@@ -145,7 +145,7 @@ test("reported blockers are converted into multiple approaches before a non-inte
 
     assert.equal(resolved.status.kind, "blocked");
     assert.match(resolved.status.reason ?? "", /waiting for input/);
-    assert.match(resolved.status.reason ?? "", /Resume with rafi build:resume --run/);
+    assert.ok((resolved.status.reason ?? "").includes(`Resume with rafi resume ${dir}`));
     assert.match(builder.instructions[0] ?? "", /two or three safe, materially different approaches/);
     assert.match(builder.instructions[0] ?? "", /recommended approach and consequence \(Recommended\)/);
   } finally {
@@ -264,6 +264,46 @@ test("explicit recovery reopens a safely paused blocked ticket", async () => {
   }
 });
 
+for (const blocked of [false, true]) test(`scoped recovery ${blocked ? "stops at blocked work" : "continues eligible work"} without selecting unrelated or generic work`, async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: ["OTHER", "T001", "T002"].map((id, index) => ({ ...makeDef(id), order: index })) }));
+    cmdUpdate(dir, "OTHER", { status: "next", actor: "test" });
+    cmdUpdate(dir, "T001", { status: "in_progress", actor: "test" });
+    if (blocked) cmdBlock(dir, "T002", { summary: "independent unresolved blocker", actor: "test" });
+    else cmdUpdate(dir, "T002", { status: "next", actor: "test" });
+    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"', 'STEP_STATUS: done | ticket="T002"']);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
+    const result = await foreman.runBatch(10, undefined, undefined, "T001", ["T001", "T002"]);
+    assert.equal(result.completed, blocked ? 1 : 2);
+    assert.equal(builder.instructions.length, blocked ? 1 : 2);
+    const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try {
+      assert.equal(db.getState("OTHER")?.status, "next");
+      assert.equal(db.getState("T001")?.status, "done");
+      assert.equal(db.getState("T002")?.status, blocked ? "blocked" : "done");
+    } finally { db.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("scoped recovery cannot complete a different ticket named by the provider", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001"), makeDef("OTHER")] }));
+    cmdUpdate(dir, "T001", { status: "in_progress", actor: "test" });
+    cmdUpdate(dir, "OTHER", { status: "next", actor: "test" });
+    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="OTHER"']);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
+    const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
+    assert.equal(result.outcome, "needs-human"); assert.equal(result.completed, 0);
+    const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try { assert.equal(db.getState("OTHER")?.status, "next"); assert.equal(db.getState("T001")?.status, "in_progress"); }
+    finally { db.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("independent QA may write Foreman's own .foreman runtime files", async () => {
   const dir = makeTmpDir();
   try {
@@ -359,4 +399,129 @@ test("every follow-up Builder dispatch re-enters the safe boundary", async () =>
   } finally {
     rmSync(dir, { recursive: true });
   }
+});
+
+for (const mode of ["pending", "answered", "stale", "outside", "run-wide"] as const) test(`recovery decision eligibility: ${mode}`, async () => {
+  const { WorkflowDb } = await import("../src/workflowDb.js");
+  const { buildScopeRevision } = await import("../src/buildApproval.js");
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001"), { ...makeDef("T002"), order: 2000 }] }));
+    cmdUpdate(dir, "T001", { status: "blocked", actor: "test" });
+    cmdUpdate(dir, "T002", { status: "next", actor: "test" });
+    const db = new WorkflowDb(dir);
+    const decision = db.ensureHumanDecision({ decisionKey: `ticket-question:${buildScopeRevision(dir)}:1`, runId: "questions", interruptionId: mode === "run-wide" ? "build-plan" : "ticket:T001", prompt: "Which approach?", choices: [{ id: "a", label: "A" }] });
+    if (["answered", "stale", "outside"].includes(mode)) db.answerHumanDecision("questions", decision.decisionId, "a");
+    if (mode === "stale") writeFileSync(join(dir, "rafi-config.yaml"), "changed: true\n");
+    const selected = mode === "answered" ? "T001" : "T002";
+    const builder = new FakeBuilder([`STEP_STATUS: done | ticket="${selected}"`]);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "questions", true);
+    const result = await foreman.runBatch(1, undefined, undefined, mode === "outside" ? "T002" : "T001", mode === "outside" ? ["T002"] : ["T001", "T002"]);
+    assert.equal(result.completed, mode === "run-wide" ? 0 : 1, result.detail);
+    const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try {
+      assert.equal(state.getState("T001")?.status, mode === "answered" ? "done" : "blocked");
+      assert.equal(state.getState("T002")?.status, ["answered", "run-wide"].includes(mode) ? "next" : "done");
+    } finally { state.close(); }
+    assert.equal(Boolean(db.operation(`decision-continuation:${decision.decisionId}`)), mode === "answered");
+    if (mode === "pending" || mode === "run-wide") assert.equal(db.pendingHumanDecisions("questions").length, 1);
+    if (mode !== "run-wide") assert.match(builder.instructions[0]!, new RegExp(`Assigned ticket: ${selected}`));
+    if (mode === "stale") {
+      const replacement = db.pendingHumanDecisions("questions")[0]!;
+      assert.ok(replacement); assert.notEqual(replacement.decisionId, decision.decisionId);
+      db.answerHumanDecision("questions", replacement.decisionId, "a");
+      builder.sendTurn = async instruction => ({ text: 'STEP_STATUS: done | ticket="T001"', isError: false, numTurns: 1, costUsd: 0 });
+      const resumed = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
+      assert.equal(resumed.completed, 1, resumed.detail);
+      assert.equal(db.pendingHumanDecisions("questions").length, 0);
+    }
+    db.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("explicit recovery cannot substitute an independent ticket after a blocker", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001"), makeDef("T002")] }));
+    cmdUpdate(dir, "T001", { status: "in_progress", actor: "test" });
+    cmdUpdate(dir, "T002", { status: "next", actor: "test" });
+    const builder = new FakeBuilder(['STEP_STATUS: blocked | ticket="T001" reason="Rafi is waiting for input"']);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
+    const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
+    assert.equal(result.completed, 0); assert.equal(builder.instructions.length, 1);
+    const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try { assert.equal(state.getState("T002")?.status, "next"); } finally { state.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("scoped completion without ticket identity cannot pass QA or update tracker", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
+    cmdUpdate(dir, "T001", { status: "in_progress", actor: "test" });
+    const builder = new FakeBuilder(['STEP_STATUS: done | summary="ambiguous"']);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async () => { throw new Error("QA must not run"); });
+    const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
+    assert.equal(result.completed, 0); assert.match(result.detail ?? "", /no ticket/);
+    assert.equal(builder.instructions.length, 1, "do not repeat implementation to recover marker identity");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("approval covers later work, revalidates edits between turns and binds every prompt", async () => {
+  const { createBuildApprovalGate } = await import("../src/buildApproval.js");
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    const tickets = [makeDef("T001"), { ...makeDef("T002"), order: 2000 }];
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets }));
+    for (const ticket of tickets) cmdUpdate(dir, ticket.id, { status: "next", actor: "test" });
+    let approvals = 0;
+    const gate = createBuildApprovalGate(dir, ["T001", "T002"], false, undefined, async () => { approvals++; });
+    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"', 'STEP_STATUS: done | ticket="T002"'], index => {
+      if (index === 0) writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [tickets[0], { ...tickets[1], acceptance: ["new requirement"] }] }));
+      if (index === 1) assert.equal(approvals, 2, "must approve changed T002 before dispatch");
+    });
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
+    const result = await foreman.runBatch(2, undefined, gate, "T001", ["T001", "T002"]);
+    assert.equal(result.completed, 2, result.detail);
+    assert.match(builder.instructions[0]!, /Assigned ticket: T001/);
+    assert.match(builder.instructions[1]!, /Assigned ticket: T002/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("explicit recovery never reopens a ticket whose dependency remains unfinished", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001"), { ...makeDef("T002"), depends_on: ["T001"] }] }));
+    cmdUpdate(dir, "T001", { status: "next", actor: "test" });
+    cmdUpdate(dir, "T002", { status: "blocked", actor: "test" });
+    const builder = new FakeBuilder([]);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
+    const result = await foreman.runBatch(1, undefined, undefined, "T002", ["T002"]);
+    assert.equal(result.completed, 0); assert.equal(result.outcome, "blocked"); assert.equal(builder.instructions.length, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("response-only protocol correction retains the assigned ticket across safe boundaries", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
+    cmdUpdate(dir, "T001", { status: "next", actor: "test" });
+    const builder = new FakeBuilder(['work finished without marker', 'STEP_STATUS: done | ticket="T001"']);
+    const boundaries: string[] = [];
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir, undefined, undefined, undefined, undefined, undefined, undefined,
+      async (adapter, action) => { boundaries.push(action); return adapter; });
+    const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
+    assert.equal(result.completed, 1, result.detail);
+    assert.equal(builder.instructions.length, 2);
+    assert.match(builder.instructions[1]!, /Protocol correction only/);
+    assert.match(builder.instructions[1]!, /Do not repeat implementation/);
+    assert.ok(builder.instructions.every(instruction => instruction.includes('Ticket scope: T001.') && instruction.includes('ticket="T001"')));
+    assert.ok(boundaries.every(instruction => instruction.includes('Ticket scope: T001.')));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

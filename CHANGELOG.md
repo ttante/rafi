@@ -4,6 +4,56 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.9.20 / ai-foreman 1.7.20 / special-agents 0.8.12 / rafi-spec 0.8.13 - 2026-10-09
+
+### Fixed
+
+- Keep earlier deferred tickets visible after later work completes or the process crashes; reconcile recovery progress against durable ticket, QA and question state.
+- Restrict explicit ticket recovery to that ticket, preserve independent continuation for bare resume, and recheck approvals before dispatching changed work.
+- Keep unanswered tickets paused, replace stale unused answers with actionable questions, and bind every recovered completion to its assigned ticket.
+- Validate fresh recovery session ownership before work or context probes, while preserving the block on uncertain previous dispatches.
+
+- Preserve the selected interrupted ticket during current-branch recovery. Complete successful ticket/QA recovery only when the saved run's tickets are done, retaining unfinished scope for later recovery.
+- Accept the same explicit build recovery options through `rafi resume` and `rafi build:resume`, while rejecting build-only options for interview operations.
+- Exercise persisted Builder/QA interruptions through both packaged aliases and require production reconciliation of paused Windows creators in prepared CI; native Windows/Linux verification remains pending.
+- Allow interrupted provider operations to reach recovery after ownership-schema upgrades, preserving their uncertainty and blocking ordinary replay.
+- Reject standalone readiness success when process cleanup is unverified, retain cleanup evidence in the current process, and reconcile it before retrying.
+- Expand prepared Windows CI with packaged resume, readiness fault, competing cleanup and worker-death regressions; native execution remains pending.
+
+- Accept established recovery launch tokens in the real start action, validate generated recovery arguments, and replace outer tokens during nested supervisor/worker transfer.
+- Register readiness helpers before allowing provider execution; share durable descendant cleanup across completion, cancellation, worker crashes and restricted resume recovery. Preserve provider results and keep group leaders until cleanup finishes.
+- Expose cleanup-only entries for terminal builds and missing build projections through both short resume commands, without replaying work or changing run status.
+- Migrate readiness ownership to schema 3 with transactional old-writer fences, strict authorization/revocation transitions and restricted cleanup connections. Retain ambiguous legacy evidence for reassessment.
+- Validate saved preparation arguments with the start command's rules, offer corrections before retry reservation, and fence preclaim launches through bounded child registration and acknowledgement. Provably failed launches can retry the same successor through `rafi resume`.
+- Attribute readiness probes in Builder/QA worktrees to the owning project. Track readiness results separately from descendant cleanup, and block further dispatch while cleanup remains unresolved.
+- Require original runtime authority for build snapshots and lower-level writes, reject terminal-run resurrection, and fence delayed snapshot publication.
+- Add Windows readiness containment using Job Objects, process incarnation checks, and direct Node invocation of standard npm provider shims. Native Windows regression coverage is included in the build-recovery workflow.
+- Reserve preparation and recovery launches durably; concurrent retries cannot create duplicate successors or claim the same launch twice. Retain uncertain launches for reconciliation.
+- Track ownership before provider readiness in supervised, detached, and unsupervised builds. Keep unknown ownership distinct, fence stale writers, and retain preparation subprocess evidence.
+- Make resume inspection read-only, follow superseded run IDs to their successor, and print shell-quoted owning-project paths when recovery is invoked elsewhere.
+- Recover completed QA continuity and response-format failures with a bounded, durable fresh-review retry, including malformed resumed reports and acknowledgements. Preserve the guards against replaying uncertain execution or accepting reconstructed reports.
+- Resolve QA ticket and revision flags from durable state when resuming, preserve stale-revision checks, and correctly pass repeatable ticket selections through both build modes.
+- Keep interrupted preparation attempts visible alongside complete build checkpoints; save their parsed start arguments and prevent preparation replay when execution or pending-decision evidence exists.
+- Respect cancellation of the recovery-mode picker and exclude superseded builds from resumable choices.
+
+### Upgrade notes
+
+Stop existing workers before upgrading. Recovery storage adds admission, launch, lineage, owned-process and monotonic lease-generation records, plus writer fences. Older binaries must not mutate an upgraded recovery database. Unsupported future ownership schemas are rejected; do not delete ownership or lineage records to downgrade. Inspection does not migrate older databases.
+
+Ownership schema version 3 retains ambiguous legacy launches and unfinished probe records for investigation rather than assuming they are safe to replay. Only verified-quiescent probe history is excluded from cleanup; terminal build status does not clear unfinished probes. Windows containment targets Windows 10 / Server 2016 APIs and requires built-in Windows PowerShell with `Add-Type`; native platform verification remains a release gate, and the minimum OS versions have not been verified.
+
+### Added
+
+- `rafi resume` now selects unfinished builds as well as interviews, newest first. `rafi build:resume` provides the build-only picker, and QA failure guidance uses the short command.
+
+### Packages
+
+- Bumped `ai-foreman` to `1.7.20` for build admission, readiness cleanup, recovery ownership, and QA resume fixes.
+- Bumped `@rafi-ai/cli` to `0.9.20` for unified resume and recovery launch fixes and its exact `ai-foreman@1.7.20` dependency.
+- Bumped `rafi-spec` to `0.8.13` for the optional `executionTickets` recovery receipt field.
+- Bumped `special-agents` to `0.8.12` for its exact `rafi-spec@0.8.13` dependency.
+- Updated the runtime and CLI to pin `rafi-spec@0.8.13` and `special-agents@0.8.12`.
+
 ## @rafi-ai/cli 0.9.19 / ai-foreman 1.7.19 / special-agents 0.8.11 / rafi-spec 0.8.12 - 2026-10-08
 
 ### Fixed

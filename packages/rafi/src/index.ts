@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { launchResumeStart } from "./resumeLauncher.js";
 import { Command } from "commander";
 import { resolve, join } from "node:path";
 import { existsSync, realpathSync } from "node:fs";
@@ -54,6 +55,7 @@ import { buildSourcesCommand } from "./sources.js";
 import { buildDiscoveryCommand } from "./discovery.js";
 import { collectCreateStackInterview } from "./createStackInterview.js";
 import { buildAgentsCommand, defaultAgentDefaults, promptSessionStrategyDefaults } from "./agents.js";
+import { buildResumeCommand } from "./resume.js";
 import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
 import { buildUninstallCleanupCommand, buildUninstallCommand, buildUninstallRestoreCommand, interpretUninstallInstruction } from "./uninstall.js";
@@ -65,10 +67,7 @@ import {
   checkpointInterview,
   completeInterview,
   createInterviewRecord,
-  discardInterview,
   findInterviewRecord,
-  pruneCompletedInterviews,
-  readInterviewRecords,
   type InterviewRecord,
 } from "ai-foreman/interviews.js";
 
@@ -413,54 +412,10 @@ program
     }
   });
 
-program
-  .command("resume")
-  .description("Resume or discard a saved interactive create, plan, or ticket-setup interview.")
-  .argument("[project]", "path to the target repo", ".")
-  .option("--id <id>", "saved interview id (or unique prefix) to resume")
-  .option("--discard <id>", "discard a saved interview id (or unique prefix)")
-  .action(async (project: string, opts) => {
-    const projectDir = resolve(project);
-    pruneCompletedInterviews(projectDir);
-    if (opts.discard) {
-      if (!discardInterview(projectDir, String(opts.discard))) throw new Error(`interview not found: ${opts.discard}`);
-      console.log(`rafi resume: discarded ${opts.discard}`);
-      return;
-    }
-    const available = readInterviewRecords(projectDir).records.filter((record) => record.status !== "completed");
-    if (available.length === 0) {
-      console.log("rafi resume: no unfinished interviews found");
-      return;
-    }
-    let record = opts.id ? findInterviewRecord(projectDir, String(opts.id)) : undefined;
-    if (!record && !opts.id) {
-      if (!process.stdin.isTTY || !process.stdout.isTTY) {
-        throw new Error("provide --id <id> when stdin/stdout is not a TTY");
-      }
-      const { select, isCancel } = await import("@clack/prompts");
-      const chosen = await select({
-        message: "Which interview should Rafi resume?",
-        options: available.map((item) => ({
-          value: item.id,
-          label: `${item.workflow} — ${item.checkpoint} — ${item.failure?.summary ?? "interrupted"}`,
-          hint: item.updatedAt,
-        })),
-      });
-      if (isCancel(chosen)) return;
-      record = findInterviewRecord(projectDir, String(chosen));
-    }
-    if (!record) throw new Error(`interview not found: ${opts.id}`);
-    if (record.status === "incompatible") {
-      throw new Error(`interview ${record.id} uses an incompatible state version; use --discard ${record.id} to remove it`);
-    }
-    console.log(`rafi resume: ${record.workflow} at ${record.checkpoint}`);
-    if (record.runtime.sessionId) {
-      console.log(`rafi resume: saved ${record.runtime.runtime ?? "agent"} session ${record.runtime.sessionId} will be requested by the workflow.`);
-    } else if (record.checkpoint === "agent-run") {
-      console.log("rafi resume: the prior agent session is unavailable; the workflow will start a fresh session with the saved brief and answers.");
-    }
-    await resumeInterview(projectDir, record);
-  });
+program.addCommand(buildResumeCommand({
+  resumeBuild: async (args) => { await buildBuildResumeCommand({ executeStart: (args, context) => launchResumeStart(fileURLToPath(import.meta.url), args, context) }).parseAsync(args, { from: "user" }); },
+  resumeInterview,
+}));
 
 function loadRafiConfig(targetDir: string): { config: ProjectConfig; migrated: boolean } | undefined {
   const configPath = join(targetDir, RAFI_CONFIG_FILE);
@@ -1048,7 +1003,7 @@ program.addCommand(buildStartCommand());
 program.addCommand(buildAttachCommand());
 program.addCommand(buildDecideCommand());
 program.addCommand(buildStopCommand());
-program.addCommand(buildBuildResumeCommand({ executeStart: (args) => runSelfCommandStatus(args) }));
+program.addCommand(buildBuildResumeCommand({ executeStart: (args, context) => launchResumeStart(fileURLToPath(import.meta.url), args, context) }));
 program.addCommand(buildBuildStartOverCommand());
 program.addCommand(buildHandoffsCommand());
 program.addCommand(buildAgentsCommand());

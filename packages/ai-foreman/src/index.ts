@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { withRecoveryCommandFamily } from "./recoveryGuidance.js";
 import { HumanDecisionRequired } from "./humanDecision.js";
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
@@ -36,7 +37,7 @@ program.addCommand(buildStopCommand());
 const argv = [...process.argv];
 if (argv[2] === "--") argv.splice(2, 1);
 const command = argv.slice(2).filter((arg) => !arg.startsWith("-")).slice(0, 3).join(" ") || "ai-foreman";
-withActivityContext(command, () => program.parseAsync(argv)).catch((err) => {
+withActivityContext(command, () => withRecoveryCommandFamily("ai-foreman", () => program.parseAsync(argv))).catch((err) => {
   console.error(`foreman: ${String(err)}`);
   process.exit(err instanceof HumanDecisionRequired ? 2 : 1);
 });

@@ -1,9 +1,12 @@
+import { WorkflowReader } from "../workflowReader.js";
+import { localBuildAuthority, canonicalProject, withBuildInvocation } from "../buildAdmission.js";
+import { formatRecoveryCommand } from "../recoveryGuidance.js";
 import { durableReadOnlyProposal } from "../readOnlyProposal.js";
 import { captureFrozenQaSource } from "../qaSnapshot.js";
-import { superviseStart, supervisedRunId } from "../supervisedStart.js";
+import { finishStartAdmission, superviseStart, supervisedRunId } from "../supervisedStart.js";
 import { durableHumanDecision, HumanDecisionRequired } from "../humanDecision.js";
-import { requiresBuildApproval, buildScopeRevision } from "../buildApproval.js";
-import { Command } from "commander";
+import { requiresBuildApproval, buildScopeRevision, createBuildApprovalGate } from "../buildApproval.js";
+import { Command, Option } from "commander";
 import { resolve, join, relative } from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -19,7 +22,7 @@ import { Foreman, createPermissionHandler } from "../foreman.js";
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
 import { printEvents } from "./events.js";
 import { loadRoleBundle } from "../roles.js";
-import { ensureRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
+import { ensureBuildRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
 import type { AgentRuntime } from "../runtimeAuth.js";
 import { resolveAgentForProject } from "./runtimeSelection.js";
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "../tickets/config.js";
@@ -31,7 +34,7 @@ import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
 import { branchPlanLogMetadata, presentBranchPlan } from "../branch/presentation.js";
-import { buildRunSessionBinding, checkpointBuildRun, completeBuildRun, createBuildRun, heartbeatBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
+import { buildRunSessionBinding, checkpointBuildRun, completeBuildRun, createBuildRun, currentBranchRecoveryTicket, currentBranchTicketProgress, recoveryExecutionTickets, finishRecoveredTicketScope, heartbeatBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
 import type { AutonomyProfile, BuildRunRecordV2, BuildRunRecordV3, ProviderSessionRefV1, ResolvedAgentSettings, SessionStrategy } from "rafi-spec";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
 import { parse as parseYaml } from "yaml";
@@ -171,12 +174,12 @@ export function formatResumeGuidance(
       `  rafi build:decide ${shellQuote(projectDir)} --run ${shellQuote(run.runId)} --decision ${shellQuote(decision.decisionId)} --choice <choice-id>`,
     ]),
     "foreman: resume this run with:",
-    `  rafi build:resume ${shellQuote(projectDir)} --run ${shellQuote(run.runId)}`,
+    `  ${formatRecoveryCommand(projectDir, "rafi")}`,
   ];
   if (executable === "rafi") {
     return [
       "foreman: resume this run with:",
-      `  rafi build:resume ${shellQuote(projectDir)}`,
+      `  ${formatRecoveryCommand(projectDir, executable, process.cwd(), sessionId ? { id: sessionId, steps } : undefined)}`,
     ];
   }
   if (!sessionId) return [];
@@ -400,6 +403,66 @@ async function ensureReviewProviderReady(cwd: string, provider: ReviewProvider, 
   }
 }
 
+/** Save parsed CLI values as argv, never as executable shell text. */
+export function savedStartArguments(command: Command, projectDir: string, opts: Record<string, unknown>): string[] {
+  const args = ["start", projectDir];
+  for (const option of command.options) {
+    const name = option.attributeName();
+    if (["preparationRun", "launchToken"].includes(name)) continue;
+    const value = opts[name];
+    if (value === undefined || (!["steps", "stacks"].includes(name) && command.getOptionValueSource(name) !== "cli")) continue;
+    if (option.negate) { if (value === false) args.push(option.long!); continue; }
+    if (value === false) continue;
+    if (value === true) args.push(option.long!);
+    else for (const item of Array.isArray(value) ? value : [value]) args.push(option.long!, name === "tickets" ? resolve(String(item)) : String(item));
+  }
+  return args;
+}
+
+/** Pure validation shared by interactive start and persisted preparation. */
+export function validateStartOptions(opts: Record<string, any>, requireCount: boolean): void {
+  const recovery = Boolean(opts.resume || opts.continue || opts.recoverRun);
+  const tickets = opts.ticket ?? [];
+  if (!recovery && tickets.length > 1) throw new Error("new-ticket selection supports exactly one --ticket");
+  if (!recovery && tickets.length && opts.stacks !== undefined) throw new Error("new-ticket selection cannot be combined with --stacks");
+  if (!recovery && tickets.length === 1 && opts.steps === undefined && opts.stacks === undefined) opts.steps = "1";
+  if (opts.steps !== undefined && opts.stacks !== undefined) throw new Error("--steps and --stacks are mutually exclusive");
+  if (requireCount && opts.steps === undefined && opts.stacks === undefined) throw new Error("exactly one of --steps or --stacks is required");
+  for (const name of ["steps", "stacks"]) if (opts[name] !== undefined && (!/^\d+$/.test(String(opts[name])) || !Number.isSafeInteger(Number(opts[name])) || Number(opts[name]) < 1)) throw new Error(`--${name} must be a positive integer`);
+  for (const [name, allowed] of Object.entries({ agent: ["claude", "codex"], effort: ["low", "medium", "high", "xhigh"], autonomy: ["supervised", "balanced", "unattended"], completion: ["pr", "auto-merge", "direct-merge", "none"], mergeMethod: ["squash", "merge", "rebase"], provider: ["auto", "github", "gitlab"], acceptHandoffRole: ["builder", "qa"] })) {
+    if (opts[name] !== undefined && !allowed.includes(String(opts[name]))) throw new Error(`--${name} must be ${allowed.join(" | ")}`);
+  }
+  for (const name of ["maxBranchDepth", "autoMergeTimeoutMinutes", "acceptHandoff"]) if (opts[name] !== undefined && (!/^\d+$/.test(String(opts[name])) || !Number.isSafeInteger(Number(opts[name])) || Number(opts[name]) < 1)) throw new Error(`${name} must be a positive integer`);
+  if (opts.autoCompactThreshold !== undefined && (!/^\d+$/.test(String(opts.autoCompactThreshold)) || Number(opts.autoCompactThreshold) < 1 || Number(opts.autoCompactThreshold) > 99)) throw new Error("--auto-compact-threshold must be an integer from 1 to 99");
+  if (opts.resume && opts.continue) throw new Error("--resume and --continue are mutually exclusive");
+  if (opts.preparationRun && opts.recoverRun) throw new Error("Preparation and established recovery run modes are mutually exclusive");
+  if (opts.preparationRun && !opts.launchToken) throw new Error("Preparation launch requires both run and token");
+  if (opts.launchToken && !opts.preparationRun && !opts.recoverRun) throw new Error("Launch token requires a preparation or recovery run");
+}
+
+/** Validate generated established recovery before reserving execution authority. */
+export function validateRecoveryArguments(args: readonly string[], projectDir: string): void {
+  if (args[0] !== "start" || canonicalProject(args[1] ?? "") !== canonicalProject(projectDir)) throw new Error("Recovery arguments belong to another project");
+  const command = buildStartCommand().exitOverride().configureOutput({ writeErr: () => {} });
+  const parsed = command.parseOptions([...args.slice(2)]);
+  if (parsed.unknown.length || parsed.operands.length) throw new Error("Unsupported recovery arguments");
+  const opts = command.opts();
+  validateStartOptions(opts, true);
+  if (!opts.recoverRun || opts.preparationRun || opts.launchToken) throw new Error("Invalid generated recovery context");
+}
+
+/** Validate persisted preparation argv without executing a command or provider. */
+export function validatePreparationArguments(args: readonly string[], projectDir: string): string[] {
+  if (args[0] !== "start" || !args[1] || canonicalProject(args[1]) !== canonicalProject(projectDir)) throw new Error("Saved preparation arguments belong to another project");
+  const command = buildStartCommand().exitOverride().configureOutput({ writeErr: () => {} });
+  const parsed = command.parseOptions([...args.slice(2)]);
+  if (parsed.unknown.length || parsed.operands.length) throw new Error("Saved preparation arguments contain unsupported options or operands");
+  const options = command.opts();
+  validateStartOptions(options, true);
+  for (const name of ["recoverRun", "recoveryMode", "recoveryDecisionDigest", "acceptHandoff", "acceptHandoffRole", "qaRevision", "launchToken", "preparationRun"]) if (command.getOptionValueSource(name) === "cli") throw new Error("Saved preparation contains stale internal recovery authority");
+  return savedStartArguments(command, projectDir, options);
+}
+
 export function buildStartCommand(): Command {
   return new Command("start")
     .description("Enlist a builder and drive it through a batch of N steps.")
@@ -409,6 +472,8 @@ export function buildStartCommand(): Command {
     .option("-a, --agent <agent>", "builder agent (claude | codex)")
     .option("-m, --model <model>", "override the builder's model")
     .option("-r, --resume <sessionId>", "resume a prior builder session")
+    .addOption(new Option("--preparation-run <id>", "authorized preparation successor (internal)").hideHelp())
+    .addOption(new Option("--launch-token <token>", "single-use preparation launch authorization (internal)").hideHelp())
     .option("--recover-run <id>", "continue an existing master recovery run ID")
     .option("--recovery-mode <mode>", "frozen build:resume mode (internal recovery receipt)")
     .option("--recovery-decision-digest <digest>", "exact frozen build:resume decision digest (internal)")
@@ -444,7 +509,8 @@ export function buildStartCommand(): Command {
     .option("--keep-worktrees", "keep successful ticket worktrees for inspection")
     .option("--ticket <id>", "select one new ticket, or identify recovery tickets with --resume/--continue/--recover-run", collectTicket, [])
     .option("--skip-delivery-unit <id>", "skip one unfinished delivery unit for this run", collectTicket, [])
-    .action(async (project: string, opts, command: Command) => {
+    .action(async (project: string, opts, command: Command) => withBuildInvocation(async () => {
+      try { validateStartOptions(opts, false); } catch (error) { fail((error as Error).message); }
       const requestedTicketIds = (opts.ticket as string[] | undefined) ?? [];
       const recoveryIntent = Boolean(opts.resume || opts.continue || opts.recoverRun);
       if (!recoveryIntent && requestedTicketIds.length > 1) fail("new-ticket selection supports exactly one --ticket");
@@ -461,6 +527,7 @@ export function buildStartCommand(): Command {
         if (isCancel(count)) process.exit(0);
         opts[mode as "steps" | "stacks"] = String(count);
       }
+      try { validateStartOptions(opts, true); } catch (error) { fail((error as Error).message); }
       let steps = Number.parseInt(opts.steps ?? "0", 10);
       const stackCount = opts.stacks === undefined ? undefined : Number.parseInt(opts.stacks, 10);
       if (stackCount !== undefined && (!Number.isInteger(stackCount) || stackCount < 1)) fail("--stacks must be a positive integer");
@@ -479,11 +546,16 @@ export function buildStartCommand(): Command {
       if (opts.recoverRun && !recoveryRecord) fail(`recoverable build run not found: ${opts.recoverRun}`);
       const autonomyProfile = opts.autonomy as AutonomyProfile | undefined;
       if (autonomyProfile && !["supervised", "balanced", "unattended"].includes(autonomyProfile)) fail("--autonomy must be supervised, balanced, or unattended");
-      const frozenPolicy = recoveryRecord && "frozenPolicy" in recoveryRecord
+      const supervisedInvocationId = recoveryRecord?.runId ?? opts.preparationRun ?? supervisedRunId() ?? (process.env.RAFI_DETACHED_SUPERVISOR_RUN || undefined) ?? randomUUID();
+      const policyReader = new WorkflowReader(cwd);
+      const persistedPolicy = policyReader.autonomyPolicy(supervisedInvocationId);
+      policyReader.close();
+      const frozenPolicy = persistedPolicy ?? (recoveryRecord && "frozenPolicy" in recoveryRecord
         ? (recoveryRecord as BuildRunRecordV3).frozenPolicy
-        : resolveAutonomyPolicy(loadProjectAutonomyConfig(cwd), autonomyProfile);
-      const supervisedInvocationId = recoveryRecord?.runId ?? supervisedRunId() ?? (process.env.RAFI_DETACHED_SUPERVISOR_RUN || undefined) ?? randomUUID();
-      if (await superviseStart(cwd, supervisedInvocationId, opts.supervisor === false ? { ...frozenPolicy, supervisorEnabled: false } : frozenPolicy, { steps: opts.steps, stacks: opts.stacks, detach: opts.detach })) return;
+        : resolveAutonomyPolicy(loadProjectAutonomyConfig(cwd), autonomyProfile));
+      try {
+      if (await superviseStart(cwd, supervisedInvocationId, opts.supervisor === false ? { ...frozenPolicy, supervisorEnabled: false } : frozenPolicy, { steps: opts.steps, stacks: opts.stacks, detach: opts.detach, launchToken: opts.launchToken, startArgs: savedStartArguments(command, cwd, opts) })) return;
+      const readinessOwner = { project: cwd, runId: supervisedInvocationId, authority: localBuildAuthority(cwd)! };
       const autoApprovePlanUpdates = recoveryRecord
         ? recoveryRecord.recoveryDecision?.planUpdateApproval === "auto"
         : Boolean(opts.yes);
@@ -606,8 +678,9 @@ export function buildStartCommand(): Command {
           ? requestedTicketIds
           : branchDefaults.branchMode && recoveryRecord
             ? [...recoveryRecord.tickets]
-            : []
+            : recoveryRecord ? [currentBranchRecoveryTicket(cwd, recoveryRecord)].filter((ticket): ticket is string => ticket !== undefined) : []
         : [];
+      if (recoveryRecord && continueTickets.some(ticket => !recoveryRecord.tickets.includes(ticket))) fail("Recovery ticket is outside the saved run scope");
       let selectedNewTicket = !recoveryIntent ? requestedTicketIds[0] : undefined;
       const maxBranchDepth = Number.parseInt(opts.maxBranchDepth, 10);
       if (!Number.isInteger(maxBranchDepth) || maxBranchDepth < 1) {
@@ -690,6 +763,9 @@ export function buildStartCommand(): Command {
       }
       const recoveryTicket = !branchMode && recoveryRecord ? continueTickets[0] : undefined;
       const preferredTicket = selectedNewTicket ?? recoveryTicket;
+      const executionTickets = !branchMode && recoveryRecord && recoveryRecord.tickets.length
+        ? recoveryExecutionTickets(recoveryRecord, requestedTicketIds, Boolean(opts.recoveryMode))
+        : selectedNewTicket ? [selectedNewTicket] : undefined;
 
       const config = loadConfig(join(cwd, "foreman.yaml"));
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -868,7 +944,7 @@ export function buildStartCommand(): Command {
       };
 
       const createBuilderForSettings = async (builderCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
-        const ready = await ensureRuntimeReadyForCommand(builderCwd, settings.make, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+        const ready = await ensureBuildRuntimeReadyForCommand(builderCwd, settings.make, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
           label: "live Builder settings",
           onTrace: trace => log.write("runtime-readiness", { ...trace, role: "builder" }),
           yes: true,
@@ -907,7 +983,7 @@ export function buildStartCommand(): Command {
       };
 
       const createQaForSettings = async (qaCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
-        const ready = await ensureRuntimeReadyForCommand(qaCwd, settings.make, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+        const ready = await ensureBuildRuntimeReadyForCommand(qaCwd, settings.make, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
           label: "live QA settings",
           onTrace: trace => log.write("runtime-readiness", { ...trace, role: "qa" }),
           yes: true,
@@ -977,7 +1053,7 @@ export function buildStartCommand(): Command {
           enabled: Boolean(process.stdin.isTTY && process.stdout.isTTY),
           allowSwitch: !(opts.resume || opts.continue),
           recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
-            const nextReady = await ensureRuntimeReadyForCommand(builderCwd, nextRuntime, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+            const nextReady = await ensureBuildRuntimeReadyForCommand(builderCwd, nextRuntime, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
               label: "builder recovery",
               allowSwitch: false,
               model: nextRuntime === agent ? model : undefined,
@@ -1098,13 +1174,15 @@ export function buildStartCommand(): Command {
           pendingHandoffGeneration = undefined;
           log.write("recovery-handoff-accepted", { role: "builder", generation: accepted.manifest.generation, successorSessionId: accepted.successorSessionId, acceptanceCheckpointDigest: accepted.acceptanceCheckpointDigest });
         }
-        return activeContinuityRunId ? continuousBuilder(
+        const continuous = activeContinuityRunId ? continuousBuilder(
           adapter,
           builderCwd,
           activeContinuityRunId,
           undefined,
           String(opts.recoveryMode ?? "") === "fresh-recovery-only" && recoveryRecord?.recoveryDecision?.role !== "qa",
         ) : adapter;
+        if (continuous instanceof ContinuityAdapter) await continuous.validateFreshRecovery();
+        return continuous;
       };
 
       const applyBuilderSettingsBoundary = async (
@@ -1154,7 +1232,7 @@ export function buildStartCommand(): Command {
         // QA settings for each one so a threshold-only update applies to the
         // very next review instead of waiting for a nonexistent session reuse.
         const qaSettings = liveRoleSettings("qa", resolvedContinuitySettings("qa"));
-        const ready = await ensureRuntimeReadyForCommand(qaCwd, qaSettings.make, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+        const ready = await ensureBuildRuntimeReadyForCommand(qaCwd, qaSettings.make, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
           label: "live QA settings",
           onTrace: trace => log.write("runtime-readiness", { ...trace, role: "qa" }),
           yes: true,
@@ -1214,7 +1292,7 @@ export function buildStartCommand(): Command {
           enabled: false,
           allowSwitch: false,
           recreate: async (nextRuntime, resumeSessionId, resumeRef) => {
-            const nextReady = await ensureRuntimeReadyForCommand(qaCwd, nextRuntime, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+            const nextReady = await ensureBuildRuntimeReadyForCommand(qaCwd, nextRuntime, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
               label: "QA recovery",
               allowSwitch: false,
               model: nextRuntime === qaAgent ? qaModel : undefined,
@@ -1247,7 +1325,7 @@ export function buildStartCommand(): Command {
         if (metadata) qaRuntimeMetadata.set(recovering, metadata);
         return recovering;
       };
-      const decorateQa = (adapter: BuilderAdapter, qaCwd: string, sessionId?: string): BuilderAdapter => {
+      const decorateQa = async (adapter: BuilderAdapter, qaCwd: string, sessionId?: string): Promise<BuilderAdapter> => {
         const metadata = qaRuntimeMetadata.get(adapter);
         const qaSettings = frozenQaRuntimeSettings(adapter, metadata);
         const continuous = activeContinuityRunId ? new ContinuityAdapter({
@@ -1286,6 +1364,7 @@ export function buildStartCommand(): Command {
             return transfer.successor;
           },
         }) : adapter;
+        if (continuous instanceof ContinuityAdapter) await continuous.validateFreshRecovery();
         const decorated = new RoleStatusAdapter(continuous, (active) => liveStatusReporter?.updateState({
           role: "qa", provider: active.agent, model: qaSettings.model, reasoning: qaSettings.reasoning, fast: qaSettings.fast,
           phase: "QA review session", sessionTransition: sessionId ? "resumed QA session" : "QA session", adapter: active,
@@ -1371,7 +1450,7 @@ export function buildStartCommand(): Command {
           adapter = accepted.successor;
           pendingHandoffGeneration = undefined;
           explicitRecoveryAccepted = true;
-          const packet = pendingQaRecoveryPacket(cwd, recoveryRecord!.runId, typeof opts.ticket === "string" ? opts.ticket : undefined);
+          const packet = pendingQaRecoveryPacket(cwd, recoveryRecord!.runId, requestedTicketIds[0]);
           if (!packet) throw new Error("accepted QA recovery handoff has no current durable packet");
           const confinement = describeQaHandle(adapter, qaCwd, { kind: "initial" }).confinement;
           handoffReceipt = { kind: "accepted", receipt: qaV2HandoffReceipt(accepted.acceptanceReceipt, {
@@ -1426,7 +1505,7 @@ export function buildStartCommand(): Command {
             });
           }
         }
-        const decorated = decorateQa(adapter, qaCwd, effectiveSessionId);
+        const decorated = await decorateQa(adapter, qaCwd, effectiveSessionId);
         return describeQaHandle(decorated, qaCwd, handoffReceipt);
       };
 
@@ -1484,7 +1563,7 @@ export function buildStartCommand(): Command {
           runId: activeContinuityRunId,
           role: "qa",
           initialSettings: qaSettings,
-          historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, recoveryRecord, activeContinuityRunId, "qa"),
+          historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, opts.recoveryMode === "fresh-recovery-only" ? undefined : recoveryRecord, activeContinuityRunId, "qa"),
           readSettings: () => liveRoleSettings("qa", qaSettings),
           settingsBoundary: (input) => applyQaSettingsBoundary(activeContinuityRunId!, qaCwd, input),
           settingsAdopted: (_settings, active) => {
@@ -1517,7 +1596,7 @@ export function buildStartCommand(): Command {
               })) : [])],
             }, (_handoff, runtime) => createQaForSettings(qaCwd, settingsForRequestedRuntime(settings, runtime)), handoffRecoveryOptions("qa"));
             if (!transfer.acceptanceReceipt || !recovery) throw new Error("QA recovery boundary did not produce a complete receipt context");
-            const successor = decorateQa(transfer.successor, qaCwd);
+            const successor = await decorateQa(transfer.successor, qaCwd);
             acceptedBoundary = acceptQaRuntimeHandoff(describeQaHandle(successor, qaCwd, { kind: "initial" }),
               (confinementDigest) => qaV2HandoffReceipt(transfer.acceptanceReceipt!, recovery, confinementDigest));
             log.write("handoff-transfer", { role: "qa", generation: transfer.manifest.generation, predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId, acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest });
@@ -1537,7 +1616,7 @@ export function buildStartCommand(): Command {
           runId: activeContinuityRunId,
           role: "qa",
           initialSettings: qaSettings,
-          historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, recoveryRecord, activeContinuityRunId, "qa"),
+          historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, opts.recoveryMode === "fresh-recovery-only" ? undefined : recoveryRecord, activeContinuityRunId, "qa"),
         });
         await controller.observeNativeCompactions(adapter);
       };
@@ -1569,7 +1648,7 @@ export function buildStartCommand(): Command {
           await ensureReviewProviderReady(cwd, branchDefaults.reviewProvider, log, Boolean(opts.yes));
         }
 
-        const ready = await ensureRuntimeReadyForCommand(cwd, agent, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+        const ready = await ensureBuildRuntimeReadyForCommand(cwd, agent, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
           label: "start",
           yes: Boolean(opts.yes),
           allowSwitch: !(opts.resume || opts.continue),
@@ -1774,14 +1853,14 @@ export function buildStartCommand(): Command {
           }
         }
 
-        const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, masterRun.runId, typeof opts.ticket === "string" ? opts.ticket : undefined) : undefined;
+        const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, masterRun.runId, requestedTicketIds[0]) : undefined;
         let qaProtocolResumeTicket: string | undefined;
         if (recoveryRecord && !qaResumedRecovery) {
           const protocolDb = new WorkflowDb(cwd);
           try {
             const pendingHeads = protocolDb.pendingQaTicketHeads(masterRun.runId);
-            if (pendingHeads.length > 1 && !opts.ticket) fail(`run ${masterRun.runId} has multiple pending QA tickets; select one with --ticket`);
-            const requested = typeof opts.ticket === "string" ? opts.ticket : undefined;
+            if (pendingHeads.length > 1 && !requestedTicketIds.length) fail(`run ${masterRun.runId} has multiple pending QA tickets; select one with --ticket`);
+            const requested = requestedTicketIds[0];
             const head = requested ? pendingHeads.find((item) => item.ticketId === requested) : pendingHeads[0];
             if (pendingHeads.length && requested && !head) fail(`--ticket ${requested} conflicts with the pending QA protocol ticket${pendingHeads.length === 1 ? ` ${pendingHeads[0].ticketId}` : "s"}`);
             if (head && !["completed", "waived"].includes(head.state)) {
@@ -1805,7 +1884,7 @@ export function buildStartCommand(): Command {
           if (existing) return existing;
           const controller = RoleSessionController.managed({
             projectDir: cwd, runId: masterRun.runId, role: "builder", initialSettings: capturedBranchBuilder,
-            historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, recoveryRecord, masterRun.runId, "builder"),
+            historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, opts.recoveryMode === "fresh-recovery-only" ? undefined : recoveryRecord, masterRun.runId, "builder"),
             readSettings: () => liveRoleSettings("builder", capturedBranchBuilder),
             settingsBoundary: (input) => applyBuilderSettingsBoundary(masterRun.runId, worktreePath, input),
             settingsAdopted: (settings, active) => liveStatusReporter?.updateState({
@@ -1918,7 +1997,7 @@ export function buildStartCommand(): Command {
           clearInterval(branchHeartbeat);
           log.write("safe-boundary-paused", { runId: masterRun.runId, message: summary, handoff: true });
           console.error(`foreman: handoff paused at a recoverable checkpoint: ${summary}`);
-          console.error(`foreman: resume this run with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(masterRun.runId)}`);
+          console.error(`foreman: resume this run with: ${formatRecoveryCommand(cwd)}`);
           process.exit(2);
         }
         if (branchSessionFailure) {
@@ -1933,8 +2012,8 @@ export function buildStartCommand(): Command {
           log.write("session-unavailable", { runId: masterRun.runId, guided, message: summary });
           console.error(`foreman: exact provider session unavailable; preserved branch work remains recoverable: ${summary}`);
           console.error(guided
-            ? `foreman: continue with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(masterRun.runId)} --guided-recovery`
-            : `foreman: inspect recovery with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(masterRun.runId)} --inspect`);
+            ? `foreman: continue with: ${formatRecoveryCommand(cwd)}`
+            : `foreman: inspect recovery with: ${formatRecoveryCommand(cwd)}`);
           process.exit(2);
         }
         if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted; recovery mode was not substituted`);
@@ -1998,7 +2077,7 @@ export function buildStartCommand(): Command {
         process.exit(failed ? 2 : 0);
       }
 
-      const ready = await ensureRuntimeReadyForCommand(cwd, agent, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
+      const ready = await ensureBuildRuntimeReadyForCommand(cwd, agent, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
         label: "start",
         yes: Boolean(opts.yes),
         allowSwitch: !(opts.resume || opts.continue),
@@ -2021,7 +2100,7 @@ export function buildStartCommand(): Command {
         resumeSessionRef = availability.sessionRef;
       }
       if (qaEnabled) {
-        const qaReady = await ensureRuntimeReadyForCommand(cwd, qaAgent, { durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms, label: "independent QA", yes: Boolean(opts.yes), model: qaModel });
+        const qaReady = await ensureBuildRuntimeReadyForCommand(cwd, qaAgent, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms, label: "independent QA", yes: Boolean(opts.yes), model: qaModel });
         qaAgent = qaReady.runtime;
         qaModel = qaReady.model;
         qaExecutable = qaReady.executable;
@@ -2043,15 +2122,15 @@ export function buildStartCommand(): Command {
       });
       activeObserver?.store.attachExecutionLease(activeObserver.executionId, readCurrentWorkflowLease(cwd)?.generation);
       activeContinuityRunId = buildRun.runId;
-      const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, buildRun.runId, typeof opts.ticket === "string" ? opts.ticket : undefined) : undefined;
+      const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, buildRun.runId, requestedTicketIds[0]) : undefined;
       let qaFinalizationTicket: string | undefined;
       let qaProtocolResumeTicket: string | undefined;
       if (recoveryRecord && !qaResumedRecovery) {
         const finalizationDb = new WorkflowDb(cwd);
         try {
           const pendingHeads = finalizationDb.pendingQaTicketHeads(buildRun.runId);
-          if (pendingHeads.length > 1 && !opts.ticket) fail(`run ${buildRun.runId} has multiple pending QA tickets; select one with --ticket`);
-          const requested = typeof opts.ticket === "string" ? opts.ticket : undefined;
+          if (pendingHeads.length > 1 && !requestedTicketIds.length) fail(`run ${buildRun.runId} has multiple pending QA tickets; select one with --ticket`);
+          const requested = requestedTicketIds[0];
           const head = requested ? pendingHeads.find((item) => item.ticketId === requested) : pendingHeads[0];
           if (pendingHeads.length && requested && !head) fail(`--ticket ${requested} conflicts with the pending QA protocol ticket${pendingHeads.length === 1 ? ` ${pendingHeads[0].ticketId}` : "s"}`);
           if (head) {
@@ -2092,7 +2171,7 @@ export function buildStartCommand(): Command {
         clearInterval(heartbeat);
         log.write("session-unavailable", { runId: buildRun.runId, phase: error.failure.phase, dispatchState: error.failure.dispatchState, message: summary });
         console.error(`foreman: exact provider session unavailable before dispatch; current worktree state was preserved: ${summary}`);
-        console.error(`foreman: inspect recovery with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --inspect`);
+        console.error(`foreman: inspect recovery with: ${formatRecoveryCommand(cwd)}`);
         process.exit(2);
       }
       const contextController = RoleSessionController.managed({
@@ -2100,7 +2179,7 @@ export function buildStartCommand(): Command {
         runId: buildRun.runId,
         role: "builder",
         initialSettings: capturedBuilder,
-        historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, recoveryRecord, buildRun.runId, "builder"),
+        historicalCountUncertain: recoveryCompactionHistoryUncertain(cwd, opts.recoveryMode === "fresh-recovery-only" ? undefined : recoveryRecord, buildRun.runId, "builder"),
         readSettings: () => liveRoleSettings("builder", capturedBuilder),
         settingsBoundary: (input) => applyBuilderSettingsBoundary(buildRun.runId, cwd, input),
         settingsAdopted: (settings, active) => liveStatusReporter?.updateState({
@@ -2190,10 +2269,19 @@ export function buildStartCommand(): Command {
       const viewer = printEvents(builder.events());
 
       try {
+        if (recoveryRecord && currentBranchTicketProgress(cwd, buildRun)?.remaining.length === 0) {
+          buildRun = finishRecoveredTicketScope(cwd, buildRun, "reconciled-completed-tickets");
+          clearInterval(heartbeat); statusReporter.stop("completed"); await foreman.close(); await viewer;
+          activeObserver?.finish(buildRun.status, observationSummaryMetadata(cwd, buildRun, qaEnabled, capturedBuilder.make));
+          observabilityStore?.closeLogFile(logPath, buildRun.status); observabilityStore?.close(); activeObserver = undefined;
+          process.off("exit", finishObservationOnExit);
+          console.log("foreman: recovered completed ticket scope");
+          process.exit(0);
+        }
         if (qaFinalizationTicket) {
           console.log(`ai-foreman: reconciling the interrupted QA finalization for ${qaFinalizationTicket}; Builder dispatch is disabled.\n`);
           await foreman.completePendingQaFinalization(qaFinalizationTicket);
-          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "qa-finalization-complete", { status: "recoverable", currentTicket: qaFinalizationTicket }), "recoverable");
+          buildRun = finishRecoveredTicketScope(cwd, buildRun, "qa-finalization-complete");
           clearInterval(heartbeat); statusReporter.stop("QA finalization complete"); await foreman.close(); await viewer;
           activeObserver?.finish(buildRun.status, observationSummaryMetadata(cwd, buildRun, qaEnabled, capturedBuilder.make));
           observabilityStore?.closeLogFile(logPath, buildRun.status); observabilityStore?.close(); activeObserver = undefined;
@@ -2211,7 +2299,9 @@ export function buildStartCommand(): Command {
           if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted`);
           if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
           if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
-          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, qa.outcome === "passed" || qa.outcome === "waived" ? "qa-recovery-complete" : "qa-recovery-paused", {
+          buildRun = qa.outcome === "passed" || qa.outcome === "waived"
+            ? finishRecoveredTicketScope(cwd, buildRun, "qa-recovery-complete")
+            : releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "qa-recovery-paused", {
             status: "recoverable", currentTicket: ticketId,
           }), "recoverable");
           clearInterval(heartbeat);
@@ -2231,14 +2321,14 @@ export function buildStartCommand(): Command {
         }
         console.log("ai-foreman: asking builder to plan the next tickets or steps...\n");
         buildRun = checkpointBuildRun(cwd, buildRun, "before-preflight");
-        await (activeObserver ? activeObserver.span("preflight", "Builder preflight", () => foreman.runPreflight(steps, ticketsContent, preferredTicket)) : foreman.runPreflight(steps, ticketsContent, preferredTicket));
+        await (activeObserver ? activeObserver.span("preflight", "Builder preflight", () => foreman.runPreflight(steps, ticketsContent, preferredTicket, executionTickets)) : foreman.runPreflight(steps, ticketsContent, preferredTicket, executionTickets));
         buildRun = withRunLocalAcceptedRuntimes(buildRun);
         if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
         if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
         buildRun = checkpointBuildRun(cwd, buildRun, "preflight-complete");
 
         let planDecisionRevision = 0;
-        if (requiresBuildApproval(cwd, preferredTicket ? [preferredTicket] : undefined, autoApprovePlanUpdates, approvalConsequences)) {
+        const ensureApproved = createBuildApprovalGate(cwd, executionTickets, autoApprovePlanUpdates, approvalConsequences, async () => {
           while (true) {
             console.log();
             const action = await durableHumanDecision({ projectDir: cwd, runId: invocationRunId, key: `build-plan:${buildScopeRevision(cwd, approvalConsequences)}:${planDecisionRevision}`, observer: activeObserver, prompt: "How does this plan look?", choices: [{ id: "proceed", label: "Proceed" }, { id: "feedback", label: "Feedback" }, { id: "cancel", label: "Cancel" }], operation: () => select({
@@ -2277,26 +2367,24 @@ export function buildStartCommand(): Command {
             await foreman.sendPreflightFeedback(String(fb));
             planDecisionRevision++;
           }
-        }
+        });
+        await ensureApproved();
 
-        const result = await (activeObserver ? activeObserver.span("builder_work", "Builder and QA batch", () => foreman.runBatch(steps, trackerRelPath, (ticketId) => {
-          const tickets = buildRun.tickets.includes(ticketId)
-            ? buildRun.tickets
-            : [...buildRun.tickets, ticketId];
-          buildRun = checkpointBuildRun(cwd, buildRun, "ticket-selected", {
-            tickets,
-            currentTicket: ticketId,
-          });
-        }, preferredTicket)) : foreman.runBatch(steps, trackerRelPath, (ticketId) => {
+        const onTicketStart = async (ticketId: string) => {
+          await ensureApproved();
           const tickets = buildRun.tickets.includes(ticketId) ? buildRun.tickets : [...buildRun.tickets, ticketId];
           buildRun = checkpointBuildRun(cwd, buildRun, "ticket-selected", { tickets, currentTicket: ticketId });
-        }, preferredTicket));
+        };
+        const batch = () => foreman.runBatch(steps, trackerRelPath, onTicketStart, preferredTicket, executionTickets);
+        const result = await (activeObserver ? activeObserver.span("builder_work", "Builder and QA batch", batch) : batch());
         if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted; recovery mode was not substituted`);
         if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
         if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
-        buildRun = result.outcome === "all-done" || result.outcome === "plan-complete"
-          ? completeBuildRun(cwd, buildRun)
-          : releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "builder-or-qa-interrupted", { status: "recoverable" }), "recoverable");
+        buildRun = buildRun.tickets.length && isTicketsInitialized(cwd)
+          ? finishRecoveredTicketScope(cwd, buildRun, "ticket-recovery-boundary")
+          : result.outcome === "all-done" || result.outcome === "plan-complete"
+            ? completeBuildRun(cwd, buildRun)
+            : releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "builder-or-qa-interrupted", { status: "recoverable" }), "recoverable");
         clearInterval(heartbeat);
         statusReporter.stop(buildRun.status === "completed" ? "completed" : "paused");
         await foreman.close();
@@ -2338,7 +2426,7 @@ export function buildStartCommand(): Command {
           await foreman.close().catch(() => {});
           log.write("safe-boundary-paused", { runId: buildRun.runId, message: summary });
           console.error(`foreman: run paused safely: ${summary}`);
-          console.error(`foreman: after resolving the condition, inspect recovery with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --inspect`);
+          console.error(`foreman: after resolving the condition, inspect recovery with: ${formatRecoveryCommand(cwd)}`);
           process.exit(2);
         }
         if (err instanceof SessionUnavailableContinuityError || err instanceof SessionUnavailableError) {
@@ -2352,8 +2440,8 @@ export function buildStartCommand(): Command {
           log.write("session-unavailable", { runId: buildRun.runId, guided, message: summary });
           console.error(`foreman: exact provider session unavailable; current worktree state was preserved: ${summary}`);
           console.error(guided
-            ? `foreman: continue with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --guided-recovery`
-            : `foreman: inspect recovery with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --inspect`);
+            ? `foreman: continue with: ${formatRecoveryCommand(cwd)}`
+            : `foreman: inspect recovery with: ${formatRecoveryCommand(cwd)}`);
           process.exit(2);
         }
         if (err instanceof HandoffAcceptanceError || err instanceof HandoffRecoveryPausedError) {
@@ -2365,7 +2453,7 @@ export function buildStartCommand(): Command {
           await foreman.close().catch(() => {});
           log.write("safe-boundary-paused", { runId: buildRun.runId, message: summary, handoff: true });
           console.error(`foreman: handoff paused at a recoverable checkpoint: ${summary}`);
-          console.error(`foreman: resume this run with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)}`);
+          console.error(`foreman: resume this run with: ${formatRecoveryCommand(cwd)}`);
           process.exit(2);
         }
         if (err instanceof HumanDecisionRequired) {
@@ -2383,7 +2471,7 @@ export function buildStartCommand(): Command {
           await foreman.close().catch(() => {});
           log.write("guided-recovery-required", { runId: buildRun.runId, message: summary });
           console.error(`foreman: run paused at a recoverable continuity checkpoint: ${summary}`);
-          console.error(`foreman: continue with: rafi build:resume ${shellQuote(cwd)} --run ${shellQuote(buildRun.runId)} --guided-recovery`);
+          console.error(`foreman: continue with: ${formatRecoveryCommand(cwd)}`);
           process.exit(2);
         }
         buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "failed", { status: "failed", failure: { category: "unknown", summary: err instanceof Error ? err.message.slice(0, 1000) : String(err).slice(0, 1000), at: new Date().toISOString() } }), "failed");
@@ -2391,7 +2479,10 @@ export function buildStartCommand(): Command {
         log.write("error", { message: String(err) });
         fail(`run failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-    });
+      } finally {
+        finishStartAdmission(cwd, supervisedInvocationId);
+      }
+    }));
 }
 
 function ticketSizeBucket(projectDir: string, ticketIds: readonly string[]): string | undefined {

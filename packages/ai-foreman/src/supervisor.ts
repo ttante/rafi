@@ -1,3 +1,4 @@
+import type { BuildAdmission } from "./buildAdmission.js";
 import { processStartIdentity } from "./processIdentity.js";
 import type { ResolvedAutonomyPolicy, SupervisorState } from "rafi-spec";
 import { WorkflowDb } from "./workflowDb.js";
@@ -19,6 +20,7 @@ export interface DurableSupervisorOptions {
   projectDir: string;
   runId: string;
   policy: ResolvedAutonomyPolicy;
+  admission?: BuildAdmission;
   spawnWorker: (generation: number) => Promise<SupervisorWorkerHandle> | SupervisorWorkerHandle;
   checkpoint: () => string;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -49,7 +51,11 @@ export class DurableSupervisor {
       state = { ...state, status: "disabled" }; db.putSupervisorState(this.options.runId, state); db.close();
       return { kind: "stopped" };
     }
-    try { state = db.atomic(() => {
+    let ownedAdmission: BuildAdmission | undefined;
+    try {
+      if (this.options.admission) db.assertBuildAdmission(this.options.admission);
+      else ownedAdmission = db.acquireBuildAdmission(this.options.runId, "coordinator");
+      state = db.atomic(() => {
     for (const other of db.runningSupervisors()) {
       if (other.runId !== this.options.runId && other.state.pid && processLooksLive(other.state.pid, other.state.processStart)) throw new Error(`supervisor already active for project (run ${other.runId})`);
     }
@@ -61,7 +67,10 @@ export class DurableSupervisor {
     state = { ...state, status: "running", pid: process.pid, processStart: processStartIdentity(), generation: state.generation + 1, heartbeatAt: this.now().toISOString() };
     db.putSupervisorState(this.options.runId, state);
     return state;
-    }); } catch (error) { db.close(); throw error; }
+    }); } catch (error) {
+      try { if (ownedAdmission) db.releaseBuildAdmission(ownedAdmission); } finally { db.close(); }
+      throw error;
+    }
     const saveState = () => db.atomic(() => {
       const owner = db.supervisorState(this.options.runId);
       if (owner?.generation !== state.generation || owner.pid !== process.pid) throw new Error("supervisor ownership changed");
@@ -92,6 +101,12 @@ export class DurableSupervisor {
           const status = outcome.kind === "completed" ? "stopped" : outcome.kind === "waiting_for_human" ? "waiting_for_human" : outcome.kind === "failed" ? "failed" : "stopped";
           state = { ...state, status }; saveState(); return outcome;
         }
+        const eligibility = db.preparationEligibility(this.options.runId);
+        if (!eligibility.eligible) {
+          state = { ...state, status: "waiting_for_human" }; saveState();
+          db.transitionSupervisor(this.options.runId, state.workerGeneration, { status: "paused", checkpoint: "worker-reconciliation-required", event: "worker_restart_withheld", payload: { reasons: eligibility.reasons } });
+          return { kind: "waiting_for_human" };
+        }
         const checkpointLimit = this.options.policy.limits.workerRestartsPerCheckpoint;
         const runLimit = this.options.policy.limits.workerRestartsPerRun;
         if (state.checkpointRestarts >= checkpointLimit || state.runRestarts >= runLimit) {
@@ -105,7 +120,9 @@ export class DurableSupervisor {
       state = { ...state, status: "stopped", stopRequestedAt: this.now().toISOString(), workerPid: undefined };
       saveState(); return { kind: "stopped" };
     } finally {
-      clearInterval(heartbeat); db.close();
+      clearInterval(heartbeat);
+      try { if (ownedAdmission && db.buildAdmission()?.token === ownedAdmission.token) db.releaseBuildAdmission(ownedAdmission); }
+      finally { db.close(); }
     }
   }
 }

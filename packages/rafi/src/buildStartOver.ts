@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Command } from "commander";
-import { checkpointBuildRun, projectBuildRecovery, recoverableBuildRuns } from "ai-foreman/build-runs.js";
+import { bindBuildAuthority, checkpointBuildRun, projectBuildRecovery, recoverableBuildRuns } from "ai-foreman/build-runs.js";
 import { resetTickets } from "ai-foreman/ticket-reset.js";
 import { WorkflowDb, type ProjectLease, type WorkflowRunSnapshot } from "ai-foreman/workflow-db.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
@@ -83,6 +83,7 @@ export function buildBuildStartOverCommand(): Command {
       printInventory(inventory);
       if (pending) console.log(`  resuming preserved start-over operation ${pending.runId} at ${pending.checkpoint}`);
       if (run.active) throw new Error("the original build process is verified live; stop it before starting over");
+      if (recoverableBuildRuns(root).find(item => item.runId === run!.runId)?.ownership === "unknown") throw new Error("Build ownership is unknown; reconcile it before starting over");
       if (opts.inspect) return;
       const pendingAction = pending ? ((pending.remainingWork as { action?: StartOverAction }).action) : undefined;
       let action = opts.action as StartOverAction | undefined;
@@ -114,11 +115,13 @@ export function buildBuildStartOverCommand(): Command {
       const workflow = new WorkflowDb(root);
       const operation = pending ?? workflow.createRun({ kind: "recovery", checkpoint: "start-over-inventory", originalWork: inventory, remainingWork: { action, tickets: run.tickets }, state: { operation: "build-start-over" } });
       let lease: ProjectLease | undefined;
+      let admission: ReturnType<WorkflowDb["acquireBuildRecoveryAdmission"]> | undefined;
       let result = preservedGitResult(operation);
       let planned = plannedGitResult(operation);
       let resetId = typeof operation.state.resetId === "string" ? operation.state.resetId : undefined;
       let plannedResetId = typeof operation.state.plannedResetId === "string" ? operation.state.plannedResetId : undefined;
       try {
+        admission = workflow.acquireBuildRecoveryAdmission(operation.runId);
         lease = workflow.acquireLease(operation.runId);
         if (!result) {
           planned ??= planStartOverGit(inventory, action);
@@ -135,7 +138,7 @@ export function buildBuildStartOverCommand(): Command {
           resetCount = reset.tickets.length;
           workflow.transition(operation.runId, { checkpoint: "tracker-reset-complete", remainingWork: { action, tickets: run.tickets }, state: { operation: "build-start-over", gitPreserved: true, result, plannedResetId, resetId } });
         }
-        const superseded = checkpointBuildRun(root, run, "superseded-by-start-over", { status: "superseded", lease: undefined, supersededBy: operation.runId });
+        const superseded = checkpointBuildRun(root, bindBuildAuthority(run, lease), "superseded-by-start-over", { status: "superseded", lease: undefined, supersededBy: operation.runId });
         workflow.transition(operation.runId, { status: "completed", checkpoint: "start-over-committed", remainingWork: {}, state: { operation: "build-start-over", gitPreserved: true, result, resetId, supersededRun: superseded.runId } });
         if (result.archiveBranch) console.log(`rafi build:start-over: archived old work on ${result.archiveBranch}`);
         if (result.restartBranch) console.log(`rafi build:start-over: restart branch is ${result.restartBranch}`);
@@ -145,7 +148,10 @@ export function buildBuildStartOverCommand(): Command {
       } catch (error) {
         workflow.transition(operation.runId, { status: "paused", checkpoint: "start-over-failed", remainingWork: { action, tickets: run.tickets }, state: { operation: "build-start-over", ...(planned ? { planned } : {}), ...(result ? { gitPreserved: true, result } : {}), ...(plannedResetId ? { plannedResetId } : {}), ...(resetId ? { resetId } : {}), error: error instanceof Error ? error.message : String(error) } });
         throw error;
-      } finally { if (lease) workflow.releaseLease(lease); workflow.close(); }
+      } finally {
+        try { if (lease) workflow.releaseLease(lease); if (admission) workflow.releaseBuildAdmission(admission); }
+        finally { workflow.close(); }
+      }
     });
 }
 

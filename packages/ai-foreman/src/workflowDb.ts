@@ -1,3 +1,6 @@
+import { cleanupReadiness, inspectReadiness, readinessMetadata, type ReadinessProcess } from "./readinessCleanup.js";
+import { windowsProbeJobState } from "./windowsProbeJob.js";
+import { originalBuildLease, rememberOriginalLease, forgetOriginalLease, registerLaunchChild, acknowledgeLaunchChild, reconcileLaunch, checkBuildOwnershipSchema, canonicalProject, launchDigest, localBuildAuthority, rememberBuildAuthority, forgetBuildAuthority, migrateBuildAdmission, acquireAdmission, readAdmission, assertAdmission, releaseAdmission, reserveLaunch, setLaunchState, claimLaunch, readLaunch, type BuildAdmission, type BuildLaunch } from "./buildAdmission.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { hostname } from "node:os";
@@ -30,7 +33,7 @@ import type {
 } from "rafi-spec";
 import type { QaDeliveryTurnV3, QaDeliveryOutcome, QaDeliveryInvocationV3 } from "./qaDeliveryJournal.js";
 import { providerSessionKey } from "./sessionIdentity.js";
-import { isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
+import { processGroupQuiescent, taggedProcesses, classifyProcess, isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
 import type { BranchResumeSession } from "./branch/resume.js";
 import {
   initialQaReducerState,
@@ -112,6 +115,7 @@ export function heartbeatCurrentWorkflowLease(projectDir: string, lease: Project
   const path = join(resolve(projectDir), WORKFLOW_DB_FILE);
   if (!existsSync(path)) throw new Error("workflow recovery database not found");
   const db = new Database(path, { fileMustExist: true });
+  db.function("rafi_protocol_v3", () => 1);
   registerHandbackWriter(db);
   try {
     const at = now.toISOString();
@@ -280,17 +284,51 @@ export interface QaReportRecordV2 {
 export class WorkflowDb {
   readonly path: string;
   private readonly db: Database.Database;
+  private writerAuthority?: BuildAdmission;
+  private writerLease?: ProjectLease;
+  private coordinatorTransition = 0;
+  private lineageTransition = 0;
 
-  constructor(readonly projectDir: string, path = join(resolve(projectDir), WORKFLOW_DB_FILE)) {
+  constructor(readonly projectDir: string, path = join(resolve(projectDir), WORKFLOW_DB_FILE), private readonly readinessAccess?: { probeId: string } | { runId: string }) {
     this.path = path;
-    mkdirSync(dirname(path), { recursive: true });
-    ensureRecoveryGitignore(resolve(projectDir));
-    this.db = new Database(path);
+    if (existsSync(path)) {
+      const preview = new Database(path, { readonly: true, fileMustExist: true });
+      try { checkBuildOwnershipSchema(preview); } finally { preview.close(); }
+    }
+    if (!readinessAccess) {
+      mkdirSync(dirname(path), { recursive: true });
+      ensureRecoveryGitignore(resolve(projectDir));
+    }
+    this.db = new Database(path, { fileMustExist: Boolean(readinessAccess) });
+    this.db.function("rafi_protocol_v3", () => 1);
+    this.writerAuthority = localBuildAuthority(projectDir);
+    this.writerLease = originalBuildLease(projectDir);
+    this.db.function("rafi_build_lease_owner", () => this.writerLease?.owner ?? "");
+    this.db.function("rafi_build_lease_generation", () => this.writerLease?.generation ?? -1);
+    this.db.function("rafi_build_writer_token", () => this.writerAuthority?.token ?? "");
+    this.db.function("rafi_build_writer_run", () => this.writerAuthority?.runId ?? "");
     registerHandbackWriter(this.db);
-    this.db.pragma("journal_mode = WAL");
+    if (!readinessAccess) this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = FULL");
     this.db.pragma("foreign_keys = ON");
-    try { this.migrate(); this.importLegacyOnce(); } catch (error) { this.db.close(); throw error; }
+    try {
+      if (readinessAccess) this.restrictReadinessConnection(readinessAccess);
+      else { this.migrate(); migrateBuildAdmission(this.db); this.importLegacyOnce(); }
+    } catch (error) { this.db.close(); throw error; }
+  }
+
+  /** Connection-local SQL fences: helper/reconciler cannot gain general writer rights. */
+  private restrictReadinessConnection(access: { probeId: string } | { runId: string }): void {
+    const value = "probeId" in access ? access.probeId : access.runId;
+    const literal = (this.db.prepare("SELECT quote(?) AS literal").get(value) as {literal:string}).literal;
+    for (const {name} of this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{name:string}>) {
+      if (!/^[a-z_]+$/.test(name)) throw new Error("Unexpected readiness storage table");
+      for (const action of ["INSERT", "UPDATE", "DELETE"]) {
+        const allowed = name === "build_owned_processes" && action === "UPDATE";
+        const condition = allowed ? `WHEN OLD.${"probeId" in access ? "id" : "run_id"}<>${literal} OR NEW.id<>OLD.id OR NEW.run_id<>OLD.run_id OR NEW.owner<>OLD.owner OR NEW.host<>OLD.host` : "";
+        this.db.exec(`CREATE TEMP TRIGGER readiness_scope_${name}_${action} BEFORE ${action} ON main.${name} ${condition} BEGIN SELECT RAISE(ABORT,'Restricted readiness connection cannot mutate this record'); END`);
+      }
+    }
   }
 
   close(): void { this.db.close(); }
@@ -298,14 +336,335 @@ export class WorkflowDb {
   /** Atomic local changes only; never await provider or filesystem work here. */
   atomic<T>(work: () => T): T { return this.db.transaction(work).immediate(); }
 
+  buildAdmission(): BuildAdmission | undefined { return readAdmission(this.db); }
+  private assertNoLegacyBuildOwner(): void {
+    for (const row of this.db.prepare("SELECT run_id,state_json FROM workflow_runs WHERE kind='build' AND legacy=1").all() as Array<{run_id:string;state_json:string}>) {
+      const state = parseJson(row.state_json) as { status?: string; lease?: {pid:number;processStart?:string;hostname?:string} };
+      if (!state.lease || ["completed", "cancelled", "superseded"].includes(state.status ?? "")) continue;
+      const owner = classifyProcess(state.lease.pid, state.lease.processStart, state.lease.hostname ?? "unknown-host");
+      if (owner.state !== "dead") throw new Error(`Legacy build ${row.run_id} ownership is ${owner.state}: ${owner.reason}; reconcile before starting another writer`);
+    }
+  }
+  private assertExecutionProtocol(): void {
+    if ((this.db.prepare("SELECT version FROM build_ownership_schema").get() as {version:number}).version !== 3) throw new Error("Ownership migration is pending legacy execution cleanup; use rafi resume before starting work");
+  }
+  acquireBuildAdmission(runId: string, phase: BuildAdmission["phase"]): BuildAdmission {
+    return this.atomic(() => {
+      this.assertNoLegacyBuildOwner();
+      const lease = this.currentLease();
+      if (lease && classifyProcess(lease.pid, lease.processStart, lease.host).state !== "dead") throw new Error(`project workflow lease is held by ${lease.owner} for run ${lease.runId}`);
+      for (const owner of this.runningSupervisors()) {
+        if (owner.state.pid && classifyProcess(owner.state.pid, owner.state.processStart).state !== "dead") throw new Error(`supervisor already active for project (run ${owner.runId})`);
+      }
+      const uncertain = this.db.prepare("SELECT run_id FROM operation_journal WHERE kind='provider-dispatch' AND status IN ('in_progress','uncertain') LIMIT 1").get() as {run_id:string}|undefined;
+      if (uncertain) throw new Error(`Build ${uncertain.run_id} has unresolved provider dispatch; reconcile before another launch`);
+      for (const row of this.db.prepare("SELECT DISTINCT run_id FROM build_owned_processes WHERE state<>'quiescent'").all() as Array<{run_id:string}>) {
+        if (this.unresolvedPreparationProcesses(row.run_id).length) throw new Error(`Build ${row.run_id} has unverified preparation descendants; reconcile before another launch`);
+      }
+      const prior = this.buildAdmission();
+      if (prior && this.unresolvedPreparationProcesses(prior.runId).length) throw new Error(`Build ${prior.runId} has unverified preparation descendants; reconcile before another launch`);
+      if (prior && [...this.unresolvedRoleDispatches(prior.runId, "builder"), ...this.unresolvedRoleDispatches(prior.runId, "qa")].length) throw new Error(`Build ${prior.runId} has unresolved provider dispatch; reconcile before another launch`);
+      this.assertExecutionProtocol();
+      this.ensureRun(runId, "build");
+      const authority = acquireAdmission(this.db, this.projectDir, runId, phase);
+      this.writerAuthority = authority;
+      rememberBuildAuthority(authority);
+      return authority;
+    });
+  }
+  acquireBuildRecoveryAdmission(runId: string): BuildAdmission {
+    return this.atomic(() => {
+      this.assertExecutionProtocol();
+      this.assertNoLegacyBuildOwner();
+      const otherDispatch = this.db.prepare("SELECT run_id FROM operation_journal WHERE run_id<>? AND kind='provider-dispatch' AND status IN ('in_progress','uncertain') LIMIT 1").get(runId) as {run_id:string}|undefined;
+      if (otherDispatch) throw new Error(`Build ${otherDispatch.run_id} has unresolved provider dispatch; reconcile before starting another recovery workflow`);
+      const current = localBuildAuthority(this.projectDir);
+      if (current && current.runId === runId && this.buildAdmission()?.token === current.token) { this.writerAuthority = current; return current; }
+      const prior = this.buildAdmission();
+      if (prior && prior.runId !== runId) return this.acquireBuildAdmission(runId, "coordinator");
+      if (this.unresolvedPreparationProcesses(runId).length) throw new Error("Owned preparation descendants require reconciliation before recovery");
+      const lease = this.currentLease();
+      if (lease && classifyProcess(lease.pid, lease.processStart, lease.host).state !== "dead") throw new Error(`project workflow lease is held by ${lease.owner} for run ${lease.runId}`);
+      for (const owner of this.runningSupervisors()) if (owner.state.pid && classifyProcess(owner.state.pid, owner.state.processStart).state !== "dead") throw new Error(`supervisor already active for project (run ${owner.runId})`);
+      const authority = acquireAdmission(this.db, this.projectDir, runId, "coordinator");
+      this.writerAuthority = authority; rememberBuildAuthority(authority);
+      return authority;
+    });
+  }
+  admitLeasedBuild(lease: ProjectLease): BuildAdmission {
+    return this.atomic(() => {
+      this.assertExecutionProtocol();
+      const held = this.currentLease();
+      if (!held || held.owner !== lease.owner || held.generation !== lease.generation || held.runId !== lease.runId) throw new Error("workflow lease ownership changed");
+      const existing = localBuildAuthority(this.projectDir);
+      const authority = existing && existing.runId === lease.runId && this.buildAdmission()?.token === existing.token ? existing : acquireAdmission(this.db, this.projectDir, lease.runId, "coordinator");
+      this.writerAuthority = authority;
+      rememberBuildAuthority(authority);
+      return authority;
+    });
+  }
+  reacquireBuildCoordinator(runId: string): BuildAdmission {
+    return this.atomic(() => {
+      const owner = this.supervisorState(runId);
+      if (owner?.pid !== process.pid || owner.processStart !== processStartIdentity()) throw new Error("Supervisor ownership changed");
+      const authority = acquireAdmission(this.db, this.projectDir, runId, "coordinator");
+      this.writerAuthority = authority;
+      rememberBuildAuthority(authority);
+      return authority;
+    });
+  }
+  assertBuildAdmission(authority: BuildAdmission): void { assertAdmission(this.db, authority); }
+  releaseBuildAdmission(authority: BuildAdmission): void {
+    this.atomic(() => {
+      assertAdmission(this.db, authority);
+      if (this.unresolvedPreparationProcesses(authority.runId).length) throw new Error("Unresolved owned processes or provider dispatch require reconciliation");
+      releaseAdmission(this.db, authority); forgetBuildAuthority(authority);
+      if (this.writerAuthority?.token === authority.token) this.writerAuthority = undefined;
+    });
+  }
+  reserveBuildLaunch(authority: BuildAdmission, role: BuildAdmission["phase"], digest: string, protocol?: BuildLaunch["protocol"]): BuildLaunch { return reserveLaunch(this.db, authority, role, digest, protocol); }
+  dispatchBuildLaunch(authority: BuildAdmission, token: string): void { setLaunchState(this.db, authority, token, "dispatching"); }
+  failBuildLaunch(authority: BuildAdmission, token: string): void { setLaunchState(this.db, authority, token, "failed"); }
+  claimBuildLaunch(runId: string, token: string, role: BuildAdmission["phase"], digest: string): BuildAdmission { const authority = claimLaunch(this.db, this.projectDir, runId, token, role, digest); this.writerAuthority = authority; rememberBuildAuthority(authority); return authority; }
+  registerBuildLaunchChild(token: string): void { registerLaunchChild(this.db, token, this.projectDir); }
+  acknowledgeBuildLaunchChild(authority: BuildAdmission, token: string, pid: number): void { acknowledgeLaunchChild(this.db, authority, token, pid); }
+  reconcileBuildLaunches(runId: string, original?: BuildAdmission): "retired" | "claimed" | "unknown" {
+    return this.atomic(() => {
+      let result: "retired" | "claimed" | "unknown" = "retired";
+      for (const row of this.db.prepare("SELECT token FROM build_launches WHERE run_id=? AND state IN ('reserved','dispatching')").all(runId) as Array<{token:string}>) {
+        const state = reconcileLaunch(this.db, row.token, original);
+        if (state === "unknown") return state;
+        if (state === "claimed") result = state;
+      }
+      return result;
+    });
+  }
+  buildLaunch(token: string): BuildLaunch | undefined { return readLaunch(this.db, token); }
+
+  preparationSuccessor(runId: string): string {
+    const seen = new Set<string>();
+    let current = runId;
+    while (true) {
+      if (seen.has(current)) throw new Error("Preparation retry lineage contains a cycle");
+      seen.add(current);
+      const link = this.db.prepare("SELECT successor,project FROM build_retry_lineage WHERE predecessor=?").get(current) as {successor:string;project:string}|undefined;
+      if (!link) return current;
+      if (link.project !== canonicalProject(this.projectDir)) throw new Error("Preparation lineage belongs to another project");
+      current = link.successor;
+    }
+  }
+  reservePreparationRetry(predecessor: string, args: string[], expectedStartArgs?: string): { runId: string; launch: BuildLaunch; authority: BuildAdmission } {
+    return this.atomic(() => {
+      this.lineageTransition++;
+      try {
+      const existing = this.preparationSuccessor(predecessor);
+      if (existing !== predecessor) throw new Error(`Preparation already retried as ${existing}; select that successor instead`);
+      const eligibility = this.preparationEligibility(predecessor);
+      if (!eligibility.eligible) throw new Error(`Preparation requires reconciliation: ${eligibility.reasons.join("; ")}`);
+      const previous = this.getRun(predecessor)!;
+      if (expectedStartArgs !== undefined && JSON.stringify(previous.state.startArgs ?? null) !== expectedStartArgs) throw new Error("Saved preparation options changed before launch reservation; select the build again with rafi resume");
+      const authority = this.acquireBuildAdmission(predecessor, "coordinator");
+      if (typeof previous.state.predecessor === "string") {
+        this.transition(predecessor, { checkpoint: "preparing", state: { ...previous.state, startArgs: args }, event: "preparation_relaunch_reserved" });
+        return { runId: predecessor, authority, launch: reserveLaunch(this.db, authority, "coordinator", launchDigest(args), "registered-v2") };
+      }
+      const runId = randomUUID();
+      this.ensureRun(runId, "build");
+      for (const row of this.db.prepare("SELECT decision_key,decision_json,created_at,updated_at FROM human_decisions WHERE run_id=? AND status='answered'").all(predecessor) as Array<{decision_key:string;decision_json:string;created_at:string;updated_at:string}>) {
+        if (!row.decision_key.startsWith(`${predecessor}:`)) throw new Error("Legacy approval key cannot be attributed safely to retry scope");
+        const decision = { ...JSON.parse(row.decision_json), decisionId: randomUUID(), runId };
+        this.db.prepare("INSERT INTO human_decisions VALUES(?,?,?,'answered',?,?,?)").run(decision.decisionId, `${runId}:${row.decision_key.slice(predecessor.length + 1)}`, runId, JSON.stringify(decision), row.created_at, row.updated_at);
+      }
+      const policy = this.autonomyPolicy(predecessor);
+      if (policy) this.freezeAutonomyPolicy(runId, policy);
+      const supervisor = this.supervisorState(predecessor);
+      if (supervisor) this.putSupervisorState(runId, { ...supervisor, status: "stopped", pid: undefined, workerPid: undefined, processStart: undefined });
+      this.transition(runId, { checkpoint: "preparing", state: { ...previous.state, startArgs: args, predecessor }, event: "preparation_retry_reserved" });
+      this.db.prepare("INSERT INTO build_retry_lineage VALUES(?,?,?,?)").run(predecessor, runId, canonicalProject(this.projectDir), new Date().toISOString());
+      this.transition(predecessor, { status: "superseded", checkpoint: "preparation-superseded", state: { ...previous.state, successor: runId }, event: "preparation_superseded", payload: { successor: runId } });
+      const next = { ...authority, runId };
+      this.db.prepare("UPDATE build_admission SET record_json=? WHERE singleton=1").run(JSON.stringify(next));
+      this.writerAuthority = next;
+      rememberBuildAuthority(next);
+      return { runId, authority: next, launch: reserveLaunch(this.db, next, "coordinator", launchDigest(args), "registered-v2") };
+      } finally { this.lineageTransition--; }
+    });
+  }
+
+  beginOwnedPreparationProcess(authority: BuildAdmission, tag?: string, gated = false): string {
+    return this.atomic(() => {
+      assertAdmission(this.db, authority);
+      const id = tag ?? randomUUID();
+      if (gated && (this.db.prepare("SELECT version FROM build_ownership_schema").get() as {version:number}).version !== 3) throw new Error("Legacy build ownership needs reconciliation before readiness protocol migration");
+      if (this.unresolvedPreparationProcesses(authority.runId).length) throw new Error("Previous readiness cleanup is unresolved");
+      this.db.prepare("INSERT INTO build_owned_processes(id,run_id,owner,pid,process_start,host,state,outcome_json) VALUES(?,?,?,NULL,NULL,?,'intended',?)").run(id, authority.runId, authority.token, authority.host, JSON.stringify(gated ? { protocol: "gated-v3", startup: "intended", revision: 0, authority, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } : { protocol: process.platform === "win32" ? "windows-job-v1" : "tagged-v2" }));
+      return id;
+    });
+  }
+  recordOwnedPreparationProcess(authority: BuildAdmission, id: string, pid: number): void {
+    this.atomic(() => {
+      assertAdmission(this.db, authority);
+      const row = this.readinessProcesses().find(row => row.id === id);
+      if (row && readinessMetadata(row).protocol === "gated-v3") throw new Error("Gated readiness requires helper registration");
+      if (this.db.prepare("UPDATE build_owned_processes SET pid=?,process_start=?,state='running' WHERE id=? AND owner=? AND state='intended'").run(pid, processStartIdentity(pid), id, authority.token).changes !== 1) throw new Error("Owned process launch changed");
+    });
+  }
+  finishOwnedPreparationProcess(authority: BuildAdmission, id: string, noChild = false, outcome?: { ready: boolean; exitCode: number | null; timedOut: boolean; cancelled: boolean }): void {
+    this.atomic(() => {
+      assertAdmission(this.db, authority);
+      const row = this.db.prepare("SELECT * FROM build_owned_processes WHERE id=? AND owner=?").get(id, authority.token) as {pid:number|null;process_start:string|null;host:string}|undefined;
+      if (!row) throw new Error("Owned process record disappeared");
+      const processRow = this.db.prepare("SELECT * FROM build_owned_processes WHERE id=?").get(id) as ReadinessProcess;
+      const meta = readinessMetadata(processRow);
+      if (outcome) this.db.prepare("UPDATE build_owned_processes SET outcome_json=? WHERE id=?").run(JSON.stringify({ ...meta, ...outcome }), id);
+      if ((noChild && row.pid === null && meta.protocol !== "gated-v3") || inspectReadiness(processRow).state === "quiescent") this.db.prepare("UPDATE build_owned_processes SET state='quiescent' WHERE id=?").run(id);
+
+
+    });
+  }
+  readinessProcesses(runId?: string): ReadinessProcess[] {
+    return this.db.prepare("SELECT * FROM build_owned_processes WHERE state<>'quiescent'" + (runId ? " AND run_id=?" : "")).all(...(runId ? [runId] : [])) as ReadinessProcess[];
+  }
+  unresolvedPreparationProcesses(runId: string): string[] {
+    const parent = (this.db.prepare("SELECT parent FROM build_child_runs WHERE child=?").get(runId) as {parent:string}|undefined)?.parent;
+    return this.readinessProcesses().filter(row => row.run_id === runId || row.run_id === parent).map(row => row.id);
+  }
+  registerReadinessHelper(id: string): void {
+    this.atomic(() => {
+      const row = this.readinessProcesses().find(row => row.id === id);
+      const meta = row && readinessMetadata(row);
+      const start = processStartIdentity();
+      if (!row || meta?.protocol !== "gated-v3" || meta.startup !== "intended" || row.pid || row.host !== hostname() || start === "unavailable") throw new Error("Readiness registration rejected");
+      this.db.prepare("UPDATE build_owned_processes SET pid=?,process_start=?,outcome_json=? WHERE id=?").run(process.pid, start, JSON.stringify({ ...meta, startup: "registered", revision: meta.revision + 1, updatedAt: new Date().toISOString() }), id);
+    });
+  }
+  authorizeReadinessHelper(authority: BuildAdmission, id: string, pid: number): void {
+    this.atomic(() => {
+      assertAdmission(this.db, authority);
+      const row = this.readinessProcesses().find(row => row.id === id);
+      const meta = row && readinessMetadata(row);
+      if (!row || row.owner !== authority.token || meta?.startup !== "registered" || row.pid !== pid || classifyProcess(pid, row.process_start ?? undefined, row.host).state !== "live") throw new Error("Readiness authorization rejected");
+      this.db.prepare("UPDATE build_owned_processes SET outcome_json=? WHERE id=?").run(JSON.stringify({ ...meta, startup: "authorized", revision: meta.revision + 1, updatedAt: new Date().toISOString() }), id);
+    });
+  }
+  assertReadinessHelper(id: string): ReadinessProcess {
+    const row = this.readinessProcesses().find(row => row.id === id);
+    if (!row || readinessMetadata(row).startup !== "authorized" || row.pid !== process.pid || row.process_start !== processStartIdentity() || row.host !== hostname()) throw new Error("Readiness execution capability rejected");
+    return row;
+  }
+  recordReadinessCreator(id: string, pid: number): void {
+    this.atomic(() => {
+      const row = this.assertReadinessHelper(id);
+      const meta = readinessMetadata(row);
+      const start = processStartIdentity(pid);
+      if (meta.creator || start === "unavailable") throw new Error("Windows creator registration rejected");
+      this.db.prepare("UPDATE build_owned_processes SET outcome_json=? WHERE id=?").run(JSON.stringify({ ...meta, creator: {pid, start}, revision: meta.revision + 1, updatedAt: new Date().toISOString() }), id);
+    });
+  }
+  private assertReadinessRelationships(runId: string): void {
+    // Inspect each directed lineage separately; cleanup never broadens to siblings.
+    for (const relation of ["parent", "successor", "predecessor"] as const) {
+      let current = runId;
+      const seen = new Set<string>();
+      while (true) {
+        if (seen.has(current)) throw new Error("Readiness run relationship contains a cycle");
+        seen.add(current);
+        const link = relation === "parent"
+          ? this.db.prepare("SELECT parent AS target FROM build_child_runs WHERE child=?").get(current) as {target:string;project?:string}|undefined
+          : this.db.prepare(`SELECT ${relation} AS target,project FROM build_retry_lineage WHERE ${relation === "successor" ? "predecessor" : "successor"}=?`).get(current) as {target:string;project?:string}|undefined;
+        if (!link) break;
+        if (!this.getRun(link.target) || (link.project && canonicalProject(link.project) !== canonicalProject(this.projectDir))) throw new Error("Readiness relationship is missing or belongs to another project");
+        current = link.target;
+      }
+    }
+  }
+  readinessCleanupDetails(runId: string): string[] {
+    return this.readinessProcesses(runId).map(row => {
+      const meta = readinessMetadata(row);
+      try { this.assertReadinessRelationships(runId); this.assertReadinessCleanupOwner(row); }
+      catch (error) { return `${row.id}: ${(error as Error).message}`; }
+      return `${row.id}: ${meta.cleanup?.reason ?? inspectReadiness(row).reason}`;
+    });
+  }
+  private assertReadinessCleanupOwner(row: ReadinessProcess, original?: BuildAdmission): void {
+    const held = this.buildAdmission();
+    if (original && held?.token === original.token && row.owner === original.token && original.project === canonicalProject(this.projectDir) && held.project === original.project) return;
+    const recorded = readinessMetadata(row).authority as BuildAdmission | undefined;
+    const owner = recorded?.token === row.owner ? recorded : held?.token === row.owner ? held : undefined;
+    if (owner && (owner.project !== canonicalProject(this.projectDir) || owner.host !== row.host)) throw new Error("Readiness ownership belongs to another project or host");
+    if (!owner || classifyProcess(owner.pid, owner.processStart, owner.host).state !== "dead") throw new Error("Readiness owner is live, unknown, or lacks attributable provenance");
+  }
+  revokeReadinessHelper(id: string, original?: BuildAdmission): void {
+    this.atomic(() => {
+      const row = this.readinessProcesses().find(row => row.id === id);
+      if (!row) return;
+      this.assertReadinessCleanupOwner(row, original);
+      const meta = readinessMetadata(row);
+      if (meta.protocol !== "gated-v3" || !["intended", "registered", "revoked"].includes(meta.startup)) throw new Error("Authorized readiness cannot be revoked; verify cleanup instead");
+      if (meta.startup === "revoked") return;
+      this.db.prepare("UPDATE build_owned_processes SET outcome_json=? WHERE id=?").run(JSON.stringify({ ...meta, startup: "revoked", revision: meta.revision + 1, updatedAt: new Date().toISOString() }), id);
+    });
+  }
+  async reconcileReadiness(runId: string, original?: BuildAdmission, deadline = Date.now() + 5000): Promise<string[]> {
+    // Exact run scope: related/different blockers remain independently selectable.
+    for (const initial of this.readinessProcesses(runId)) {
+      if (Date.now() >= deadline) break;
+      let row = initial;
+      try {
+        this.atomic(() => {
+          this.assertReadinessRelationships(runId);
+          this.assertReadinessCleanupOwner(row, original);
+          const meta = readinessMetadata(row);
+          if (meta.protocol === "gated-v3" && ["intended", "registered"].includes(meta.startup)) this.revokeReadinessHelper(row.id, original);
+        });
+        row = this.readinessProcesses(runId).find(item => item.id === row.id)!;
+        if (!row) continue;
+        const meta = readinessMetadata(row);
+        let evidence = await cleanupReadiness(row, deadline);
+        // tagged-v2 launched directly from its recorded owner, without a delayed helper.
+        if (!row.pid && meta.protocol === "tagged-v2" && row.host === hostname() && (() => { const owner = this.buildAdmission(); return owner?.token === row.owner && classifyProcess(owner.pid, owner.processStart, owner.host).state === "dead"; })() && taggedProcesses(row.id)?.length === 0) evidence = { state: "quiescent", reason: "verified dead direct-spawn owner and complete empty tag inventory" };
+        this.atomic(() => {
+          this.assertReadinessRelationships(runId);
+          this.assertReadinessCleanupOwner(row, original);
+          const current = this.readinessProcesses(runId).find(item => item.id === row.id);
+          if (!current || current.outcome_json !== row.outcome_json || current.pid !== row.pid) return;
+          this.db.prepare("UPDATE build_owned_processes SET state=?,outcome_json=? WHERE id=?").run(evidence.state === "quiescent" ? "quiescent" : row.state, JSON.stringify({ ...meta, cleanup: { ...evidence, checkedAt: new Date().toISOString() }, revision: (meta.revision ?? 0) + 1, updatedAt: new Date().toISOString() }), row.id);
+        });
+      } catch { /* Preserve durable blocker, including after storage/authority failures. */ }
+    }
+    return this.readinessProcesses(runId).map(row => row.id);
+  }
+
+  preparationEligibility(runId: string): { eligible: boolean; reasons: string[] } {
+    const run = this.getRun(runId);
+    const reasons: string[] = [];
+    for (const row of this.db.prepare("SELECT state_json FROM workflow_runs WHERE kind='legacy' AND legacy=1").all() as Array<{state_json:string}>) {
+      const legacy = parseJson(row.state_json) as {source?:string;record?:{sessionId?:string}};
+      if (legacy.source && /delivery-sessions/.test(legacy.source) && existsSync(legacy.source) && legacy.record?.sessionId) reasons.push("unattributed legacy branch session requires reconciliation");
+    }
+    if (this.pendingHumanDecisions(runId).length) reasons.push("pending decisions require an answer");
+    if (this.unresolvedPreparationProcesses(runId).length) reasons.push("owned preparation processes are still running or unverified");
+    if (this.incompletePublications().some(item => item.runId === runId)) reasons.push("unfinished publication requires reconciliation");
+    if (!run || ["completed", "cancelled", "superseded"].includes(run.status)) reasons.push("run is missing or terminal");
+    if (run?.state.version !== undefined || run?.state.runId) reasons.push("implementation snapshot exists");
+    const tables = ["operation_journal", "provider_sessions", "continuity_heads", "handoffs", "role_mutation_leases", "branch_resume_sessions", "qa_ticket_heads", "qa_recovery_heads", "recovery_attempts"];
+    for (const table of tables) if (this.db.prepare(`SELECT 1 FROM ${table} WHERE run_id=? LIMIT 1`).get(runId)) reasons.push(`${table} contains execution evidence or decisions`);
+    return { eligible: reasons.length === 0, reasons };
+  }
+
   /** Ensure non-workflow build records can use the same durable event store. */
   ensureRun(runId: string, kind: WorkflowKind = "build", now = new Date()): WorkflowRunSnapshot {
     const existing = this.getRun(runId);
     if (existing) return existing;
     const at = now.toISOString();
     this.db.transaction(() => {
+      if (this.writerAuthority) assertAdmission(this.db, this.writerAuthority);
       const inserted = this.db.prepare(`INSERT OR IGNORE INTO workflow_runs(run_id,kind,status,checkpoint,original_work_json,remaining_work_json,state_json,legacy,created_at,updated_at)
         VALUES(?,?,'running','durable-baseline','{}','{}','{}',0,?,?)`).run(runId, kind, at, at);
+      if (inserted.changes && this.writerAuthority && this.writerAuthority.runId !== runId) {
+        this.db.prepare("INSERT INTO build_child_runs VALUES(?,?)").run(runId, this.writerAuthority.runId);
+        this.db.prepare("INSERT OR IGNORE INTO build_runtime_runs VALUES(?)").run(runId);
+      }
       if (inserted.changes) this.insertEvent(runId, "durable_baseline", "durable-baseline", { source: "host" }, at);
     })();
     return this.getRun(runId)!;
@@ -319,8 +678,13 @@ export class WorkflowDb {
       legacy: Boolean(input.legacy), createdAt: at, updatedAt: at,
     };
     this.db.transaction(() => {
+      if (this.writerAuthority) assertAdmission(this.db, this.writerAuthority);
       this.db.prepare(`INSERT INTO workflow_runs(run_id,kind,status,checkpoint,original_work_json,remaining_work_json,state_json,legacy,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?)`).run(run.runId, run.kind, run.status, run.checkpoint, json(run.originalWork), json(run.remainingWork), json(run.state), run.legacy ? 1 : 0, at, at);
+      if (this.writerAuthority && this.writerAuthority.runId !== run.runId) {
+        this.db.prepare("INSERT INTO build_child_runs VALUES(?,?)").run(run.runId, this.writerAuthority.runId);
+        this.db.prepare("INSERT OR IGNORE INTO build_runtime_runs VALUES(?)").run(run.runId);
+      }
       this.insertEvent(run.runId, "run_created", run.checkpoint, { kind: run.kind }, at);
     })();
     return run;
@@ -355,10 +719,34 @@ export class WorkflowDb {
     return (rows as DbRun[]).map(rowToRun);
   }
 
+  /** Supervisors may pause a worker generation; they cannot publish worker state. */
+  transitionSupervisor(runId: string, workerGeneration: number, update: { status?: WorkflowRunStatus; checkpoint: string; event?: string; payload?: unknown }): WorkflowRunSnapshot {
+    return this.atomic(() => {
+      const owner = this.supervisorState(runId);
+      if (!owner || owner.pid !== process.pid || owner.processStart !== processStartIdentity() || owner.workerGeneration !== workerGeneration) throw new Error("Supervisor generation no longer owns the lifecycle transition");
+      this.coordinatorTransition++;
+      try { return this.transition(runId, update); }
+      finally { this.coordinatorTransition--; }
+    });
+  }
+
   transition(runId: string, update: { status?: WorkflowRunStatus; checkpoint: string; remainingWork?: unknown; state?: Record<string, unknown>; event?: string; payload?: unknown }, now = new Date()): WorkflowRunSnapshot {
     const at = now.toISOString();
     return this.db.transaction(() => {
+      if (!this.coordinatorTransition && (this.writerAuthority || this.buildAdmission())) {
+        if (!this.writerAuthority) throw new Error("Workflow transition requires original build admission authority");
+        assertAdmission(this.db, this.writerAuthority);
+        const supersession = update.status === "superseded" && update.state?.supersededBy === this.writerAuthority.runId && this.getRun(this.writerAuthority.runId)?.kind === "recovery";
+        if (!this.lineageTransition && this.writerAuthority.runId !== runId && !this.db.prepare("SELECT 1 FROM build_child_runs WHERE child=? AND parent=?").get(runId, this.writerAuthority.runId) && !supersession) throw new Error("Workflow authority belongs to another run");
+      }
       const current = this.getRun(runId); if (!current) throw new Error(`workflow run not found: ${runId}`);
+      if (["completed", "cancelled", "superseded"].includes(current.status) && update.status && update.status !== current.status) throw new Error(`Cannot reactivate terminal ${current.status} workflow`);
+      if (!this.coordinatorTransition && this.db.prepare("SELECT 1 FROM build_runtime_runs WHERE run_id=?").get(runId) && !this.writerAuthority) {
+        const lease = this.currentLease();
+        if (!this.writerLease || !lease || lease.owner !== this.writerLease.owner || lease.generation !== this.writerLease.generation) throw new Error("Workflow transition requires original build authority");
+        const supersession = update.status === "superseded" && update.state?.supersededBy === lease.runId && this.getRun(lease.runId)?.kind === "recovery";
+        if (lease.runId !== runId && !supersession) throw new Error("Workflow authority belongs to another run");
+      }
       const next = { ...current, status: update.status ?? current.status, checkpoint: update.checkpoint, remainingWork: update.remainingWork ?? current.remainingWork, state: update.state ?? current.state, updatedAt: at };
       this.db.prepare("UPDATE workflow_runs SET status=?,checkpoint=?,remaining_work_json=?,state_json=?,updated_at=? WHERE run_id=?")
         .run(next.status, next.checkpoint, json(next.remainingWork), json(next.state), at, runId);
@@ -662,7 +1050,29 @@ export class WorkflowDb {
     return (this.db.prepare("SELECT decision_key,decision_json FROM human_decisions WHERE run_id=? AND status='answered'").all(runId) as Array<{ decision_key: string; decision_json: string }>)
       .filter(row => row.decision_key.includes(`:${scopeRevision}:`))
       .map(row => parseJson(row.decision_json) as PendingHumanDecision)
-      .filter(decision => decision.interruptionId.startsWith("ticket:") && !this.operation(`decision-continuation:${decision.decisionId}`));
+      .filter(decision => decision.interruptionId.startsWith("ticket:") && !this.operation(`decision-continuation:${decision.decisionId}`) && !this.operation(`decision-supersession:${decision.decisionId}`));
+  }
+
+  /** Unconsumed answers to an older definition must not silently reopen a ticket. */
+  staleTicketDecisions(runId: string, scopeRevision: string): PendingHumanDecision[] {
+    return (this.db.prepare("SELECT decision_key,decision_json FROM human_decisions WHERE run_id=? AND status='answered'").all(runId) as Array<{ decision_key: string; decision_json: string }>)
+      .filter(row => !row.decision_key.includes(`:${scopeRevision}:`))
+      .map(row => parseJson(row.decision_json) as PendingHumanDecision)
+      .filter(decision => decision.interruptionId.startsWith("ticket:") && !this.operation(`decision-continuation:${decision.decisionId}`) && !this.operation(`decision-supersession:${decision.decisionId}`));
+  }
+
+  refreshStaleTicketDecisions(runId: string, scopeRevision: string, tickets?: readonly string[]): void {
+    this.atomic(() => {
+      for (const prior of this.staleTicketDecisions(runId, scopeRevision)) {
+        if (tickets && !tickets.includes(prior.interruptionId.slice(7))) continue;
+        const next = this.ensureHumanDecision({ runId, decisionKey: `${runId}:ticket-question:${scopeRevision}:supersedes:${prior.decisionId}`, interruptionId: prior.interruptionId,
+          prompt: prior.prompt, choices: prior.choices, evidence: prior.evidence });
+        const key = `decision-supersession:${prior.decisionId}`;
+        this.planOperation({ runId, idempotencyKey: key, kind: "decision-supersession", intent: { priorDecisionId: prior.decisionId, replacementDecisionId: next.decisionId, reason: "ticket scope changed before answer was used" } });
+        this.updateOperation(key, "in_progress");
+        this.updateOperation(key, "confirmed");
+      }
+    });
   }
 
   answerHumanDecision(runId: string, decisionId: string, choiceId: string, now = new Date(), answer?: string): PendingHumanDecision {
@@ -702,6 +1112,7 @@ export class WorkflowDb {
 
   planOperation(input: { runId: string; idempotencyKey: string; kind: string; intent: unknown }, now = new Date()): OperationRecord {
     const at = now.toISOString();
+    if (input.kind === "provider-dispatch" && this.unresolvedPreparationProcesses(input.runId).length) throw new Error("Readiness cleanup must be reconciled before provider dispatch");
     this.db.prepare(`INSERT INTO operation_journal(idempotency_key,run_id,kind,status,intent_json,created_at,updated_at)
       VALUES(?,?,?,'planned',?,?,?) ON CONFLICT(idempotency_key) DO NOTHING`).run(input.idempotencyKey, input.runId, input.kind, json(input.intent), at, at);
     const operation = this.operation(input.idempotencyKey)!;
@@ -712,7 +1123,8 @@ export class WorkflowDb {
   }
 
   updateOperation(idempotencyKey: string, status: OperationLifecycle, details: { result?: unknown; externalId?: string; error?: string } = {}, now = new Date()): OperationRecord {
-    const prior = this.operation(idempotencyKey); if (!prior) throw new Error(`operation not found: ${idempotencyKey}`);
+    const prior = this.operation(idempotencyKey); if (prior?.kind === "provider-dispatch" && status === "in_progress" && this.unresolvedPreparationProcesses(prior.runId).length) throw new Error("Readiness cleanup must be reconciled before provider dispatch");
+    if (!prior) throw new Error(`operation not found: ${idempotencyKey}`);
     const allowed: Record<OperationLifecycle, OperationLifecycle[]> = {
       planned: ["planned", "in_progress", "failed"],
       in_progress: ["in_progress", "confirmed", "failed", "uncertain"],
@@ -1813,15 +2225,30 @@ export class WorkflowDb {
   acquireLease(runId: string, owner = `${hostname()}:${process.pid}:${randomUUID()}`, now = new Date(), staleMs = 45_000): ProjectLease {
     const at = now.toISOString(); const host = hostname(); const pid = process.pid; const processStart = processStartIdentity();
     return this.db.transaction(() => {
+      const admission = this.buildAdmission();
+      if (admission) {
+        const local = localBuildAuthority(this.projectDir);
+        if (!local || local.token !== admission.token || local.runId !== runId) {
+          const state = classifyProcess(admission.pid, admission.processStart, admission.host);
+          if (state.state !== "dead") throw new Error(`Build ${admission.runId} admission is ${state.state}: ${state.reason}`);
+          if (this.db.prepare("SELECT 1 FROM build_launches WHERE run_id=? AND state IN ('reserved','dispatching')").get(admission.runId)) throw new Error("Unresolved build launch requires reconciliation");
+        } else assertAdmission(this.db, local);
+      }
       const current = this.currentLease();
       if (current && leaseVerifiedLive(current, now, staleMs)) throw new Error(`project workflow lease is held by ${current.owner} for run ${current.runId}`);
-      const generation = (current?.generation ?? 0) + 1;
+      const sequence = this.db.prepare("SELECT generation FROM workflow_lease_sequence WHERE singleton=1").get() as {generation:number};
+      const generation = Math.max(sequence.generation, current?.generation ?? 0) + 1;
+      this.db.prepare("UPDATE workflow_lease_sequence SET generation=? WHERE singleton=1").run(generation);
       this.db.prepare(`INSERT INTO project_lease(singleton,owner,generation,pid,host,process_start,heartbeat_at,run_id)
         VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET owner=excluded.owner,generation=excluded.generation,pid=excluded.pid,host=excluded.host,process_start=excluded.process_start,heartbeat_at=excluded.heartbeat_at,run_id=excluded.run_id`)
         .run(owner, generation, pid, host, processStart, at, runId);
       this.db.prepare("UPDATE workflow_runs SET lease_generation=? WHERE run_id=?").run(generation, runId);
       this.insertEvent(runId, current ? "lease_takeover" : "lease_acquired", "lease", { owner, generation, previous: current?.owner }, at);
-      return { owner, generation, pid, host, processStart, heartbeatAt: at, runId };
+      const lease = { owner, generation, pid, host, processStart, heartbeatAt: at, runId };
+      this.writerLease = lease;
+      rememberOriginalLease(this.projectDir, lease);
+      if (this.getRun(runId)?.kind === "build") this.db.prepare("INSERT OR IGNORE INTO build_runtime_runs VALUES(?)").run(runId);
+      return lease;
     }).immediate();
   }
 
@@ -1835,6 +2262,7 @@ export class WorkflowDb {
   releaseLease(lease: ProjectLease, now = new Date()): void {
     this.db.transaction(() => {
       const result = this.db.prepare("DELETE FROM project_lease WHERE singleton=1 AND owner=? AND generation=?").run(lease.owner, lease.generation);
+      if (result.changes === 1) forgetOriginalLease(this.projectDir, lease);
       if (result.changes === 1) this.insertEvent(lease.runId, "lease_released", "lease", { generation: lease.generation }, now.toISOString());
     })();
   }
@@ -2085,14 +2513,7 @@ function sanitizeContinuityValue(value: unknown, depth = 0): unknown {
 }
 function leaseVerifiedLive(lease: ProjectLease, now: Date, staleMs: number): boolean {
   void now; void staleMs;
-  // Heartbeat expiry is not proof of process death. Remote or inaccessible
-  // identities require operator reconciliation; only proven-dead owners move.
-  if (lease.host !== hostname()) return true;
-  try { process.kill(lease.pid, 0); }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
-  const actual = processStartIdentity(lease.pid);
-  if (actual === "unavailable" || lease.processStart === "unavailable") return true;
-  return actual === lease.processStart;
+  return classifyProcess(lease.pid, lease.processStart, lease.host).state !== "dead";
 }
 function ensureRecoveryGitignore(projectDir: string): void {
   const localExclude = join(projectDir, ".git", "info", "exclude");

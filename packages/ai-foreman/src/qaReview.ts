@@ -1,3 +1,4 @@
+import { formatRecoveryCommand } from "./recoveryGuidance.js";
 import { checkQaPrerequisites } from "./qaPrerequisites.js";
 import { boundedQaHistory } from "./qaHandbackHistory.js";
 import {
@@ -143,7 +144,30 @@ function pauseQaReview(opts: IsolatedQaOptions, stage: string, detail: string, f
     if (head.state !== "operator-menu") head = db.transitionQa(opts.recovery.runId, opts.ticket.id, head.revision, { type: "operator-menu" });
   } finally { db.close(); }
   ensureProtocolPausePacket(opts, head, stage, detail, frozenState);
-  return { outcome: "needs-human", detail: `${detail}. Resume with: rafi build:resume ${opts.recovery.projectDir} --run ${opts.recovery.runId} --ticket ${opts.ticket.id} --qa-revision ${head.revision} --fresh-with-handoff` };
+  return { outcome: "needs-human", detail: `${detail}. Resume with: ${formatRecoveryCommand(opts.recovery.projectDir)}` };
+}
+
+/** Retry completed protocol failures, never uncertain execution or Builder work.
+ * The allowance is shared by all protocol failures for this ticket and survives restart.
+ * oneReview's finally closes the predecessor before the loop allocates a new snapshot.
+ */
+function retryFreshQaReview(opts: IsolatedQaOptions, stage: string, detail: string, frozenState: FrozenQaSourceState): IsolatedQaResult | { outcome: "retry-modification" } {
+  const db = new WorkflowDb(opts.recovery.projectDir);
+  let retry = false;
+  try {
+    retry = db.reserveRecoveryAllowance(opts.recovery.runId, opts.ticket.id, "qa-fresh-protocol-review", 1);
+    if (retry) {
+      const head = db.qaTicketHead(opts.recovery.runId, opts.ticket.id);
+      if (head.state !== "operator-menu") db.transitionQa(opts.recovery.runId, opts.ticket.id, head.revision, { type: "operator-menu" });
+      db.appendContinuityEvent({ runId: opts.recovery.runId, role: "host", kind: "qa_fresh_review_retry",
+        payload: { ticketId: opts.ticket.id, stage, detail }, authoritativeStateRevision: head.revision });
+    }
+  } finally { db.close(); }
+  if (!retry) return pauseQaReview(opts, stage, `${detail}; automatic fresh QA review allowance exhausted`, frozenState);
+  opts.resumedRecovery = undefined;
+  currentActivity()?.update("qa-recovery", `${opts.ticket.id}: ${detail}. Running a complete fresh QA review.`);
+  opts.evidence?.({ cycle: 0, outcome: "qa_fresh_review_retry", detail });
+  return { outcome: "retry-modification" };
 }
 
 function pauseQaProtocol(opts: IsolatedQaOptions, stage: string, detail: string, outcome: IsolatedQaResult["outcome"] = "needs-human"): IsolatedQaResult {
@@ -154,7 +178,7 @@ function pauseQaProtocol(opts: IsolatedQaOptions, stage: string, detail: string,
     if (head.state !== "operator-menu") head = db.transitionQa(opts.recovery.runId, opts.ticket.id, head.revision, { type: "operator-menu" });
   } finally { db.close(); }
   ensureProtocolPausePacket(opts, head, stage, detail);
-  return { outcome, detail: `${detail}. Resume with: rafi build:resume ${opts.recovery.projectDir} --run ${opts.recovery.runId} --ticket ${opts.ticket.id} --qa-revision ${head.revision} --fresh-with-handoff` };
+  return { outcome, detail: `${detail}. Resume with: ${formatRecoveryCommand(opts.recovery.projectDir)}` };
 }
 
 function loadDurableQaHistory(db: WorkflowDb, runId: string, ticketId: string): {
@@ -213,7 +237,7 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
       protocolHead = scopeDb.transitionQa(opts.recovery.runId, opts.ticket.id, protocolHead.revision, { type: "operator-menu" });
       if (!opts.resumedRecovery) {
         ensureProtocolPausePacket(opts, protocolHead, "turn-uncertain", "A QA provider turn may have been dispatched before the prior process stopped");
-        return { outcome: "needs-human", detail: `A QA provider turn may have been dispatched before the prior process stopped. Reconcile it before retrying. Resume with: rafi build:resume ${opts.recovery.projectDir} --run ${opts.recovery.runId} --ticket ${opts.ticket.id} --qa-revision ${protocolHead.revision} --fresh-with-handoff` };
+        return { outcome: "needs-human", detail: `A QA provider turn may have been dispatched before the prior process stopped. Reconcile it before retrying. Resume with: ${formatRecoveryCommand(opts.recovery.projectDir)}` };
       }
     }
     if (protocolHead.state === "remediation-intended" || protocolHead.state === "remediation-uncertain") {
@@ -221,7 +245,7 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
       protocolHead = scopeDb.transitionQa(opts.recovery.runId, opts.ticket.id, protocolHead.revision, { type: "operator-menu" });
       if (!opts.resumedRecovery) {
         ensureProtocolPausePacket(opts, protocolHead, "remediation-uncertain", "Builder remediation has an uncertain external outcome; QA must review current source without replaying Builder");
-        return { outcome: "needs-human", detail: `Builder remediation has an uncertain external outcome and cannot be replayed automatically. Resume with: rafi build:resume ${opts.recovery.projectDir} --run ${opts.recovery.runId} --ticket ${opts.ticket.id} --qa-revision ${protocolHead.revision} --fresh-with-handoff` };
+        return { outcome: "needs-human", detail: `Builder remediation has an uncertain external outcome and cannot be replayed automatically. Resume with: ${formatRecoveryCommand(opts.recovery.projectDir)}` };
       }
     }
     if (protocolHead.state === "source-frozen" || protocolHead.state === "review-ready") {
@@ -270,7 +294,7 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
         resumedReport = undefined;
       } else {
         ensureProtocolPausePacket(opts, resumedHead, "missing-review-evidence", missing);
-        return { outcome: "needs-human", detail: `${missing}. Resume with: rafi build:resume ${opts.recovery.projectDir} --run ${opts.recovery.runId} --ticket ${opts.ticket.id} --qa-revision ${resumedHead.revision} --fresh-with-handoff` };
+        return { outcome: "needs-human", detail: `${missing}. Resume with: ${formatRecoveryCommand(opts.recovery.projectDir)}` };
       }
     }
   }
@@ -591,7 +615,7 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
       db.transition(opts.recovery.runId, { status: "paused", checkpoint: "qa-source-capture", remainingWork: run.remainingWork, state: run.state,
         event: "qa_source_capture_unstable", payload: { ticketId: opts.ticket.id, attempts: error.attempts } });
     } finally { db.close(); }
-    return { outcome: "needs-human", detail: `${error.message}. No QA session or report was created. Resume with: rafi build:resume ${opts.recovery.projectDir} --run ${opts.recovery.runId} --ticket ${opts.ticket.id} --qa-revision ${qaRevision} --fresh-session` };
+    return { outcome: "needs-human", detail: `${error.message}. No QA session or report was created. Resume with: ${formatRecoveryCommand(opts.recovery.projectDir)}` };
   }
   let qa: BuilderAdapter | undefined;
   let recoverySnapshot: Awaited<ReturnType<typeof createDisposableQaSnapshotAsync>> | undefined;
@@ -701,6 +725,7 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
       resumedPacket = acknowledged.packet;
       const ackErrors = acknowledged.errors;
       if (ackErrors.length) {
+        if (acknowledged.retryable) return retryFreshQaReview(opts, "invalid-recovery-acknowledgement", `QA recovery acknowledgement was invalid: ${ackErrors.join("; ")}`, snapshot.frozenState);
         const synthetic: TurnResult = { text: "", rawResponse: "", cleanedResponse: "", isError: true, numTurns: 0, costUsd: 0 };
         const recovery = await repairResumedFailureReport(opts, identity, resumedPacket, snapshot, qaHandle, synthetic, ackErrors, qaEvents, recoveryContext, true);
         if (recovery.outcome === "failed") return recovery.result;
@@ -788,7 +813,8 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
       durableReviewFinished = true;
       return { outcome: "retry-modification" };
     }
-    if (responseProtocolError) return pauseQaReview(opts, "invalid-response-contract", responseProtocolError, reviewedSnapshot.frozenState);
+    if (turn.continuityErrors?.length && !turn.failure) return retryFreshQaReview(opts, "invalid-continuity", `QA continuity record was invalid: ${turn.continuityErrors.join("; ")}`, reviewedSnapshot.frozenState);
+    if (responseProtocolError && !turn.isError && !turn.failure) return retryFreshQaReview(opts, "invalid-response-contract", responseProtocolError, reviewedSnapshot.frozenState);
     if (turn.isError || turn.failure) return pauseQaReview(opts, "qa-turn-error", `QA turn failed: ${sanitizePreview(turn.text)}`, reviewedSnapshot.frozenState);
     if (status.kind === "blocked") return pauseQaReview(opts, "qa-blocked", status.reason ?? "QA reported blocked", reviewedSnapshot.frozenState);
       if (status.kind === "qa_pass") {
@@ -850,7 +876,7 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
       markQaRecoveryPendingBuilder(opts);
       return { outcome: "failed", detail, report, reportDigest: digest, reviewAttempt: acceptedBinding.reviewNumber, reviewAttemptId: acceptedBinding.reviewAttemptId };
     }
-    return pauseQaReview(opts, "unrecognized-qa-outcome", status.error ?? `QA returned ${status.kind}`, reviewedSnapshot.frozenState);
+    return retryFreshQaReview(opts, "unrecognized-qa-outcome", status.error ?? `QA returned ${status.kind}`, reviewedSnapshot.frozenState);
   } finally {
     if (durableReviewStarted && !durableReviewFinished) {
       try {
@@ -911,7 +937,11 @@ async function repairResumedFailureReport(
 
   void packet;
   void requireFreshReviewReason;
-  return { outcome: "failed", result: pauseQaReview(opts, "resumed-reconstruction-disabled", "Resumed QA report reconstruction is no longer authoritative; run a complete fresh QA review of current source", snapshot.frozenState) };
+  if (!originalTurn.isError && !originalTurn.failure) {
+    const result = retryFreshQaReview(opts, "resumed-invalid-report", "Resumed QA report was invalid; a complete fresh QA review is required", snapshot.frozenState);
+    return result.outcome === "retry-modification" ? { outcome: "retry" } : { outcome: "failed", result };
+  }
+  return { outcome: "failed", result: pauseQaReview(opts, "resumed-reconstruction-disabled", `Resumed QA recovery could not be validated: ${originalErrors.map(error => sanitizePreview(error)).join("; ")}; a complete fresh QA review is required`, snapshot.frozenState) };
 }
 
 export function buildQaReviewHandoff(ticket: TicketDef, builderSummary: string, diffDigest: string, validationChecklist: string[], changeSummary?: unknown, history: QaReportHistoryEntry[] = []): string {
@@ -1007,6 +1037,7 @@ async function repairInvalidFailureReport(
   let qa = originalQa; let activeQaHandle = qaHandle; let errors = originalErrors; let turns = 0;
   let recoveryContextSeal: ReturnType<typeof materializeQaRecoveryContext> | undefined;
   let protocolViolation: string | undefined;
+  let correctionExecutionFailed = false;
   const attemptCorrections = async (count: number, stage: string, guidance?: string) => {
     for (let index = 0; index < count; index++) {
       turns++; packet = updateQaRecoveryPosition(packet, stage, turns, "qa-correction");
@@ -1025,6 +1056,7 @@ async function repairInvalidFailureReport(
       packet = appendQaRecoveryResource(packet, "context/tool-events.json", qaEvents.length ? qaEvents : { unavailable: true }, { purpose: "Latest complete set of QA BuilderEvent records available to the host" });
       try { recoveryContextSeal?.verify(); } catch (error) { protocolViolation = error instanceof Error ? error.message : String(error); return undefined; }
       if (!result.isError && !result.failure && contract.valid && contract.report) return { result, contract };
+      correctionExecutionFailed = Boolean(result.failure || (result.isError && !result.continuityErrors?.length));
       errors = result.isError ? [`QA correction turn errored: ${sanitizePreview(result.text)}`] : contract.errors;
     }
     return undefined;
@@ -1034,7 +1066,9 @@ async function repairInvalidFailureReport(
   if (protocolViolation) packet = appendQaRecoveryResource(packet, `recovery-history/context-mutation-${packet.manifest.revision + 1}.txt`, protocolViolation, { purpose: "Recovery-context mutation protocol violation", exact: true });
 
   void packet;
-  return { outcome: "failed", result: pauseQaReview(opts, "report-correction-exhausted", protocolViolation ?? "QA report correction exhausted after one same-session turn; a complete fresh QA review is required", snapshot.frozenState) };
+  if (protocolViolation || correctionExecutionFailed) return { outcome: "failed", result: pauseQaReview(opts, "report-correction-exhausted", protocolViolation ?? errors.join("; "), snapshot.frozenState) };
+  const result = retryFreshQaReview(opts, "report-correction-exhausted", "QA report correction exhausted after one same-session turn; a complete fresh QA review is required", snapshot.frozenState);
+  return result.outcome === "retry-modification" ? { outcome: "retry" } : { outcome: "failed", result };
 }
 async function exhausted(
   packet: QaRecoveryPacket, originalResponse: string, opts: IsolatedQaOptions,
@@ -1091,7 +1125,7 @@ async function exhausted(
       });
     } finally { db.close(); }
   }
-  return { outcome: "failed", result: { outcome: "needs-human", detail: `${currentPrefix}. Recovery packet: ${packet.directory} (${packet.manifest.packetDigest}). Resources:\n${boundedRecoveryInventory(packet)}\n${QA_REPORT_RECOVERY_MENU.map((item, index) => `${index + 1}. ${item}`).join("\n")}\nResume with: rafi build:resume ${opts.recovery?.projectDir ?? opts.builderWorktree} --run ${opts.recovery?.runId ?? packet.manifest.runId} --ticket ${packet.manifest.ticketId} --qa-revision ${resumeRevision} --fresh-with-handoff` } };
+  return { outcome: "failed", result: { outcome: "needs-human", detail: `${currentPrefix}. Recovery packet: ${packet.directory} (${packet.manifest.packetDigest}). Resources:\n${boundedRecoveryInventory(packet)}\n${QA_REPORT_RECOVERY_MENU.map((item, index) => `${index + 1}. ${item}`).join("\n")}\nResume with: ${formatRecoveryCommand(opts.recovery.projectDir)}` } };
 }
 
 function normalizeUnsupportedOperator<T extends { outcome: string }>(result: T, reason: string): Exclude<T, { outcome: "operator" }> | { outcome: "failed"; result: IsolatedQaResult } {
@@ -1227,7 +1261,7 @@ async function performRecoveryAcknowledgement(
   continuityAlreadyValidated: boolean,
   label: string,
   seal?: { verify(): void },
-): Promise<{ packet: QaRecoveryPacket; errors: string[] }> {
+): Promise<{ packet: QaRecoveryPacket; errors: string[]; retryable?: boolean }> {
   // Both turns acknowledge the same already-materialized revision. Observing
   // either response advances the owner-only packet afterward, so validation
   // must continue to use this immutable target rather than the new revision.
@@ -1237,7 +1271,8 @@ async function performRecoveryAcknowledgement(
   let errors = validateQaRecoveryAcknowledgement(effectiveTurnText(first), target, { continuityAlreadyValidated });
   try { seal?.verify(); } catch (error) { errors.push(`recovery context mutated during acknowledgement: ${error instanceof Error ? error.message : String(error)}`); }
   packet = await appendTurnObservation(packet, `${label}-acknowledgement`, first, prompt, errors, "packet-acknowledgement", events);
-  if (first.isError || first.failure) return { packet, errors: [...errors, "QA acknowledgement provider turn failed"] };
+  if (first.isError || first.failure) return { packet, errors: [...errors, first.continuityErrors?.length && !first.failure ? "QA acknowledgement continuity metadata was invalid" : "QA acknowledgement provider turn failed"],
+    retryable: Boolean(first.continuityErrors?.length && !first.failure && !errors.some(error => /mutated/i.test(error))) };
   try { seal?.verify(); } catch (error) { errors.push(`recovery context mutated after acknowledgement: ${error instanceof Error ? error.message : String(error)}`); }
   if (errors.length) {
     const correction = `${prompt}\n\nAcknowledgement correction only. Do not produce the report yet. Errors: ${errors.join("; ")}`;
@@ -1246,10 +1281,10 @@ async function performRecoveryAcknowledgement(
     errors = validateQaRecoveryAcknowledgement(effectiveTurnText(repaired), target, { continuityAlreadyValidated });
     try { seal?.verify(); } catch (error) { errors.push(`recovery context mutated during acknowledgement repair: ${error instanceof Error ? error.message : String(error)}`); }
     packet = await appendTurnObservation(packet, `${label}-acknowledgement-repair`, repaired, correction, errors, "packet-acknowledgement-repair", events);
-    if (repaired.isError || repaired.failure) errors.push("QA acknowledgement repair provider turn failed");
+    if (repaired.isError || repaired.failure) errors.push(repaired.continuityErrors?.length && !repaired.failure ? "QA acknowledgement repair continuity metadata was invalid" : "QA acknowledgement repair provider turn failed");
     try { seal?.verify(); } catch (error) { errors.push(`recovery context mutated after acknowledgement repair: ${error instanceof Error ? error.message : String(error)}`); }
   }
-  return { packet, errors };
+  return { packet, errors, retryable: !errors.some(error => /mutated|provider turn failed/i.test(error)) };
 }
 
 function validateBoundaryReceipt(receipt: HandoffAcceptanceReceiptV2, packet: QaRecoveryPacket, successorHandle: QaSessionHandle): void {
@@ -1597,7 +1632,7 @@ export async function beginQaFinalization(projectDir: string, sourceWorktree: st
     try {
       const head = db.qaTicketHead(runId, ticketId);
       const paused = db.invalidateQaPassBeforeFinalization({ runId, ticketId, certificateId, expectedSourceStateDigest, expectedRevision: head.revision, reason });
-      throw new Error(`${reason}; a complete QA recheck is required. Resume with: rafi build:resume ${projectDir} --run ${runId} --ticket ${ticketId} --qa-revision ${paused.revision} --fresh-with-handoff`);
+      throw new Error(`${reason}; a complete QA recheck is required. Resume with: ${formatRecoveryCommand(projectDir)}`);
     } finally { db.close(); }
   };
   let live: FrozenQaSourceState;
@@ -1641,7 +1676,7 @@ export async function verifyPendingQaFinalizationSource(projectDir: string, sour
     const branch = execFileSync("git", ["branch", "--show-current"], { cwd: sourceWorktree, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
     const head = invalidationDb.qaTicketHead(runId, ticketId);
     const paused = invalidationDb.invalidateQaFinalization(runId, ticketId, head.revision, reason, branch);
-    throw new Error(`${reason}; a complete QA recheck is required. Resume with: rafi build:resume ${projectDir} --run ${runId} --ticket ${ticketId} --qa-revision ${paused.revision} --fresh-with-handoff`);
+    throw new Error(`${reason}; a complete QA recheck is required. Resume with: ${formatRecoveryCommand(projectDir)}`);
   } finally { invalidationDb.close(); }
 }
 

@@ -1490,6 +1490,8 @@ export interface BuildRecoveryDecisionReceipt {
   mode: BuildRecoveryMode;
   runId: string;
   tickets: string[];
+  /** Tickets this invocation may mutate; omitted by legacy receipts. */
+  executionTickets?: string[];
   role: "builder" | "qa";
   checkpointDigest?: string;
   handoffDigest?: string;

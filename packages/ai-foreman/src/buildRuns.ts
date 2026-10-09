@@ -1,11 +1,12 @@
+export { withBuildInvocation as withBuildRecoveryInvocation, launchDigest as launchArgumentDigest } from "./buildAdmission.js";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
 import type { AutonomyProfile, BuildRunRecord, BuildRunRecordV1, BuildRunRecordV2, BuildRunRecordV3, ProviderSessionRefV1, ResolvedAgentSettings, ResolvedAutonomyPolicy, SessionAvailabilityV1 } from "rafi-spec";
-import { WorkflowDb, heartbeatCurrentWorkflowLease, readCurrentWorkflowLease, type WorkflowRunStatus } from "./workflowDb.js";
+import { WorkflowDb, heartbeatCurrentWorkflowLease, readCurrentWorkflowLease, type WorkflowRunStatus, type ProjectLease } from "./workflowDb.js";
 import { WorkflowReader } from "./workflowReader.js";
 import { canonicalSessionPath, captureWorkspaceIdentity, createProviderSessionRef, latestSessionBinding, upsertSessionBinding } from "./sessionIdentity.js";
 import { resolveProviderSessionAvailability, type ResolveSessionAvailabilityOptions } from "./sessionAvailability.js";
@@ -13,12 +14,26 @@ import { captureCurrentWorkflowSessionIdentity, currentWorkflowIdentityKey } fro
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
 import { loadTickets } from "./tickets/ticketLoader.js";
 import { loadProjectAutonomyConfig, resolveAutonomyPolicy } from "./recoveryPolicy.js";
-import { isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
+import { classifyProcess, isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
 
 export const BUILD_RUN_VERSION = 3;
 export const BUILD_RUN_DIRECTORY = ".foreman/runs";
 export const BUILD_HEARTBEAT_MS = 10_000;
 export const BUILD_LEASE_STALE_MS = 45_000;
+
+const buildAuthority = Symbol("buildAuthority");
+type AuthorizedBuild = BuildRunRecordV2 & { [buildAuthority]?: ProjectLease };
+export function bindBuildAuthority(run: BuildRunRecordV2, lease: ProjectLease): BuildRunRecordV2 {
+  return { ...run, [buildAuthority]: lease } as AuthorizedBuild;
+}
+function assertBuildAuthority(workflow: WorkflowDb, run: BuildRunRecordV2): void {
+  const token = (run as AuthorizedBuild)[buildAuthority];
+  if (!token) throw new Error("build mutation requires the caller's original workflow authority");
+  const held = workflow.currentLease();
+  const authorizedSupersession = run.status === "superseded" && run.supersededBy === held?.runId;
+  if (token && (!held || held.owner !== token.owner || held.generation !== token.generation || held.runId !== token.runId)) throw new Error("workflow lease ownership changed");
+  if (held && (!token || (held.runId !== run.runId && !authorizedSupersession))) throw new Error("build mutation requires the caller's original workflow authority");
+}
 
 export interface CreateBuildRunInput {
   runId?: string;
@@ -84,36 +99,32 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
     createdAt: stamp,
     updatedAt: stamp,
   };
-  const saved = saveBuildRun(input.repositoryRoot, run, now);
   const workflow = new WorkflowDb(input.repositoryRoot);
-  try { workflow.acquireLease(saved.runId, undefined, now, BUILD_LEASE_STALE_MS); } finally { workflow.close(); }
-  return saved;
+  try {
+    workflow.ensureRun(run.runId, "build", now);
+    const authority = workflow.acquireLease(run.runId, undefined, now, BUILD_LEASE_STALE_MS);
+    return saveBuildRun(input.repositoryRoot, bindBuildAuthority(run, authority), now);
+  } finally { workflow.close(); }
 }
 
 export function resumeBuildRun(projectDir: string, runId: string, patch: { builder?: LegacyResolvedAgentSettings; qa?: LegacyResolvedAgentSettings; builderSessionId?: string | null; builderSessionRef?: ProviderSessionRefV1 | null; expectedRecoveryDecisionDigest?: string }, now = new Date()): BuildRunRecordV2 {
   let existing = readBuildRuns(projectDir).find((run) => run.runId === runId);
   if (!existing) throw new Error(`recoverable build run not found: ${runId}`);
-  if (existing.status === "completed" || existing.status === "superseded") throw new Error(`build run ${runId} is ${existing.status} and cannot resume`);
+  if (["completed", "cancelled", "superseded"].includes(existing.status)) throw new Error(`build run ${runId} is ${existing.status} and cannot resume`);
   const workflow = new WorkflowDb(projectDir);
+  let authority: ProjectLease;
   try {
-    const held = workflow.currentLease();
-    if (held && held.runId === runId && held.pid === process.pid && held.host === hostname() && held.processStart === processStartIdentity(process.pid)) {
-      workflow.heartbeatLease(held, now);
-    } else {
-      workflow.acquireLease(runId, undefined, now, BUILD_LEASE_STALE_MS);
-    }
+    authority = workflow.acquireLease(runId, undefined, now, BUILD_LEASE_STALE_MS);
     if (patch.expectedRecoveryDecisionDigest) {
       const decision = workflow.getRun(runId)?.state.recoveryDecision;
       if (createHash("sha256").update(JSON.stringify(decision ?? null)).digest("hex") !== patch.expectedRecoveryDecisionDigest) {
-        const lease = workflow.currentLease();
-        if (lease?.runId === runId && lease.pid === process.pid) workflow.releaseLease(lease, now);
+        workflow.releaseLease(authority, now);
         throw new Error("Recovery decision changed before the child supervisor acquired its lease; inspect and retry");
       }
     }
     existing = readBuildRuns(projectDir).find((run) => run.runId === runId)!;
-    if (!existing || existing.status === "completed" || existing.status === "superseded") {
-      const lease = workflow.currentLease();
-      if (lease?.runId === runId && lease.pid === process.pid) workflow.releaseLease(lease, now);
+    if (!existing || ["completed", "cancelled", "superseded"].includes(existing.status)) {
+      workflow.releaseLease(authority, now);
       throw new Error("Recovery run completed or disappeared before lease acquisition");
     }
   } finally { workflow.close(); }
@@ -122,7 +133,7 @@ export function resumeBuildRun(projectDir: string, runId: string, patch: { build
     ? undefined
     : patch.builderSessionRef?.sessionId ?? patch.builderSessionId ?? existing.builder?.sessionId;
   return saveBuildRun(projectDir, {
-    ...existing, status: "running", checkpoint: "recovery-resumed", completedAt: undefined,
+    ...bindBuildAuthority(existing, authority!), status: "running", checkpoint: "recovery-resumed", completedAt: undefined,
     builder: patch.builder ? { settings: normalizeCapturedSettings(patch.builder), ...(builderSessionId ? { sessionId: builderSessionId } : {}) } : existing.builder,
     qa: patch.qa ? { settings: normalizeCapturedSettings(patch.qa), sessionId: existing.qa?.sessionId } : existing.qa,
     sessionBindings: patch.builderSessionRef ? upsertSessionBinding(existing.sessionBindings, patch.builderSessionRef) : existing.sessionBindings,
@@ -143,9 +154,18 @@ function normalizeCapturedSettings(settings: LegacyResolvedAgentSettings): Resol
 }
 
 export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = new Date()): BuildRunRecordV2 {
+  if (!(run as AuthorizedBuild)[buildAuthority]) throw new Error("build mutation requires the caller's original workflow authority");
+  if (canonicalSessionPath(projectDir) !== canonicalSessionPath(run.repository.root)) throw new Error("Build authority belongs to another project");
+  const original = (run as AuthorizedBuild)[buildAuthority]!;
+  const current = readCurrentWorkflowLease(projectDir);
+  if (!current || current.owner !== original.owner || current.generation !== original.generation || current.runId !== original.runId) throw new Error("workflow lease ownership changed");
   validateBuildRun(run);
   const directory = join(resolve(projectDir), BUILD_RUN_DIRECTORY);
-  mkdirSync(directory, { recursive: true });
+  const progress = ["recoverable", "interrupted", "blocked", "failed"].includes(run.status) ? currentBranchTicketProgress(projectDir, run) : undefined;
+  if (progress) run = { ...run,
+    currentTicket: progress.pendingQa.find(ticket => run.tickets.includes(ticket)) ?? (run.currentTicket && progress.remaining.includes(run.currentTicket) ? run.currentTicket : progress.remaining[0]),
+    progress: { ...run.progress, completedTickets: progress.completed, remainingTickets: progress.remaining },
+  };
   const upgraded = upgradeBuildRun(run, projectDir, now);
   const completedOperations = Object.keys(upgraded.receipts).sort();
   let next: BuildRunRecordV3 = {
@@ -156,12 +176,14 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
   const workflow = new WorkflowDb(projectDir);
   const target = join(directory, `${run.runId}.json`);
   let publicationId: string | undefined;
+  let temporary: string | undefined;
   try {
     workflow.atomic(() => {
+    assertBuildAuthority(workflow, run);
     const frozenPolicy = workflow.freezeAutonomyPolicy(next.runId, next.frozenPolicy, now);
     next = { ...next, frozenPolicy, recoveryAttempts: workflow.recoveryAttempts(next.runId), pendingDecisions: workflow.pendingHumanDecisions(next.runId), supervisor: workflow.supervisorState(next.runId) ?? next.supervisor };
     const existing = workflow.getRun(next.runId);
-    if (existing?.status === "superseded" && next.status !== "superseded") throw new Error("cannot rewrite a superseded build run as active");
+    if (existing && ["completed", "cancelled", "superseded"].includes(existing.status) && workflowStatus(next.status) !== existing.status) throw new Error(`cannot rewrite a ${existing.status} build run`);
     if (!existing) workflow.createRun({
       runId: next.runId, kind: "build", checkpoint: next.checkpoint,
       originalWork: { tickets: next.tickets, deliveryUnit: next.deliveryUnit, branchMode: next.branchMode },
@@ -176,9 +198,16 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
     publicationId = workflow.beginPublication(next.runId, { operation: "build-run-projection", target,
       revision: createHash("sha256").update(JSON.stringify(next)).digest("hex"), updatedAt: next.updatedAt }, {}, now).transactionId;
     });
+    mkdirSync(directory, { recursive: true });
     const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    temporary = temp;
     writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    renameSync(temp, target);
+    workflow.atomic(() => {
+      assertBuildAuthority(workflow, run);
+      if (JSON.stringify(workflow.getRun(run.runId)?.state) !== JSON.stringify(next)) throw new Error("Build projection changed before publication");
+      renameSync(temp, target);
+      temporary = undefined;
+    });
     workflow.atomic(() => {
       workflow.updatePublication(publicationId!, "committed", now);
       // Publishing the latest authoritative revision also reconciles any older
@@ -188,7 +217,7 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
         if (pending.runId === next.runId && intent.operation === "build-run-projection" && intent.target === target) workflow.updatePublication(pending.transactionId, "committed", now);
       }
     });
-  } finally { workflow.close(); }
+  } finally { if (temporary) rmSync(temporary, { force: true }); workflow.close(); }
   return next;
 }
 
@@ -260,21 +289,40 @@ export function recordBuildReceipt(
 }
 
 export function heartbeatBuildRun(projectDir: string, run: BuildRunRecordV2, now = new Date()): BuildRunRecordV2 {
-  const lease = readCurrentWorkflowLease(projectDir);
+  const lease = (run as AuthorizedBuild)[buildAuthority];
   if (!lease || lease.runId !== run.runId) throw new Error("workflow lease ownership changed");
   const next = heartbeatCurrentWorkflowLease(projectDir, lease, now);
   return { ...run, lease: { hostname: next.host, pid: next.pid, processStart: next.processStart, heartbeatAt: next.heartbeatAt } };
 }
 
 export function releaseBuildLease(projectDir: string, run: BuildRunRecordV2, status: BuildRunRecordV2["status"] = "interrupted"): BuildRunRecordV2 {
-  const saved = saveBuildRun(projectDir, { ...run, status, lease: undefined }); releaseWorkflowLease(projectDir, run.runId); return saved;
+  const saved = saveBuildRun(projectDir, { ...run, status, lease: undefined }); releaseWorkflowLease(projectDir, run); return saved;
 }
 
 export function completeBuildRun(projectDir: string, run: BuildRunRecordV2, now = new Date()): BuildRunRecordV2 {
+  if (run.status === "completed") {
+    const committed = readBuildRuns(projectDir).find(item => item.runId === run.runId);
+    if (committed?.status === "completed" && JSON.stringify(committed) === JSON.stringify(run)) return committed;
+  }
   const workflow = new WorkflowDb(projectDir);
-  try { workflow.assertQaRunFinalizable(run.runId); }
+  try {
+    workflow.assertQaRunFinalizable(run.runId);
+    if (workflow.pendingHumanDecisions(run.runId).length) throw new Error("build run has unanswered decisions");
+    if (["builder", "qa"].some(role => workflow.unresolvedRoleDispatches(run.runId, role).length)) throw new Error("build run has unresolved provider dispatches");
+  }
   finally { workflow.close(); }
-  const saved = saveBuildRun(projectDir, { ...run, status: "completed", checkpoint: "complete", lease: undefined, completedAt: now.toISOString(), progress: { ...run.progress, completedTickets: [...run.tickets], remainingTickets: [], nextAction: "None; build complete" } }, now); releaseWorkflowLease(projectDir, run.runId, now); return saved;
+  const saved = saveBuildRun(projectDir, { ...run, status: "completed", checkpoint: "complete", lease: undefined, completedAt: now.toISOString(), progress: { ...run.progress, completedTickets: [...run.tickets], remainingTickets: [], nextAction: "None; build complete" } }, now); releaseWorkflowLease(projectDir, run, now); return saved;
+}
+
+/** A recovered ticket boundary is complete only when the saved run scope is done. */
+export function finishRecoveredTicketScope(projectDir: string, run: BuildRunRecordV2, checkpoint: string): BuildRunRecordV2 {
+  if (run.branchMode !== "current" || !run.tickets.length || !isTicketsInitialized(projectDir)) throw new Error("Ticket recovery completion requires an initialized current-branch run scope");
+  const { completed, remaining } = currentBranchTicketProgress(projectDir, run)!;
+  if (!remaining.length) return completeBuildRun(projectDir, run);
+  return releaseBuildLease(projectDir, checkpointBuildRun(projectDir, run, checkpoint, {
+    currentTicket: remaining[0],
+    progress: { ...run.progress, completedTickets: completed, remainingTickets: remaining, nextAction: `Resume ${remaining[0]}` },
+  }), "recoverable");
 }
 
 export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
@@ -287,6 +335,17 @@ export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
   for (const stored of workflow.buildRuns()) {
     const value = stored.state as unknown as BuildRunRecord;
     if (value?.runId) candidates.set(value.runId, value);
+    else if (!["completed", "superseded", "cancelled"].includes(stored.status) && !candidates.has(stored.runId)) {
+      // Supervision/readiness can stop before the first full build snapshot.
+      // Keep that attempt visible without inventing a provider session or baseline.
+      candidates.set(stored.runId, {
+        version: 1, runId: stored.runId, status: stored.status === "running" ? "running" : "recoverable",
+        tickets: [], branchMode: "current", checkpoint: stored.checkpoint,
+        repository: { root: resolve(projectDir), worktree: resolve(projectDir) }, receipts: {},
+        createdAt: stored.createdAt, updatedAt: stored.updatedAt,
+        failure: { category: "preparation-incomplete", summary: "Build preparation stopped before a complete build checkpoint", at: stored.updatedAt },
+      });
+    }
   }
   const runs = [...candidates.values()].flatMap((projection) => {
     try {
@@ -294,7 +353,9 @@ export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
       const authoritative = workflow?.getRun(projection.runId)?.state as unknown as BuildRunRecord | undefined;
       const run = authoritative?.runId ? authoritative : projection;
       let upgraded = upgradeBuildRun(run, projectDir);
-      if (workflow?.getRun(run.runId)?.status === "superseded") upgraded = { ...upgraded, status: "superseded" };
+      const dbStatus = workflow.getRun(run.runId)?.status;
+      if (dbStatus === "superseded" || dbStatus === "completed") upgraded = { ...upgraded, status: dbStatus };
+      if (dbStatus === "cancelled") return [];
       if (!["completed", "superseded", "cancelled"].includes(workflow?.getRun(run.runId)?.status ?? "")) {
         for (const role of ["builder", "qa"] as const) {
           const lease = workflow?.roleMutationLease(run.runId, role);
@@ -306,22 +367,32 @@ export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
     } catch {
       return [];
     }
-  }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.runId.localeCompare(b.runId));
   workflow?.close();
   return runs;
 }
 
-export function recoverableBuildRuns(projectDir: string, now = new Date()): Array<BuildRunRecordV2 & { active: boolean }> {
-  const databaseLease = readCurrentWorkflowLease(projectDir);
-  return readBuildRuns(projectDir)
-    .filter((run) => run.status !== "completed")
-    .map((run) => ({ ...inferLegacyRunTickets(projectDir, run), active: databaseLease?.runId === run.runId ? workflowLeaseLooksLive(databaseLease, now) : isLeaseActive(run, now) }));
-}
-
-function workflowLeaseLooksLive(lease: NonNullable<ReturnType<typeof readCurrentWorkflowLease>>, now: Date): boolean {
-  if (now.getTime() - new Date(lease.heartbeatAt).getTime() > BUILD_LEASE_STALE_MS) return false;
-  if (lease.host !== hostname()) return true;
-  return isLiveProcessIdentity(lease.pid, lease.processStart);
+export function recoverableBuildRuns(projectDir: string, now = new Date()): Array<BuildRunRecordV2 & { active: boolean; ownership: "live" | "dead" | "unknown"; ownershipReason: string; cleanupOnly?: boolean }> {
+  const reader = new WorkflowReader(projectDir);
+  const databaseLease = reader.currentLease();
+  const admission = reader.buildAdmission();
+  const unfinished = (readBuildRuns(projectDir) as BuildRunRecordV3[]).filter(run => !["completed", "superseded"].includes(run.status));
+  const cleanupRuns = [...new Set(reader.readinessProcesses().map(row => row.run_id))].filter(id => !unfinished.some(run => run.runId === id)).map(runId => {
+    const run = reader.getRun(runId);
+    const at = run?.updatedAt ?? new Date(0).toISOString();
+    return { ...upgradeBuildRun({ version: 1, runId, status: "recoverable", tickets: [], branchMode: "current", checkpoint: "readiness-cleanup", repository: { root: resolve(projectDir), worktree: resolve(projectDir) }, receipts: {}, createdAt: run?.createdAt ?? at, updatedAt: at }, projectDir), cleanupOnly: true };
+  });
+  try { return [...unfinished, ...cleanupRuns]
+    .map(run => {
+      const owners = [];
+      if (admission?.runId === run.runId) owners.push(classifyProcess(admission.pid, admission.processStart, admission.host));
+      if (databaseLease?.runId === run.runId) owners.push(classifyProcess(databaseLease.pid, databaseLease.processStart, databaseLease.host));
+      if (run.supervisor?.pid && ["running", "stopping"].includes(run.supervisor.status)) owners.push(classifyProcess(run.supervisor.pid, run.supervisor.processStart));
+      if (!owners.length && run.lease) owners.push(classifyProcess(run.lease.pid, run.lease.processStart, run.lease.hostname));
+      let owner = owners.find(item => item.state === "live") ?? owners.find(item => item.state === "unknown") ?? { state: "dead" as const, reason: "No live owner recorded" };
+      if (owner.state !== "live" && reader.pendingBuildLaunches(run.runId).some(launch => launch.state === "dispatching")) owner = { state: "unknown", reason: "launch dispatch began but no child claim was confirmed; reconcile the launcher and child process evidence before retrying" };
+      return { ...inferLegacyRunTickets(projectDir, run), active: owner.state === "live", ownership: owner.state, ownershipReason: owner.reason };
+    }); } finally { reader.close(); }
 }
 
 /**
@@ -356,11 +427,8 @@ function inferLegacyRunTickets(projectDir: string, run: BuildRunRecordV2): Build
 }
 
 export function isLeaseActive(run: BuildRunRecordV2, now = new Date()): boolean {
-  if (!run.lease) return false;
-  const age = now.getTime() - new Date(run.lease.heartbeatAt).getTime();
-  if (age > BUILD_LEASE_STALE_MS) return false;
-  if (run.lease.hostname !== hostname()) return true;
-  return isLiveProcessIdentity(run.lease.pid, run.lease.processStart);
+  void now;
+  return Boolean(run.lease && classifyProcess(run.lease.pid, run.lease.processStart, run.lease.hostname).state !== "dead");
 }
 
 export function buildRecoveryPreview(run: BuildRunRecordV2): string[] {
@@ -401,6 +469,51 @@ export interface BuildRecoveryProjection {
   sessionAvailability?: SessionAvailabilityV1;
 }
 
+/** Saved context may be broader than the work authorized for this invocation. */
+export function recoveryExecutionTickets(run: BuildRunRecordV2, requested: readonly string[], frozen: boolean): string[] {
+  const scope = frozen && run.recoveryDecision?.executionTickets !== undefined
+    ? run.recoveryDecision.executionTickets
+    : requested.length ? requested : run.tickets;
+  if (scope.some(ticket => !run.tickets.includes(ticket)) || requested.some(ticket => !scope.includes(ticket)) || (run.tickets.length && !scope.length)) {
+    throw new Error("Recovery execution scope conflicts with the saved run or requested ticket");
+  }
+  return [...new Set(scope)];
+}
+
+/** Read-only reconciliation also handles crashes before the last progress checkpoint. */
+export function currentBranchTicketProgress(projectDir: string, run: BuildRunRecordV2): { completed: string[]; remaining: string[]; pendingQa: string[] } | undefined {
+  if (run.branchMode !== "current" || !run.tickets.length || !isTicketsInitialized(projectDir)) return undefined;
+  if (run.status === "completed") return { completed: [...run.tickets], remaining: [], pendingQa: [] };
+  const workflow = new WorkflowReader(projectDir);
+  let pendingQa: string[];
+  let questions: string[];
+  try {
+    pendingQa = workflow.pendingQaTicketIds(run.runId);
+    questions = workflow.pendingHumanDecisions(run.runId).filter(item => item.interruptionId.startsWith("ticket:")).map(item => item.interruptionId.slice(7));
+  } finally { workflow.close(); }
+  let state: Database.Database | undefined;
+  let completed: string[] = [];
+  try {
+    const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);
+    state = new Database(paths.stateDb, { readonly: true, fileMustExist: true });
+    const read = state.prepare("SELECT status FROM ticket_state WHERE ticket_id=?");
+    completed = run.tickets.filter(ticket => (read.get(ticket) as { status: string } | undefined)?.status === "done" && !pendingQa.includes(ticket) && !questions.includes(ticket));
+  } catch {
+    // Legacy, missing or unreadable tracker evidence cannot authorize completion.
+    // Keep recovery inspectable; actual dispatch still requires a usable tracker.
+    completed = [];
+  } finally { state?.close(); }
+  return { completed, remaining: run.tickets.filter(ticket => !completed.includes(ticket)), pendingQa };
+}
+
+/** Match the frozen preview at both the resume wrapper and direct start boundary. */
+export function currentBranchRecoveryTicket(projectDir: string, run: BuildRunRecordV2): string | undefined {
+  if (run.currentTicket && !run.tickets.includes(run.currentTicket)) throw new Error(`Recovery ticket ${run.currentTicket} is outside the saved run scope`);
+  const ticket = projectBuildRecovery(projectDir, run).ticketId;
+  if (ticket && !run.tickets.includes(ticket)) throw new Error(`Recovery ticket ${ticket} is outside the saved run scope`);
+  return ticket;
+}
+
 export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, now = new Date(), ticketOverride?: string, sessionAvailability?: SessionAvailabilityV1): BuildRecoveryProjection {
   let operationNames: string[] = [];
   let issues: string[] = [];
@@ -414,7 +527,12 @@ export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, 
     } finally { workflow.close(); }
   }
   const stateTicket = typeof workflowState.currentTicket === "string" ? workflowState.currentTicket : undefined;
-  const ticketId = ticketOverride ?? stateTicket ?? run.currentTicket ?? run.progress.remainingTickets[0] ?? run.tickets[0];
+  const progress = currentBranchTicketProgress(projectDir, run);
+  if (progress && stateTicket && !run.tickets.includes(stateTicket)) throw new Error(`Recovery ticket ${stateTicket} is outside the saved run scope`);
+  const savedTicket = stateTicket ?? run.currentTicket;
+  const ticketId = ticketOverride ?? (progress
+    ? progress.pendingQa.find(ticket => run.tickets.includes(ticket)) ?? (savedTicket && progress.remaining.includes(savedTicket) ? savedTicket : progress.remaining[0])
+    : savedTicket ?? run.progress.remainingTickets[0] ?? run.tickets[0]);
   let ticketTitle: string | undefined;
   if (ticketId && isTicketsInitialized(projectDir)) {
     try {
@@ -434,15 +552,15 @@ export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, 
   const unexpectedChanges = baseChanges.map((path) => ({ path, risk: "base-worktree changes may conflict with recovery" }));
   if (identityChanged) unexpectedChanges.push({ path: recoveryWorktree, risk: "preserved worktree identity changed" });
   if (branchChanged) unexpectedChanges.push({ path: recoveryWorktree, risk: `branch changed from ${expectedBranch} to ${branchNow}` });
-  const completed = [...new Set([...run.progress.completedTickets, ...run.progress.completedOperations, ...operationNames])];
-  const remaining = run.progress.remainingTickets.length ? run.progress.remainingTickets : remainingTickets(run);
+  const completed = [...new Set([...(progress?.completed ?? run.progress.completedTickets), ...run.progress.completedOperations, ...operationNames])];
+  const remaining = progress?.remaining ?? (run.progress.remainingTickets.length ? run.progress.remainingTickets : remainingTickets(run));
   const interruption = run.interruption?.lastError ?? run.interruption?.summary ?? run.failure?.summary ?? issues.at(-1) ?? run.status;
   const validation = run.progress.validation
     ? `${run.progress.validation.status}${run.progress.validation.qa ? `; QA ${run.progress.validation.qa}` : ""}`
     : run.qa?.sessionId ? "QA session checkpointed" : "no completed QA/validation checkpoint recorded";
   const nextAction = ticketOverride
     ? `Resume ${ticketOverride} from ${run.checkpoint}`
-    : run.progress.nextAction ?? (ticketId ? `Resume ${ticketId} from ${run.checkpoint}` : `Resume from ${run.checkpoint}`);
+    : (progress ? undefined : run.progress.nextAction) ?? (ticketId ? `Resume ${ticketId} from ${run.checkpoint}` : `Resume from ${run.checkpoint}`);
   const primary = ticketId ? `${ticketId}${ticketTitle ? `: ${ticketTitle}` : ""}` : "legacy run (ticket unavailable)";
   const stateSessionId = typeof workflowState.sessionId === "string" ? workflowState.sessionId : undefined;
   const sessionCandidateRef = buildRunSessionBinding(run, "builder", stateSessionId ?? run.builder?.sessionId);
@@ -540,7 +658,7 @@ function workflowStatus(status: BuildRunRecordV2["status"]): WorkflowRunStatus {
 
 function remainingTickets(run: BuildRunRecordV2): string[] {
   const current = run.currentTicket ? run.tickets.indexOf(run.currentTicket) : 0;
-  return run.status === "completed" ? [] : run.tickets.slice(Math.max(0, current));
+  return run.status === "completed" ? [] : (run.branchMode === "current" ? run.tickets : run.tickets.slice(Math.max(0, current))).filter(ticket => run.branchMode !== "current" || !run.progress.completedTickets.includes(ticket));
 }
 
 function captureGitSnapshot(worktree: string, input: CreateBuildRunInput): BuildRunRecordV2["repository"]["git"] {
@@ -627,6 +745,11 @@ function upgradeBuildRun(run: BuildRunRecord, projectDir = run.repository.root, 
   };
 }
 
-function releaseWorkflowLease(projectDir: string, runId: string, now = new Date()): void {
-  const workflow = new WorkflowDb(projectDir); try { const lease = workflow.currentLease(); if (lease?.runId === runId) workflow.releaseLease(lease, now); } finally { workflow.close(); }
+function releaseWorkflowLease(projectDir: string, run: BuildRunRecordV2, now = new Date()): void {
+  const workflow = new WorkflowDb(projectDir);
+  try {
+    assertBuildAuthority(workflow, run);
+    const lease = (run as AuthorizedBuild)[buildAuthority];
+    if (lease) workflow.releaseLease(lease, now);
+  } finally { workflow.close(); }
 }

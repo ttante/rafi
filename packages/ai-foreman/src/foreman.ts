@@ -400,12 +400,17 @@ export class Foreman {
     instruction: string,
     mode: "builder" | "qa" = "builder",
   ): Promise<{ result: TurnResult; status: StepStatus }> {
+    const ticket = mode === "builder" ? this.currentTicketId : undefined;
+    const scopedInstruction = (text: string): string => !ticket || text.includes(`Ticket scope: ${ticket}.`) ? text
+      : `${text}\nTicket scope: ${ticket}. Do not substitute another ticket. Include ticket="${ticket}" in any STEP_STATUS marker.`;
+    instruction = scopedInstruction(instruction);
+    const send = (text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]) => adapter.sendTurn(scopedInstruction(text), policy);
     if (adapter === this.builder && this.beforeBuilderTurn) {
       this.builder = await this.beforeBuilderTurn(this.builder, instruction);
       adapter = this.builder;
     }
     const turnPolicy = { logicalActionId: this.currentTicketId ?? createHash("sha256").update(instruction).digest("hex") };
-    let result = await adapter.sendTurn(instruction, turnPolicy);
+    let result = await send(instruction, turnPolicy);
     await this.observeBuilderNative(adapter);
     let status = parseStepStatus(result.text);
     if (result.isError || result.failure) return { result: { ...result, isError: true }, status };
@@ -423,7 +428,7 @@ export class Foreman {
             if (!budget.reserveRecoveryAllowance(this.qaRunId, turnPolicy.logicalActionId, "protocol-correction", budget.autonomyPolicy(this.qaRunId)?.limits.protocolCorrections ?? 1)) return { result, status: { kind: "blocked", reason: "shared protocol correction budget exhausted" } };
           } finally { budget.close(); }
         }
-        result = await adapter.sendTurn(mode === "qa"
+        result = await send(mode === "qa"
           ? "Protocol correction only: based on the review already completed, return exactly one final STEP_STATUS: qa_pass or STEP_STATUS: qa_fail marker. Do not repeat QA, tests, tools, or compaction."
           : "Protocol correction only: based on the work already completed, return exactly one final STEP_STATUS: done, plan_complete, blocked, or needs_input marker. Do not repeat implementation, tools, or compaction.", { ...turnPolicy, responseOnly: true });
         await this.observeBuilderNative(adapter);
@@ -479,10 +484,10 @@ export class Foreman {
         }
 
         if (adapter === this.builder && this.beforeBuilderTurn) {
-          this.builder = await this.beforeBuilderTurn(this.builder, answer);
+          this.builder = await this.beforeBuilderTurn(this.builder, scopedInstruction(answer));
           adapter = this.builder;
         }
-        result = await adapter.sendTurn(answer, turnPolicy);
+        result = await send(answer, turnPolicy);
         await this.observeBuilderNative(adapter);
         if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
         status = parseStepStatus(result.text);
@@ -500,10 +505,10 @@ export class Foreman {
       this.log.write("blocked-recovery", { reason, role: adapter === this.builder ? "builder" : "qa" });
       const recoveryInstruction = buildBlockerRecoveryInstruction(reason);
       if (adapter === this.builder && this.beforeBuilderTurn) {
-        this.builder = await this.beforeBuilderTurn(this.builder, recoveryInstruction);
+        this.builder = await this.beforeBuilderTurn(this.builder, scopedInstruction(recoveryInstruction));
         adapter = this.builder;
       }
-      result = await adapter.sendTurn(recoveryInstruction, turnPolicy);
+      result = await send(recoveryInstruction, turnPolicy);
       await this.observeBuilderNative(adapter);
       if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
       status = parseStepStatus(result.text);
@@ -514,7 +519,7 @@ export class Foreman {
             if (!budget.reserveRecoveryAllowance(this.qaRunId, turnPolicy.logicalActionId, "protocol-correction", budget.autonomyPolicy(this.qaRunId)?.limits.protocolCorrections ?? 1)) break;
           } finally { budget.close(); }
         }
-        result = await adapter.sendTurn('Protocol correction only: return the blocker approaches now using exactly one final STEP_STATUS: needs_input marker with question="..." and choices="recommended (Recommended)|alternative|alternative". Do not repeat tools or implementation.', { ...turnPolicy, responseOnly: true });
+        result = await send('Protocol correction only: return the blocker approaches now using exactly one final STEP_STATUS: needs_input marker with question="..." and choices="recommended (Recommended)|alternative|alternative". Do not repeat tools or implementation.', { ...turnPolicy, responseOnly: true });
         await this.observeBuilderNative(adapter);
         if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
         status = parseStepStatus(result.text);
@@ -525,8 +530,8 @@ export class Foreman {
   }
 
   /** Send a planning turn and return the builder's response text. Does not count toward steps. */
-  async runPreflight(n: number, ticketsContent?: string, preferredTicketId?: string): Promise<string> {
-    const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId);
+  async runPreflight(n: number, ticketsContent?: string, preferredTicketId?: string, executionTickets?: readonly string[]): Promise<string> {
+    const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId) + (executionTickets ? `\nAuthorized ticket scope: ${executionTickets.join(", ")}. Plan only these tickets. Tickets awaiting answers are not eligible for implementation.` : "");
     if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, instruction);
     const result = await this.builder.sendTurn(instruction);
     await this.observeBuilderNative(this.builder);
@@ -725,6 +730,7 @@ export class Foreman {
     trackerPath?: string,
     onTicketStart?: (ticketId: string) => void | Promise<void>,
     preferredTicketId?: string,
+    recoveryTickets?: readonly string[],
   ): Promise<BatchResult> {
     this.log.write("batch-start", { requested: n, agent: this.builder.agent });
     let completed = 0;
@@ -733,43 +739,57 @@ export class Foreman {
     const deferred = new Set<string>();
 
     for (let i = 1; completed < n; i++) {
-      const answered = this.projectDir ? (() => {
+      const decisionRevision = this.projectDir ? buildScopeRevision(this.projectDir) : "";
+      const decisions = this.projectDir ? (() => {
         const db = new WorkflowDb(this.projectDir!);
-        try { return db.answeredTicketDecisions(this.qaRunId, buildScopeRevision(this.projectDir!)); }
-        finally { db.close(); }
-      })() : [];
-      for (const decision of answered) {
-        const id = decision.interruptionId.slice("ticket:".length);
-        const row = cmdImplementationQueue(this.projectDir!).find(item => item.ticket === id);
-        if (row?.status === "blocked") {
-          cmdUnblock(this.projectDir!, id, { actor: "foreman", summary: `Scoped question answered: ${decision.decisionId}` });
-          deferred.delete(id);
-        }
+        try {
+          const revision = decisionRevision;
+          db.refreshStaleTicketDecisions(this.qaRunId, revision, recoveryTickets);
+          return { answered: db.answeredTicketDecisions(this.qaRunId, revision), pending: db.pendingHumanDecisions(this.qaRunId) };
+        } finally { db.close(); }
+      })() : { answered: [], pending: [] };
+      const answered = decisions.answered.filter(decision => !recoveryTickets || recoveryTickets.includes(decision.interruptionId.slice(7)));
+      if (decisions.pending.some(decision => !decision.interruptionId.startsWith("ticket:"))) {
+        outcome = "needs-human"; detail = "Rafi is waiting for an answer to a build-wide question"; break;
       }
+      const waiting = new Set(decisions.pending.map(decision => decision.interruptionId.slice(7)));
+      for (const ticket of waiting) if (!recoveryTickets || recoveryTickets.includes(ticket)) deferred.add(ticket);
+      if (waiting.size && !this.continueIndependentTickets) { outcome = "needs-human"; detail = "Rafi is waiting for ticket answers"; break; }
       // Determine which ticket we're about to work on (for in_progress marking)
       let pendingTicketId: string | undefined;
       if (this.ticketsEnabled && this.projectDir) {
         try {
-          const queue = cmdImplementationQueue(this.projectDir);
-          const next = i === 1 && preferredTicketId
-            ? queue.find((row) => row.ticket === preferredTicketId)
-            : queue.find((row) => row.status === "next");
-          if (i === 1 && preferredTicketId && !next) {
+          const queue = cmdImplementationQueue(this.projectDir).filter(row => !recoveryTickets || recoveryTickets.includes(row.ticket));
+          const preferred = i === 1 && preferredTicketId ? queue.find(row => row.ticket === preferredTicketId) : undefined;
+          const canAnswer = (ticket: string) => answered.some(decision => decision.interruptionId === `ticket:${ticket}`);
+          if (preferred && preferred.blockedBy !== "None") deferred.add(preferred.ticket);
+          const next = preferred && preferred.blockedBy === "None" && !waiting.has(preferred.ticket) ? preferred
+            : queue.find(row => row.blockedBy === "None" && !waiting.has(row.ticket) && (!deferred.has(row.ticket) || canAnswer(row.ticket)) && (row.status === "next" || (row.status === "blocked" && canAnswer(row.ticket))));
+          if (i === 1 && preferredTicketId && !preferred && !next) {
             outcome = "needs-human";
             detail = `recovery ticket ${preferredTicketId} is no longer available in the implementation queue`;
             break;
           }
-          if (i === 1 && preferredTicketId && next?.status === "blocked") {
-            cmdUnblock(this.projectDir, preferredTicketId, { actor: "foreman", summary: "Reopened by explicit build recovery" });
-          } else if (i === 1 && preferredTicketId && next && next.status !== "next" && next.status !== "in_progress") {
-            outcome = "needs-human";
-            detail = `recovery ticket ${preferredTicketId} cannot resume while its status is ${next.status}`;
-            break;
+          if (!next && (recoveryTickets || deferred.size)) break;
+          if (next && next.status !== "next" && next.status !== "in_progress" && next.status !== "blocked") {
+            outcome = "needs-human"; detail = `recovery ticket ${next.ticket} cannot resume while its status is ${next.status}`; break;
           }
-          if ((!next || deferred.has(next.ticket)) && deferred.size) break;
           if (next) {
             pendingTicketId = next.ticket;
             await onTicketStart?.(next.ticket);
+            // Approval/feedback can change definitions while selection is awaiting it.
+            if (decisionRevision !== buildScopeRevision(this.projectDir)) { i--; continue; }
+            const boundaryDb = new WorkflowDb(this.projectDir);
+            try {
+              const pending = boundaryDb.pendingHumanDecisions(this.qaRunId);
+              if (pending.some(decision => !decision.interruptionId.startsWith("ticket:") || decision.interruptionId === `ticket:${next.ticket}`)) {
+                i--; continue;
+              }
+            } finally { boundaryDb.close(); }
+            const latest = cmdImplementationQueue(this.projectDir).find(row => row.ticket === next.ticket);
+            if (!latest || latest.status !== next.status || latest.blockedBy !== "None") { i--; continue; }
+            if (next.status === "blocked") cmdUnblock(this.projectDir, next.ticket, { actor: "foreman", summary: canAnswer(next.ticket) ? "Scoped question answered" : "Reopened by build recovery" });
+            deferred.delete(next.ticket);
             cmdUpdate(this.projectDir, next.ticket, {
               status: "in_progress",
               actor: "foreman",
@@ -785,8 +805,9 @@ export class Foreman {
 
       this.currentTicketId = pendingTicketId;
       let instruction = i === 1
-        ? buildPrimer(n, trackerPath, this.ticketsEnabled, preferredTicketId)
+        ? buildPrimer(n, trackerPath, this.ticketsEnabled, pendingTicketId)
         : buildNextStepInstruction(i, n);
+      if (pendingTicketId) instruction += `\n\nAssigned ticket: ${pendingTicketId}. Implement exactly this ticket. Do not substitute another ticket. End with ticket="${pendingTicketId}" in the STEP_STATUS marker.`;
       const continuations = answered.filter(decision => decision.interruptionId === `ticket:${pendingTicketId}`);
       if (continuations.length) {
         instruction += "\n\nScoped answers authorizing this ticket continuation:\n" + continuations.map(decision => `${decision.prompt}\nAnswer: ${decision.answer ?? decision.selectedChoiceId}`).join("\n");
@@ -827,6 +848,12 @@ export class Foreman {
       if (result.isError) {
         outcome = "blocked";
         detail = `builder turn errored: ${result.text.slice(0, 200)}`;
+        break;
+      }
+
+      if (recoveryTickets && pendingTicketId && status.ticket !== pendingTicketId && (status.kind === "done" || status.kind === "plan_complete" || Boolean(status.ticket))) {
+        outcome = "needs-human";
+        detail = `Builder response named ${status.ticket ?? "no ticket"}, but this recovery turn was scoped to ${pendingTicketId}`;
         break;
       }
 
