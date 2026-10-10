@@ -80,12 +80,12 @@ test("status discovers nested projects while explicit paths are exact", { skip: 
   writeFileSync(join(root, ".foreman", "2026.jsonl"), `${JSON.stringify({ event: "batch-end", outcome: "completed", completed: 1, requested: 1 })}\n`, "utf8");
   const projectRoot = join(HERE, "..");
   const entry = join(projectRoot, "src", "index.ts");
-  const output = execFileSync(tsxBin(projectRoot), [entry, "status"], { cwd: nested, encoding: "utf8" });
+  const output = execFileSync(tsxBin(projectRoot), [entry, "status"], { cwd: nested, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
   assert.match(output, /rafi: project Status App/);
   assert.match(output, new RegExp(`rafi: root ${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   assert.match(output, /foreman: outcome — completed/);
 
-  const explicit = spawnSync(tsxBin(projectRoot), [entry, "status", nested], { cwd: projectRoot, encoding: "utf8" });
+  const explicit = spawnSync(tsxBin(projectRoot), [entry, "status", nested], { cwd: projectRoot, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
   assert.notEqual(explicit.status, 0);
   assert.match(explicit.stderr, /explicit project directory/);
 });
@@ -102,6 +102,7 @@ test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { sk
   const output = execFileSync(tsxBin(projectRoot), ["src/index.ts", "compile", dir], {
     cwd: projectRoot,
     encoding: "utf8",
+    env: { ...process.env, NO_COLOR: "1" },
   });
 
   assert.match(output, /migrated project\.yaml to rafi-config\.yaml/);
