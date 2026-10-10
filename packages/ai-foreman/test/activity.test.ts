@@ -43,7 +43,7 @@ test("TTY activity continuously redraws one elapsed-time line and cleans it up",
 
 test("non-TTY activity coalesces unchanged heartbeats without ANSI", async () => {
   const sink = output(false);
-  const reporter = new ActivityReporter("test", { output: sink.target, displayDelayMs: 0, tickMs: 5, heartbeatMs: 10, quietWarningMs: 10_000 });
+  const reporter = new ActivityReporter("test", { output: sink.target, colorEnvironment: { NO_COLOR: "1" }, displayDelayMs: 0, tickMs: 5, heartbeatMs: 10, quietWarningMs: 10_000 });
   const end = reporter.begin("fetching sources");
   await new Promise((resolve) => setTimeout(resolve, 28));
   end();
@@ -256,7 +256,7 @@ test("record TTY keeps persistent output without repeating the current status", 
 
 test("non-TTY heartbeat behavior ignores TTY rendering overrides", () => {
   const sink = output(false);
-  const reporter = new ActivityReporter("test", { output: sink.target, displayDelayMs: 0, heartbeatMs: 1, ttyMode: "records" });
+  const reporter = new ActivityReporter("test", { output: sink.target, colorEnvironment: { NO_COLOR: "1" }, displayDelayMs: 0, heartbeatMs: 1, ttyMode: "records" });
   const end = reporter.begin("fetching source 1");
   reporter.update("fetching source 2");
   end();

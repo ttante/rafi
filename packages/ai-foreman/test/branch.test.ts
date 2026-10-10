@@ -1407,12 +1407,14 @@ test("doctor --github reports GitHub readiness failures", async () => {
   const dir = mkdtempSync(join(tmpdir(), "foreman-doctor-gh-test-"));
   const binDir = join(dir, "bin");
   const oldPath = process.env.PATH;
+  const oldNoColor = process.env.NO_COLOR;
   const oldExit = process.exit;
   const oldLog = console.log;
   let output = "";
   try {
     mkdirSync(binDir, { recursive: true });
     process.env.PATH = binDir;
+    process.env.NO_COLOR = "1";
     process.exit = ((code?: string | number | null | undefined): never => {
       throw new ExitError(code);
     }) as typeof process.exit;
@@ -1428,6 +1430,8 @@ test("doctor --github reports GitHub readiness failures", async () => {
     assert.match(output, /-- github repair — gh --version/);
   } finally {
     process.env.PATH = oldPath;
+    if (oldNoColor === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = oldNoColor;
     process.exit = oldExit;
     console.log = oldLog;
     rmSync(dir, { recursive: true, force: true });
