@@ -1,0 +1,7 @@
+<!-- graphify-freshness:start -->
+## Graphify selective use and freshness
+
+Apply the trigger gate in `/Users/tyler/.local/share/graphify/agent-workflow.md` before any Graphify invocation or scan. Only explicit graph requests, substantial graph-assisted architecture/cross-file investigations, and meaningful indexed relationship/behavior changes qualify. An existing graph or changed file bytes alone is not a trigger. Routine terminal commands (including `rafi tickets queue`), status/file inspection, tests/builds, formatting, ticket bookkeeping, and agent/Graphify-policy edits require no scan, update, or graph-status footer. Batch at most one update after a qualifying editing task; do not build missing graphs without an explicit build/adoption request. Preserve mixed coverage, use the host assistant unless a separate backend is authorized, and report relevant failures. Explicit user instructions take precedence.
+<!-- graphify-freshness:end -->
+
+Use the existing machine-wide installation; follow `docs/graphify-agent-guide.md` for setup and verification. Codex uses `/Users/tyler/.codex/skills/graphify/SKILL.md`; Claude uses `/Users/tyler/.claude/skills/graphify/SKILL.md`. Read the shared workflow for freshness checks, incremental updates, provenance, manifest handling, and verification. Keep generated artifacts local under ignored `graphify-out/`. Do not install automatic hooks or watchers.

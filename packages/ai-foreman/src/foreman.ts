@@ -1,5 +1,8 @@
+import { deliverBuilderGuidanceFollowup } from "./builderGuidanceFollowup.js";
+import { qaDigest } from "./qaProtocolV2.js";
+import { BuildControlBoundary } from "./buildInterventions.js";
 import { buildScopeRevision } from "./buildApproval.js";
-import { durableHumanDecision, HumanDecisionRequired } from "./humanDecision.js";
+import { durableHumanDecision, HumanDecisionRequired, HumanDecisionCancelled, servicePendingHumanDecisions, decisionResponse } from "./humanDecision.js";
 import { select, text, isCancel } from "@clack/prompts";
 import { MARKER_SPEC, QA_MARKER_SPEC } from "./markers.js";
 import type {
@@ -32,6 +35,7 @@ import { SessionUnavailableError, sessionUnavailableErrorFromFailure } from "./a
 import type { RunObserver } from "./observability.js";
 import type { QaRecoveryPacket } from "./qaRecovery.js";
 import { WorkflowDb } from "./workflowDb.js";
+import { assertBuildAssignmentReconciled, beginBuildAssignment, BuildAssignmentRejected, finishBuildAssignment, validateBuildAssignment } from "./buildAssignment.js";
 
 /** Parsed STEP_STATUS marker from a builder's turn. */
 export interface StepStatus {
@@ -253,6 +257,25 @@ export function createPermissionHandler(
       return providerQuestion;
     }
 
+    // A provider sandbox escalation is never covered by routine tool allow-lists.
+    if (req.input.providerSandboxEscalation === true) {
+      const owner = opts.durable?.();
+      if (!owner || req.signal?.aborted) return { behavior: "deny", message: "Sandbox escalation requires a current durable build owner" };
+      try {
+        const action = await durableHumanDecision({ projectDir: owner.projectDir, runId: owner.runId, key: `permission:${req.toolUseID ?? "unknown"}:${createHash("sha256").update(JSON.stringify(req.input)).digest("hex")}`,
+          prompt: `Provider requests sandbox escalation for this exact operation: ${JSON.stringify(req.input)}. This may permit host access beyond the workspace and network; ticket approval does not grant it. Approve only if you accept this scope.`,
+          choices: [{ id: "approve-once", label: "Approve this operation once" }, { id: "deny", label: "Deny" }],
+          operation: async () => {
+            if (req.signal?.aborted) return undefined;
+            const selected = await select({ message: req.title ?? "Approve sandbox escalation?", signal: req.signal, options: [{ value: "deny", label: "Deny (Recommended)" }, { value: "approve-once", label: "Approve this exact operation once" }] });
+            return isCancel(selected) || req.signal?.aborted ? undefined : selected;
+          } });
+        return action === "approve-once" && !req.signal?.aborted ? { behavior: "allow" } : { behavior: "deny", message: "Sandbox escalation denied or paused" };
+      } catch (error) {
+        if (!(error instanceof HumanDecisionRequired)) throw error;
+        return { behavior: "deny", message: error.message };
+      }
+    }
     const verdict = policy.classify(req);
     log.write("permission", {
       tool: req.toolName,
@@ -296,6 +319,8 @@ export class Foreman {
   private readonly qaStream: QaStreamState = { reviews: 0, modificationViolations: 0 };
   private builderWorkSessions = 0;
   private currentTicketId?: string;
+  private preflightPlan = "";
+  approvedPlanText(): string {return this.preflightPlan;}
 
   constructor(
     private builder: BuilderAdapter,
@@ -326,6 +351,8 @@ export class Foreman {
     private readonly qaRunId: string = `qa-${randomUUID()}`,
     private readonly continueIndependentTickets = true,
     initialTicketId?: string,
+    private readonly builderWorktree?: string,
+    private readonly decisionPrompt?: (decision: import("rafi-spec").PendingHumanDecision) => Promise<string | undefined>,
   ) {
     void _deprecatedSameSessionReviewer;
     this.currentTicketId = initialTicketId;
@@ -404,7 +431,16 @@ export class Foreman {
     const scopedInstruction = (text: string): string => !ticket || text.includes(`Ticket scope: ${ticket}.`) ? text
       : `${text}\nTicket scope: ${ticket}. Do not substitute another ticket. Include ticket="${ticket}" in any STEP_STATUS marker.`;
     instruction = scopedInstruction(instruction);
-    const send = (text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]) => adapter.sendTurn(scopedInstruction(text), policy);
+    const send = async (text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> => {
+      const finalInstruction = scopedInstruction(text);
+      const assignment = ticket && this.projectDir ? beginBuildAssignment(this.projectDir, this.qaRunId, ticket, this.builderWorktree ?? this.projectDir, finalInstruction) : undefined;
+      const response = await adapter.sendTurn(assignment?.instruction ?? finalInstruction, policy);
+      const parsed = parseStepStatus(response.text);
+      const applicable = parsed.kind === "unknown" && looksLikeQuestion(response.text) ? { kind: "needs_input" as const, question: lastLine(response.text) } : parsed;
+      const rejection = assignment ? finishBuildAssignment(this.projectDir!, assignment, response, applicable) : undefined;
+      if (rejection) throw new BuildAssignmentRejected(rejection);
+      return response;
+    };
     if (adapter === this.builder && this.beforeBuilderTurn) {
       this.builder = await this.beforeBuilderTurn(this.builder, instruction);
       adapter = this.builder;
@@ -413,6 +449,7 @@ export class Foreman {
     let result = await send(instruction, turnPolicy);
     await this.observeBuilderNative(adapter);
     let status = parseStepStatus(result.text);
+    if (ticket && validateBuildAssignment(ticket, status)) return { result, status };
     if (result.isError || result.failure) return { result: { ...result, isError: true }, status };
     if (status.kind === "unknown") {
       if (!status.error && looksLikeQuestion(result.text)) {
@@ -440,16 +477,18 @@ export class Foreman {
 
     let blockerExplanations = 0;
     while (true) {
+      if (ticket && validateBuildAssignment(ticket, status)) return { result, status };
       while (status.kind === "needs_input") {
         const question = status.question ?? "The builder has a question";
         const choices = status.choices?.length ? status.choices : ["Continue"];
         this.log.write("needs_input", { question, choices });
         signalAttention("Foreman needs your input", question, this.notificationsEnabled, this.terminalBellEnabled);
 
-        const prompt = async () => this.waitForUserInput(async () => {
+        const prompt = async (signal?: AbortSignal) => this.waitForUserInput(async () => {
           console.log();
           const selected = await select<string>({
             message: question,
+            signal,
             options: [
               ...choices.map((choice) => ({ value: choice, label: choice })),
               { value: "__rafi_custom__", label: "Custom response", hint: "Type a different answer" },
@@ -458,7 +497,7 @@ export class Foreman {
           });
           if (isCancel(selected) || selected === "__rafi_pause__") return undefined;
           if (selected !== "__rafi_custom__") return selected;
-          const custom = await text({ message: "Custom response:", validate: (value) => String(value ?? "").trim() ? undefined : "Enter a response" });
+          const custom = await text({ message: "Custom response:", signal, validate: (value) => String(value ?? "").trim() ? undefined : "Enter a response" });
           return isCancel(custom) ? undefined : String(custom);
         });
         if (!this.projectDir && (!process.stdin.isTTY || !process.stdout.isTTY)) {
@@ -468,29 +507,48 @@ export class Foreman {
         let answer: string | undefined;
         try {
           answer = this.projectDir ? await durableHumanDecision({ projectDir: this.projectDir, runId: this.qaRunId, key: `builder:${this.currentTicketId ?? "step"}:${buildScopeRevision(this.projectDir)}`, ticketId: this.currentTicketId,
-            prompt: question, choices: [...choices.map(choice => ({ id: choice, label: choice })), { id: "custom", label: "Custom response" }],
+            prompt: question, choices: [...choices.map((choice, index) => ({ id: `option-${index + 1}`, label: choice })), { id: "custom", label: "Custom response" }],
             defer: Boolean(this.currentTicketId && this.continueIndependentTickets), operation: prompt }) : await prompt();
         } catch (error) {
           if (!(error instanceof HumanDecisionRequired)) throw error;
-          status = { kind: "blocked", reason: error.message };
+          status = { kind: "blocked", ticket, reason: error.message };
           break;
         }
         console.log();
 
         if (answer === undefined) {
           result = { text: "", isError: false, numTurns: 0, costUsd: 0 };
-          status = { kind: "blocked", reason: "user chose safe pause at an input prompt" };
+          status = { kind: "blocked", ticket, reason: "user chose safe pause at an input prompt" };
           break;
         }
 
+        // Journal inline answers too: a crash after dispatch must not replay them on resume.
+        let inlineContinuationKey: string | undefined;
+        if (this.projectDir && this.currentTicketId) {
+          const db = new WorkflowDb(this.projectDir);
+          try {
+            const decision = db.answeredTicketDecisions(this.qaRunId, buildScopeRevision(this.projectDir)).find(item => item.interruptionId === `ticket:${this.currentTicketId}` && item.prompt === question);
+            if (decision) db.atomic(() => {
+              inlineContinuationKey = db.nextDecisionContinuationKey(this.qaRunId, decision.decisionId);
+              db.planOperation({ runId: this.qaRunId, idempotencyKey: inlineContinuationKey, kind: "decision-continuation", intent: { decisionId: decision.decisionId, ticketId: this.currentTicketId } });
+              db.updateOperation(inlineContinuationKey, "in_progress");
+            });
+          } finally { db.close(); }
+        }
         if (adapter === this.builder && this.beforeBuilderTurn) {
           this.builder = await this.beforeBuilderTurn(this.builder, scopedInstruction(answer));
           adapter = this.builder;
         }
         result = await send(answer, turnPolicy);
+        if (inlineContinuationKey && this.projectDir) {
+          const db = new WorkflowDb(this.projectDir);
+          try { db.updateOperation(inlineContinuationKey, result.failure?.dispatchState === "not-sent" ? "failed" : result.failure?.dispatchState === "unknown" || result.isError && !result.failure?.dispatchState ? "uncertain" : "confirmed", { result: { isError: result.isError, dispatchState: result.failure?.dispatchState } }); }
+          finally { db.close(); }
+        }
         await this.observeBuilderNative(adapter);
         if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
         status = parseStepStatus(result.text);
+        if (ticket && validateBuildAssignment(ticket, status)) return { result, status };
       }
 
       if (status.kind !== "blocked" || (status.reason?.startsWith("user chose safe pause") || status.reason?.includes("Rafi is waiting for input")) || !process.stdin.isTTY || !process.stdout.isTTY) break;
@@ -541,6 +599,7 @@ export class Foreman {
       isError: result.isError,
     });
     if (result.isError) throw new Error(result.text);
+    this.preflightPlan=result.text;
     return result.text;
   }
 
@@ -551,6 +610,7 @@ export class Foreman {
     await this.observeBuilderNative(this.builder);
     this.log.write("preflight", { feedback: true, costUsd: result.costUsd, isError: result.isError });
     if (result.isError) throw new Error(result.text);
+    this.preflightPlan=result.text;
   }
 
   /** Send one custom instruction through the same needs_input loop as a batch turn. */
@@ -578,7 +638,7 @@ export class Foreman {
    * Loops on qa_fail → fix → re-QA until qa_pass or the cycle cap is reached.
    * QA turns are free — they do not advance the step counter.
    */
-  private async runQa(stepIndex: number, ticketId?: string, builderResult?: string): Promise<{
+  private async runQa(stepIndex: number, ticketId?: string, builderResult?: string, explicitResume = false): Promise<{
     outcome: "passed" | "blocked" | "needs-human" | "waived";
     detail?: string;
     summary?: string;
@@ -587,8 +647,9 @@ export class Foreman {
   }> {
     if (this.projectDir && this.qaFactory) {
       const resumedRecovery = this.qaResumedRecovery;
+      const scopedTicket = this.ticketForQa(stepIndex, ticketId);
       const review = await runIsolatedQa({
-        ticket: this.ticketForQa(stepIndex, ticketId),
+        ticket: scopedTicket,
         builderWorktree: this.projectDir,
         builderSummary: builderResult ?? "Builder result unavailable at this explicit QA-only API boundary",
         qaStrategy: this.qaSessionStrategy,
@@ -603,6 +664,22 @@ export class Foreman {
         continuityManaged: this.qaContinuityManaged,
         onReportRecovery: this.qaReportRecovery,
         resumedRecovery,
+        resumeBuilderGuidance: explicitResume || Boolean(resumedRecovery),
+        deliverBuilderFollowup: (instruction, followup) => deliverBuilderGuidanceFollowup({ projectDir: this.projectDir!, runId: this.qaRunId, ticketId: scopedTicket.id, worktree: this.builderWorktree ?? this.projectDir! }, instruction, followup, {
+          prepare: async (instruction) => {
+            await this.prepareBuilderBoundary(instruction);
+            if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, instruction);
+            return this.builder;
+          },
+          validateRequirements: () => {
+            if (qaDigest("admitted-requirements", this.ticketForQa(stepIndex, scopedTicket.id)) !== followup.requirementsDigest) throw new BuildAssignmentRejected("Ticket requirements changed during session preparation; renewed scope approval is required");
+          },
+          completed: async (operationId, adapter) => {
+            this.builderWorkSessions += 1;
+            await this.observeBuilderNative(adapter);
+            this.log.write("qa-fix", { kind: "builder-guidance-followup", ticketId: scopedTicket.id, operationId });
+          },
+        }),
         deliverFailure: async (request) => {
           this.builderWorkSessions += 1;
           const delivery = new QaFailureDeliveryService();
@@ -655,10 +732,10 @@ export class Foreman {
     sourceStateDigest?: string;
   }> {
     if (this.qaResumedRecovery && this.qaResumedRecovery.manifest.ticketId !== ticketId) throw new Error(`pending QA recovery belongs to ${this.qaResumedRecovery.manifest.ticketId}, not ${ticketId}`);
-    return this.runQa(1, ticketId, builderResult);
+    return this.runQa(1, ticketId, builderResult, true);
   }
 
-  /** Complete only the pending QA boundary and its tracker transition. No Builder work turn is sent. */
+  /** Resume the pending boundary, including authorized waiting guidance, then complete its tracker transition. */
   async completePendingQaRecovery(ticketId: string): Promise<{
     outcome: "passed" | "blocked" | "needs-human" | "waived";
     detail?: string;
@@ -717,12 +794,16 @@ export class Foreman {
         : cmdImplementationQueue(this.projectDir).find((row) => row.status === "next" || row.status === "in_progress");
       const ticket = loadTickets(join(this.projectDir, config.paths.tickets)).find((candidate) => candidate.id === active?.ticket);
       if (ticket) return ticket;
+      throw new Error(`Assigned ticket ${ticketId ?? "(missing)"} cannot be resolved for QA; ownership reconciliation is required`);
     }
-    return {
-      id: `STEP-${stepIndex}`, order: stepIndex, title: `Implementation step ${stepIndex}`, area: "project",
-      priority: "P2", size: "M", risk: "Low", depends_on: [], summary: `Review implementation step ${stepIndex}`,
-      acceptance: ["The requested implementation step is complete"], required_tests: ["Run the relevant project validation"], likely_files: [],
-    };
+    if (!this.projectDir || !ticketId) throw new Error("QA requires a durable admitted work identity");
+    const db = new WorkflowDb(this.projectDir);
+    try {
+      db.assertAdmittedWork(this.qaRunId,ticketId);
+      const synthetic=db.workDefinitions(this.qaRunId).find(work=>work.workId===ticketId&&work.kind==="synthetic");
+      if(!synthetic)throw new Error("Synthetic QA identity cannot be resolved; failed ticket lookup never enables unticketed work");
+      return synthetic.definition as TicketDef;
+    } finally {db.close();}
   }
 
   async runBatch(
@@ -738,23 +819,39 @@ export class Foreman {
     let detail: string | undefined;
     const deferred = new Set<string>();
 
+    const service = async (): Promise<boolean> => {
+      if (!this.projectDir) return false;
+      assertBuildAssignmentReconciled(this.projectDir, this.qaRunId);
+      try { return await servicePendingHumanDecisions({ projectDir: this.projectDir, runId: this.qaRunId, tickets: recoveryTickets, observer: this.observer, prompt: this.decisionPrompt }); }
+      catch (error) { if (!(error instanceof HumanDecisionRequired)) throw error; detail = error.message; return false; }
+    };
     for (let i = 1; completed < n; i++) {
+      if (this.projectDir) {
+        try {
+          assertBuildAssignmentReconciled(this.projectDir, this.qaRunId);
+          const db = new WorkflowDb(this.projectDir);
+          try { if (db.operations(this.qaRunId).some(op => op.kind === "decision-continuation" && ["in_progress", "uncertain"].includes(op.status))) throw new BuildAssignmentRejected("Uncertain decision continuation requires reconciliation before further provider work"); } finally { db.close(); }
+        }
+        catch (error) { if (!(error instanceof BuildAssignmentRejected || error instanceof BuildControlBoundary)) throw error; outcome = "needs-human"; detail = error.message; break; }
+      }
       const decisionRevision = this.projectDir ? buildScopeRevision(this.projectDir) : "";
       const decisions = this.projectDir ? (() => {
         const db = new WorkflowDb(this.projectDir!);
         try {
           const revision = decisionRevision;
+          for (const work of db.workDefinitions(this.qaRunId)) if (!recoveryTickets || recoveryTickets.includes(work.workId)) db.consumeInstructionControls(this.qaRunId,work.workId);
           db.refreshStaleTicketDecisions(this.qaRunId, revision, recoveryTickets);
           return { answered: db.answeredTicketDecisions(this.qaRunId, revision), pending: db.pendingHumanDecisions(this.qaRunId) };
         } finally { db.close(); }
       })() : { answered: [], pending: [] };
       const answered = decisions.answered.filter(decision => !recoveryTickets || recoveryTickets.includes(decision.interruptionId.slice(7)));
       if (decisions.pending.some(decision => !decision.interruptionId.startsWith("ticket:"))) {
+        if (await service()) { i--; continue; }
         outcome = "needs-human"; detail = "Rafi is waiting for an answer to a build-wide question"; break;
       }
       const waiting = new Set(decisions.pending.map(decision => decision.interruptionId.slice(7)));
       for (const ticket of waiting) if (!recoveryTickets || recoveryTickets.includes(ticket)) deferred.add(ticket);
-      if (waiting.size && !this.continueIndependentTickets) { outcome = "needs-human"; detail = "Rafi is waiting for ticket answers"; break; }
+      if (waiting.size && !this.continueIndependentTickets) { if (await service()) { i--; continue; } outcome = "needs-human"; detail = "Rafi is waiting for ticket answers"; break; }
       // Determine which ticket we're about to work on (for in_progress marking)
       let pendingTicketId: string | undefined;
       if (this.ticketsEnabled && this.projectDir) {
@@ -764,23 +861,32 @@ export class Foreman {
           const canAnswer = (ticket: string) => answered.some(decision => decision.interruptionId === `ticket:${ticket}`);
           if (preferred && preferred.blockedBy !== "None") deferred.add(preferred.ticket);
           const next = preferred && preferred.blockedBy === "None" && !waiting.has(preferred.ticket) ? preferred
+            : i === 1 && preferredTicketId && (!recoveryTickets || recoveryTickets.length <= 1) ? undefined
             : queue.find(row => row.blockedBy === "None" && !waiting.has(row.ticket) && (!deferred.has(row.ticket) || canAnswer(row.ticket)) && (row.status === "next" || (row.status === "blocked" && canAnswer(row.ticket))));
-          if (i === 1 && preferredTicketId && !preferred && !next) {
+          if (!next && [...waiting].some(ticket => !recoveryTickets || recoveryTickets.includes(ticket))) {
+            if (await service()) { i--; continue; }
+          }
+          if (i === 1 && preferredTicketId && !next) {
             outcome = "needs-human";
-            detail = `recovery ticket ${preferredTicketId} is no longer available in the implementation queue`;
+            detail = `requested ticket ${preferredTicketId} is unavailable or blocked in the implementation queue`;
             break;
           }
-          if (!next && (recoveryTickets || deferred.size)) break;
+          if (!next) {
+            if (queue.some(row => row.status !== "done") && !detail) { outcome = "needs-human"; detail = "No eligible ticket assignment; unfinished work requires prerequisite or question recovery"; }
+            break;
+          }
           if (next && next.status !== "next" && next.status !== "in_progress" && next.status !== "blocked") {
             outcome = "needs-human"; detail = `recovery ticket ${next.ticket} cannot resume while its status is ${next.status}`; break;
           }
           if (next) {
+            outcome = "all-done"; detail = undefined;
             pendingTicketId = next.ticket;
             await onTicketStart?.(next.ticket);
             // Approval/feedback can change definitions while selection is awaiting it.
             if (decisionRevision !== buildScopeRevision(this.projectDir)) { i--; continue; }
             const boundaryDb = new WorkflowDb(this.projectDir);
             try {
+              boundaryDb.consumeInstructionControls(this.qaRunId,next.ticket);
               const pending = boundaryDb.pendingHumanDecisions(this.qaRunId);
               if (pending.some(decision => !decision.interruptionId.startsWith("ticket:") || decision.interruptionId === `ticket:${next.ticket}`)) {
                 i--; continue;
@@ -789,6 +895,8 @@ export class Foreman {
             const latest = cmdImplementationQueue(this.projectDir).find(row => row.ticket === next.ticket);
             if (!latest || latest.status !== next.status || latest.blockedBy !== "None") { i--; continue; }
             if (next.status === "blocked") cmdUnblock(this.projectDir, next.ticket, { actor: "foreman", summary: canAnswer(next.ticket) ? "Scoped question answered" : "Reopened by build recovery" });
+            const admittedDb = new WorkflowDb(this.projectDir);
+            try { admittedDb.assertAdmittedWork(this.qaRunId, next.ticket); } finally { admittedDb.close(); }
             deferred.delete(next.ticket);
             cmdUpdate(this.projectDir, next.ticket, {
               status: "in_progress",
@@ -797,25 +905,37 @@ export class Foreman {
             });
           }
         } catch (err) {
+          if (err instanceof HumanDecisionCancelled) throw err;
           outcome = "needs-human";
           detail = `failed to update ticket tracker before step ${i}: ${err instanceof Error ? err.message : String(err)}`;
           break;
         }
       }
 
+      if (!this.ticketsEnabled && this.projectDir) {
+        const db=new WorkflowDb(this.projectDir);
+        try {
+          const completedSynthetic=new Set(db.operations(this.qaRunId).filter(operation=>operation.kind==="synthetic-completion"&&operation.status==="confirmed").map(operation=>(operation.intent as {workId:string}).workId));
+          const selected=db.workDefinitions(this.qaRunId).find(work=>work.kind==="synthetic"&&!completedSynthetic.has(work.workId)&&(i!==1||!preferredTicketId||work.workId===preferredTicketId));
+          if(!selected){outcome=completedSynthetic.size?"all-done":"needs-human";detail=completedSynthetic.size?undefined:"No explicitly admitted unticketed work is available";break;}
+          pendingTicketId=selected.workId;
+        } finally {db.close();}
+      }
       this.currentTicketId = pendingTicketId;
       let instruction = i === 1
         ? buildPrimer(n, trackerPath, this.ticketsEnabled, pendingTicketId)
         : buildNextStepInstruction(i, n);
       if (pendingTicketId) instruction += `\n\nAssigned ticket: ${pendingTicketId}. Implement exactly this ticket. Do not substitute another ticket. End with ticket="${pendingTicketId}" in the STEP_STATUS marker.`;
       const continuations = answered.filter(decision => decision.interruptionId === `ticket:${pendingTicketId}`);
+      const continuationKeys: string[] = [];
       if (continuations.length) {
-        instruction += "\n\nScoped answers authorizing this ticket continuation:\n" + continuations.map(decision => `${decision.prompt}\nAnswer: ${decision.answer ?? decision.selectedChoiceId}`).join("\n");
+        instruction += "\n\nScoped answers authorizing this ticket continuation:\n" + continuations.map(decision => `${decision.prompt}\nAnswer: ${decisionResponse(decision)}`).join("\n");
         const db = new WorkflowDb(this.projectDir!);
         try {
           db.atomic(() => {
             for (const decision of continuations) {
-              const key = `decision-continuation:${decision.decisionId}`;
+              const key = db.nextDecisionContinuationKey(this.qaRunId, decision.decisionId);
+              continuationKeys.push(key);
               db.planOperation({ runId: this.qaRunId, idempotencyKey: key, kind: "decision-continuation", intent: { decisionId: decision.decisionId, ticketId: pendingTicketId } });
               db.updateOperation(key, "in_progress");
             }
@@ -825,13 +945,18 @@ export class Foreman {
       if (i > 1) await this.prepareBuilderBoundary(instruction);
       this.builderWorkSessions += 1;
       const turn = () => this.doTurn(instruction);
-      const { result, status } = this.observer
-        ? await this.observer.withContext({ role: "builder", stream: "builder", ticketId: pendingTicketId }, turn)
-        : await turn();
+      let response: Awaited<ReturnType<typeof turn>>;
+      try {
+        response = this.observer ? await this.observer.withContext({ role: "builder", stream: "builder", ticketId: pendingTicketId }, turn) : await turn();
+      } catch (error) {
+        if (!(error instanceof BuildAssignmentRejected || error instanceof BuildControlBoundary)) throw error;
+        outcome = "needs-human"; detail = error.message; break;
+      }
+      const { result, status } = response;
 
       if (continuations.length) {
         const db = new WorkflowDb(this.projectDir!);
-        try { for (const decision of continuations) db.updateOperation(`decision-continuation:${decision.decisionId}`, result.failure?.dispatchState === "unknown" ? "uncertain" : "confirmed", { result: { isError: result.isError } }); }
+        try { for (const key of continuationKeys) db.updateOperation(key, result.failure?.dispatchState === "not-sent" ? "failed" : result.failure?.dispatchState === "unknown" || result.isError && !result.failure?.dispatchState ? "uncertain" : "confirmed", { result: { isError: result.isError, dispatchState: result.failure?.dispatchState } }); }
         finally { db.close(); }
       }
       this.log.write("step", {
@@ -851,24 +976,18 @@ export class Foreman {
         break;
       }
 
-      if (recoveryTickets && pendingTicketId && status.ticket !== pendingTicketId && (status.kind === "done" || status.kind === "plan_complete" || Boolean(status.ticket))) {
-        outcome = "needs-human";
-        detail = `Builder response named ${status.ticket ?? "no ticket"}, but this recovery turn was scoped to ${pendingTicketId}`;
-        break;
-      }
-
       if (status.kind === "done" || status.kind === "plan_complete") {
         let qaSummary: string | undefined;
         let qaWaived = false;
         let qaPassCertificateId: string | undefined;
         let qaSourceStateDigest: string | undefined;
         if (this.qaEnabled) {
-          const qa = await this.runQa(i, status.ticket ?? pendingTicketId, result.text);
+          const qa = await this.runQa(i, pendingTicketId, result.text);
           if (qa.outcome === "blocked" || qa.outcome === "needs-human") {
             outcome = qa.outcome;
             detail = qa.detail;
             if (pendingTicketId && this.continueIndependentTickets && this.ticketsEnabled && this.projectDir) {
-              cmdBlock(this.projectDir, pendingTicketId, { summary: qa.detail ?? "QA requires recovery", actor: "foreman" });
+              cmdBlock(this.projectDir, pendingTicketId, { summary: qa.detail ?? "QA requires recovery", unblockCriteria: qa.detail ?? "Reconcile QA recovery", blockerType: "qa", actor: "foreman" });
               deferred.add(pendingTicketId);
               continue;
             }
@@ -883,13 +1002,15 @@ export class Foreman {
         // Update ticket state only after QA has passed, so generated tracker
         // state does not claim done before verification has completed.
         if (this.ticketsEnabled && this.projectDir) {
-          const ticketId = status.ticket ?? pendingTicketId;
+          const ticketId = pendingTicketId;
           if (ticketId) {
             try {
               if (this.qaEnabled && !qaWaived) {
                 if (!qaPassCertificateId || !qaSourceStateDigest) throw new Error("QA passed without a durable pass certificate");
                 await beginQaFinalization(this.projectDir, this.projectDir, this.qaRunId, ticketId, qaPassCertificateId, qaSourceStateDigest, `ticket-complete:${ticketId}`, generatedTrackerDirtyPaths(loadTicketsConfig(this.projectDir).paths));
               }
+              const controls=new WorkflowDb(this.projectDir);
+              try {controls.assertFinalizationControls(this.qaRunId,ticketId);}finally{controls.close();}
               cmdComplete(this.projectDir, ticketId, {
                 actor: "foreman",
                 summary: status.summary ?? `Step ${i} complete`,
@@ -909,6 +1030,25 @@ export class Foreman {
             }
           }
         }
+        if (!this.ticketsEnabled && this.projectDir && pendingTicketId) {
+          const controls=new WorkflowDb(this.projectDir);
+          try {controls.assertFinalizationControls(this.qaRunId,pendingTicketId);}catch(error){if(!(error instanceof BuildControlBoundary))throw error;outcome="needs-human";detail=error.message;break;}finally{controls.close();}
+          if (this.qaEnabled && !qaWaived) {
+            if(!qaPassCertificateId||!qaSourceStateDigest)throw new Error("Synthetic work requires a durable independent QA pass");
+            await beginQaFinalization(this.projectDir,this.builderWorktree??this.projectDir,this.qaRunId,pendingTicketId,qaPassCertificateId,qaSourceStateDigest,`synthetic-complete:${pendingTicketId}`);
+          }
+          const db=new WorkflowDb(this.projectDir);
+          try {db.atomic(()=>{
+            const key=`synthetic-completion:${this.qaRunId}:${pendingTicketId}`;
+            db.planOperation({runId:this.qaRunId,idempotencyKey:key,kind:"synthetic-completion",intent:{workId:pendingTicketId}});
+            if(db.operation(key)?.status === "planned")db.updateOperation(key,"in_progress");
+            db.updateOperation(key,"confirmed");
+            const state=db.getRun(this.qaRunId)!.state;
+            const progress=state.progress as {completedTickets?:string[]}|undefined;
+            if(progress)db.transition(this.qaRunId,{checkpoint:"synthetic-completed",state:{...state,progress:{...progress,completedTickets:[...new Set([...(progress.completedTickets??[]),pendingTicketId!])]}}});
+          });}finally{db.close();}
+        }
+        if (!this.ticketsEnabled && this.projectDir && pendingTicketId && this.qaEnabled && !qaWaived) completeQaFinalization(this.projectDir,this.qaRunId,pendingTicketId);
         completed++;
         if (status.kind === "plan_complete") {
           outcome = "plan-complete";
@@ -921,11 +1061,13 @@ export class Foreman {
       if (status.kind === "blocked") {
         // Mark ticket blocked in the tracker
         if (this.ticketsEnabled && this.projectDir) {
-          const ticketId = status.ticket ?? pendingTicketId;
+          const ticketId = pendingTicketId;
           if (ticketId) {
             try {
               cmdBlock(this.projectDir, ticketId, {
                 summary: status.reason ?? "builder reported blocked",
+                unblockCriteria: status.reason ?? "Resolve the external blocker before continuing",
+                blockerType: status.reason?.includes("Rafi is waiting for input") ? "input" : "external",
                 actor: "foreman",
               });
             } catch (err) {
@@ -951,6 +1093,12 @@ export class Foreman {
       break;
     }
 
+    if (completed >= n && this.projectDir) {
+      const db = new WorkflowDb(this.projectDir);
+      let pending: boolean;
+      try { pending = db.pendingHumanDecisions(this.qaRunId).some(decision => !decision.interruptionId.startsWith("ticket:") || !recoveryTickets || recoveryTickets.includes(decision.interruptionId.slice(7))); } finally { db.close(); }
+      if (pending && !await service()) { outcome = "needs-human"; detail = "Paused with pending questions at the authorized step limit"; }
+    }
     if (deferred.size) { outcome = "blocked"; detail = `Deferred tickets: ${[...deferred].join(", ")}. ${detail ?? "Input or prerequisite recovery is required."}`; }
     this.log.write("batch-end", { completed, requested: n, outcome, detail, sessionId: this.builder.sessionId() });
     return { completed, requested: n, outcome, detail };

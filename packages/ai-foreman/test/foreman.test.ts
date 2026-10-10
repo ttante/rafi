@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify } from "yaml";
 
-import { Foreman } from "../src/foreman.js";
+import { AuthorizedForeman as Foreman } from "./helpers/workAdmission.js";
 import { Log } from "../src/log.js";
 import { cmdBlock, cmdInit, cmdUpdate } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
@@ -14,6 +14,9 @@ import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/t
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import type { QaSessionHandle } from "../src/qaReview.js";
 import { qaDigest } from "../src/qaProtocolV2.js";
+import { WorkflowReader } from "../src/workflowReader.js";
+import { createBuildRun, releaseBuildLease } from "../src/buildRuns.js";
+import { readQaEvidenceSnapshot } from "../src/qaEvidenceReader.js";
 import { BUILDER_QA_REMEDIATION_END, BUILDER_QA_REMEDIATION_START, type ProviderSessionRefV1 } from "rafi-spec";
 
 function makeTmpDir(): string {
@@ -47,6 +50,115 @@ function makeDef(id: string): TicketDef {
   };
 }
 
+for (const qaEnabled of [false, true]) {
+  for (const kind of ["done", "plan_complete", "blocked", "needs_input"] as const) {
+    for (const returned of ["T001", "UNKNOWN", undefined]) {
+      test(`assignment rejects ${kind}/${returned ?? "missing"} with QA ${qaEnabled}`, async () => {
+        const dir = makeTmpDir();
+        try {
+          cmdInit(dir, { appName: "Test", timezone: "UTC" });
+          writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001"), { ...makeDef("T002"), order: 2000 }] }));
+          let qaCalls = 0;
+          const run = createBuildRun({ tickets: ["T002"], repositoryRoot: dir, qaEnabled });
+          const response = `STEP_STATUS: ${kind} | ${returned ? `ticket="${returned}" ` : ""}summary="returned" reason="blocked" question="choose" choices="A|B"`;
+          const builder = new FakeBuilder([response], () => writeFileSync(join(dir, "unexpected.txt"), "preserve these edits"));
+          const parameters: ConstructorParameters<typeof Foreman> = [builder, new Log(join(dir, ".foreman/test.jsonl")), false, qaEnabled, 3, dir, undefined, async (cwd) => { qaCalls++; return qaHandle(new FakeBuilder([qaPass]), cwd); }];
+          parameters[22] = run.runId;
+          const foreman = new Foreman(...parameters);
+          const result = await foreman.runBatch(1, undefined, undefined, "T002");
+          assert.equal(result.outcome, "needs-human", result.detail);
+          assert.equal(result.completed, 0);
+          assert.equal(qaCalls, 0);
+          assert.equal(builder.instructions.length, 1);
+          const tracker = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+          try { assert.equal(tracker.getState("T001"), undefined); assert.equal(tracker.getState("T002")?.status, "in_progress"); } finally { tracker.close(); }
+          const reader = new WorkflowReader(dir);
+          try {
+            assert.ok(reader.events(run.runId).some(event => event.type === "build_assignment_rejected"), "identity rejection must retain a durable scoped response");
+            const operation = reader.operations(run.runId).find(operation => operation.kind === "build-assignment")!;
+            const evidence = readQaEvidenceSnapshot(dir, run.runId);
+            assert.equal(evidence.blobs.get((operation.result as { responseDigest: string }).responseDigest)?.toString(), response);
+          } finally { reader.close(); }
+          assert.equal(readFileSync(join(dir, "unexpected.txt"), "utf8"), "preserve these edits");
+          const resumed = await foreman.runBatch(1, undefined, undefined, "T002");
+          assert.equal(resumed.outcome, "needs-human"); assert.equal(builder.instructions.length, 1);
+          const directQa = await foreman.runPendingQaRecovery("T002", "Inspect rejected work");
+          assert.equal(directQa.outcome, "needs-human"); assert.match(directQa.detail ?? "", /requires assignment reconciliation/);
+          assert.equal(qaCalls, 0, "direct QA recovery must not bypass assignment conflict");
+          releaseBuildLease(dir, run, "recoverable");
+        } finally { rmSync(dir, { recursive: true }); }
+      });
+    }
+  }
+}
+
+test("an empty automatic ticket queue does not dispatch generic work", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [] }));
+    const builder = new FakeBuilder(['STEP_STATUS: done | summary="generic work"']);
+    const result = await new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir).runBatch(1);
+    assert.equal(builder.instructions.length, 0);
+    assert.equal(result.completed, 0);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("an unavailable explicit ticket never substitutes an independent ticket", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
+    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"']);
+    const result = await new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir).runBatch(1, undefined, undefined, "REMOVED");
+    assert.equal(result.outcome, "needs-human");
+    assert.equal(builder.instructions.length, 0);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("removed definitions during approval dispatch no substitute or synthetic work", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
+    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"']);
+    const result = await new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 1, dir).runBatch(1, undefined, () => {
+      writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [] }));
+    }, "T001");
+    assert.equal(result.outcome, "needs-human"); assert.equal(builder.instructions.length, 0);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("uncertain Builder exception preserves work and prevents blind redispatch", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
+    const builder = new FakeBuilder([], () => { writeFileSync(join(dir, "partial.txt"), "uncertain work"); throw new Error("transport disconnected"); });
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir);
+    await assert.rejects(foreman.runBatch(1), /transport disconnected/);
+    const resumed = await foreman.runBatch(1);
+    assert.equal(resumed.outcome, "needs-human"); assert.equal(builder.instructions.length, 1);
+    assert.equal(readFileSync(join(dir, "partial.txt"), "utf8"), "uncertain work");
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("an unscoped plain question persists an identity stop before any decision or follow-up turn", async () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
+    const builder = new FakeBuilder(['Would you like me to change the requirements?']);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir);
+    assert.equal((await foreman.runBatch(1)).outcome, "needs-human");
+    assert.equal((await foreman.runBatch(1)).outcome, "needs-human");
+    assert.equal(builder.instructions.length, 1);
+    const reader = new WorkflowReader(dir);
+    try { assert.ok(reader.buildRuns().some(run => reader.events(run.runId).some(event => event.type === "build_assignment_rejected"))); assert.ok(reader.buildRuns().every(run => !reader.pendingHumanDecisions(run.runId).length)); }
+    finally { reader.close(); }
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
 class FakeBuilder implements BuilderAdapter {
   readonly agent = "claude" as const;
   readonly instructions: string[] = [];
@@ -59,14 +171,15 @@ class FakeBuilder implements BuilderAdapter {
   private ref?: ProviderSessionRefV1;
 
   constructor(
-    private readonly turns: string[],
+    private readonly turns: Array<string | ((instruction:string)=>string)>,
     private readonly beforeTurn?: (index: number) => void,
   ) {}
 
   async sendTurn(instruction: string): Promise<TurnResult> {
     this.instructions.push(instruction);
     this.beforeTurn?.(this.index);
-    let text = this.turns[this.index++] ?? "";
+    const response = this.turns[this.index++] ?? "";
+    let text = typeof response === "function" ? response(instruction) : response;
     if (instruction.includes(BUILDER_QA_REMEDIATION_START) && !text.includes(BUILDER_QA_REMEDIATION_START)) {
       const handoffId = /QA failure handoff ID: ([a-f0-9]{64})/.exec(instruction)?.[1] ?? "missing";
       const findingKey = /QA-1 -> ([a-f0-9]{64})/.exec(instruction)?.[1] ?? "missing";
@@ -308,7 +421,7 @@ test("independent QA may write Foreman's own .foreman runtime files", async () =
   const dir = makeTmpDir();
   try {
     const builder = new FakeBuilder([
-      'implemented\nSTEP_STATUS: done | summary="implemented"',
+      (instruction:string) => `implemented\nSTEP_STATUS: done | ticket="${/Ticket scope: ([^ ]+)\./.exec(instruction)?.[1]}" summary="implemented"`,
     ]);
     const foreman = new Foreman(
       builder,
@@ -340,7 +453,7 @@ test("independent QA source changes still require human review", async () => {
   try {
     writeFileSync(join(dir, "source.ts"), "before\n", "utf8");
     const builder = new FakeBuilder([
-      'implemented\nSTEP_STATUS: done | summary="implemented"',
+      (instruction:string) => `implemented\nSTEP_STATUS: done | ticket="${/Ticket scope: ([^ ]+)\./.exec(instruction)?.[1]}" summary="implemented"`,
     ]);
     const foreman = new Foreman(
       builder,

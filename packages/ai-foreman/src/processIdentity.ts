@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { linuxProbeInventory } from "./linuxProbeInventory.js";
 
 export type ProcessClassification = { state: "live" | "dead" | "unknown"; reason: string };
 
@@ -72,6 +73,10 @@ export function isLiveProcessIdentity(pid: number, expectedStart: string): boole
 /** Complete local process inventory, including orphan descendants of a known group. */
 export function processGroupQuiescent(group: number, timeoutMs = 1000): boolean {
   if (process.platform === "win32" || !Number.isSafeInteger(group) || group <= 1) return false;
+  if (process.platform === "linux") {
+    const rows = linuxProbeInventory(undefined, timeoutMs);
+    return rows !== undefined && rows.filter(row => row.group === group).every(row => row.state === "Z" || row.state === "X");
+  }
   try {
     const rows = execFileSync("ps", ["-axo", "pid=,pgid=,stat="], { encoding: "utf8", timeout: Math.max(1, timeoutMs), maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] })
       .split("\n").map(line => /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line)).filter(row => row !== null);
@@ -85,6 +90,7 @@ export function processGroupQuiescent(group: number, timeoutMs = 1000): boolean 
  */
 export function taggedProcesses(tag: string, timeoutMs = 1000): Array<{pid: number; start: string}> | undefined {
   if (!/^[a-f0-9-]{36}$/.test(tag) || process.platform === "win32") return undefined;
+  if (process.platform === "linux") return linuxProbeInventory(tag, timeoutMs)?.filter(row => row.tagged).map(({ pid, start }) => ({ pid, start }));
   try {
     const deadline = Date.now() + timeoutMs;
     const rows = execFileSync("ps", ["eww", "-axo", "pid=,stat=,command="], { encoding: "utf8", timeout: Math.max(1, timeoutMs), maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }).split("\n");

@@ -34,9 +34,11 @@ export function inspectReadiness(row: ReadinessProcess, deadline = Date.now() + 
   }
   if (metadata.protocol === "windows-job-v1") return { state: "unknown", reason: "Windows containment unavailable" };
   if (metadata.protocol === "gated-v3" && identity.state !== "dead" && !processGroupQuiescent(row.pid, remaining())) return { state: "unknown", reason: "authorized helper can still execute" };
-  return processGroupQuiescent(row.pid, remaining()) && taggedProcesses(row.id, remaining())?.length === 0
-    ? { state: "quiescent", reason: "group and inherited tag inventory empty" }
-    : { state: "unknown", reason: "owned group or tagged descendants active or unavailable" };
+  if (!processGroupQuiescent(row.pid, remaining())) return { state: "unknown", reason: "owned process group remains active or group inventory is unavailable" };
+  const members = taggedProcesses(row.id, remaining());
+  if (!members) return { state: "unknown", reason: "inherited probe tag inventory is unavailable" };
+  return members.length === 0 ? { state: "quiescent", reason: "group and inherited tag inventory empty" }
+    : { state: "unknown", reason: "tagged probe descendants remain active" };
 }
 
 const cleanupInFlight = new Map<string, Promise<CleanupEvidence>>();
@@ -59,10 +61,12 @@ async function cleanReadiness(row: ReadinessProcess, deadline: number): Promise<
     try { process.kill(row.pid, "SIGTERM"); } catch { /* capability is already fenced */ }
   }
   let attempt = 0;
+  let lastEvidence: CleanupEvidence = { state: "unknown", reason: "cleanup inventory unavailable" };
   do {
     const evidence = inspectReadiness(row, deadline);
     if (evidence.state === "quiescent") return evidence;
-    if (Date.now() >= deadline) return evidence;
+    if (evidence.reason !== "cleanup inventory deadline exceeded") lastEvidence = evidence;
+    if (Date.now() >= deadline) break;
     const signal = attempt++ < 3 ? "SIGTERM" : "SIGKILL";
     if (row.pid) {
       const identity = identityOf(row.pid, row.process_start ?? undefined, row.host);
@@ -79,5 +83,5 @@ async function cleanReadiness(row: ReadinessProcess, deadline: number): Promise<
     if (Date.now() >= deadline) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   } while (Date.now() < deadline);
-  return inspectReadiness(row, deadline);
+  return { state: "unknown", reason: `${lastEvidence.reason}; cleanup verification deadline exceeded` };
 }

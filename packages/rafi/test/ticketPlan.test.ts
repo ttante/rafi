@@ -14,6 +14,7 @@ test("guided ticket plan instruction is read-only, conversational, and exact-app
     docsRoot: "docs",
   });
   assert.match(instruction, /read-only guided ticket planner/);
+  assert.match(instruction, /Builder automatic compaction threshold: 65%/);
   assert.match(instruction, /grill-me skill exhaustively/);
   assert.match(instruction, /recommended answer first/);
   assert.match(instruction, /native AskUserQuestion-style question tool/);

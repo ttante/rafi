@@ -21,6 +21,7 @@ import {
 import { compileWithRootUpdateRecovery, type RootUpdateRecoveryChoice } from "./createRecovery.js";
 import {
   ensureAgentRuntimesReady,
+  promptProbeCleanupRecovery,
   type RuntimeReadinessChoice,
   type RuntimeReadinessError,
 } from "./runtimeReadiness.js";
@@ -364,7 +365,7 @@ program
     );
     updateCreateGitignore(targetDir, createGitignoreModeFromSelection(answers.gitignoreMode));
 
-    const finalTargets = await ensureCreateRuntimesReady(targetDir, config, Boolean(opts.defaults));
+    const finalTargets = await ensureCreateRuntimesReady(targetDir, config);
     if (!sameTargets(config.harness.targets, finalTargets)) {
       const previousTargets = config.harness.targets;
       config = {
@@ -542,9 +543,9 @@ async function compileCreateConfig(
 async function ensureCreateRuntimesReady(
   targetDir: string,
   config: ProjectConfig,
-  defaultsMode: boolean,
 ): Promise<AgentRuntime[]> {
-  const nonInteractive = defaultsMode || !process.stdin.isTTY || !process.stdout.isTTY;
+  // Defaults skip the interview, not recovery from a safety stop.
+  const nonInteractive = !process.stdin.isTTY || !process.stdout.isTTY;
   if (nonInteractive) {
     return ensureAgentRuntimesReady(targetDir, config.harness.targets, async (err) => {
       throw err;
@@ -558,6 +559,10 @@ async function promptRuntimeReadinessRecovery(
   otherRuntime: AgentRuntime,
 ): Promise<RuntimeReadinessChoice> {
   const { select, isCancel, log } = await import("@clack/prompts");
+  if (err.cleanupUnverified) {
+    if (await promptProbeCleanupRecovery(err.message, "Create") === "cancel") process.exit(0);
+    return "retry";
+  }
   log.error(err.message);
   log.info(
     "Cancel stops here and keeps generated files in place. Rafi will not uninstall packages, delete generated files, or corrupt setup. " +

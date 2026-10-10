@@ -1,6 +1,10 @@
 /** ajv-backed validation for the neutral schemas. */
 import { Ajv, type ValidateFunction } from "ajv";
 import {
+  managerEvidenceRequestV2Schema,
+  managerActionRequestV1Schema,
+  buildWorkAdmissionV1Schema,
+  buildOwnershipRepairV1Schema,
   rulePackSchema,
   skillManifestSchema,
   agentManifestSchema,
@@ -41,6 +45,8 @@ function run(fn: ValidateFunction, data: unknown): ValidationResult {
 }
 
 const vRulePack = ajv.compile(rulePackSchema);
+const vManagerEvidenceV2 = ajv.compile(managerEvidenceRequestV2Schema);
+export const validateManagerEvidenceRequestV2 = (d: unknown): ValidationResult => run(vManagerEvidenceV2, d);
 const vSkill = ajv.compile(skillManifestSchema);
 const vAgent = ajv.compile(agentManifestSchema);
 const vProject = ajv.compile(projectConfigSchema);
@@ -125,3 +131,11 @@ export function assertBuilderQaRemediationReport(d: unknown): asserts d is Build
   if (!r.valid) throw new Error(`Invalid Builder QA remediation report: ${r.errors.join("; ")}`);
 }
 export const assertBuilderQaRemediationReportV2: (d: unknown) => asserts d is BuilderQaRemediationReportV2 = assertBuilderQaRemediationReport;
+
+const vWorkAdmission = ajv.compile(buildWorkAdmissionV1Schema);
+const vManagerAction = ajv.compile(managerActionRequestV1Schema);
+export const validateBuildWorkAdmissionV1 = (d: unknown): ValidationResult => run(vWorkAdmission, d);
+export const validateManagerActionRequestV1 = (d: unknown): ValidationResult => run(vManagerAction, d);
+
+const vOwnershipRepair = ajv.compile(buildOwnershipRepairV1Schema);
+export const validateBuildOwnershipRepairV1 = (d: unknown): ValidationResult => run(vOwnershipRepair,d);

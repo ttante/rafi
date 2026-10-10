@@ -1,3 +1,4 @@
+import { registerHandbackWriter } from "./qaHandbackMigration.js";
 import type { ProjectLease } from "./workflowDb.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -59,6 +60,7 @@ export function maintainBuildAdmission(authority: BuildAdmission): void {
     try {
       db = new Database(join(authority.project, ".rafi/recovery.sqlite3"), { fileMustExist: true });
       db.function("rafi_protocol_v3", () => 1);
+      registerHandbackWriter(db);
       const changed = db.prepare("UPDATE build_admission SET record_json=json_set(record_json,'$.heartbeatAt',?) WHERE singleton=1 AND json_extract(record_json,'$.token')=?").run(new Date().toISOString(), authority.token);
       if (changed.changes !== 1) stopBuildAdmissionHeartbeat(authority);
     } catch { stopBuildAdmissionHeartbeat(authority); }

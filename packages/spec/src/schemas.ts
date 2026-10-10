@@ -468,7 +468,7 @@ export const projectConfigSchema = {
 
 const buildRunBaseProperties = {
   runId: { type: "string", minLength: 1 },
-  status: { enum: ["running", "interrupted", "recoverable", "blocked", "completed", "failed", "superseded"] },
+  status: { enum: ["running", "interrupted", "recoverable", "blocked", "completed", "failed", "cancelled", "superseded"] },
   tickets: { type: "array", items: { type: "string", minLength: 1 } },
   branchMode: { enum: ["current", "per-ticket", "shared", "mixed"] },
   checkpoint: { type: "string", minLength: 1 },
@@ -576,4 +576,41 @@ export const installManifestSchema = {
       dependencies: { type: "array", items: installDependency },
     } },
   ],
+} as const;
+const managerEvidenceIdV2 = { type: "string", minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9_.:-]+$" };
+const managerEvidenceCursorV2 = { type: "string", minLength: 1, maxLength: 2048, pattern: "^[A-Za-z0-9_-]+$" };
+const managerEvidenceScopedV2 = { runId: managerEvidenceIdV2, workId: managerEvidenceIdV2, snapshotId: managerEvidenceIdV2, cursor: managerEvidenceCursorV2 };
+export const managerEvidenceRequestV2Schema = {
+  type: "object", additionalProperties: false, required: ["version", "requestId", "operation"],
+  properties: { version: { const: 2 }, requestId: managerEvidenceIdV2, operation: { oneOf: [
+    { type: "object", additionalProperties: false, required: ["kind", "runId"], properties: { kind: { enum: ["list_build_work", "get_ownership_conflicts"] }, runId: managerEvidenceIdV2, cursor: managerEvidenceCursorV2 } },
+    { type: "object", additionalProperties: false, required: ["kind", "runId", "workId"], properties: { ...managerEvidenceScopedV2, kind: { enum: ["list_qa_attempts", "get_qa_timeline"] } } },
+    { type: "object", additionalProperties: false, required: ["kind", "runId", "workId", "attemptId", "occurrenceId"], properties: { ...managerEvidenceScopedV2, kind: { const: "get_qa_report" }, attemptId: managerEvidenceIdV2, occurrenceId: managerEvidenceIdV2 } },
+    { type: "object", additionalProperties: false, required: ["kind", "runId", "workId", "attemptId", "occurrenceId", "evidenceRef"], properties: { ...managerEvidenceScopedV2, kind: { const: "get_qa_evidence" }, attemptId: managerEvidenceIdV2, occurrenceId: managerEvidenceIdV2,
+      evidenceRef: { type: "object", additionalProperties: false, required: ["kind", "id"], properties: { kind: { enum: ["report", "remediation_request", "remediation_response", "turn_response", "delivery_receipt", "verification", "diff"] }, id: managerEvidenceIdV2 } } } },
+    { type: "object", additionalProperties: false, required: ["kind", "runId", "workId", "instructionId"], properties: { kind: { const: "get_intervention_status" }, runId: managerEvidenceIdV2, workId: managerEvidenceIdV2, instructionId: managerEvidenceIdV2 } },
+  ] } },
+} as const;
+
+export const buildWorkAdmissionV1Schema = {
+  type:"object", additionalProperties:false,
+  required:["version","projectId","runId","workId","kind","assignmentId","approvalId","scopeRevision","requirementsDigest","definitionDigest","admittedAt","admittedSequence","provenance"],
+  properties:{ version:{const:1}, projectId:managerEvidenceIdV2, runId:managerEvidenceIdV2, workId:managerEvidenceIdV2, kind:{enum:["ticket","synthetic"]}, ticketId:managerEvidenceIdV2, assignmentId:managerEvidenceIdV2, approvalId:managerEvidenceIdV2, scopeRevision:managerEvidenceIdV2, requirementsDigest:{type:"string",pattern:"^[a-f0-9]{64}$"}, definitionDigest:{type:"string",pattern:"^[a-f0-9]{64}$"}, admittedAt:{type:"string",minLength:1,maxLength:64}, admittedSequence:{type:"integer",minimum:1},
+    provenance:{type:"object",additionalProperties:false,required:["reason"],properties:{userTurn:{type:"string",minLength:1,maxLength:16384},decisionId:managerEvidenceIdV2,approvedPlanDigest:{type:"string",pattern:"^[a-f0-9]{64}$"},reason:{type:"string",minLength:1,maxLength:4096}},anyOf:[{required:["userTurn"]},{required:["decisionId"]},{required:["approvedPlanDigest"]}]}},
+  allOf:[{if:{properties:{kind:{const:"ticket"}}},then:{required:["ticketId"]}},{if:{properties:{kind:{const:"synthetic"}}},then:{properties:{workId:{type:"string",pattern:"^synthetic:[a-f0-9-]{36}$"}},not:{required:["ticketId"]}}}]
+} as const;
+export const managerActionRequestV1Schema = {
+  type:"object",additionalProperties:false,required:["version","requestId","runId","workId","action","text","expectedRevision"],
+  properties:{version:{const:1},requestId:managerEvidenceIdV2,runId:managerEvidenceIdV2,workId:managerEvidenceIdV2,action:{enum:["guide_builder","guide_qa","guide_both","answer_question","pause","request_attempt","supersede","withdraw"]},text:{type:"string",maxLength:16384},expectedRevision:{type:"integer",minimum:0},instructionId:managerEvidenceIdV2,decisionId:managerEvidenceIdV2,decisionRevision:{type:"string",minLength:1,maxLength:256},pauseScope:{enum:["work","run"]}},
+  allOf:[{if:{properties:{action:{enum:["guide_builder","guide_qa","guide_both","supersede","answer_question","request_attempt"]}}},then:{properties:{text:{type:"string",minLength:1}}}},{if:{properties:{action:{enum:["supersede","withdraw"]}}},then:{required:["instructionId"]}},{if:{properties:{action:{const:"answer_question"}}},then:{required:["decisionId","decisionRevision"]}}]
+} as const;
+
+export const buildOwnershipRepairV1Schema = {
+  type:"object",additionalProperties:false,
+  required:["version","requestId","runId","workId","expectedRevision","choice","inspectedSourceDigest","scopeRevision","authorization","attestation","mapping"],
+  properties:{version:{const:1},requestId:managerEvidenceIdV2,runId:managerEvidenceIdV2,workId:managerEvidenceIdV2,scopeRevision:managerEvidenceIdV2,decisionId:managerEvidenceIdV2,
+    expectedRevision:{type:"string",pattern:"^[a-f0-9]{64}$"},inspectedSourceDigest:{type:"string",pattern:"^[a-f0-9]{64}$"},
+    choice:{enum:["link_provenance","authorize_mapped_work","quarantine"]},
+    authorization:{type:"string",minLength:1,maxLength:16384,pattern:"\\S"},attestation:{type:"string",minLength:1,maxLength:16384,pattern:"\\S"},
+    mapping:{type:"array",maxItems:10000,items:{type:"object",additionalProperties:false,required:["path","workId"],properties:{path:{type:"string",minLength:1,maxLength:4096},workId:managerEvidenceIdV2}}}}
 } as const;

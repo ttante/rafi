@@ -100,7 +100,7 @@ ${JSON.stringify(opts.context, null, 2)}
 Host-owned decisions (planner prose and contradictory fields cannot override them):
 - Work mode: ${opts.workMode ? workModeLabel(opts.workMode) : "not selected"}
 - Git consequences: ${opts.workMode ? workModeConsequences(opts.workMode) : "not selected"}
-- Builder automatic compaction threshold: ${opts.autoCompactThresholdPercent ?? 50}%
+- Builder automatic compaction threshold: ${opts.autoCompactThresholdPercent ?? 65}%
 - Builder compact maximum: ${opts.compactMaximum ?? 10}
 - Branch prefix retained for isolated work: ${opts.branchPrefix ?? "feature"}
 
@@ -306,7 +306,7 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
         questionId,
       });
     };
-    if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "agent-run", answers: decisionsWithGrillState({ ...interview.answers, sourceChoice, grill, workMode, agentDefaults: pendingAgentDefaults, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" }, grillState), decisions: { ...interview.decisions, workflow: { workMode, consequences: workMode ? workModeConsequences(workMode) : undefined, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" } }, outputs: fingerprint, planningMode: grill });
+    if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "agent-run", answers: decisionsWithGrillState({ ...interview.answers, sourceChoice, grill, workMode, agentDefaults: pendingAgentDefaults, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" }, grillState), decisions: { ...interview.decisions, workflow: { workMode, consequences: workMode ? workModeConsequences(workMode) : undefined, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" } }, outputs: fingerprint, planningMode: grill });
 
     let roleRef: RoleBuilder | undefined;
     const rebuildingLostContinuity = Boolean(interview?.continuityLost || interview?.runtime.continuityLost);
@@ -338,7 +338,7 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
     console.log(`rafi tickets plan: interview=${grill}; agent changes are disabled\n`);
     if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() } });
 
-    const baseInstruction = buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" });
+    const baseInstruction = buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" });
     let result = await role.builder.sendTurn(rebuildingLostContinuity && grillState.answers.length
       ? `${baseInstruction}\n\n${buildAuditAnswersContinuation(grillState)}`
       : baseInstruction);
@@ -428,7 +428,7 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
       console.log("\nrafi tickets plan: host-owned approval decisions");
       console.log(`  work mode: ${workMode ? workModeLabel(workMode) : "unchanged"}`);
       if (workMode) console.log(`  Git consequences: ${workModeConsequences(workMode)}`);
-      console.log(`  Builder auto-compaction: ${pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50}%`);
+      console.log(`  Builder auto-compaction: ${pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65}%`);
       console.log(`  Builder compact maximum: ${pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10}`);
       console.log(`  branch prefix: ${config.tickets?.build?.branch_prefix ?? "feature"}`);
       const decision = opts.yes ? "approve" : await reviewProposal(proposal);
@@ -457,7 +457,7 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
       else writeRafiConfigYaml(projectDir, nextConfig);
       const readback = readProjectConfig(projectDir);
       if (workMode && readback.tickets?.build?.branch_strategy !== workMode) throw new Error("approved ticket work mode failed config readback verification");
-      if ((readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent ?? 50) !== (pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50)) throw new Error("approved compaction threshold failed config readback verification");
+      if ((readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent ?? 65) !== (pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65)) throw new Error("approved compaction threshold failed config readback verification");
       saveSourceRegistry(projectDir, stagedSources);
       if (interview) completeInterview(projectDir, interview);
       console.log(`rafi tickets plan: created ${applied.added.length}, edited ${applied.edited.length}; validation passed`);

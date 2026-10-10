@@ -1,3 +1,4 @@
+import { admitFixtureWork } from "./helpers/workAdmission.js";
 // Regression tests converted from the October 2026 build-stall investigation.
 // Assertions verify repaired behavior for each originally reproduced defect.
 import { test } from "node:test";
@@ -120,7 +121,7 @@ test("investigation: superseding a run retires its branch session", t => {
   mkdirSync(join(dir, ".foreman"));
   const db = new WorkflowDb(dir);
   try {
-    db.ensureRun("old-run", "build");
+    db.ensureRun("old-run", "build"); admitFixtureWork(db,"old-run","T001");
     db.recordBranchResumeSession("old-run", { ticket: "T001", branch: "feature/unit", base: "main", worktreePath: dir, sessionId: "stale-session", logPath: "structured-recovery" });
     db.transition("old-run", { status: "superseded", checkpoint: "superseded-by-start-over" });
     assert.deepEqual(findResumableBranchSessions(join(dir, ".foreman")), []);

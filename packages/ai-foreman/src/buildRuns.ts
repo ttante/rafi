@@ -15,6 +15,7 @@ import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "./t
 import { loadTickets } from "./tickets/ticketLoader.js";
 import { loadProjectAutonomyConfig, resolveAutonomyPolicy } from "./recoveryPolicy.js";
 import { classifyProcess, isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
+import { assertBuildAssignmentReconciled } from "./buildAssignment.js";
 
 export const BUILD_RUN_VERSION = 3;
 export const BUILD_RUN_DIRECTORY = ".foreman/runs";
@@ -38,6 +39,8 @@ function assertBuildAuthority(workflow: WorkflowDb, run: BuildRunRecordV2): void
 export interface CreateBuildRunInput {
   runId?: string;
   tickets: string[];
+  authorizedBatch?: BuildRunRecordV2["authorizedBatch"];
+  builderCapabilities?: BuildRunRecordV2["builderCapabilities"];
   deliveryUnit?: string;
   branchMode?: BuildRunRecordV2["branchMode"];
   repositoryRoot: string;
@@ -70,6 +73,8 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
     runId: input.runId ?? randomUUID(),
     status: "running",
     tickets: [...input.tickets],
+    authorizedBatch: input.authorizedBatch ?? (input.tickets.length && (input.branchMode ?? "current") === "current" ? { tickets: [...input.tickets], requestedSteps: input.tickets.length, scopeRevision: "explicit-create-selection", startedTickets: [] } : undefined),
+    builderCapabilities: input.builderCapabilities,
     deliveryUnit: input.deliveryUnit,
     branchMode: input.branchMode ?? "current",
     checkpoint: "created",
@@ -147,7 +152,7 @@ function normalizeCapturedSettings(settings: LegacyResolvedAgentSettings): Resol
     ...settings,
     session_strategy: settings.session_strategy ?? (["builder", "qa", "ticket-maker"].includes(settings.role) ? "compact" : "fresh"),
     display_session_cost: settings.display_session_cost ?? false,
-    auto_compact_threshold_percent: settings.auto_compact_threshold_percent ?? 50,
+    auto_compact_threshold_percent: settings.auto_compact_threshold_percent ?? 65,
     compact_maximum: settings.compact_maximum ?? 10,
     settings_revision: settings.settings_revision ?? 0,
   };
@@ -183,6 +188,8 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
     const frozenPolicy = workflow.freezeAutonomyPolicy(next.runId, next.frozenPolicy, now);
     next = { ...next, frozenPolicy, recoveryAttempts: workflow.recoveryAttempts(next.runId), pendingDecisions: workflow.pendingHumanDecisions(next.runId), supervisor: workflow.supervisorState(next.runId) ?? next.supervisor };
     const existing = workflow.getRun(next.runId);
+    const priorProgress = existing?.state.progress as {completedTickets?: string[]}|undefined;
+    next = {...next,progress:{...next.progress,completedTickets:[...new Set([...next.progress.completedTickets,...(priorProgress?.completedTickets??[])])]}};
     if (existing && ["completed", "cancelled", "superseded"].includes(existing.status) && workflowStatus(next.status) !== existing.status) throw new Error(`cannot rewrite a ${existing.status} build run`);
     if (!existing) workflow.createRun({
       runId: next.runId, kind: "build", checkpoint: next.checkpoint,
@@ -300,6 +307,7 @@ export function releaseBuildLease(projectDir: string, run: BuildRunRecordV2, sta
 }
 
 export function completeBuildRun(projectDir: string, run: BuildRunRecordV2, now = new Date()): BuildRunRecordV2 {
+  assertBuildAssignmentReconciled(projectDir, run.runId);
   if (run.status === "completed") {
     const committed = readBuildRuns(projectDir).find(item => item.runId === run.runId);
     if (committed?.status === "completed" && JSON.stringify(committed) === JSON.stringify(run)) return committed;
@@ -318,6 +326,7 @@ export function completeBuildRun(projectDir: string, run: BuildRunRecordV2, now 
 export function finishRecoveredTicketScope(projectDir: string, run: BuildRunRecordV2, checkpoint: string): BuildRunRecordV2 {
   if (run.branchMode !== "current" || !run.tickets.length || !isTicketsInitialized(projectDir)) throw new Error("Ticket recovery completion requires an initialized current-branch run scope");
   const { completed, remaining } = currentBranchTicketProgress(projectDir, run)!;
+  if (!remaining.length && !run.authorizedBatch) return releaseBuildLease(projectDir, checkpointBuildRun(projectDir, run, "legacy-scope-reconciliation-required", { progress: { ...run.progress, completedTickets: completed, remainingTickets: [], nextAction: "Confirm the original authorized batch scope before declaring the build complete" } }), "recoverable");
   if (!remaining.length) return completeBuildRun(projectDir, run);
   return releaseBuildLease(projectDir, checkpointBuildRun(projectDir, run, checkpoint, {
     currentTicket: remaining[0],
@@ -354,8 +363,8 @@ export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
       const run = authoritative?.runId ? authoritative : projection;
       let upgraded = upgradeBuildRun(run, projectDir);
       const dbStatus = workflow.getRun(run.runId)?.status;
-      if (dbStatus === "superseded" || dbStatus === "completed") upgraded = { ...upgraded, status: dbStatus };
-      if (dbStatus === "cancelled") return [];
+      if (dbStatus === "superseded" || dbStatus === "completed" || dbStatus === "cancelled") upgraded = { ...upgraded, status: dbStatus };
+
       if (!["completed", "superseded", "cancelled"].includes(workflow?.getRun(run.runId)?.status ?? "")) {
         for (const role of ["builder", "qa"] as const) {
           const lease = workflow?.roleMutationLease(run.runId, role);
@@ -376,7 +385,7 @@ export function recoverableBuildRuns(projectDir: string, now = new Date()): Arra
   const reader = new WorkflowReader(projectDir);
   const databaseLease = reader.currentLease();
   const admission = reader.buildAdmission();
-  const unfinished = (readBuildRuns(projectDir) as BuildRunRecordV3[]).filter(run => !["completed", "superseded"].includes(run.status));
+  const unfinished = (readBuildRuns(projectDir) as BuildRunRecordV3[]).filter(run => !["completed", "cancelled", "superseded"].includes(run.status));
   const cleanupRuns = [...new Set(reader.readinessProcesses().map(row => row.run_id))].filter(id => !unfinished.some(run => run.runId === id)).map(runId => {
     const run = reader.getRun(runId);
     const at = run?.updatedAt ?? new Date(0).toISOString();
@@ -391,21 +400,19 @@ export function recoverableBuildRuns(projectDir: string, now = new Date()): Arra
       if (!owners.length && run.lease) owners.push(classifyProcess(run.lease.pid, run.lease.processStart, run.lease.hostname));
       let owner = owners.find(item => item.state === "live") ?? owners.find(item => item.state === "unknown") ?? { state: "dead" as const, reason: "No live owner recorded" };
       if (owner.state !== "live" && reader.pendingBuildLaunches(run.runId).some(launch => launch.state === "dispatching")) owner = { state: "unknown", reason: "launch dispatch began but no child claim was confirmed; reconcile the launcher and child process evidence before retrying" };
-      return { ...inferLegacyRunTickets(projectDir, run), active: owner.state === "live", ownership: owner.state, ownershipReason: owner.reason };
+      return { ...run, active: owner.state === "live", ownership: owner.state, ownershipReason: owner.reason };
     }); } finally { reader.close(); }
 }
 
 /**
- * Current-branch runs created before ticket checkpointing did not retain their
- * selected ticket. Recover it from Foreman's tracker events so --ticket can
- * still address those durable runs without rewriting the legacy record.
+ * Timestamp correlations are diagnostic hints, never executable membership.
  */
-function inferLegacyRunTickets(projectDir: string, run: BuildRunRecordV2): BuildRunRecordV2 {
-  if (run.tickets.length > 0 || !isTicketsInitialized(projectDir)) return run;
+export function legacyTrackerWorkHints(projectDir: string, run: BuildRunRecordV2): string[] {
+  if (!isTicketsInitialized(projectDir)) return [];
   let db: Database.Database | undefined;
   try {
     const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);
-    if (!existsSync(paths.stateDb)) return run;
+    if (!existsSync(paths.stateDb)) return [];
     db = new Database(paths.stateDb, { readonly: true, fileMustExist: true });
     const rows = db.prepare(`
       SELECT ticket_id
@@ -417,10 +424,9 @@ function inferLegacyRunTickets(projectDir: string, run: BuildRunRecordV2): Build
       ORDER BY timestamp, id
     `).all(run.createdAt, run.updatedAt) as Array<{ ticket_id: string }>;
     const tickets = [...new Set(rows.map((row) => row.ticket_id).filter(Boolean))];
-    if (tickets.length === 0) return run;
-    return { ...run, tickets, currentTicket: tickets.at(-1) };
+    return tickets;
   } catch {
-    return run;
+    return [];
   } finally {
     db?.close();
   }
@@ -648,6 +654,7 @@ function validateBuildRun(run: BuildRunRecord): void {
 }
 
 function workflowStatus(status: BuildRunRecordV2["status"]): WorkflowRunStatus {
+  if (status === "cancelled") return "cancelled";
   if (status === "completed") return "completed";
   if (status === "failed") return "failed";
   if (status === "superseded") return "superseded";

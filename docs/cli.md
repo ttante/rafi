@@ -20,6 +20,10 @@ Commander help does not visually mark every `requiredOption`. Source-derived req
 
 Runtime behavior not fully expressible in Commander help:
 
+- Foreground builds collect pending ticket questions when no independent authorized work remains, and collect questions at the step limit before returning. Safe pause/EOF retains a recoverable waiting record; explicit cancellation supersedes pending questions while preserving their evidence. Detached builds return with a durable waiting record.
+- Recovery collects applicable pending answers before provider readiness or model calls. Answers retain their decision identity and are journaled before continuation dispatch; uncertain dispatches require reconciliation before replay.
+- `--builder-network` requests internet access separately from ticket approval and `--yes`. Explicit approval applies to the current build worker and is checked again on recovery. QA remains read-only and offline. `--builder-approvals` enables separate, one-operation Codex sandbox escalation requests; approving a question does not grant either capability. Managed provider policy can still refuse access; use a verified local source/dependency bundle when offline.
+- Authorized batch tickets and requested count are retained separately from started tickets. Recovery excludes completed work and never adds newly discovered tickets automatically. Legacy records without original scope require reconciliation before whole-build completion can be certified.
 - `rafi create --runtime <both|claude|codex>` controls `harness.targets`. `--defaults` keeps both targets unless `--runtime` is supplied.
 - `rafi compile` emits native artifacts only for configured targets: Codex writes `AGENTS.md`, `.codex/agents/*`, and `.agents/skills/*`; Claude writes `CLAUDE.md`, `.claude/agents/*`, and `.claude/skills/*`. `.rafi/compiled/<role>/*` is always emitted. Files for unselected targets are preserved, not deleted.
 - In `agent_files.mode: append` or `--root-file-mode append`, Rafi appends generated guidance inline unless that would exceed the target runtime's root-file startup guard. Overflow writes generated guidance to a target-specific sidecar (`AGENTS-rafi.md` or `CLAUDE-rafi.md`) and inserts a compact managed reference block near the top of the root file. Claude `@file` imports still load into Claude's context; this keeps root files short, but it is not a Claude context-reduction mechanism.
@@ -58,6 +62,24 @@ rafi tickets show --all --output agent-context.txt
 ```
 
 `--output` creates missing parent directories and appends rather than replacing existing content. When `--json` is appended after existing text, the new payload remains a pretty-printed, multi-line JSON block. The surrounding file is intentionally agent-readable accumulated context; Rafi does not parse or rewrite it as one JSON document.
+
+### Manager QA evidence
+
+Manager host commands retrieve retained workflow evidence without a provider turn or a database migration. They also work through `--ask`, for example:
+
+```bash
+rafi manager ./project --ask '/qa-work RUN_ID'
+rafi manager ./project --ask '/qa-attempts RUN_ID T001'
+rafi manager ./project --ask '/qa-report RUN_ID T001 ATTEMPT_ID'
+rafi manager ./project --ask '/qa-timeline RUN_ID T001'
+rafi manager ./project --ask '/qa-conflicts RUN_ID'
+```
+
+`/qa-report` renders the complete retained report with its run, work, attempt and occurrence identity. An optional fourth argument selects an occurrence when ambiguous. Passing reviews expose verification metadata and have no failure-report body. Missing, unreadable, corrupt and unsupported legacy evidence are disclosed separately from empty history. Conflicting historical work is inspectable without granting execution authority.
+
+One-shot `--ask` output drains all pages from the requested snapshot and expands report and oversized metadata artifacts before exiting. Model lookup packets remain bounded. An expired snapshot is reported as incomplete; it is never silently refreshed within an output. A later invocation retrieves a new snapshot. `/qa-export RUN TICKET ATTEMPT [OCCURRENCE]` resolves a scoped retained report and exports its exact protected bytes to a private file, disclosing its identity and raw digest without printing its contents.
+
+During an interactive Manager session, `/more CURSOR` continues an immutable snapshot; `/artifact HANDLE` renders a complete pinned artifact. These commands do not consume model lookup rounds. Cursors and handles belong to that host session. Cursors expire explicitly after 15 minutes; refresh the original request after expiration. Artifact bytes remain pinned until the session closes. New reviews or changed dispositions appear on refresh. `/qa-export HANDLE` explicitly exports protected raw bytes to a private temporary file. Default rendering redacts credentials, escapes terminal controls, and identifies raw/display digests and affected spans. Manager action delivery is unavailable until its authorization and delivery gates pass.
 
 ## `rafi`
 
@@ -108,8 +130,8 @@ Commands:
                                                       Rafi roles.
   state                                               Export, inspect, and import portable Rafi
                                                       local state bundles.
-  manager [options] [project]                         Ask a read-only Manager about all retained
-                                                      builds in a project.
+  manager [options] [project]                         Inspect retained builds and enqueue
+                                                      explicitly scoped Builder/QA guidance.
   uninstall [options] [project]                       Preview and safely remove selected
                                                       project-local Rafi material.
   uninstall:restore [options] <recoveryId> [project]  Restore files from an indefinite
@@ -163,6 +185,10 @@ Options:
   --id <id>               saved interview id (or unique prefix) to resume
   --discard <id>          discard a saved interview id (or unique prefix)
   --ticket <id>           narrow mutation scope to one ticket while retaining run-wide context
+  --builder-network       request separately approved builder internet access for this resumed
+                          build
+  --builder-approvals     allow explicit per-operation builder sandbox approval requests; QA stays
+                          restricted
   --qa-revision <number>  exact durable QA protocol revision to resume
   --inspect               show recovery state and planned actions without mutation
   --yes                   auto-approve the implementation plan and later plan updates for this
@@ -715,6 +741,10 @@ Options:
   --auto-compact-threshold <percent>   initial Builder context compaction threshold (1-99)
   --max-branch-depth <n>               maximum selected branch stack depth (default: "5")
   --pr-ready                           create ready-for-review PRs instead of draft PRs
+  --builder-network                    request build-scoped builder internet access with separate
+                                       explicit approval; rechecked on resume
+  --builder-approvals                  allow the builder to request explicit per-operation sandbox
+                                       approvals; QA stays restricted
   --keep-worktrees                     keep successful ticket worktrees for inspection
   --ticket <id>                        select one new ticket, or identify recovery tickets with
                                        --resume/--continue/--recover-run (default: [])
@@ -777,8 +807,8 @@ Commands:
                                project.
   doctor [options] [project]   Check Foreman, agent CLIs, config, and optional
                                ticket tracker readiness.
-  manager [options] <project>  Ask a read-only Manager about all retained
-                               builds in a project.
+  manager [options] <project>  Inspect retained builds and enqueue explicitly
+                               scoped Builder/QA guidance.
   state                        Export, inspect, and import portable Rafi local
                                state bundles.
   help [command]               display help for command
@@ -902,6 +932,12 @@ Options:
                                        (default: "5")
   --pr-ready                           create ready-for-review PRs instead of
                                        draft PRs
+  --builder-network                    request build-scoped builder internet
+                                       access with separate explicit approval;
+                                       rechecked on resume
+  --builder-approvals                  allow the builder to request explicit
+                                       per-operation sandbox approvals; QA
+                                       stays restricted
   --keep-worktrees                     keep successful ticket worktrees for
                                        inspection
   --ticket <id>                        select one new ticket, or identify
@@ -961,6 +997,10 @@ Arguments:
 Options:
   --run <id>              run ID or unique prefix
   --ticket <id>           narrow mutation scope to one ticket while retaining run-wide context
+  --builder-network       request separately approved builder internet access for this resumed
+                          build
+  --builder-approvals     allow explicit per-operation builder sandbox approval requests; QA stays
+                          restricted
   --qa-revision <number>  exact durable QA protocol revision to resume
   --inspect               show recovery state and planned actions without mutation
   --yes                   auto-approve the implementation plan and later plan updates for this
@@ -1212,7 +1252,7 @@ Options:
 ```text
 Usage: rafi manager [options] [project]
 
-Ask a read-only Manager about all retained builds in a project.
+Inspect retained builds and enqueue explicitly scoped Builder/QA guidance.
 
 Arguments:
   project            project directory
@@ -1233,7 +1273,7 @@ Options:
 ```text
 Usage: ai-foreman manager [options] <project>
 
-Ask a read-only Manager about all retained builds in a project.
+Inspect retained builds and enqueue explicitly scoped Builder/QA guidance.
 
 Arguments:
   project            project directory
@@ -1407,3 +1447,5 @@ Options:
   -y, --yes        confirm replacement of local Rafi state
   -h, --help       display help for command
 ```
+
+When QA passes with Builder guidance still waiting, explicitly resuming the build applies the guidance within the existing approved ticket scope and remaining attempt allowance, then runs complete fresh QA. This applies to current-branch and isolated-worktree recovery. If the allowance is exhausted, `/request-attempt <run> <work> <reason>` authorizes one follow-up before resume. Changed requirements need renewed approval; uncertain submissions require reconciliation. Saving guidance alone does not start work or reset an allowance.

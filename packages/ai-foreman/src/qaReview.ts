@@ -1,4 +1,6 @@
+import { BuildControlBoundary } from "./buildInterventions.js";
 import { formatRecoveryCommand } from "./recoveryGuidance.js";
+import { assertBuildAssignmentReconciled, BuildAssignmentRejected, captureBuildSource, type BuilderGuidanceFollowup } from "./buildAssignment.js";
 import { checkQaPrerequisites } from "./qaPrerequisites.js";
 import { boundedQaHistory } from "./qaHandbackHistory.js";
 import {
@@ -87,6 +89,9 @@ export interface IsolatedQaOptions {
   fix?: (request: QaFixRequest) => Promise<QaFixResult>;
   /** Canonical production delivery path for validated QA failure reports. */
   deliverFailure?: (request: QaFailureDeliveryInput) => Promise<QaFailureDeliveryResult>;
+  /** Explicit resume may deliver waiting Builder guidance using existing scoped authority. */
+  resumeBuilderGuidance?: boolean;
+  deliverBuilderFollowup?: (instruction: string, followup: BuilderGuidanceFollowup) => Promise<QaFixResult>;
   maxCycles: number;
   /** Durable QA execution scope; review/fix budgets survive worker restarts. */
   recovery: { projectDir: string; runId: string };
@@ -209,6 +214,12 @@ function loadDurableQaHistory(db: WorkflowDb, runId: string, ticketId: string): 
 }
 
 export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQaResult> {
+  try { return await runIsolatedQaOwned(opts); } catch (error) { if (error instanceof BuildControlBoundary) return {outcome:"needs-human",detail:error.message}; throw error; }
+}
+
+async function runIsolatedQaOwned(opts: IsolatedQaOptions): Promise<IsolatedQaResult> {
+  try { assertBuildAssignmentReconciled(opts.recovery.projectDir, opts.recovery.runId); }
+  catch (error) { if (error instanceof BuildAssignmentRejected) return { outcome: "needs-human", detail: error.message }; throw error; }
   if (opts.resumedRecovery && (opts.resumedRecovery.manifest.runId !== opts.recovery.runId || opts.resumedRecovery.manifest.ticketId !== opts.ticket.id)) {
     return { outcome: "needs-human", detail: `QA recovery packet ${opts.resumedRecovery.manifest.runId}/${opts.resumedRecovery.manifest.ticketId} does not match requested scope ${opts.recovery.runId}/${opts.ticket.id}; no QA work was dispatched` };
   }
@@ -217,8 +228,10 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
   let history: QaNonconvergenceContext["history"];
   let durableReviews: ReturnType<WorkflowDb["qaReviewAttempts"]>;
   let durableRemediations: ReturnType<WorkflowDb["qaRemediationAttempts"]>;
+  let durableRemediationGeneration: number;
   try {
     scopeDb.ensureRun(opts.recovery.runId);
+    scopeDb.assertAdmittedWork(opts.recovery.runId, opts.ticket.id);
     durablePolicy = scopeDb.autonomyPolicy(opts.recovery.runId) ?? scopeDb.freezeAutonomyPolicy(opts.recovery.runId, resolveAutonomyPolicy(loadProjectAutonomyConfig(opts.recovery.projectDir)));
     const stop = scopeDb.qaRemediationStop(opts.recovery.runId, opts.ticket.id);
     if (stop) {
@@ -261,6 +274,7 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
     for (const uncertain of durableRemediations.filter((item) => item.status === "intended" || item.status === "started")) scopeDb.updateQaRemediationAttempt(uncertain.attemptId, "uncertain", { detail: "host restarted without a durable Builder completion receipt" });
     durableRemediations = scopeDb.qaRemediationAttempts(opts.recovery.runId, opts.ticket.id);
     ({ history } = loadDurableQaHistory(scopeDb, opts.recovery.runId, opts.ticket.id));
+    durableRemediationGeneration = scopeDb.qaTicketHead(opts.recovery.runId, opts.ticket.id).remediationGeneration;
   } finally { scopeDb.close(); }
   opts.state.builderResponseHistory ??= [];
   if (!opts.state.builderResponseHistory.some((entry) => entry.ticketId === opts.ticket.id && entry.kind === "completion" && sha(entry.response) === sha(opts.builderSummary))) {
@@ -272,13 +286,48 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
   const maxBuilderFixes = Math.min(opts.maxCycles, durableLimit);
   let automaticFixes = persistedQaFixCount(opts);
   let reviewAttempt = Math.max(opts.state.reviews, ...durableReviews.map((item) => item.reviewNumber), 0);
-  let remediationGeneration = Math.max(opts.state.remediationGeneration ?? 0, ...durableReviews.map((item) => item.remediationGeneration), ...durableRemediations.map((item) => item.generation), 0);
+  let remediationGeneration = Math.max(opts.state.remediationGeneration ?? 0, durableRemediationGeneration, ...durableReviews.map((item) => item.remediationGeneration), ...durableRemediations.map((item) => item.generation), 0);
   const resumedHeadDb = new WorkflowDb(opts.recovery.projectDir);
+  resumedHeadDb.reconcileInstructionDeliveries(opts.recovery.runId,opts.ticket.id);
+  opts.qaRemediationAuthorization ??= resumedHeadDb.consumeInstructionControls(opts.recovery.runId,opts.ticket.id,"attempts");
   let resumedHead = resumedHeadDb.qaTicketHead(opts.recovery.runId, opts.ticket.id);
   let resumedReport = resumedHead.state === "review-failed"
     ? resumedHeadDb.unresolvedQaReports(opts.recovery.runId, opts.ticket.id).at(-1)
     : undefined;
   resumedHeadDb.close();
+  if (opts.resumeBuilderGuidance && resumedHead.state === "passed") {
+    const controlDb = new WorkflowDb(opts.recovery.projectDir);
+    let waiting = false;
+    try {
+      const preview = controlDb.reserveGuidance(opts.recovery.runId, opts.ticket.id, "builder", randomUUID(), captureBuildSource(opts.builderWorktree).digest, "Builder follow-up", false);
+      waiting = preview.ids.length > 0;
+    } finally { controlDb.close(); }
+    if (waiting) {
+      if (automaticFixes >= maxBuilderFixes && !opts.qaRemediationAuthorization) {
+        const detail = `Builder guidance is waiting, but the attempt allowance is exhausted. Authorize one follow-up with /request-attempt ${opts.recovery.runId} ${opts.ticket.id} <reason>, then resume.`;
+        ensureProtocolPausePacket(opts, resumedHead, "builder-guidance-budget", detail);
+        return { outcome: "needs-human", detail };
+      }
+      if (!opts.deliverBuilderFollowup) return { outcome: "needs-human", detail: "Builder guidance is waiting; resume through the build owner with a validated Builder session" };
+      const latest = durableReviews.at(-1)!;
+      const instruction = `Builder guidance follow-up after explicit resume.\nTicket scope: ${opts.ticket.id}. Do not substitute another ticket.\nPreserve the previously completed work and all mandatory requirements. Apply only the authorized waiting guidance within the approved ticket scope. If broader permission is needed, stop and explain it.\nApproved ticket requirements:\n${JSON.stringify(opts.ticket)}\nReport the instruction IDs you applied with evidence, then finish with STEP_STATUS: done | ticket="${opts.ticket.id}" summary="...".`;
+      const fix = await opts.deliverBuilderFollowup(instruction, { reviewAttemptId: latest.attemptId, requirementsDigest: qaDigest("admitted-requirements", opts.ticket), maximum: maxBuilderFixes, authorizationId: opts.qaRemediationAuthorization });
+      opts.qaRemediationAuthorization = undefined;
+      if (!fix.ok) {
+        const db = new WorkflowDb(opts.recovery.projectDir);
+        try { ensureProtocolPausePacket(opts, db.qaTicketHead(opts.recovery.runId,opts.ticket.id), "builder-guidance-stopped", fix.detail ?? "Builder follow-up did not complete"); } finally { db.close(); }
+        return { outcome: "needs-human", detail: fix.detail ?? "Builder follow-up did not complete; reconcile its outcome before resuming" };
+      }
+      opts.builderSummary = fix.response;
+      opts.state.builderResponseHistory.push({ ticketId: opts.ticket.id, cycle: latest.cycle, kind: "remediation", response: fix.response, summary: boundedBuilderSummary(fix.summary) });
+      automaticFixes = persistedQaFixCount(opts);
+      remediationGeneration += 1;
+      opts.state.remediationGeneration = remediationGeneration;
+      // The assignment transaction invalidated the old certificate. A complete
+      // fresh review now checks the exact post-follow-up source.
+      opts.resumedRecovery = undefined;
+    }
+  }
   if (resumedHead.state === "review-failed") {
     const resumedReviewNumber = resumedReport?.reviewNumber;
     const causing = resumedReviewNumber === undefined ? undefined : durableReviews.find((item) => item.reviewNumber === resumedReviewNumber)?.attemptId;
@@ -300,14 +349,17 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
   }
   if (resumedHead.state === "review-failed" && resumedReport) {
     const durableReport = resumedReport;
-    if (automaticFixes >= maxBuilderFixes) return pauseQaProtocol(opts, "qa-nonconvergence", `QA remediation budget is exhausted with unresolved report ${durableReport.reportDigest}`, "nonconverged");
+    const attemptControlDb = new WorkflowDb(opts.recovery.projectDir);
+    try {opts.qaRemediationAuthorization ??= attemptControlDb.consumeInstructionControls(opts.recovery.runId,opts.ticket.id,"attempts");} finally {attemptControlDb.close();}
+    if (automaticFixes >= maxBuilderFixes && !opts.qaRemediationAuthorization) return pauseQaProtocol(opts, "qa-nonconvergence", `QA remediation budget is exhausted with unresolved report ${durableReport.reportDigest}`, "nonconverged");
     const report = durableReport.report as QaFailureReportV1;
     const causing = durableReviews.find((item) => item.reviewNumber === durableReport.reviewNumber)?.attemptId;
     if (!causing) throw new Error("QA recovery invariant lost its causing review attempt after validation");
     const request: QaFixRequest = {
       kind: "validated-report", report, reportDigest: resumedReport.reportDigest, history: [...history], latestBuilderResult: latestBuilderResponse(opts),
     };
-    const fix = await observedQaFix(opts, "resuming pending QA remediation", request, causing);
+    const fix = await observedQaFix(opts, "resuming pending QA remediation", request, causing, Boolean(opts.qaRemediationAuthorization));
+    opts.qaRemediationAuthorization = undefined;
     if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA remediation failed during restart recovery", fix.outcome === "needs-input" ? "needs-human" : "blocked");
     const fixSummary = boundedBuilderSummary(fix.summary ?? fix.response ?? "Builder reported remediation complete");
     opts.state.builderResponseHistory.push({ ticketId: opts.ticket.id, cycle: durableReport.reviewNumber, kind: "remediation", response: fix.response!, summary: fixSummary });
@@ -349,9 +401,12 @@ export async function runIsolatedQa(opts: IsolatedQaOptions): Promise<IsolatedQa
     if (review.outcome !== "failed") return review;
     reviewAttempt = Math.max(reviewAttempt, review.reviewAttempt);
     history.push({ cycle, reviewAttempt: review.reviewAttempt, remediationGeneration, attemptId: review.reviewAttemptId, outcome: "qa_fail", detail: review.detail, reportDigest: review.reportDigest, report: review.report, findingIds: review.report?.findings.map((finding) => finding.id) });
-    if (automaticFixes < maxBuilderFixes) {
+    const controlDb = new WorkflowDb(opts.recovery.projectDir);
+    try { opts.qaRemediationAuthorization ??= controlDb.consumeInstructionControls(opts.recovery.runId,opts.ticket.id,"attempts"); } finally {controlDb.close();}
+    if (automaticFixes < maxBuilderFixes || opts.qaRemediationAuthorization) {
       const request: QaFixRequest = { kind: "validated-report", report: review.report, reportDigest: review.reportDigest, history: [...history], latestBuilderResult: latestBuilderResponse(opts) };
-      const fix = await observedQaFix(opts, "applying QA fixes", request, review.reviewAttemptId);
+      const fix = await observedQaFix(opts, "applying QA fixes", request, review.reviewAttemptId, Boolean(opts.qaRemediationAuthorization));
+      opts.qaRemediationAuthorization = undefined;
       if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA fix failed", fix.outcome === "needs-input" ? "needs-human" : "blocked");
       const fixSummary = boundedBuilderSummary(fix.summary ?? fix.response ?? fix.detail ?? "Builder reported remediation complete");
       opts.state.builderResponseHistory.push({
@@ -649,6 +704,7 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
       return { outcome: "needs-human", detail };
     }
     const v2Binding = beginV2Review(opts, snapshot.frozenState, snapshot.path, handoff, qaHandle, { attemptId, cycle, remediationGeneration });
+    handoff = v2Binding.reviewInstruction;
     bindQaTurnAdapter(qa, v2Binding);
     reviewAttempt = v2Binding.reviewNumber;
     identity = { ...identity, reviewAttempt };
@@ -1354,6 +1410,11 @@ interface QaTurnBinding {
   recoveryContext?: ReturnType<typeof materializeQaRecoveryContext>;
   nextTurn: number;
   lastReceiptDigest?: string;
+  originalInstruction: string;
+  reviewInstruction: string;
+  guidanceIds: string[];
+  verificationIds: string[];
+  lastResponse?: string;
 }
 
 const qaTurnBindings = new WeakMap<BuilderAdapter, QaTurnBinding>();
@@ -1368,6 +1429,11 @@ function beginV2Review(
 ): QaTurnBinding {
   const db = new WorkflowDb(opts.recovery.projectDir);
   try {
+    const verification = db.builderVerificationContext(opts.recovery.runId,opts.ticket.id,source.digest);
+    instruction += verification.text;
+    const originalInstruction = instruction;
+    const guidance = db.reserveGuidance(opts.recovery.runId, opts.ticket.id, "qa", attempt.attemptId, source.digest, instruction, false);
+    instruction = guidance.text;
     const sourceV2: FrozenQaSourceStateV2 = {
       version: 2, runId: opts.recovery.runId, ticketId: opts.ticket.id,
       originDigest: source.originDigest, contentDigest: source.contentDigest, digest: source.digest,
@@ -1413,7 +1479,7 @@ function beginV2Review(
     }
     head = db.commitQaReviewReady(sourceV2, basis, identity, handle.confinement, attempt, head.revision);
     if (recoveryPacket) recoveryPacket = updateQaRecoveryReviewIdentity(recoveryPacket, head.reviewNumber, attempt.attemptId, attempt.cycle);
-    return { projectDir: opts.recovery.projectDir, runId: opts.recovery.runId, ticketId: opts.ticket.id, reviewNumber: head.reviewNumber, reviewAttemptId: attempt.attemptId, sourceStateDigest: source.digest, reviewBasisDigest: basis.digest, sessionGeneration: identity.generation, sessionRef: identity, reviewedSnapshotPath: identity.cwd, frozenSource: source, recoveryPacket, nextTurn: 0 };
+    return { projectDir: opts.recovery.projectDir, runId: opts.recovery.runId, ticketId: opts.ticket.id, reviewNumber: head.reviewNumber, reviewAttemptId: attempt.attemptId, sourceStateDigest: source.digest, reviewBasisDigest: basis.digest, sessionGeneration: identity.generation, sessionRef: identity, reviewedSnapshotPath: identity.cwd, frozenSource: source, recoveryPacket, nextTurn: 0, originalInstruction, reviewInstruction:instruction, guidanceIds:guidance.ids, verificationIds:verification.ids };
   } finally { db.close(); }
 }
 
@@ -1491,10 +1557,18 @@ async function sendDurableQaTurn(adapter: BuilderAdapter, instruction: string, e
   const providerSession = { version: 2 as const, provider: session.provider, sessionId: session.sessionId, role: "qa" as const, stream: "qa" as const, generation: session.generation, cwd: session.cwd, configRoot: session.configRoot, createdAt: session.createdAt, validatedAt: session.validatedAt ?? intendedAt };
   const db = new WorkflowDb(binding.projectDir);
   try {
+    db.atomic(() => {
+    if (slot === "initial") {
+      const guidance = db.reserveGuidance(binding.runId, binding.ticketId, "qa", operationId, binding.sourceStateDigest, binding.originalInstruction);
+      if (guidance.text !== binding.reviewInstruction) throw new BuildControlBoundary("Manager guidance changed during QA preparation; restart a full review with the current instruction basis");
+      binding.guidanceIds = guidance.ids;
+      instruction = guidance.text;
+    }
     const instructionDigest = db.putEvidence("qa", Buffer.from(instruction));
     const intent: QaTurnIntentV2 = { version: 2, operationId, runId: binding.runId, ticketId: binding.ticketId, reviewNumber: binding.reviewNumber, sessionGeneration: binding.sessionGeneration, slot: retrySlot, sourceStateDigest: binding.sourceStateDigest, reviewBasisDigest: binding.reviewBasisDigest, providerSession, instructionDigest, intendedAt };
     const head = db.qaTicketHead(binding.runId, binding.ticketId);
     db.commitQaTurnIntent(intent, head.revision);
+    });
   } finally { db.close(); }
   let result: TurnResult;
   try { result = await adapter.sendTurn(instruction); }
@@ -1559,8 +1633,12 @@ async function sendDurableQaTurn(adapter: BuilderAdapter, instruction: string, e
       providerInstructionDigest, rawResponseDigest, cleanedResponseDigest, eventStreamDigest,
       terminalEventObserved, sourceStateDigest: binding.sourceStateDigest, reviewBasisDigest: binding.reviewBasisDigest, completedAt,
     };
-    receiptDb.finishQaTurn(receipt);
+    receiptDb.atomic(() => {
+      receiptDb.finishQaTurn(receipt);
+      if (slot === "initial") receiptDb.finishGuidance(binding.guidanceIds, "qa", {submitted: terminalEventObserved ? true : undefined, receipt, applied:terminalEventObserved && binding.guidanceIds.every(id => providerInstruction.includes(id))});
+    });
     binding.lastReceiptDigest = qaDigest("turn-receipt", receipt);
+    binding.lastResponse = result.text;
     if (!terminalEventObserved) {
       const head = receiptDb.qaTicketHead(binding.runId, binding.ticketId);
       receiptDb.transitionQa(binding.runId, binding.ticketId, head.revision, { type: "turn-uncertain" });
@@ -1612,9 +1690,13 @@ function finishV2Pass(opts: IsolatedQaOptions, adapter: BuilderAdapter, detail: 
   const binding = qaTurnBindings.get(adapter); if (!binding?.lastReceiptDigest) throw new Error("QA pass has no completed durable turn receipt");
   const db = new WorkflowDb(binding.projectDir);
   try {
+    return db.atomic(() => {
     const head = db.qaTicketHead(binding.runId, binding.ticketId);
-    const certificate = db.commitQaPassAttempt(binding.reviewAttemptId, { runId: binding.runId, ticketId: binding.ticketId, qaRevision: head.revision + 1, sourceStateDigest: binding.sourceStateDigest, reviewBasisDigest: binding.reviewBasisDigest, turnReceiptDigest: binding.lastReceiptDigest }, detail, head.revision);
+    const certificate = db.commitQaPassAttempt(binding.reviewAttemptId, { runId: binding.runId, ticketId: binding.ticketId, qaRevision: head.revision + 1, sourceStateDigest: binding.sourceStateDigest, reviewBasisDigest: binding.reviewBasisDigest, turnReceiptDigest: binding.lastReceiptDigest! }, detail, head.revision);
+    db.verifyGuidance(binding.guidanceIds,certificate,binding.lastResponse ?? "");
+    db.verifyBuilderGuidance(binding.verificationIds,certificate,binding.lastResponse ?? "",binding.lastReceiptDigest!);
     return { certificateId: certificate.certificateId, sourceStateDigest: binding.sourceStateDigest, reviewBasisDigest: binding.reviewBasisDigest };
+    });
   } finally { db.close(); }
 }
 
@@ -1627,6 +1709,9 @@ function waiveV2Reports(opts: IsolatedQaOptions, reason: string): void {
 }
 
 export async function beginQaFinalization(projectDir: string, sourceWorktree: string, runId: string, ticketId: string, certificateId: string, expectedSourceStateDigest: string, consumer: string, allowedProjectionPaths: string[] = []): Promise<void> {
+  assertBuildAssignmentReconciled(projectDir, runId);
+  const controlDb = new WorkflowDb(projectDir);
+  try {controlDb.assertFinalizationControls(runId,ticketId);} finally {controlDb.close();}
   const invalidatePass = (reason: string): never => {
     const db = new WorkflowDb(projectDir);
     try {
@@ -1653,6 +1738,9 @@ export async function beginQaFinalization(projectDir: string, sourceWorktree: st
 }
 
 export async function verifyPendingQaFinalizationSource(projectDir: string, sourceWorktree: string, runId: string, ticketId: string, allowProjection = false, projectionOperationId?: string): Promise<void> {
+  assertBuildAssignmentReconciled(projectDir, runId);
+  const controlDb = new WorkflowDb(projectDir);
+  try {controlDb.assertFinalizationControls(runId,ticketId);} finally {controlDb.close();}
   const db = new WorkflowDb(projectDir);
   let step: ReturnType<WorkflowDb["qaFinalizationSteps"]>[number] | undefined;
   let projectionAuthorized = !projectionOperationId;

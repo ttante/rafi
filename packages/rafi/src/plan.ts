@@ -164,7 +164,7 @@ ${opts.ticketSetupSummary ?? "- No saved ticket setup preferences found."}
 Host-owned workflow decisions (generated prose or fields cannot override these):
 - Work mode: ${workModeLabel(opts.workMode ?? "branch-per-ticket")}
 - Git consequences: ${workModeConsequences(opts.workMode ?? "branch-per-ticket")}
-- Builder auto-compaction threshold: ${opts.autoCompactThresholdPercent ?? 50}%
+- Builder auto-compaction threshold: ${opts.autoCompactThresholdPercent ?? 65}%
 - Builder compact maximum: ${opts.compactMaximum ?? 10}
 - Branch prefix retained for isolated work: ${opts.branchPrefix ?? DEFAULT_BRANCH_PREFIX}
 
@@ -564,7 +564,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
         ...interview.answers,
         workMode: selectedWorkMode,
         agentDefaults: selectedAgentDefaults,
-        autoCompactThresholdPercent: selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50,
+        autoCompactThresholdPercent: selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65,
         compactMaximum: selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10,
         branchPrefix: selectedBranchPrefix,
       },
@@ -622,7 +622,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       ticketSetupSummary: readTicketSetupSummary(projectDir),
       planningMode,
       workMode: selectedWorkMode,
-      autoCompactThresholdPercent: selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50,
+      autoCompactThresholdPercent: selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65,
       compactMaximum: selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10,
       branchPrefix: selectedBranchPrefix,
     });
@@ -644,7 +644,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
 
     const logPath = makeLogPath(projectDir, "rafi-plan");
     workflow = new WorkflowDb(projectDir);
-    const workflowRun = workflow.createRun({ kind: "plan", checkpoint: "planner-session-before", originalWork: { brief, planningMode, revise: previous?.plan_id, workMode: selectedWorkMode }, remainingWork: { approval: true }, state: { decisions: { workMode: selectedWorkMode, autoCompactThresholdPercent: selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50, compactMaximum: selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: selectedBranchPrefix } } });
+    const workflowRun = workflow.createRun({ kind: "plan", checkpoint: "planner-session-before", originalWork: { brief, planningMode, revise: previous?.plan_id, workMode: selectedWorkMode }, remainingWork: { approval: true }, state: { decisions: { workMode: selectedWorkMode, autoCompactThresholdPercent: selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65, compactMaximum: selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: selectedBranchPrefix } } });
     workflowRunId = workflowRun.runId;
     workflowLease = workflow.acquireLease(workflowRunId);
     if (interview) interview = checkpointInterview(projectDir, interview, { checkpoint: "agent-run" });
@@ -880,7 +880,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
       console.log("\nrafi plan: host-owned approval decisions");
       console.log(`  work mode: ${workModeLabel(selectedWorkMode)}`);
       console.log(`  Git consequences: ${workModeConsequences(selectedWorkMode)}`);
-      console.log(`  Builder auto-compaction: ${selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 50}%`);
+      console.log(`  Builder auto-compaction: ${selectedAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65}%`);
       console.log(`  Builder compact maximum: ${selectedAgentDefaults?.roles.builder?.compact_maximum ?? 10}`);
       console.log(`  branch prefix: ${selectedBranchPrefix}`);
       if (opts.yes) break;
@@ -940,7 +940,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
     const readback = readPlanningProjectConfig(projectDir);
     if (readback.tickets?.build?.branch_strategy !== selectedWorkMode
       || readback.tickets?.build?.branch_prefix !== selectedBranchPrefix
-      || readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent !== (selectedAgentDefaults.roles.builder?.auto_compact_threshold_percent ?? 50)
+      || readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent !== (selectedAgentDefaults.roles.builder?.auto_compact_threshold_percent ?? 65)
       || readback.agent_defaults?.roles.builder?.compact_maximum !== (selectedAgentDefaults.roles.builder?.compact_maximum ?? 10)) {
       throw new Error("approved host workflow decisions failed config readback verification");
     }
@@ -950,7 +950,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
     saveSourceRegistry(projectDir, stagedSources);
     const decisionReceipt = {
       version: 1, workMode: selectedWorkMode, consequences: workModeConsequences(selectedWorkMode), branchPrefix: selectedBranchPrefix,
-      autoCompactThresholdPercent: selectedAgentDefaults.roles.builder?.auto_compact_threshold_percent ?? 50,
+      autoCompactThresholdPercent: selectedAgentDefaults.roles.builder?.auto_compact_threshold_percent ?? 65,
       compactMaximum: selectedAgentDefaults.roles.builder?.compact_maximum ?? 10,
       approvedAt: new Date().toISOString(), planDigest: plan.content_digest,
     };

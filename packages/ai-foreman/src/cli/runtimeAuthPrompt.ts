@@ -7,7 +7,7 @@ import {
   type AgentRuntime,
 } from "../runtimeAuth.js";
 import { BuildOwnershipError } from "../buildAdmission.js";
-import { RuntimeCleanupError, type BuildReadinessContext, resolveExecutablePath } from "../runtimeReadiness.js";
+import { RuntimeCleanupError, runtimeCleanupRecoveryHelp, type BuildReadinessContext, resolveExecutablePath } from "../runtimeReadiness.js";
 import type { RuntimeProbeResult } from "rafi-spec";
 import { otherRuntime, runtimeDisplayName } from "./runtimeSelection.js";
 import { currentActivity } from "../activity.js";
@@ -75,7 +75,7 @@ export async function ensureRuntimeReadyForCommand(
       if (!executable) throw new Error(`${runtime} executable disappeared after readiness`);
       return { runtime, model: opts.model, fellBack: false, executable };
     } catch (err) {
-      if (err instanceof RuntimeCleanupError || err instanceof BuildOwnershipError) throw err;
+      if (err instanceof BuildOwnershipError || (err instanceof RuntimeCleanupError && opts.build)) throw err;
       const failure = err instanceof RuntimeAuthError
         ? err
         : new RuntimeAuthError({
@@ -85,22 +85,23 @@ export async function ensureRuntimeReadyForCommand(
             cause: err,
           });
 
-      if (nonInteractive && !opts.durable) {
+      if (nonInteractive && !opts.durable && !(failure.cleanupUnverified && process.stdin.isTTY && process.stdout.isTTY)) {
         throw failure;
       }
 
       const fallbackRuntime = otherRuntime(runtime);
+      const canSwitch = allowSwitch && !failure.cleanupUnverified;
       const choice = opts.durable && !opts.choose
-        ? await durableRuntimeRecovery(opts.durable, failure, opts.label, fallbackRuntime, allowSwitch)
+        ? await durableRuntimeRecovery(opts.durable, failure, opts.label, fallbackRuntime, canSwitch)
         : opts.choose
-        ? await opts.choose(failure, { otherRuntime: fallbackRuntime, allowSwitch })
-        : await promptRuntimeRecovery(failure, opts.label, fallbackRuntime, allowSwitch);
+        ? await opts.choose(failure, { otherRuntime: fallbackRuntime, allowSwitch: canSwitch })
+        : await promptRuntimeRecovery(failure, opts.label, fallbackRuntime, canSwitch);
 
       if (choice === "retry") {
         currentActivity()?.note(`rafi: retrying ${runtime} readiness check`);
         continue;
       }
-      if (choice === "switch" && allowSwitch) {
+      if (choice === "switch" && canSwitch) {
         currentActivity()?.note(`rafi: checking fallback runtime ${fallbackRuntime}`);
         try {
           const probe = await check(projectDir, fallbackRuntime);
@@ -117,7 +118,7 @@ export async function ensureRuntimeReadyForCommand(
           if (!executable) throw new Error(`${fallbackRuntime} executable disappeared after readiness`);
           return { runtime: fallbackRuntime, model: undefined, fellBack: true, executable };
         } catch (switchErr) {
-          if (switchErr instanceof RuntimeCleanupError || switchErr instanceof BuildOwnershipError) throw switchErr;
+          if (switchErr instanceof BuildOwnershipError || (switchErr instanceof RuntimeCleanupError && opts.build)) throw switchErr;
           const switchFailure = switchErr instanceof RuntimeAuthError
             ? switchErr
             : new RuntimeAuthError({
@@ -178,6 +179,21 @@ async function promptRuntimeRecovery(
   allowSwitch: boolean,
 ): Promise<RuntimeCommandRecoveryChoice> {
   log.error(err.message);
+  if (err.cleanupUnverified) {
+    while (true) {
+      const choice = await select({
+        message: `${label} is paused until probe cleanup is verified. Choose a resolution.`,
+        options: [
+          { value: "retry", label: "Recheck cleanup after repairing process visibility" },
+          { value: "help", label: "Show platform-specific resolution approaches" },
+          { value: "cancel", label: "Cancel deliberately; keep project files" },
+        ],
+      });
+      if (isCancel(choice) || choice === "cancel") return "cancel";
+      if (choice === "help") { log.info(runtimeCleanupRecoveryHelp()); continue; }
+      return "retry";
+    }
+  }
   log.info(
     "Cancel stops this command and keeps project files in place. It does not uninstall packages, delete generated files, or change configuration.",
   );

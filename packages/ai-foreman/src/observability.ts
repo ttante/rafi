@@ -283,7 +283,7 @@ export class ObservabilityStore {
       const spans = (this.db.prepare("SELECT * FROM run_spans WHERE run_id=?").all(runId) as DbSpan[]).map(spanFromRow);
       const executions = this.db.prepare("SELECT started_at,ended_at FROM run_executions WHERE run_id=?").all(runId) as Array<{ started_at: string; ended_at: string | null }>;
       const observedEnd = input.completedAt ?? this.now().toISOString();
-      const completedAt = input.completedAt ?? (["completed", "failed", "superseded"].includes(input.status) ? observedEnd : undefined);
+      const completedAt = input.completedAt ?? (["completed", "failed", "cancelled", "superseded"].includes(input.status) ? observedEnd : undefined);
       const createdAt = input.createdAt ?? executions[0]?.started_at ?? observedEnd;
       const activeExecutionMs = unionMs(executions.map(item => [new Date(item.started_at).getTime(), new Date(item.ended_at ?? observedEnd).getTime()]));
       const attributedMs = unionMs(spans.map(item => [new Date(item.startedAt).getTime(), new Date(item.endedAt ?? observedEnd).getTime()]));

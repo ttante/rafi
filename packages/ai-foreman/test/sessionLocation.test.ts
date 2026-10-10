@@ -1,3 +1,4 @@
+import { runAuthorizedQa } from "./helpers/workAdmission.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -422,7 +423,7 @@ test("each disposable QA cycle creates a fresh provider session in a different s
   const observedQaSessions: string[] = [];
   let created = 0;
   const state: QaStreamState = { reviews: 0, modificationViolations: 0 };
-  const result = await runIsolatedQa({
+  const result = await runAuthorizedQa({
     ticket: {
       id: "T001", order: 1000, title: "Fresh QA", area: "test", priority: "P1", size: "S", risk: "Low",
       depends_on: [], summary: "Verify QA isolation", acceptance: ["isolated"], required_tests: ["test"], likely_files: ["README.md"],

@@ -1,0 +1,1060 @@
+{
+  "version": 2,
+  "date": "2026-10-09",
+  "implementationStatus": "Implemented; the approved after-pass Builder policy and audit findings are resolved and final local validation passed.",
+  "releaseReady": false,
+  "plan": "docs/manager-qa-and-resume-implementation-plan.md",
+  "runtime": {
+    "node": "20.19.0",
+    "platform": "native macOS",
+    "execution": "Host process inspection and child-process/PTY access enabled for tests; deterministic provider transports. No authenticated provider calls in acceptance journeys.",
+    "dependencyOrLockfileChanges": false
+  },
+  "packages": {
+    "rafi-spec": "0.8.13",
+    "special-agents": "0.8.12",
+    "ai-foreman": "1.7.20",
+    "@rafi-ai/cli": "0.9.20"
+  },
+  "protocols": {
+    "managerReads": [
+      1,
+      2
+    ],
+    "managerActions": 1,
+    "ownershipRepair": 1,
+    "qa": 2,
+    "workAdmissionWriter": 4,
+    "schemaMigrations": [
+      "004_admitted_build_work",
+      "005_manager_controls"
+    ]
+  },
+  "revision": {
+    "head": "4aa437b3cf19d83d7bb5dc8482bb4b04709c887a",
+    "workingTree": true,
+    "sourceManifest": "/private/tmp/rafi-guidance-followup-source.json",
+    "manifestFileSha256": "24666a9091e3bc129be94f90cf77a34f8de643e30051ea2518c4a8b4bf31c4f7",
+    "packageFiles": 396,
+    "manifestScope": "Package source, tests, documentation and metadata, plus the root CLI documentation and implementation plan, excluding dist, node_modules and Finder directory-view metadata; verified unchanged after final validation. This validation record is updated after validation.",
+    "frozenFiles": 398,
+    "rootDocumentFiles": 2,
+    "sourceFilesSha256": {
+      "docs/cli.md": "1e323183b446f895ff43580b9e95c95785b88df24e4e1c53a7f403dde2fdf253",
+      "docs/manager-qa-and-resume-implementation-plan.md": "0832306687e864018076809106be6345fbfb682efaf5f5772c130416f8bf823c",
+      "packages/ai-foreman/.claude/settings.json": "f66a7cf27f1d9f8549a0c3f84ebd75f728dd72b7571136035fd24a8bff75f6b8",
+      "packages/ai-foreman/.gitignore": "a0d481e109e6c0113cd57b0fa46f77c7e42bb6729ad11a542e273c4a7a4249c4",
+      "packages/ai-foreman/LICENSE": "5c9817c129b98e7bb966bca028c43c19107102ef8e03fe799bffb4354f4ef015",
+      "packages/ai-foreman/README.md": "5f8154937d51b1fc68457cc337ac508fb8f713b86938f1c7b6103f70373b6e11",
+      "packages/ai-foreman/Untitled": "df4c1f5976933d3e33a8e0ab5cd2d060adea6d24f4c63d72847ed570f620b785",
+      "packages/ai-foreman/foreman.yaml": "1fc5675dfc6fc3beb051658e55684a5504d23baeab34a7433c7a759e8802cc98",
+      "packages/ai-foreman/package.json": "c58df90e201ceccdb377d5eb0a9c3d9ff4709461d68bac2add46cdcc3b05f997",
+      "packages/ai-foreman/src/activity.ts": "70ad0bbee90f3ff58b430ce004813641f86dd15fdfd3b70487e3a2b090cdbed0",
+      "packages/ai-foreman/src/adapters/claude.ts": "f9c15f291992efd131dec3056a43821481109fd91acb50d54dacc99b397ded25",
+      "packages/ai-foreman/src/adapters/codex.ts": "4292164c5e13b87fd593ead469c948c15e5d28cc176e28dfaea94907c3f9aeec",
+      "packages/ai-foreman/src/adapters/recovering.ts": "c97971b2cd3614c37813db1f5ddff2403659ca0e41a31fb2f2ada145f4020961",
+      "packages/ai-foreman/src/adapters/sessionFailure.ts": "5386d7aaf71b475920bddb0308b5e284a64faf75160dcdf934ac374588b0c92c",
+      "packages/ai-foreman/src/adapters/types.ts": "0c37871d559c9cbe7ede1e2591d11d1d031510cca71259c762adfbafd0c1843a",
+      "packages/ai-foreman/src/agentRun.ts": "639580fe2c70fd2337f6e9a77e4300b74ac8266497993aee375a62ad2814ac3c",
+      "packages/ai-foreman/src/branch/currentGuard.ts": "0afb31794b06c4b3121108d3acd2c156d8d383eef4eea6b8dc0eb092dc59fa21",
+      "packages/ai-foreman/src/branch/finalization.ts": "15d4d0117bc641608b8791ab17d3bfb7951b8b497c9a75be6dd36e63b4208835",
+      "packages/ai-foreman/src/branch/git.ts": "d1187937bb66f792c52dc61ad5aa06a7d7e189d734986e5d5086c24ef198c6b4",
+      "packages/ai-foreman/src/branch/github.ts": "941a4b150459cf14db8ce16a6c7dd3faa9a7d9dc554f7696fd583488e60f0c33",
+      "packages/ai-foreman/src/branch/gitlab.ts": "1b347a377ac31804e1a61a33e3a8b1a4957ea23cecf6e9531f8edba306182b53",
+      "packages/ai-foreman/src/branch/planner.ts": "e51a0762dc11ce651018c28d02df6b94a29876612f82634709a86518f9bffe6e",
+      "packages/ai-foreman/src/branch/prefix.ts": "b2778b2bc03759611cd5d3e6f87a97c577a826138b325f120f0931ae43ab8fd1",
+      "packages/ai-foreman/src/branch/presentation.ts": "d4c1f2eca21cceaf57bd170de0c7aa63bacf0f4d3ee7b3db0216480a9960db4a",
+      "packages/ai-foreman/src/branch/resume.ts": "430da5cba86de56a9167fbcc36ac9944f83874156c4492af88682ee1d56615f9",
+      "packages/ai-foreman/src/branch/runner.ts": "641cb055e5ebc9cdcb7277601cbb6f047f5d094c29aa7cf9f4e7c83ca0ea1792",
+      "packages/ai-foreman/src/branch/types.ts": "5e5a68bd1092e39a0207e8df1326b172d17e81219c711165af44ae9649999f19",
+      "packages/ai-foreman/src/buildAdmission.ts": "e5d237aff8de68ff324850e794dd93c38e36a81be22efae31df7e467e1ef0f48",
+      "packages/ai-foreman/src/buildApproval.ts": "751687f83b2ae2d9ed97ecf82a0155dc5d6aaa284a9ae2e6ad0f7f687664e8d9",
+      "packages/ai-foreman/src/buildAssignment.ts": "2a6b46683c8399711bca9e7587c3b7678d03bc68913815516013a6da2765114b",
+      "packages/ai-foreman/src/buildInterventions.ts": "022ad33254f39ff16a4138e557b225eeff5e1dd4007655298251c96336863150",
+      "packages/ai-foreman/src/buildLaunchGate.ts": "ccb539d5c147ec66ac417023cb51e74049c3420b04cfdf0534d0d2e3f6b70345",
+      "packages/ai-foreman/src/buildOwnershipReconciliation.ts": "0747d8ded7dc7d922b6558b6637b1a4bd40d4ba9cf10420b9999aefa270c4fbd",
+      "packages/ai-foreman/src/buildOwnershipRepair.ts": "29d61dcfe7e0d25dac71e2e9ca4cea2f80ce99faad3a42d2799326bf07d64f01",
+      "packages/ai-foreman/src/buildRuns.ts": "aaccb3eecf9d1e12c8cad5bdb7eb6acd81499c922ec071bc6e9aa89e0d7f5bd8",
+      "packages/ai-foreman/src/buildSyntheticWork.ts": "d6699bf0fe30a5f0cc2a8c8ead7e3a6459197a72c120df27b653ad0201fc7a03",
+      "packages/ai-foreman/src/buildWorkAdmission.ts": "bca5aa7e7c5255d40a5969097eee233df93a36b90fdd7e0db08f06d5351f3aba",
+      "packages/ai-foreman/src/buildWorkAuthorization.ts": "e63e86b6e17b72d1edffb11a34535ad406807ecc9be95ecb06acda3c41d315cf",
+      "packages/ai-foreman/src/buildWorkMigration.ts": "f3f0ff6ca57881559a01463caa4f108784d916a79ab8fd0b5a2c4a31e5721a59",
+      "packages/ai-foreman/src/buildWorkReconciliation.ts": "79f65c5aa99cc69c0e81e86466c1dd4b97db3c5c4016a0d1e3ae77d8099a6c27",
+      "packages/ai-foreman/src/builderGuidanceFollowup.ts": "22580a97e83b4e32c8b653656ce2a87f47d962e5f29329f5b27e74695de91b10",
+      "packages/ai-foreman/src/cli/doctor.ts": "41a77d829191e1b859891cbc32730ffa24b5656a72460ca71cc6f650b2c8160d",
+      "packages/ai-foreman/src/cli/events.ts": "ccf50b1ca8ae651dcbfa49d20d8236e46693c7b38a0949b7bac9ae9535e9b0ab",
+      "packages/ai-foreman/src/cli/handoffs.ts": "70810eb9c4b43594606303b477f67ca380ca76148581771740d73bc9c0358818",
+      "packages/ai-foreman/src/cli/manager.ts": "37dd6bd08c93338680c124aa72b0a419ef86372f744ac7ef2226ab14e7f56e76",
+      "packages/ai-foreman/src/cli/recovery.ts": "f4f99e8a51738ddedeae72fc58286d46f52b388adf120b94919f66d5e7042aea",
+      "packages/ai-foreman/src/cli/runtimeAuthPrompt.ts": "bc42b99fc6d8f5f12ae7407df28ab8af8ef267bd04f979a9b36d6e7f78822a38",
+      "packages/ai-foreman/src/cli/runtimeSelection.ts": "6623e66153eb13242e21ff83ace6bc8c1b01f9c04442df45237ffd762c491218",
+      "packages/ai-foreman/src/cli/start.ts": "7b865027d7fc471e2f19e8fc4d975efff03b54a00c5bac4ebca88f552c38141a",
+      "packages/ai-foreman/src/cli/state.ts": "f778e78e8bde3b71134c535b8e0e0c49701de97d94d77b737a116e17fa6c8dcd",
+      "packages/ai-foreman/src/cli/status.ts": "51b4dc5abbe796006a4fa04bb3c803c32535541de0ac04730919a8b30c837dae",
+      "packages/ai-foreman/src/cli/tickets.ts": "aae5eb332f9f187e6466650d370c3e678d8cbab3cf06b7546fbc9fff6837b3bd",
+      "packages/ai-foreman/src/config.ts": "c75c01af580a7cd9b9ea7b567731106e7f09587d48c477bf53220ac2f58e007d",
+      "packages/ai-foreman/src/continuity.ts": "33f6a73d10d7e8c7d2450d1890c2a5f6afce129d314aa4e02cf95cd87af16b23",
+      "packages/ai-foreman/src/diagnostics.ts": "813dd2e059e56185e0d2fcc160a8e629a30f86e92d79dee434273e4ca69255eb",
+      "packages/ai-foreman/src/foreman.ts": "6554a3bf2050dab07834635a38a2d6fda93c36b3251b89c255976764766b0f41",
+      "packages/ai-foreman/src/handoffs.ts": "fd92732dd8c31737794c998f4fe5ef142e9ee5f966d52aadc4ca295f7d1e7804",
+      "packages/ai-foreman/src/humanDecision.ts": "b2a3eacc1edf07a52a0577ed007026c0cd2192b060d2516e12ea1bcbc08097f7",
+      "packages/ai-foreman/src/index.ts": "b254a108d18d21eec20890dbfbfc5b4ab2a156fe22265b2ab0c9b0b84cd8b063",
+      "packages/ai-foreman/src/interviews.ts": "82a288fadc321419871f14247e384e301e5098d792f523cded1075f65c853436",
+      "packages/ai-foreman/src/linuxProbeInventory.ts": "0838fe5627b9e40b6718ba6b9557124d0c27ca8f7d9632141c91da51e3fb3555",
+      "packages/ai-foreman/src/log.ts": "c8e4065b9f2c392f27414ac80b58335c404792958b14319a9a725144e8271771",
+      "packages/ai-foreman/src/managerEvidence.ts": "68de8c0d6a8604a55918bf50a6ca90748c7c0bfe1b2a45c0d303eb2f770bd187",
+      "packages/ai-foreman/src/managerEvidenceArtifacts.ts": "3f16b16ec4de594adfea1c5b8a9c9e8248fdf3c7dfd9b16609fca936b793b65a",
+      "packages/ai-foreman/src/managerPacket.ts": "f88cd7cc426562ffba314e44ca51684db1fb6554a73dd6272ff319a690ab637a",
+      "packages/ai-foreman/src/markers.ts": "9a0f7b7ce5204d9953f9bfcb4d7433577427296823ad0cb158a56a1a50367faa",
+      "packages/ai-foreman/src/notify.ts": "78be9f422ea2da7ae7dc654e5f8f09bd1ca2361ed1702ab11e71a321813d16fc",
+      "packages/ai-foreman/src/observability.ts": "831d8c21ab94f56b713b7a3e31b81f4167455fff384720cd1a3a4d1199c8176b",
+      "packages/ai-foreman/src/operationRecovery.ts": "405e30daad9c101eaa06a97916a979b559261cd6f97f2af889bb8d1b38ca83f3",
+      "packages/ai-foreman/src/outcomes.ts": "c5238819f0c1d9677d30a3f5abadaaf0383c44a2247fb9f7007d4777a6772aad",
+      "packages/ai-foreman/src/permissions/policy.ts": "54f297a5f028bf3dfe029bdf1533b8a06b92a7384e9b7ebb5617e467b8b02fc2",
+      "packages/ai-foreman/src/planChanges.ts": "96d3307a19c075090c401cdb804c5bf2f93a2b3916ae942990acba969b1afd09",
+      "packages/ai-foreman/src/processIdentity.ts": "ae1cd12eb61bc46f740426551885203287431fe34b1c086e15a1b7614f1d5cdc",
+      "packages/ai-foreman/src/projectDiagnostics.ts": "94020f542d32f7be352e35f574c0bb27c2b29c894668c8ee443fee06c6766b76",
+      "packages/ai-foreman/src/providerQuestions.ts": "10b4e3f65e4c12c6fb52982e42303ca6a7e20371e92ae6565ac43069bd6ae818",
+      "packages/ai-foreman/src/qaDeliveryJournal.ts": "99855c1b4b84013f7d1c4b84efc4a402d26d2bde91928c8390f4ed4549b503c8",
+      "packages/ai-foreman/src/qaEvidenceReader.ts": "823b84eea897faccf849b9d98bf2fa1acf4af90d5fbc1e88b3b48674db3613ea",
+      "packages/ai-foreman/src/qaFailureDelivery.ts": "67d0578ec3e446ab2df1c3d232a4d40a29b73c08f443c07e520aebe0cf9c96ed",
+      "packages/ai-foreman/src/qaHandbackHistory.ts": "ee599199f4a80e0705e725324a4008b8a6366993c826ed4bc880f1ed77936f9a",
+      "packages/ai-foreman/src/qaHandbackMigration.ts": "0c6d7ec3690a16e0491a44677a725f436cb54a677172a28e0609aa3cb101fe6c",
+      "packages/ai-foreman/src/qaPrerequisites.ts": "257b9e57440b096ee74c52c7a8b8ec33fe05a53284511d48ce4544c05a8c0899",
+      "packages/ai-foreman/src/qaProtocolV2.ts": "c0cea9b7e02b640a427f1d6caf25a34a356ba6851c63dfc1a4f26c277b800832",
+      "packages/ai-foreman/src/qaRecovery.ts": "eeb68f3be5b842a1431adde334fe66a917c2bb81509c9bc64d0a139051e8e216",
+      "packages/ai-foreman/src/qaReview.ts": "d03f0e0ca530165585f3164b24afcc095b9a259636e7aadf971a69b8ba84437c",
+      "packages/ai-foreman/src/qaRuntime.ts": "e0eb692145f5f256cef4a50afb8ea8923c41a604096c9e5d81d9cdbcce696281",
+      "packages/ai-foreman/src/qaSnapshot.ts": "3eac96233f7da1ab3d8c76cbef04170265b1f02ecc9828bd2f295a94ab174312",
+      "packages/ai-foreman/src/qaTimeline.ts": "ad8b847ee128fa010de82b0d753c28f357198e912566b1531a5d42c1722ba07e",
+      "packages/ai-foreman/src/questionTrace.ts": "a5dcaf6a27da7df1b6626320c42c007a28fa1c7bca2523a6769729499f4db6b0",
+      "packages/ai-foreman/src/readOnlyProposal.ts": "f60aa3a3b3fbafa1ff99b75be6a5296c319867f826bd3d5267f8b8c23f148de7",
+      "packages/ai-foreman/src/readinessCleanup.ts": "21cc768f3aab2feda56b3fd121616a21403132e01242c699de3365de739461dd",
+      "packages/ai-foreman/src/readinessGate.ts": "d130723dc3cb09a33690b502b9117ca82781280d09a0fd614107b0e9ff8082c6",
+      "packages/ai-foreman/src/recoveryGuidance.ts": "fb12231b29cfde271ab8c6fe0372b2b4ea0c91a31026da31e464029f74f73cae",
+      "packages/ai-foreman/src/recoveryPolicy.ts": "d54e84fc4cc3bfae9538c7a1284534ef32d472300ec7e6f5b66fa60d4d59861c",
+      "packages/ai-foreman/src/roles.ts": "4dbc99d1fae097d130627ee1a9aaa02548a00248b7b400e0a49f3848751792b7",
+      "packages/ai-foreman/src/runtimeAuth.ts": "052d47dedc75a888b254a36c4d26ebf968773785d518bac2f27c7cf17bd2ea51",
+      "packages/ai-foreman/src/runtimeReadiness.ts": "51759abf12c10c5d35e787f3d6c70e7eb7c8f44d564f49cd45c24d9757fb0cda",
+      "packages/ai-foreman/src/sessionAvailability.ts": "c68ddf505adc74f026ddf5623403421f9973382cec5550d9ede2d3a23486a3e4",
+      "packages/ai-foreman/src/sessionIdentity.ts": "2c90a24134065b7c0f3ab6ece8feea306f2a043474209d10e7469f1a547a4586",
+      "packages/ai-foreman/src/sessionLifecycle.ts": "d8167f6c3110724a302b9432b098e9eadaed502ca9dc3f727b8d3a40a298653f",
+      "packages/ai-foreman/src/sources/sourceRegistry.ts": "6f442a5a858cec9f105c1e2bbb61d88c65f75cfe0bb37252dc1488411f2c6e39",
+      "packages/ai-foreman/src/stateTransfer.ts": "c8de156ae84378cf048e254a462e56edf5b9245f0fdf3b786f257bc586840c8a",
+      "packages/ai-foreman/src/statusReporter.ts": "79e80d662f556f9631d339e054564354923ed3ec6e35514322de1c60191975fb",
+      "packages/ai-foreman/src/supervisedStart.ts": "cb996a43ed9b84abef3d79004c5e91dbfeb23cd1c20bf4b34c07f7f893c15f7f",
+      "packages/ai-foreman/src/supervisor.ts": "fd03d78fadfb13137901142cd34d6a92d7de14c114de0bf8db995d9974536d45",
+      "packages/ai-foreman/src/ticket-progress-template.md": "8f75ae9f90a821566db410d67f3c709882a0df28c0b897a96fed615ba04c7da2",
+      "packages/ai-foreman/src/ticketHistoryReader.ts": "3d03a6f73ce6d35af17fb8d4b3763409a2443197afb353185b21663515b95fe5",
+      "packages/ai-foreman/src/ticketPlanning.ts": "fc70faf17475f50c297eee24d8a691745201d530d9b4347cfa92fb19a126997b",
+      "packages/ai-foreman/src/ticketPopulation.ts": "037473eeecba515340be1e0c5dde0d884513835dea9bdc70dc4ee0a124eb97b9",
+      "packages/ai-foreman/src/tickets/blockers.ts": "455bdf0a65cde6179d5c1e47d79dcd241ffd0bfd78376fff4409f46abcdf202f",
+      "packages/ai-foreman/src/tickets/commands.ts": "21b2875c72b2abe837bd4d664fe11bd3d13b35a286553358e148b7ecbc756d93",
+      "packages/ai-foreman/src/tickets/config.ts": "4fd34368a70e1b58df4dd0066725b5f75f86bbf6c8bfc886021913d979206442",
+      "packages/ai-foreman/src/tickets/delivery.ts": "0f2d7056898a65cca47d730ca6a90acb09a542d183bac86dc68f76536e3ad29b",
+      "packages/ai-foreman/src/tickets/details.ts": "68182411606ba027709801f7eb8ef17e4ea682e208e930430ff8c315e5a19a46",
+      "packages/ai-foreman/src/tickets/eligibility.ts": "bef791311245b1c09641b06729402d44e8f81c04d37d2bec5934e0bbe314e6e0",
+      "packages/ai-foreman/src/tickets/events.ts": "4adb3aac24247c50d7921280840e05212c790353c3cad89bb09d8d655abfe172",
+      "packages/ai-foreman/src/tickets/groupReset.ts": "f03eb8278f8f556b5f173660f03722ee09e8f0a1f0c6e2b014be9397a38d06ca",
+      "packages/ai-foreman/src/tickets/groups.ts": "d9fb0f58bbe9af08a5638d7bee64d0dcb0dc3b175d8878719a3bd7de2b86db23",
+      "packages/ai-foreman/src/tickets/importer.ts": "2fddc82ab222cb8f870983d8e9c1cee55119504ebf6f9868c92260862276782b",
+      "packages/ai-foreman/src/tickets/output.ts": "fdf330d341fa2f0698d1604f663eae9c0ac7551c4c9bc37b6437c562e519f18a",
+      "packages/ai-foreman/src/tickets/queue.ts": "5326ea639e6dcd8651b73ef9bf79ee11f20e11e8a7b08e9dd62ae17b904241ac",
+      "packages/ai-foreman/src/tickets/recommendations.ts": "2499ed8aeed678f802ac4da3ccbcd676d1171e32f7784f69fd00ca84aaa542aa",
+      "packages/ai-foreman/src/tickets/renderMarkdown.ts": "cec3834833fd707bcce3245927373e5e69dc55d5bad6f8996ef9fd5e13e5098a",
+      "packages/ai-foreman/src/tickets/reset.ts": "3a6c2cb5c0406a98606b941bedca7df07b1c9ba4570cec492ac18d661d24857b",
+      "packages/ai-foreman/src/tickets/reviewStandards.ts": "2c0b829bc8ab19ca1713e4529c3819055d3a39f146497e101fd162b9bc180427",
+      "packages/ai-foreman/src/tickets/setupConfig.ts": "06dc3c2cbc88bcde07353eccfda9e942b5780aee5128087878b165cb7771d658",
+      "packages/ai-foreman/src/tickets/sourceFetch.ts": "5d3277ab8ddd90a2d732382176cbb3aaa1a06fa3d7ca23b3cc55a94b229cd2ad",
+      "packages/ai-foreman/src/tickets/stateDb.ts": "3148952f1bf8887a72a22e4ab391e1fb02fd56784848cefe0521fb6b7e7efd02",
+      "packages/ai-foreman/src/tickets/ticketLoader.ts": "606e5fbe8e402d43e85861b1e160ec89af9e989e436f8adf19b95753c41151b1",
+      "packages/ai-foreman/src/tickets/ticketSchema.ts": "06a9eb172f2d32e32c1a548b6524b8cd5acc232a12da700873caefe34ff6473a",
+      "packages/ai-foreman/src/tickets/validate.ts": "e02a89dc9b5a87d40bcab20c6c17551de154ab3f1c37f60570bc8635e64ba799",
+      "packages/ai-foreman/src/util/asyncQueue.ts": "ae2ea61509154a2ca9be230018af1b74fc1a66aa085e935067b5059b9a257091",
+      "packages/ai-foreman/src/util/deadline.ts": "0ab8c7eb1366550836455e0e65d689ce9c40966c0d99ca414ab4a84f6110637b",
+      "packages/ai-foreman/src/windowsProbeJob.ts": "e60e89443ebc9e4569a2e56f5b326601543be60966aeef89e9a9fd5c419a9ca4",
+      "packages/ai-foreman/src/workflowDb.ts": "a599eb2dbb3d4ec3e95d08f076af7604efad23cd7ada48e8710a9ad77e5e4287",
+      "packages/ai-foreman/src/workflowReader.ts": "0cfc236486069526297f73f1ce162a5e79460609155dc473655de6e062a02e35",
+      "packages/ai-foreman/test/activity.test.ts": "ee836aa050ec724b00407c39bebc65b6c7c3bff6107b5f6a9cccde6f739db97a",
+      "packages/ai-foreman/test/adapters.test.ts": "52e5aeb0de5edfbd0ab5c8109e761e5906e3afc8f72604db6f1697b733fc4309",
+      "packages/ai-foreman/test/alignedPlan.test.ts": "89ddd736c20600d1ce15fdaceaddeea1279f3c8c515016986dd0218138f9527e",
+      "packages/ai-foreman/test/branch.test.ts": "1922026d9528bcff425218716586a1319e56012bcb75744b505ecc3d1f160ac5",
+      "packages/ai-foreman/test/branchFinalization.test.ts": "cbfd2e558a33a4d7856a88f5dce6ad1b6834e12bf7f34f464dc496ff47406d05",
+      "packages/ai-foreman/test/branchPresentation.test.ts": "aa96b2b4894932d61bfbffcaafc6dd39843712ab7b73d244300b6d7553a195a5",
+      "packages/ai-foreman/test/buildAdmission.test.ts": "f39b2bc6b5c416c7bfc2a4de95d781e41f75d5dcf823ccdfb6d00ab2d50319f7",
+      "packages/ai-foreman/test/buildAdmissionLive.test.ts": "baaf750e09ea1d79d1fd8e1680ba056999e3db32d2e3b50196c1e061459c88d6",
+      "packages/ai-foreman/test/buildAssignment.test.ts": "d24179238cb0da504105967be9b53d344d36d6b0dbac81038a4998efabc74867",
+      "packages/ai-foreman/test/buildInterventions.test.ts": "2fa9cfbb5ae3cfe4b32c123ef5b1f3aa0be1c2135533effda911ed6ce03e4526",
+      "packages/ai-foreman/test/buildOwnershipReconciliation.test.ts": "234221d2129d63a2b18f31c9b65b3091b48006242e18fe3dd01b397cdd2b6eec",
+      "packages/ai-foreman/test/buildRuns081.test.ts": "21c55aa8a5cacce2054ccc961f39a5cd002d320b1d5c32c5126d0b7b4d689ff8",
+      "packages/ai-foreman/test/buildStallInvestigation.test.ts": "3aaf3eb8bade8f36e1e4753aa2741da963bcfc092fed2c8324e5fa0d1d7c2d54",
+      "packages/ai-foreman/test/buildStallRepairs.test.ts": "b7cb7d270625718c315a141fa83dccc29140f2e33e61a657d206236077223bad",
+      "packages/ai-foreman/test/buildWorkAdmission.test.ts": "521c7402c69c5688e5890930000ea9ede3d21a8467ed1fd9c6265d2e3ca4ec49",
+      "packages/ai-foreman/test/buildWorkMigration.test.ts": "6dfcd83a6335bd97669fa1959fb7e38edc74bc5fd315a97e1f72c1b67cf635cd",
+      "packages/ai-foreman/test/codex.test.ts": "75effe506122e80bc8831d92a0f98cf6fb36ab832943d9e55286a1eecd474189",
+      "packages/ai-foreman/test/delivery.test.ts": "19764fcd002f1616d377f7481d38651fd7533a5329449e71e04f2ec0d75fd006",
+      "packages/ai-foreman/test/events.test.ts": "fa6f5d886dc802e9e43219c898d5a4dab34de1085a20e766351ee8aebebb897c",
+      "packages/ai-foreman/test/fixtures/build-stall-codex.cjs": "11d807302be83b885647baaa06a6c80d7a8605702b171cda3c18ca552afac581",
+      "packages/ai-foreman/test/fixtures/handoff-crash.ts": "d0c0a82d363d1fa343e747f5b397975c37af46d23f28b7f53bb3e5f2658cd34f",
+      "packages/ai-foreman/test/fixtures/qa-handback-v2.sql": "3abc79db9b84aabdd07d7a3812219bb455a5bf5004a75c5a87613cec88531f6e",
+      "packages/ai-foreman/test/foreman.test.ts": "36341c14ba6d819ba635ae5b08f2cc603599e591741fb67f7ec5552428a70b69",
+      "packages/ai-foreman/test/handoffCrash.test.ts": "a544cfa371cfe04c114100e578714daecc724e21dd023f0b72b6c05aa3f4dea8",
+      "packages/ai-foreman/test/helpers/legacyWork.ts": "fcfabd7b0170214c8ffcb5a9a34558001df266ad09504bce9a3c9fbb39b02790",
+      "packages/ai-foreman/test/helpers/workAdmission.ts": "c9248a98701f8c07a561f2fda9e14008c712509211d0f3f08f903a0f7ab60479",
+      "packages/ai-foreman/test/interviews.test.ts": "26887016ccf039c98f131285ceac3bd9b957e17b97f479b0f7bfb938d27baeb4",
+      "packages/ai-foreman/test/linuxProbeInventory.test.ts": "715a66e34e3191cb9505873cf060543ba97212788286cd05bc9ee7897a668795",
+      "packages/ai-foreman/test/managerEvidence.test.ts": "ae89a430443fde6aa16ca26ade6a81e6f71435676403df55c8298146d2d6edd6",
+      "packages/ai-foreman/test/observability.test.ts": "4270818b66cf2602dc1941b68a7422074293d31445507b3656cdfa60cb068757",
+      "packages/ai-foreman/test/planning.test.ts": "ef43930785a7b99553eb43198a8e11a65a2ea85567123886cea9f363cdd108bc",
+      "packages/ai-foreman/test/policy.test.ts": "9dd182013d80c775e50f788e0206dcf0a85ec48853bbff8463beaddf7e0314b3",
+      "packages/ai-foreman/test/processIdentity.test.ts": "216740a21484d79d086bf69b32a4d1a34a37689fe6959fe60ef9d23350ebf79a",
+      "packages/ai-foreman/test/projectDiagnostics.test.ts": "7d10a526d506228798b4aff59d11f580a549c9196196f51ed9ff9cc1a4ff978c",
+      "packages/ai-foreman/test/providerQuestions.test.ts": "fda1f9c3b92cee35b55b421edb3240ffa70ab74782d6a7b0693060116395deae",
+      "packages/ai-foreman/test/providerSmoke.test.ts": "574578733b6d9284fe31a8257ea637bd8025a8743a01e76ece892cca2fbcd021",
+      "packages/ai-foreman/test/publish.test.ts": "5b9b60e1ad8dc454aeef068acb1c3efdf3eceb0cc7338e4cdff492d59d28af04",
+      "packages/ai-foreman/test/qaDecisions.test.ts": "fc4a0907c980aadb707f71fa178504f0b3d73ab6b87cef41e2bc9cc67e52baa2",
+      "packages/ai-foreman/test/qaFailureDelivery.test.ts": "eb5d203397b9cc1723044e43ec9a9dce416b53c6b9a447924e084089a74c9eec",
+      "packages/ai-foreman/test/qaGuidanceDelivery.test.ts": "6852dddbe07c2a27cf72261bf27d54a3060ee24ec5f8a6ca01cfffea75d83ca8",
+      "packages/ai-foreman/test/qaHandbackCallers.test.ts": "39df23807b6fe5b89f31f23866f59250e71c1833dceafc06dec1fe8c034a5ea4",
+      "packages/ai-foreman/test/qaHandbackInvestigation.test.ts": "afd7812b1247ba778df8f5db25e3e6217d406150ee79a6a54a0c423a78db057b",
+      "packages/ai-foreman/test/qaHandbackLease.test.ts": "8e6fc9de63e19dbe2d9ac3ff87efaab9e3f17f4feda1d62c536dfe4c3e3a5d7c",
+      "packages/ai-foreman/test/qaHandbackMigration.test.ts": "eb253c88591619776152373dfea1ed467298170bc282f84814fa7e0208d89dfc",
+      "packages/ai-foreman/test/qaHandbackSafety.test.ts": "f7392f830fda6d308546fbedaa643ff02e4d39853a7c9bf107b07d7e2bb148ea",
+      "packages/ai-foreman/test/qaHandoffAcceptance.test.ts": "2f0a66535ec47d7a958127c4c25a6f1de146bf1997ee80312a856f6b4435fc4d",
+      "packages/ai-foreman/test/qaPrerequisites.test.ts": "8d0b1ccac5cc57d2eec46ac97fb1df3e3ce69a112a7abcf3eed695106f523a08",
+      "packages/ai-foreman/test/qaProtocolV2.test.ts": "8fd5b896092fc0aa7cc2c77462f9457e7b1ab0c826e4e8babacbc88beaaa8b62",
+      "packages/ai-foreman/test/qaRecovery.test.ts": "ff124689722a1d5f32b66d6dfdf6e1606e1b57fbc243bcf551163b96a9350650",
+      "packages/ai-foreman/test/qaRuntime.test.ts": "60547cc51709d54881c442f8cb1675448f34d473f7b61525efc0d7ab8ee134f5",
+      "packages/ai-foreman/test/qaSessionPreparation.test.ts": "037cdef02e8f1a377bce88b5c5945baedc7cdbb1f11c319310844ff6a80d18b0",
+      "packages/ai-foreman/test/qaSnapshot.test.ts": "b2f469d8d48f0a6b045e18bfc6408a6980d2466cb2e873716df4f04007a19588",
+      "packages/ai-foreman/test/qaTimeline.test.ts": "157a282a69fec2009609addbf5349aae1dabe25035c373f2cd7b89ae4ca4513f",
+      "packages/ai-foreman/test/questionTrace.test.ts": "0dbec36ad2de56e5066a46ad02f7bd80c09fcef2807963ce6cb3824a071ff21b",
+      "packages/ai-foreman/test/readOnlyProposal.test.ts": "839d6a7f1984f5504b35cdff491db93198212c4932fde477cb7125236d6a35b9",
+      "packages/ai-foreman/test/readinessFaultsPackaged.test.mjs": "1b85d3799bdf3dbb2c173ca445f91bb41dae9249cd043b804e887f76035551ac",
+      "packages/ai-foreman/test/readinessRecovery.test.ts": "9a966e211df60ca3c32eed38aa3476676536c76f2e9ef0be1242df5f42991605",
+      "packages/ai-foreman/test/recoveringAdapter.test.ts": "ed7116206c9d378e45ee7ecff1763687c23f289781c3c2164ffcd92849aa9764",
+      "packages/ai-foreman/test/recoveryGuidance.test.ts": "d743857c29fc8ef66b80d35cda26de99f0e6fc9ac55b3ce0bc7272a9fb06167f",
+      "packages/ai-foreman/test/roles.test.ts": "850dcaa99840a45aaf081d1e0d944a848d9011a27936a588bc577aeb60d8e1f0",
+      "packages/ai-foreman/test/runtimeAuth.test.ts": "0c44483b1e2c469ea370f31a720cbbff4a9e4e91aa9f045bd9486cea4cede635",
+      "packages/ai-foreman/test/runtimeReadiness081.test.ts": "44181a81a90773aa434ccbe9eb7e50c09cba4f68f5a72c2b3b508b26981e909b",
+      "packages/ai-foreman/test/sessionLocation.test.ts": "51bbcd68415f331f0460c85b25c92d619675fa6d02fb6edb4c4781569ff79072",
+      "packages/ai-foreman/test/sourceFetch.test.ts": "82af2327f9e3d2be0ea99a440e8f28f51cac8b99ea93acc9e764912c325bf06e",
+      "packages/ai-foreman/test/sourceRegistry.test.ts": "1607e50caeb3284bf4a13e6da45ba83d334ecc55a6dcde99b59452c718659e7a",
+      "packages/ai-foreman/test/start-output.test.ts": "921e8ce62d2cd59841394c84bdb48928d15b33ed1b9b22ca68220038e16435c1",
+      "packages/ai-foreman/test/startArguments.test.ts": "64d776327652b7f87f13977e982ca5d0da3c7451d7bd0b5a887e386c7fa31b38",
+      "packages/ai-foreman/test/stateTransfer.test.ts": "d8712e56921912537ef248d9d6fafa77995786c6dd5da8385c06cfe262320c00",
+      "packages/ai-foreman/test/statusReporter.test.ts": "bf9348622c276fb6d3ee487d06c84062ddea8fe00f58186b4612e43b89fe2f3b",
+      "packages/ai-foreman/test/stopRecovery.test.ts": "203384d7ecaacd27501b4be1873bfeb201106d02d019e83a13cdde0cad678cd8",
+      "packages/ai-foreman/test/supervisedStart.test.ts": "9f6cc7eb0ee34223978bd491ca888cf14adff7ac0ec87f877ce2f668f9575f9c",
+      "packages/ai-foreman/test/ticketPopulation.test.ts": "abeb8f8a82fc71c6a6f3e166d8be9bed787418e5d8e7eb0dfe82e62846915b83",
+      "packages/ai-foreman/test/ticketShowCli.test.ts": "dfcc8ecdd132e6f628ff5e75c063a589af9d19473908be0d22d853aeddefbb36",
+      "packages/ai-foreman/test/tickets.test.ts": "37e376ddf0f719bd36f980d77cecb87d2f4de9232db6a8d98eb6cb9f43dafb04",
+      "packages/ai-foreman/test/unifiedContinuity.test.ts": "6f573159525ee2580c0d66547dc7949e135c029a12a399683f9dea7132ce2b1f",
+      "packages/ai-foreman/test/windowsProbeJob.test.ts": "c846ed375d3d3816ae119ae06c24624d3b3184a3d614b7389c1134266cf74c7e",
+      "packages/ai-foreman/test/workflowArchitecture.test.ts": "96013718c8f70e1b074d0f1e68d4fc602748b963b63a396c23ff2004748c0f22",
+      "packages/ai-foreman/tsconfig.build.json": "896947b6a25f76c661a2639ac777523f6631d37f1720b9199d535512ee5598d6",
+      "packages/ai-foreman/tsconfig.json": "87f463a5b1ef80b623971f2819bb46c49ca79f3361336e1adf235b583a2b1cf2",
+      "packages/ai-foreman/update-plan.md": "c1a66a835f3a962da9a5eb880875c15c45a897af8c54a5e0413b0888a0f4b1a5",
+      "packages/rafi/LICENSE": "5c9817c129b98e7bb966bca028c43c19107102ef8e03fe799bffb4354f4ef015",
+      "packages/rafi/README.md": "2a0cf64d828419d11ad1a6dc0c526e9014feec025262e2379e74831cbaf6fd4e",
+      "packages/rafi/package.json": "86450ccc433eaba74a1a7484244dcb765325c96cb12ea979775833e086b4ccd2",
+      "packages/rafi/scripts/generate-cli-docs.ts": "98f940c238caac6d04a363cf0afcecf5b14b31ca9dfa3a3a8aadea6a925123a7",
+      "packages/rafi/src/agents.ts": "e96235f2bc158e5e944ec1b130ec8f995a4138cb39611f8ee4661b9f42af27b4",
+      "packages/rafi/src/buildRecoveryOptions.ts": "f4305a13baa8d4f410ed9db8d62b366ac69e830723e1d94fc27d4ed6905bcf1f",
+      "packages/rafi/src/buildResume.ts": "5718b37aff7c9b281891c27da6bfd7b036b017c6090782af5103b8e8bd9ce7c7",
+      "packages/rafi/src/buildStartOver.ts": "3cf2d13b03bc589ed5dbd8fe6b755ebc506ddb7f73afd6e2722d3847157712ef",
+      "packages/rafi/src/compiler.ts": "1e13c1fdc587bd607329aebbfe643f5dcbb13899c40e3b34f16eaf54cb22cdd9",
+      "packages/rafi/src/createRecovery.ts": "42dfe458e86b29f734c76caf3ac1350b338fec9b393ef4b1389709946f6625cb",
+      "packages/rafi/src/createStackInterview.ts": "92e0a2950e36b76b2ff31b1e74cfff282488d95381847f23f9c69aedbdfb3f5c",
+      "packages/rafi/src/discovery.ts": "cf2907a38507a023a2feb89ebf5af149f4a3345b0011e521cad526bc901067c0",
+      "packages/rafi/src/docs.ts": "99243cc13ff2f5c2f9f5c4530c843eeba4b91040d51fd76edcbb069d415b50ad",
+      "packages/rafi/src/gitignore.ts": "f0237231592bdd30fedcd712dfd6a62aa6fb3fb036b85d4d6d627a9953ebb97a",
+      "packages/rafi/src/grillAudit.ts": "91a4656a167a396d224b7401c1a8b96ce928dcf1b806b1b9fa59419e52e80737",
+      "packages/rafi/src/index.ts": "769e927079b71d9884f9c1244753400f23b44e8592a29330f5b1ce86cb8726d1",
+      "packages/rafi/src/lifecycle.ts": "b94ffa3630325902c2debe554f2287db8e810aa4a3ac1ac01d0c02a3b94fcd00",
+      "packages/rafi/src/ownership.ts": "ce8a76959bb2ea7540c09a58d7a33bba654f1cc98048b967e37d0c48a6c9de77",
+      "packages/rafi/src/plan.ts": "de56f6df344c5c5f1284804b08b8c2938734c7ae1813eaea138cde341e7fecae",
+      "packages/rafi/src/planningDriver.ts": "80915eb604cd248a8931dea3ac86483350f38cdf517272bbacef9e2d22a01272",
+      "packages/rafi/src/planningRuntime.ts": "551f708a017be5d396ec7279071515c9223948d1c9984f457535213f929d9037",
+      "packages/rafi/src/project.ts": "9b5813cacd30cf6e9fbe54f31ec0a50fb6e6fc885ea12eb90a09fe75eda888a0",
+      "packages/rafi/src/resume.ts": "a48b9d7ff8bcc834c9f6dba8c377e02a921017c147370d880dc6a875b5dc3fce",
+      "packages/rafi/src/resumeLaunchGate.ts": "83c19a7c56c76a774bad8dad77fcc7322b86e808caf16db8cf2bf4e3811369f6",
+      "packages/rafi/src/resumeLauncher.ts": "c03655d1652794aaed403d88b3bd92d97a713404a4d3dbd3a9fbd14eb49bacd8",
+      "packages/rafi/src/runtimeReadiness.ts": "ea9017c926840eb97716c99c3fede5acf58fa0e00ae4cc32f2fdeb025ee56313",
+      "packages/rafi/src/sources.ts": "a3c6f9da01b102ef8ec6677688dd9d726d0ce40d9ba399bae33748b1916ce535",
+      "packages/rafi/src/structuredPlan.ts": "7a9475ccd1e7b12c25c472a4447f3e7120f42573e6760e0cae5d23290695c6d3",
+      "packages/rafi/src/ticketPlan.ts": "4b7c19d598a54b1654ba89e9c598de225a397b1489fd3b608cc963e5cc4dd900",
+      "packages/rafi/src/uninstall.ts": "ab2ed8202f2ca808ac4aeedb38fa2d0c11d3b7222543b9715161ba905e247dd0",
+      "packages/rafi/src/workMode.ts": "d314d99cd64b9ac01ae0d6971a1370e688d508125467a41d716f3437ecce480d",
+      "packages/rafi/test/agents.test.ts": "501cba4491746fcf1737704389b5c260a1fc28f1bc2c9b3afae10c012a176b02",
+      "packages/rafi/test/buildResume.test.ts": "931f162c8476ca9ca210a0dbaba0960fba6246e4f19d0cebda0b361b23c1632c",
+      "packages/rafi/test/buildStartOver.test.ts": "b799b79bc053b2c21cbe56437706a14a30fdaac8a2bbae679aefedcbaa80364a",
+      "packages/rafi/test/cli.test.ts": "83702c0b7569896435f0632aae2fd0d60574d3fcf7a2fe36145de0a1c1a76080",
+      "packages/rafi/test/compile.test.ts": "0b544f6a7acd540edd393eb69df40977296d2f4cbc71afe69d7eaea2fd1fdac3",
+      "packages/rafi/test/createHandoff.test.ts": "62b5fa17a3bbdcb12562102871c0101f603f4120084460fb5052a85aa73d4659",
+      "packages/rafi/test/createRecovery.test.ts": "9f578d80dbfde6e65017062113304d0e9791e595f80b518bb043c6549a810a93",
+      "packages/rafi/test/createStackInterview.test.ts": "a567da96ca9641e08d80d926b5e6272ff3ef914c047b125c4e0874d12270a0db",
+      "packages/rafi/test/discovery.test.ts": "2fcb8554753bd4bbdf3f229a72e07280d67c5c9b880237dea3e9b5e25c178598",
+      "packages/rafi/test/docs.test.ts": "f44dd4642cd935ad830bd60b400e59bc8b40674fc90e50268d49f02673ba9e4b",
+      "packages/rafi/test/establishedPackaged.test.mjs": "0aa65c9d3f30c8437659c1140c2fe2e8e6581ef7907489c1fa675b2528b42b33",
+      "packages/rafi/test/fixtures/interrupted-recovery-codex.cjs": "f66b11288b65d5bcb17f6789f0d211c8aa063c2255e1bff440df59e999ab0088",
+      "packages/rafi/test/gitignore.test.ts": "70f01ffd90b0aa0443d14b68e17dcb9cd42c1ded9c79989d6fd9f1906a858311",
+      "packages/rafi/test/grillAudit.test.ts": "271cae4f6cd5a6e422835cc578fb6da2314e647502896676cc784d71f554b2f3",
+      "packages/rafi/test/interruptedPackaged.test.mjs": "bc025b41e58e2017358992a3e12165a567ed036bf76db9a4a08655469b72c67a",
+      "packages/rafi/test/liveInterviewHarness.test.mjs": "925b842ca36db36c7eaffa8914586aa69c48fcb0711fc3d8ef23eaac351e67da",
+      "packages/rafi/test/managerPackaged.test.mjs": "5930427800a9e73623430ee11e7d18a17759abdd8a6518a3bf5237052bb684ec",
+      "packages/rafi/test/plan.test.ts": "8037b0ebfd1b4eb27058a6d06f6efd5a56fe4a222d18df1b2b405014f32aa054",
+      "packages/rafi/test/planningDriver.test.ts": "36ca1421131a03f2e0dd8c951a48d0aa1e313380eeb7b36638a6c989ee28a171",
+      "packages/rafi/test/planningRuntime.test.ts": "8214d3a81235b9f29501b2e89366fbd1382d77ae88267f5d9a41745730d8ea40",
+      "packages/rafi/test/project.test.ts": "6e17b857b11db5d5c70f6ba68a5af23cd11f6cc916e8cfff5f711ee10cfd4b12",
+      "packages/rafi/test/publish.test.ts": "bef51f13486727148b21cc7b0b216ec02eab881af9dd46b94073151bff350b01",
+      "packages/rafi/test/readme.test.ts": "9a62d8137aa264c793d0bc05bbfe777df2bdd97338a4704a32e31d58e202d0fe",
+      "packages/rafi/test/release081.test.ts": "6ccd53ae386e7525b7f1ab08e36b1de919e91455eb2ab46551765dc195e72618",
+      "packages/rafi/test/resume.test.ts": "1b8a3668b4e4829157963d02434911db5549381c547d783644c6abd166c2495f",
+      "packages/rafi/test/resumeLauncher.test.ts": "183a75f6fb8494b3d13cc817e4bcfd7d7326f188cc7ffdf1ce901028515ff534",
+      "packages/rafi/test/resumePackaged.test.mjs": "5a60bf95b9e4b0b0175e2e262f73d0b8b6d554eeeaf4fc80d9a26a9c1f079f46",
+      "packages/rafi/test/resumePty.test.ts": "0d4c3f289d0de2500f64e2c2a80524da08b698d0146c9d1ea60bce0783ba5839",
+      "packages/rafi/test/runtimeReadiness.test.ts": "3bfad95de0df738dc6f1465815994095116a51ef79c1d19de9e350ead3a4ce6a",
+      "packages/rafi/test/structuredPlan.test.ts": "7656d045662076c068d7ae59ba664dd033d1dc0bbc1589e7901c12dc0202c40c",
+      "packages/rafi/test/syntheticPackaged.test.mjs": "42adb8a2d0674496777829412b830b605e3273435f4c75540990e7d72e008baa",
+      "packages/rafi/test/ticketPlan.test.ts": "2f3aaf0684dd17259515a23057ecc5df8c76ba1031e74431d96b5e6ce33381c2",
+      "packages/rafi/test/uninstallRecovery.test.ts": "7a7d467dc95e299bf7bdc8d9e8210f01234b39446103b0442e94741f61a3c409",
+      "packages/rafi/tsconfig.build.json": "2e5483daf2ae17b5aebf6c866e880b08b56c74fac0e0c78002eac238e95e9644",
+      "packages/rafi/tsconfig.json": "9efde414883fa1b03327f9ebe99cb1bdecc2ac0a6b7870c57b556c246d70565a",
+      "packages/spec/LICENSE": "5c9817c129b98e7bb966bca028c43c19107102ef8e03fe799bffb4354f4ef015",
+      "packages/spec/package.json": "c1f0d9f4eda36771fa52d79f7931d335b1b6301c26feb3acb7b82531dd16f0f8",
+      "packages/spec/src/index.ts": "4bf060d893b72378f3c4c84fc8ab71eea70e9954c57d1d93f829f0bead88bd69",
+      "packages/spec/src/qaFailureReport.ts": "6fee9c6e68718d0ff2eaeefe1286898eb298e7226f5c4aa0d20e9377eaceba9b",
+      "packages/spec/src/schemas.ts": "36abbeb0be5fb4bc729141e9e7459d5b5ec611c61e5b8e9a53ea06919488cf97",
+      "packages/spec/src/types.ts": "96a06540ec329a16a0fc64710db3bff15957f9f1ce08b528c2f86fe5bd6f7a10",
+      "packages/spec/src/validate.ts": "497f584533399d407bdedd2c3de208014e46811e6298036e0140e93d785ea499",
+      "packages/spec/test/qaFailureReport.test.ts": "0022ca9f7df66b51f42a778cc56deedfd671e1b42758bed442f70a892fdea722",
+      "packages/spec/test/qaRemediationV3.test.ts": "3345717619f5b8c140873d36b27e24d0009dbfe8dab2ee8cb1ad5c515f2e7efa",
+      "packages/spec/test/validate.test.ts": "00e1c6be05aadda2c1e02612e98f544e5852d0df669afdf0a61f43aadd1067d3",
+      "packages/spec/tsconfig.build.json": "2e5483daf2ae17b5aebf6c866e880b08b56c74fac0e0c78002eac238e95e9644",
+      "packages/spec/tsconfig.json": "9efde414883fa1b03327f9ebe99cb1bdecc2ac0a6b7870c57b556c246d70565a",
+      "packages/special-agents/LICENSE": "5c9817c129b98e7bb966bca028c43c19107102ef8e03fe799bffb4354f4ef015",
+      "packages/special-agents/README.md": "cfaaa6d7148fa9d8f2374b5d921181d52c382e3dc24d0854e6fc8cbdb542fd14",
+      "packages/special-agents/content/agents/builder.yaml": "90b7f434f65f42928ca3bb8793dfc1981a0da2e707e3a7a3a5e24305dbe11072",
+      "packages/special-agents/content/agents/discovery.yaml": "307853e88886700ec0f634724df1d4be20b2b5978782572b8cb355537c7956b4",
+      "packages/special-agents/content/agents/manager-diagnostics.md": "e743ea3e31390347f4f17231c0c3a6c5325f77e91c84843f84c3b1a793fa790e",
+      "packages/special-agents/content/agents/manager.yaml": "44bc8e5ce56d6477f06780ab78fe28adc74e5156999c4bbb26b7025baf27cb1c",
+      "packages/special-agents/content/agents/planner.yaml": "55780f1018f26ce915a8319c55bba236c42d2bbe33f3428120ffb052544c5fee",
+      "packages/special-agents/content/agents/qa.yaml": "4aa45550c36caed831a29de22f2e1aa180cbb186bc72278d39f5ee47539bc832",
+      "packages/special-agents/content/agents/ticket-maker.yaml": "9162863fb2d40c92f8a47366a9ff8ca1df77219fd2c8d501c9c3fcade26333d2",
+      "packages/special-agents/content/agents/uninstaller.yaml": "e34cb43053e7b0623f0be144da6561492e9636dae99e249c5f22c0781c642661",
+      "packages/special-agents/content/defaults.yaml": "52433ea9ff204e57904ee316b63e1c914470b42b3e46f6a6ad13a636dbbfa48a",
+      "packages/special-agents/content/docs/README.md": "b064814c600afc184b947b2f7c3f651a69ba0bc49ecddc8b995cca4297a89479",
+      "packages/special-agents/content/docs/admins.md": "aeaf00fa070e26e8541c615527397c96f1dd8dd7c84da8117665e29320e8bb47",
+      "packages/special-agents/content/docs/ai-costs.md": "28a0aa0e355a5325a6d7d18dee4588ad2fb301b7412109c788fb7a2ef0514a17",
+      "packages/special-agents/content/docs/ai-evals.md": "5e172b04047abdd8dd5050264a57dfeb8baed4916b1e33175333aa7522849ab7",
+      "packages/special-agents/content/docs/ai.md": "aa3fddfb3432c551b2f9a022b9a503336fe08dbedac34dbe72bc910c29a8ef64",
+      "packages/special-agents/content/docs/api.md": "e4acc65e4631d27d770b9bce811b9d8ca2de2be59a448ad2e16e66280c7f4d96",
+      "packages/special-agents/content/docs/architecture.md": "c2d8b1b07599d496ed520ff2948c82cfae06674819eb7e9fd69462bc0f22fa90",
+      "packages/special-agents/content/docs/business.md": "bc27c49fe51a8a7b5794dd22fca93d1b36565debdb1632cb766a647e7f916c72",
+      "packages/special-agents/content/docs/data-governance.md": "6cb2bafdb8c59893a3c751f8f9ef7355ff038eeb5a41806ada92309cc4ee184f",
+      "packages/special-agents/content/docs/decisions/0000-template.md": "4e6d21b0cd372a7a82bc97d93a2dc5de5336b49169e93eb1f1322bd1b18ca6ae",
+      "packages/special-agents/content/docs/decisions/README.md": "3d5ad4eaf109055863e9a4c0394e17a335e362827e58d7ec5e57473b956fdcc2",
+      "packages/special-agents/content/docs/docs.index.yaml": "2de91a2a524ec1f086c01ac7c01d755d5878ff61cbd66e403b1b25f4a9f5e22b",
+      "packages/special-agents/content/docs/features.md": "3e5701562fb3a74e74dca24182441129290fbc2734ebf65a29d21f932d30f20c",
+      "packages/special-agents/content/docs/local-cloud.md": "62bd855f56aa30e7634d855d677a55a8ab63a150156ce1b0e4464b2baeede3c5",
+      "packages/special-agents/content/docs/operations.md": "40e6366c24717a96f90b351a000e780ae6b98ebcf51ae223ad98a1678d8383b2",
+      "packages/special-agents/content/docs/release-checklist.md": "e74b4071430a4fab8d69d1e4b6432511d1919e8c5df0c3827df99fad378cf76d",
+      "packages/special-agents/content/docs/scalability.md": "1eed010be8177c2a7ce18286dc3181e063c398a572bfee59e08267b3753fdcba",
+      "packages/special-agents/content/docs/security.md": "c7f244be7b9a9f946d3f2976c99f477481d1bcf644d7c8bfbf972487e143b05c",
+      "packages/special-agents/content/docs/tickets.md": "c58310863121fc31226ade63f9f1af9f0902edc6908966519157ad1cd8626caa",
+      "packages/special-agents/content/docs/users.md": "aa05a884374deeaf746d6b5332ce59f1b6987a260245b8d534dd28ba723207b1",
+      "packages/special-agents/content/preamble.md": "592ea5663332d3a7aa4df9a6c5ca8e410359e32785d3d3b9ee5936fc9841a0eb",
+      "packages/special-agents/content/rules/base/code-quality.md": "31771c844eebbb74440bf16fa5da92de842c644ee9f5ea11c4d47766845e3a0b",
+      "packages/special-agents/content/rules/base/core.md": "47ed547f290da6ebab473b891ec5bdc0adc721f81ecd9c752ecbd44d94820eaa",
+      "packages/special-agents/content/rules/base/definition-of-done.md": "ef95aa1882b6d12d53c72745179c5a02da303bfef170e812dbf3e7f895bcd593",
+      "packages/special-agents/content/rules/base/git-safety.md": "536af68eaf552c3f80bacbe7064defb0fbf18d741fd17846debb018c41894e37",
+      "packages/special-agents/content/rules/base/response-expectations.md": "f791e0e2bd90bd01fc197194928323c7442e72055109945e4eb5152e217fae27",
+      "packages/special-agents/content/rules/domain/accessibility.md": "c949389f954be1135c5e701cf45aab064fb89a9149db2a53a58ea0b7b311aed4",
+      "packages/special-agents/content/rules/domain/ai-batch-testing.md": "62f0710e25cd06a78df849493edbae3c7fdcc47cfbc1dc08fd88b8c551ccc29c",
+      "packages/special-agents/content/rules/domain/ai-cost.md": "2392f7747039a34638dc8cfcb001eb67e57507ff8dbd809b2d9c376ae80fd35e",
+      "packages/special-agents/content/rules/domain/ai-evals.md": "6514105c8d1851c246684ebc209e36fdf376a977bcc7fe93ca34b432c132eadc",
+      "packages/special-agents/content/rules/domain/ai-governance.md": "2c1ce0c8042081a0c5b8ccdce320b5bbb0554c2720b7777c61f69bd398e00b0f",
+      "packages/special-agents/content/rules/domain/ai-reproducibility.md": "344fea65cd4a612d4556870e9d477f75fe12ee733c206e89acbe1991723057b4",
+      "packages/special-agents/content/rules/domain/ai-safety.md": "585424ad981fb08476adf260e5e778752cdccf144f814f644ef653be93ae3db9",
+      "packages/special-agents/content/rules/domain/data-governance.md": "08e3a55f4b81ceb4d030a31f428888e3e56db3cce7a7a256b4bb1b1523c6c64d",
+      "packages/special-agents/content/rules/domain/observability.md": "c7c11343b7db7b19774376cc803355141ea0040bd48d13dbf21601a3e481944c",
+      "packages/special-agents/content/rules/domain/robustness.md": "e0affe3833c2f9cf29fa5d9c431b9490de959fc16d61251d8b85b1613497aaa3",
+      "packages/special-agents/content/rules/domain/scalability.md": "9cb5f29201c8d4ac66acc73fb1309f841f287a931253b46adefb28ffb917f2e8",
+      "packages/special-agents/content/rules/domain/security.md": "a6b907de303d4761f17e957b134667d87e6a48b5762a6d8d568f51a974dd5d0f",
+      "packages/special-agents/content/rules/packs.index.yaml": "251184a38c403cc2cef547a8ed2467edf1c53b4dc2635b9fe580017f833d86f9",
+      "packages/special-agents/content/rules/process/api-docs.md": "b6344ce8648f34ae3cdeee23849d458fb321dd087b94a997aed022ff2522b273",
+      "packages/special-agents/content/rules/process/architecture.md": "6e28f3ed3c2b91797b25d450ee771bc510dcfabb87be9ee7e716a11c80cfbb94",
+      "packages/special-agents/content/rules/process/business-docs.md": "7533886e28da651ed69936ac3dfd88e14cdc669bc931dfe8127728214adbad58",
+      "packages/special-agents/content/rules/process/ci.md": "ad60fdaf4cdd498a9de7e985ec7ff93c709f7e6d8969ff93fcc3a0183af541c2",
+      "packages/special-agents/content/rules/process/dependencies.md": "ed631c7277ff5de29c9cf7314e487e71cf186003ab3a9b1b44245718240fc106",
+      "packages/special-agents/content/rules/process/project-docs.md": "677178a781fcd9e8524eed250156aa2a74c99159d624e8bba54ce2e9930c222e",
+      "packages/special-agents/content/rules/process/release.md": "7a416225c922b20993d9fd87f65140295913a7441a30027bf6eb6275e53d4ac0",
+      "packages/special-agents/content/rules/process/tdd.md": "425a92d050989f9ff94ff59c1f461d59fe61d41c51ed21b8809480cd339f754a",
+      "packages/special-agents/content/rules/process/testing.md": "696bac04741ca721289953da06fadde8863291538cfcd5ae443cfda336f2e141",
+      "packages/special-agents/content/rules/process/tickets.md": "5aa700fd4aa5b2498e2b2d9de5f5387d99a4031e9aa5ab8f71d193a1a652ad25",
+      "packages/special-agents/content/rules/templated/database.md": "1dafe60511e49c01ad75a15e035c2e6839108606d793e76bc925b904d2d59cfc",
+      "packages/special-agents/content/rules/templated/infra.md": "c523452a49bd4e336a86e8c841d1d8c6e7add439aead446ef621f98348adbb6f",
+      "packages/special-agents/content/rules/templated/stack.md": "2aa991f3a709d53dd27a15400b4d4ee0d03008c46f47eff7a0ab471590cce976",
+      "packages/special-agents/content/skills/better-sqlite3-rebuild/SKILL.md": "9b3ade0591c9b5141376a7f7aa3e4852e825e9f05653bddfe58ac673faf75e4d",
+      "packages/special-agents/content/skills/grill-me/SKILL.md": "74147eb6010a65957efef2b9e0f0b3ff935c1def7fc117697151b1d0f3610556",
+      "packages/special-agents/content/skills/handoff/SKILL.md": "7b122662c7e6cc6fc76dfec66f44e7d1e8c0df67dd2ec896689832ee3b6da017",
+      "packages/special-agents/content/skills/handoff/references/manifest-v1.schema.json": "40b9be98674ee8f84792f0aa42d39e715287c37e0f0d54293552bc570ca5ec8d",
+      "packages/special-agents/content/skills/handoff/references/protocol-v1.md": "af51b3549f2efd8c039d40a90081d378a0ded138f47e185d93147dfbd477a3f3",
+      "packages/special-agents/content/skills/implementor/SKILL.md": "e38f0ae83ab1e9c70f60cfa3b9b3879839515931d65424f84b1bf190aa9889f6",
+      "packages/special-agents/content/skills/implementor/references/review.md": "742ad43a6e42da86315f1bb10c233d9aa9abd1f52d3bef9d3203405b73445038",
+      "packages/special-agents/content/skills/improve-codebase-architecture/REFERENCE.md": "dd47bb0359f8e09db95d393c6b9f8c77430af37826d939557edc2abef59cddbb",
+      "packages/special-agents/content/skills/improve-codebase-architecture/SKILL.md": "c6dd6ad7daad279ec9caa3452392f0bd9d66c84c0252af2a39ba89d1f3232eb1",
+      "packages/special-agents/content/skills/prd-to-issues/SKILL.md": "e2d8d48e76c7b4aa11f3b4bb0c08804dc7f9a37e517f5f9797d3afd7b219b623",
+      "packages/special-agents/content/skills/tdd/SKILL.md": "1d0a1439aefa3ebe6a8fe83b5bb4559610d75268edd0bd4ef7d391d841742fc5",
+      "packages/special-agents/content/skills/tdd/deep-modules.md": "f2123700bf953db1740625686c75bdd145efd486357c47c6818c869fee657a32",
+      "packages/special-agents/content/skills/tdd/interface-design.md": "764c5ff0e3fa6b4ab7095eb65ccc7201e090baf19fa16051dfdb72c06d27417d",
+      "packages/special-agents/content/skills/tdd/mocking.md": "3ceb807fdf4a47d6a93d4d9a891e5ba6d362a6247bd08adc451feebfc17361ef",
+      "packages/special-agents/content/skills/tdd/refactoring.md": "54fced22dd1911b7094c3fe7979b7c1a40d40be307482c4adf7dc0588f27d6cc",
+      "packages/special-agents/content/skills/tdd/tests.md": "e12182f5c4c6a844b7c6ab4b8d2623b642aaaae5460fe58ed087efd4f3d5fb8a",
+      "packages/special-agents/content/skills/write-a-prd/SKILL.md": "f8fe27edd7985df33dcfc09d6665eebf281769826a95843e0db396652373f02c",
+      "packages/special-agents/package.json": "8cad43078ece62bce652f3036ae0c8d40c8967163ce58d1e0d63b594992bdf99",
+      "packages/special-agents/scripts/shard.ts": "c8bb7a35d77985dcc9ba52d65ddd168692ed9092956cd023cb297aee54e9b654",
+      "packages/special-agents/src/agents.ts": "dafb6462eaf37765805c89f86870eb8204036e7222b3e3c0c5d3737c5b607ad0",
+      "packages/special-agents/src/compile.ts": "487c5586698bf72da2a6fddd8448249edf58ce823c57b757cdb291732cfb5418",
+      "packages/special-agents/src/content.ts": "59d7915006612becb951f06d9651ee66a86b6ce6ae77aea8c430525b19a4a8ef",
+      "packages/special-agents/src/index.ts": "59381a4b98850b2d3086beb2aa54ceb02a6d248fdd254824f91304ca0d57c627",
+      "packages/special-agents/src/resolve.ts": "48bfd0e7086b266faf74b01bbb4684931b3ca2da6d57958b693dfe5999bcc2a0",
+      "packages/special-agents/src/skills.ts": "d6263f106285dc49db50e87ee62f5c22b7f45ec4f77544bbaff94e73626aa293",
+      "packages/special-agents/src/template.ts": "82f289b2951c1cea06b673dfadbeec34d8d052143b3dc69f8f826fc418a249d4",
+      "packages/special-agents/test/agent-compose.test.ts": "a70ac4e5a027e3a082ced265a573dbeefbc60d90dd6bebe1ec70c41709fc144f",
+      "packages/special-agents/test/agents.test.ts": "83fc3067e93814e9f90b341dede54d50b9ca150be8cac1e2d0d34c8d658acb92",
+      "packages/special-agents/test/cleanup.test.ts": "33dfacc0782c048ea42d5e6054211c56aab8490a67205f3746231959c000bf30",
+      "packages/special-agents/test/compile.test.ts": "f767e39ebef42d458ec013880160f83ad0a679374d7eb97a82ee66334954fbdf",
+      "packages/special-agents/test/content.test.ts": "09fc3458c68321f94a98c9d7f06681dc13bc2acc7af988a2c016276c5e68cf6e",
+      "packages/special-agents/test/emit.test.ts": "842ebd8310dee3d015c64b8ac55a839409bef635138328243b859558a3afcc76",
+      "packages/special-agents/test/fixtures/rules.snapshot.md": "cee63b5673e97acf2493543757164bae385e30bc5ec21c5c9d62a53c309a9f7f",
+      "packages/special-agents/test/index.test.ts": "6cd710eb07988b298572a4529ecd2d8037eee2937a982af6472f2d001348b3c2",
+      "packages/special-agents/test/parity.test.ts": "d12bfbd6583a5ddab1d847c60786750cb5b1ef1a77fe82fa16bd2c22c979726d",
+      "packages/special-agents/test/publish.test.ts": "e9a6a7829004d2ce68147ae7fe61b62000f79b3f96112d463cfb4510e72a2273",
+      "packages/special-agents/test/resolve.test.ts": "f643ef659b05faf86a65368638307e5854b8c6849eab0009a27eb41b6c073b62",
+      "packages/special-agents/test/shard.test.ts": "6e56a42da60eb9f80781897705f79f66e1070ec9cdcb59f53ae055983d012646",
+      "packages/special-agents/test/skills.test.ts": "cc5e24eacaf0d062b1dad028f1433a43ad32fabae7a1e222130fa83e72c4f68f",
+      "packages/special-agents/test/template.test.ts": "cb6381ea6485fc7d40ad87033ba09fe8a3198636e8eec1d006b42ced8c256ffe",
+      "packages/special-agents/tsconfig.build.json": "3382126fee58653d123486717eee44490bb28abea8d2db4c184f2f7677b7fe2f",
+      "packages/special-agents/tsconfig.json": "39def5da6e8b629135d9664d1aebd953c9dc9ad2453adee2ef5b1cf9d33ed878"
+    }
+  },
+  "workPackages": {
+    "P0": {
+      "implementation": "implemented",
+      "result": "Characterization and executable regression fixtures; original production incident remains unattributed."
+    },
+    "P1": {
+      "implementation": "implemented",
+      "result": "Protocol 4 project identity, immutable admissions, scope and parent guards, coherent external backups, legacy quarantine, staged import rebinding and old-writer rejection."
+    },
+    "P2": {
+      "implementation": "implemented",
+      "result": "Shared admission and assignment guards before dispatch, strict identity handling in current/branch modes, retained source/response evidence and stable synthetic work."
+    },
+    "P3": {
+      "implementation": "implemented",
+      "result": "Read-only V1/V2 evidence, pinned snapshots/cursors, complete protected artifacts, explicit corruption/legacy gaps and disclosed redaction."
+    },
+    "P4": {
+      "implementation": "implemented",
+      "result": "Pre-mode ownership assessment for both resume aliases, diagnostic-only tracker hints, revision-bound audited link/authorize/quarantine repair and repeatable publication."
+    },
+    "P5": {
+      "implementation": "implemented",
+      "result": "Per-work timeline joins, report occurrences and dispositions, linked remediation/delivery/source evidence, recurrence and qualified metrics."
+    },
+    "P6": {
+      "implementation": "implemented",
+      "result": "Original-turn scoped actions, restricted control connection, immutable CAS stream, recipient states, withdrawal/supersession, existing decisions and single-use attempt authorization."
+    },
+    "P7": {
+      "implementation": "implemented: in-cycle guidance and explicit-resume follow-ups in current-branch and isolated-worktree recovery, with durable shared attempts and fresh QA",
+      "result": "Owning-loop prompt reservation and exact provider instructions, ordered Builder/QA guidance, source-bound verification, finalization barriers, remote decision wakeup and restart reconciliation."
+    },
+    "P8": {
+      "implementation": "implemented",
+      "result": "Manager host commands/help/instructions, built public contracts and exports, fresh installed-package control/evidence/repair/resume journeys; external release gates remain."
+    }
+  },
+  "acceptanceRows": {
+    "1": {
+      "scenario": "Historical report bodies and repeated content",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "managerEvidence.test.ts",
+        "managerPackaged.test.mjs"
+      ]
+    },
+    "2": {
+      "scenario": "Large reports, pinned pagination and redaction",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "managerEvidence.test.ts",
+        "managerPackaged.test.mjs"
+      ]
+    },
+    "3": {
+      "scenario": "Read-only legacy, missing and corrupt evidence",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "managerEvidence.test.ts",
+        "buildWorkMigration.test.ts",
+        "buildOwnershipReconciliation.test.ts"
+      ]
+    },
+    "4": {
+      "scenario": "Ticket-specific timeline counts and provenance",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "qaTimeline.test.ts",
+        "managerEvidence.test.ts"
+      ]
+    },
+    "5": {
+      "scenario": "Guidance in actual Builder and QA prompts",
+      "localEvidence": "Claude/Codex production wrappers cover in-cycle and after-pass guidance for Builder, QA and both; current-branch and isolated-worktree resume; pauses, withdrawal, changed requirements/source, repeated guidance, exhausted attempts, scoped authorization and process crashes at reservation/submission/receipt. Saving guidance alone never dispatches work.",
+      "tests": [
+        "qaGuidanceDelivery.test.ts"
+      ]
+    },
+    "6": {
+      "scenario": "Decision races, stopped ownership and interrupted delivery",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "buildInterventions.test.ts",
+        "managerPackaged.test.mjs",
+        "interruptedPackaged.test.mjs"
+      ]
+    },
+    "7": {
+      "scenario": "Exact original authorization, CAS and requirements drift",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "buildInterventions.test.ts",
+        "buildWorkAdmission.test.ts"
+      ]
+    },
+    "8": {
+      "scenario": "Assigned-response identity rejection",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "foreman.test.ts",
+        "branch.test.ts",
+        "buildAssignment.test.ts",
+        "buildOwnershipReconciliation.test.ts"
+      ]
+    },
+    "9": {
+      "scenario": "Empty queue and stable synthetic resume",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "foreman.test.ts",
+        "syntheticPackaged.test.mjs",
+        "buildResume.test.ts"
+      ]
+    },
+    "10": {
+      "scenario": "Interrupted intent, migration and publication",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "buildInterventions.test.ts",
+        "buildWorkMigration.test.ts",
+        "buildOwnershipReconciliation.test.ts",
+        "buildRuns081.test.ts",
+        "qaHandbackSafety.test.ts"
+      ]
+    },
+    "11": {
+      "scenario": "Storage membership, parent bindings, old writers and imports",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "buildWorkAdmission.test.ts",
+        "buildWorkMigration.test.ts",
+        "stateTransfer.test.ts",
+        "qaProtocolV2.test.ts"
+      ]
+    },
+    "12": {
+      "scenario": "All three audited repair choices and wrong-ticket preservation",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "buildOwnershipReconciliation.test.ts",
+        "buildResume.test.ts",
+        "managerPackaged.test.mjs"
+      ]
+    },
+    "13": {
+      "scenario": "Existing approval, continuation, budget, waiver, certificate and owner safeguards",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "foreman.test.ts",
+        "branchFinalization.test.ts",
+        "qaProtocolV2.test.ts",
+        "qaHandbackSafety.test.ts",
+        "interruptedPackaged.test.mjs"
+      ]
+    },
+    "14": {
+      "scenario": "Fresh isolated installed tarballs and both resume aliases",
+      "localEvidence": "covered by listed deterministic suites; see limits below",
+      "tests": [
+        "managerPackaged.test.mjs",
+        "syntheticPackaged.test.mjs",
+        "interruptedPackaged.test.mjs",
+        "establishedPackaged.test.mjs",
+        "qaGuidanceDelivery.test.ts",
+        "buildOwnershipReconciliation.test.ts"
+      ]
+    }
+  },
+  "checks": [
+    {
+      "command": "pnpm build",
+      "status": "passed",
+      "log": "/private/tmp/rafi-guidance-followup-build.log"
+    },
+    {
+      "command": "pnpm typecheck",
+      "status": "passed",
+      "log": "/private/tmp/rafi-guidance-followup-typecheck.log"
+    },
+    {
+      "command": "node --import tsx packages/rafi/scripts/generate-cli-docs.ts --check",
+      "status": "passed",
+      "log": "/private/tmp/rafi-guidance-followup-docs.log"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed",
+      "log": "/private/tmp/rafi-guidance-followup-whitespace.log"
+    },
+    {
+      "command": "pnpm test",
+      "status": "passed",
+      "log": "/private/tmp/rafi-guidance-followup-workspace.log",
+      "summaries": {
+        "spec": {
+          "tests": 48,
+          "pass": 48,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "duration_ms": 2861.452959
+        },
+        "special-agents": {
+          "tests": 92,
+          "pass": 92,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "duration_ms": 12766.072917
+        },
+        "rafi": {
+          "tests": 268,
+          "pass": 266,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 2,
+          "duration_ms": 175847.892417
+        },
+        "ai-foreman": {
+          "tests": 955,
+          "pass": 943,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 12,
+          "duration_ms": 1349930.283041
+        }
+      },
+      "skippedCases": [
+        "packages/ai-foreman test: ok 143 - authenticated claude readiness retains and releases preparation ownership # SKIP",
+        "packages/ai-foreman test: ok 144 - authenticated codex readiness retains and releases preparation ownership # SKIP",
+        "packages/rafi test: ok 158 - TTY runner reports a premature successful exit as an incomplete journey # SKIP",
+        "packages/rafi test: ok 159 - TTY runner enforces its configured timeout # SKIP",
+        "packages/ai-foreman test: ok 426 - authenticated claude session starts, compacts natively, and resumes exactly # SKIP",
+        "packages/ai-foreman test: ok 427 - authenticated codex session starts, compacts natively, and resumes exactly # SKIP",
+        "packages/ai-foreman test: ok 741 - Linux standalone Claude cleanup does not require ps or a full PATH # SKIP",
+        "packages/ai-foreman test: ok 946 - Windows Job Object readiness normal # SKIP",
+        "packages/ai-foreman test: ok 947 - Windows Job Object readiness descendant # SKIP",
+        "packages/ai-foreman test: ok 948 - Windows Job Object readiness cancel # SKIP",
+        "packages/ai-foreman test: ok 949 - Windows helper death closes its job and prevents detached descendants surviving # SKIP",
+        "packages/ai-foreman test: ok 950 - Windows helper stops its job when the owning Rafi process dies # SKIP",
+        "packages/ai-foreman test: ok 951 - Windows gated job creator cannot execute after startup EOF # SKIP",
+        "packages/ai-foreman test: ok 952 - Windows production reconciliation fences a paused creator before late authorization # SKIP"
+      ]
+    },
+    {
+      "command": "node --test --test-concurrency=1 *.test.mjs",
+      "status": "passed",
+      "directory": "/private/tmp/rafi-manager-fixes-consumer/consumer",
+      "log": "/private/tmp/rafi-guidance-followup-consumer.log",
+      "summaries": {
+        "installed consumer": {
+          "tests": 158,
+          "pass": 158,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "duration_ms": 632593.210625
+        }
+      },
+      "skippedCases": []
+    },
+    {
+      "command": "Verify frozen source and installed package bytes against final tarballs",
+      "status": "passed",
+      "log": "/private/tmp/rafi-guidance-followup-source-check.json"
+    }
+  ],
+  "installedConsumer": {
+    "freshInstallation": true,
+    "packBuilds": "Dependency order: spec, special-agents, ai-foreman, CLI. pnpm pack runs package prepack builds.",
+    "offlineInstall": "Fresh npm install --offline --ignore-scripts and npm rebuild better-sqlite3 --offline. All four final tarballs reinstalled offline after the approved policy and audit fixes; the unchanged freshly built SQLite dependency is reused.",
+    "workspaceSourceImports": false,
+    "workspacePackageSymlinks": false,
+    "drivers": "12 standalone plain-ESM test drivers refreshed for the audit fixes, including process-crash workers; imports resolve installed dist only, without a tsx loader or workspace source.",
+    "tarballs": {
+      "rafi-spec-0.8.13.tgz": "ed8ffab835025e27e73d66ee8902849078f9e78e5cd516d24030b932b1e759a8",
+      "special-agents-0.8.12.tgz": "2852330b345dfc69a3b5f6cdd8446a3a0512358fe9c6d153ab5896e6234231a0",
+      "ai-foreman-1.7.20.tgz": "67eb7c2f7f477c8ab141c986e67cab8ac4f1f67b35d3368328bb402a6337a3ea",
+      "rafi-ai-cli-0.9.20.tgz": "427c796fbe82f30178d27bb75a132967b03e3221f3bf127e42821d9c65d923aa"
+    },
+    "installedFilesVerifiedAgainstTarballs": 423
+  },
+  "validationLimits": [
+    "Native Linux and Windows platform jobs were not run on this macOS host. Platform-dependent skips are not passes.",
+    "Authenticated Claude/Codex canaries were not run. Deterministic native SDK/RPC transports establish prompt wiring and storage behavior, not production model quality or latency.",
+    "Original incident attribution requires the affected project, run and installed version. Local wrong-ticket reproductions do not identify that historical incident.",
+    "Legacy migration conservatively quarantines observed QA instead of automatically treating historical progress as permission. The operator can link a proven approval/assignment/session chain or explicitly authorize inspected mapped work through audited repair.",
+    "Repair and migration publication boundaries use fault injection. Guidance intent/dispatch/receipt tests and existing handback suites also use actual child-process SIGKILL. Fault-injection coverage is not claimed as SIGKILL coverage at every repair boundary.",
+    "Storage tests exercise representative cross-run/scope/parent mutations and enumerate scope guards; they do not establish an exhaustive Cartesian product of every public method and every malformed field.",
+    "Repair preserves source. Branch separation or baseline restoration is an operator-inspected prerequisite where necessary; the host records the inspected mapping and attestation and requires fresh QA without replaying uncertain work.",
+    "Remote question wakeup uses bounded polling and cancellation of the obsolete prompt. There is no reliance on a separate local notification service.",
+    "The complete plan release exit gate remains pending native platform verification and release rehearsal on operator-approved copies of any actual affected build. No deployment, production migration or repair was performed."
+  ],
+  "regressionConclusion": "No failures in final local workspace and installed-consumer validation. All five original findings and the approved after-pass policy are resolved; testing does not prove absence of every possible regression.",
+  "graphify": {
+    "adoptedGraph": false,
+    "graphFile": false,
+    "ignoreFile": false,
+    "rebuildRequired": false
+  },
+  "previousValidation": {
+    "description": "Pre-audit implementation validation; retained as historical evidence, not validation of these fixes.",
+    "revision": {
+      "head": "4aa437b3cf19d83d7bb5dc8482bb4b04709c887a",
+      "workingTree": true,
+      "sourceManifest": "/private/tmp/rafi-manager-frozen-source.json",
+      "manifestFileSha256": "b13978acb94d2e37c80c50631e4b386b8a07625005c9e30c24762d783b1d54ae",
+      "packageFiles": 396,
+      "manifestScope": "All package source, tests, documentation and metadata, excluding dist and node_modules; checked unchanged after validation. The plan and validation record are documentation updated after code freeze."
+    },
+    "checks": [
+      {
+        "command": "Import ten new ai-foreman public subpaths and rafi-spec V2/action/repair validators from the installed consumer",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-frozen-consumer/public-exports.log"
+      },
+      {
+        "command": "pnpm build",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-frozen-build.log"
+      },
+      {
+        "command": "pnpm typecheck",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-frozen-typecheck.log"
+      },
+      {
+        "command": "node --import tsx packages/rafi/scripts/generate-cli-docs.ts --check",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-frozen-docs.log"
+      },
+      {
+        "command": "git diff --check",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-frozen-whitespace.log"
+      },
+      {
+        "command": "pnpm test",
+        "log": "/private/tmp/rafi-manager-frozen-workspace.log",
+        "status": "passed",
+        "summaries": {
+          "packages/spec": {
+            "tests": 48,
+            "pass": 48,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "duration_ms": 5025.370125
+          },
+          "packages/special-agents": {
+            "tests": 92,
+            "pass": 92,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "duration_ms": 17874.074792
+          },
+          "packages/rafi": {
+            "tests": 267,
+            "pass": 265,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 2,
+            "duration_ms": 173478.729375
+          },
+          "packages/ai-foreman": {
+            "tests": 875,
+            "pass": 863,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 12,
+            "duration_ms": 934550.21175
+          }
+        },
+        "skippedCases": [
+          "ok 143 - authenticated claude readiness retains and releases preparation ownership # SKIP",
+          "ok 144 - authenticated codex readiness retains and releases preparation ownership # SKIP",
+          "ok 158 - TTY runner reports a premature successful exit as an incomplete journey # SKIP",
+          "ok 159 - TTY runner enforces its configured timeout # SKIP",
+          "ok 410 - authenticated claude session starts, compacts natively, and resumes exactly # SKIP",
+          "ok 411 - authenticated codex session starts, compacts natively, and resumes exactly # SKIP",
+          "ok 661 - Linux standalone Claude cleanup does not require ps or a full PATH # SKIP",
+          "ok 866 - Windows Job Object readiness normal # SKIP",
+          "ok 867 - Windows Job Object readiness descendant # SKIP",
+          "ok 868 - Windows Job Object readiness cancel # SKIP",
+          "ok 869 - Windows helper death closes its job and prevents detached descendants surviving # SKIP",
+          "ok 870 - Windows helper stops its job when the owning Rafi process dies # SKIP",
+          "ok 871 - Windows gated job creator cannot execute after startup EOF # SKIP",
+          "ok 872 - Windows production reconciliation fences a paused creator before late authorization # SKIP"
+        ]
+      },
+      {
+        "command": "node --test --test-concurrency=1 *.test.mjs",
+        "directory": "/private/tmp/rafi-manager-frozen-consumer/consumer",
+        "log": "/private/tmp/rafi-manager-frozen-consumer/verification.log",
+        "status": "passed",
+        "summaries": {
+          "installed consumer": {
+            "tests": 77,
+            "pass": 77,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "duration_ms": 229589.575333
+          }
+        },
+        "skippedCases": []
+      }
+    ],
+    "installedConsumer": {
+      "freshInstallation": true,
+      "packBuilds": "Dependency order: spec, special-agents, ai-foreman, CLI. pnpm pack runs package prepack builds.",
+      "offlineInstall": "npm install --offline --ignore-scripts; npm rebuild better-sqlite3 --offline",
+      "workspaceSourceImports": false,
+      "workspacePackageSymlinks": false,
+      "drivers": "12 test drivers transformed to plain ESM with imports resolving only installed dist; fixtures copied independently. No tsx loader or workspace source dependency in consumer.",
+      "tarballs": {
+        "special-agents-0.8.12.tgz": "52ccbb44617efe746b88086d82f02ceee6a313118c3275d5846171c895462249",
+        "rafi-spec-0.8.13.tgz": "ed8ffab835025e27e73d66ee8902849078f9e78e5cd516d24030b932b1e759a8",
+        "ai-foreman-1.7.20.tgz": "1e23ef98881d24cf7b868c1f776fac09bbc514af1b469d6b3a210227151b780a",
+        "rafi-ai-cli-0.9.20.tgz": "427c796fbe82f30178d27bb75a132967b03e3221f3bf127e42821d9c65d923aa"
+      }
+    },
+    "implementationStatus": "implemented; local validation passed"
+  },
+  "auditFollowup": {
+    "plan": "The reviewed five-finding fix plan in the conversation",
+    "findings": [
+      {
+        "id": 1,
+        "status": "resolved",
+        "result": "Quoted credentials, complete Authorization headers, overlap offsets, URL host/path preservation, escaped embedded JSON, rendered packets/chunks and protected raw bytes are covered."
+      },
+      {
+        "id": 2,
+        "status": "resolved",
+        "result": "Explicit resume dispatches waiting Builder guidance within existing admitted scope and remaining shared attempts, invalidates the old pass atomically, then requires fresh QA. Current-branch and isolated-worktree recovery share one service. Exhaustion supports one review-bound request_attempt; requirements changes require approval. Provider retry is disabled, completed proof is reused, and uncertain submissions remain fenced."
+      },
+      {
+        "id": 3,
+        "status": "resolved for eligible current-source failed reviews",
+        "result": "Restores the validated failed-review basis before replacing its attempt ID. Reconciles the accepted instruction, pending nonconvergence decision and unconsumed authorization atomically, separately from dispatch reservation. Answer races, restart, rollback, source drift, stale scope and uncertain execution remain explicit boundaries."
+      },
+      {
+        "id": 4,
+        "status": "resolved",
+        "result": "Completed metadata repairs stay terminal, waived work retains existing waiver policy, and eligible nonterminal repairs require fresh QA and invalidate old certificates. Immutable legacy receipts receive compatible interpretation; repeat repair cannot invalidate a fresh post-repair pass."
+      },
+      {
+        "id": 5,
+        "status": "resolved",
+        "result": "One-shot host output drains pinned pages and expands reports and oversized metadata with full redaction disclosures; expiry never silently refreshes. Identity-based raw export resolves the retained occurrence and discloses its digest."
+      }
+    ],
+    "approvedPolicy": "The user explicitly approved using existing authority and remaining attempts on explicit resume, with new authorization only when needed. Saving guidance alone never starts work."
+  },
+  "previousAuditValidation": {
+    "description": "Independent audit fixes before the approved after-pass policy; retained as historical evidence.",
+    "revision": {
+      "head": "4aa437b3cf19d83d7bb5dc8482bb4b04709c887a",
+      "workingTree": true,
+      "sourceManifest": "/private/tmp/rafi-manager-fixes-source.json",
+      "manifestFileSha256": "e49240765ec1b041e9ad5d820871925f3a9ba0395c9d9705364283e94f3a080b",
+      "packageFiles": 396,
+      "manifestScope": "All package source, tests, documentation and metadata, excluding dist and node_modules; verified unchanged after final validation. Root CLI documentation was separately generated/checked. This validation record is updated after validation."
+    },
+    "checks": [
+      {
+        "command": "pnpm build",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-fixes-build-final.log"
+      },
+      {
+        "command": "pnpm typecheck",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-fixes-typecheck-final.log"
+      },
+      {
+        "command": "node --import tsx packages/rafi/scripts/generate-cli-docs.ts --check",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-fixes-docs-final.log"
+      },
+      {
+        "command": "git diff --check",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-fixes-whitespace-final.log"
+      },
+      {
+        "command": "pnpm test",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-fixes-workspace-final.log",
+        "summaries": {
+          "spec": {
+            "tests": 48,
+            "pass": 48,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "duration_ms": 3513.172583
+          },
+          "special-agents": {
+            "tests": 92,
+            "pass": 92,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "duration_ms": 12057.068083
+          },
+          "rafi": {
+            "tests": 268,
+            "pass": 266,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 2,
+            "duration_ms": 162633.822584
+          },
+          "ai-foreman": {
+            "tests": 900,
+            "pass": 888,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 12,
+            "duration_ms": 992746.01575
+          }
+        },
+        "skippedCases": [
+          "packages/ai-foreman test: ok 143 - authenticated claude readiness retains and releases preparation ownership # SKIP",
+          "packages/ai-foreman test: ok 144 - authenticated codex readiness retains and releases preparation ownership # SKIP",
+          "packages/rafi test: ok 158 - TTY runner reports a premature successful exit as an incomplete journey # SKIP",
+          "packages/rafi test: ok 159 - TTY runner enforces its configured timeout # SKIP",
+          "packages/ai-foreman test: ok 421 - authenticated claude session starts, compacts natively, and resumes exactly # SKIP",
+          "packages/ai-foreman test: ok 422 - authenticated codex session starts, compacts natively, and resumes exactly # SKIP",
+          "packages/ai-foreman test: ok 686 - Linux standalone Claude cleanup does not require ps or a full PATH # SKIP",
+          "packages/ai-foreman test: ok 891 - Windows Job Object readiness normal # SKIP",
+          "packages/ai-foreman test: ok 892 - Windows Job Object readiness descendant # SKIP",
+          "packages/ai-foreman test: ok 893 - Windows Job Object readiness cancel # SKIP",
+          "packages/ai-foreman test: ok 894 - Windows helper death closes its job and prevents detached descendants surviving # SKIP",
+          "packages/ai-foreman test: ok 895 - Windows helper stops its job when the owning Rafi process dies # SKIP",
+          "packages/ai-foreman test: ok 896 - Windows gated job creator cannot execute after startup EOF # SKIP",
+          "packages/ai-foreman test: ok 897 - Windows production reconciliation fences a paused creator before late authorization # SKIP"
+        ]
+      },
+      {
+        "command": "node --test --test-concurrency=1 *.test.mjs",
+        "status": "passed",
+        "directory": "/private/tmp/rafi-manager-fixes-consumer/consumer",
+        "log": "/private/tmp/rafi-manager-fixes-consumer/verification-lexer-final.log",
+        "summaries": {
+          "installed consumer": {
+            "tests": 103,
+            "pass": 103,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "duration_ms": 307512.0415
+          }
+        },
+        "skippedCases": []
+      },
+      {
+        "command": "Verify frozen source and installed package bytes against final tarballs",
+        "status": "passed",
+        "log": "/private/tmp/rafi-manager-fixes-source-check.json"
+      }
+    ],
+    "installedConsumer": {
+      "freshInstallation": true,
+      "packBuilds": "Dependency order: spec, special-agents, ai-foreman, CLI. pnpm pack runs package prepack builds.",
+      "offlineInstall": "Fresh npm install --offline --ignore-scripts and npm rebuild better-sqlite3 --offline. Final ai-foreman tarball reinstalled offline after renderer tightening; the unchanged freshly built SQLite dependency is reused.",
+      "workspaceSourceImports": false,
+      "workspacePackageSymlinks": false,
+      "drivers": "12 standalone plain-ESM test drivers refreshed for the audit fixes, including process-crash workers; imports resolve installed dist only, without a tsx loader or workspace source.",
+      "tarballs": {
+        "rafi-spec-0.8.13.tgz": "ed8ffab835025e27e73d66ee8902849078f9e78e5cd516d24030b932b1e759a8",
+        "special-agents-0.8.12.tgz": "2a2fea1f60e3da4510d9919703075faade4f19609523878d1c75ee0c17204117",
+        "ai-foreman-1.7.20.tgz": "12234ae350fc0a10d1b84f27257fbb428a1fdfd7b0a677d45bdffcb609c449e5",
+        "rafi-ai-cli-0.9.20.tgz": "427c796fbe82f30178d27bb75a132967b03e3221f3bf127e42821d9c65d923aa"
+      },
+      "installedFilesVerifiedAgainstTarballs": 421
+    },
+    "implementationStatus": "Four independent audit defects resolved and guidance crash tests implemented; after-pass Builder follow-up remains pending a product decision."
+  },
+  "sourceFreezeExclusions": [
+    {
+      "path": "packages/.DS_Store",
+      "reason": "Finder directory-view metadata; not a product or test input. Changed outside task edits during validation and left untouched.",
+      "frozenSha256": "9a47b82694e2423011162a2de35eb15cb857cb53c534a65b2d0c91e046e47efb",
+      "observedSha256": "aedc187e9a717c285d656ab00ba5ba70898745d99e49138ad398e2349668e959"
+    }
+  ],
+  "auditReview": {
+    "status": "completed",
+    "unresolvedFindings": [],
+    "scope": [
+      "Original five audit findings and the manager QA/resume implementation plan",
+      "Scoped authority, renewed admissions, attempt accounting, atomic rollback and certificate invalidation",
+      "Current-branch and isolated-worktree recipient ordering, session preparation and source-bound fresh QA",
+      "Crash recovery, retained completion proof and provider retry fences",
+      "Redacted host/model evidence, pinned pagination, structured oversized metadata and exact protected export"
+    ],
+    "additionalFindings": [
+      {
+        "result": "fixed",
+        "finding": "A guidance follow-up advanced only the in-memory remediation generation, so an ensuing failed QA review could not accept an authorized fix. Its intent now advances the durable reducer generation atomically, and fresh hosts recover that generation. Regression coverage resumes after the completed receipt, fails QA, then authorizes and completes the fix."
+      },
+      {
+        "result": "fixed",
+        "finding": "An applied attempt authorization could be retrieved after admission scope changed. Retrieval now binds requirements, assignment and scope revision; regression coverage exercises renewed admission."
+      },
+      {
+        "result": "fixed",
+        "finding": "One-shot expansion parsed rendered oversized metadata, which can be invalid JSON after secret redaction. Host expansion now uses the pinned already-sanitized structured item; secret-field regression coverage reproduces and verifies the fix."
+      }
+    ],
+    "reviewLimits": "Local deterministic provider transports and process crashes are covered. Authenticated-provider and platform-specific checks skipped by the suite remain separately disclosed; releaseReady stays false."
+  }
+}

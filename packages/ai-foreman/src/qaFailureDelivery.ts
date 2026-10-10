@@ -186,7 +186,7 @@ export class QaFailureDeliveryService {
     if (preBoundary.digest !== input.reviewedSourceStateDigest) return this.drift(input, "source-drift-before-delivery", preBoundary.digest);
     const findingRefs = createQaFindingRefs({ runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, rawFindingIds: input.report.findings.map(f => f.id) });
     const handoff = this.buildHandoff(input, preBoundary, findingRefs);
-    const instruction = renderQaFailureHandoff(handoff) + (input.operatorAnswer ? `\nAuthorized operator answer (${input.operatorAnswer.decisionId}): ${JSON.stringify(input.operatorAnswer.answer)}` : "");
+    let instruction = renderQaFailureHandoff(handoff) + (input.operatorAnswer ? `\nAuthorized operator answer (${input.operatorAnswer.decisionId}): ${JSON.stringify(input.operatorAnswer.answer)}` : "");
     enforceMandatoryPromptLimit(Buffer.from(instruction));
     const operationId = qaDigest("builder-remediation-operation", { runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, handoffId, remediationGeneration: input.remediationGeneration + 1 });
     const prepareDb = new WorkflowDb(input.projectDir);
@@ -217,9 +217,12 @@ export class QaFailureDeliveryService {
     const db = new WorkflowDb(input.projectDir);
     let intent: { recoveryId: string; expectedRevision: number };
     let record: QaDeliveryTurnV3;
+    let guidanceIds: string[] = [];
     try {
       intent = db.atomic(() => {
         const head = validateReviewBinding(db, input);
+        const guidance = db.reserveGuidance(input.runId, input.ticket.id, "builder", operationId, preDispatch.digest, instruction);
+        instruction = guidance.text; guidanceIds = guidance.ids;
         const policy = db.autonomyPolicy(input.runId);
         const maximum = Math.min(input.maxRemediationOperations ?? 3, policy?.rules["qa.nonconvergence"].max_attempts ?? policy?.limits.builderQaFixesPerTicket ?? 3);
         db.reserveQaRemediation(input.runId, input.ticket.id, input.reviewAttemptId, operationId, maximum, input.authorizationId);
@@ -233,6 +236,8 @@ export class QaFailureDeliveryService {
     } finally { db.close(); }
     this.faults.afterIntent?.();
     let response = await phase("initial-work-and-validation", () => this.dispatch(input, builder!, record!, instruction));
+    const guidanceDb = new WorkflowDb(input.projectDir);
+    try { guidanceDb.finishGuidance(guidanceIds, "builder", {submitted:response.record.status === "completed" && response.record.providerTurnId ? true : undefined, receipt:response.record.providerTurnId ? response.record : undefined}); } finally {guidanceDb.close();}
     let outcome = this.classify(response);
     if (outcome === "response-invalid" && response.record.sourceCapture === "captured") {
       const correction = [

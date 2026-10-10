@@ -8,13 +8,20 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stringify } from "yaml";
 
-import { createBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease } from "ai-foreman/build-runs.js";
+import { createBuildRun as createUnadmittedBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease } from "ai-foreman/build-runs.js";
 import { createProviderSessionRef } from "ai-foreman/session-identity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import { createQaRecoveryPacket } from "ai-foreman/qa-recovery.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
 import { buildBuildResumeCommand } from "../src/buildResume.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
+
+function createBuildRun(input:Parameters<typeof createUnadmittedBuildRun>[0]) {
+  const run=createUnadmittedBuildRun(input);
+  const db=new WorkflowDb(input.repositoryRoot);
+  try {for(const ticketId of run.tickets)db.admitWork({runId:run.runId,kind:"ticket",ticketId,definition:{id:ticketId},approvalId:"fixture",scopeRevision:"fixture",provenance:{userTurn:`Test authorizes ${ticketId}`,reason:"Approved resume fixture"}});}finally{db.close();}
+  return run;
+}
 
 function initializedProject(): string {
   const dir = mkdtempSync(join(tmpdir(), "rafi-build-resume-"));
@@ -696,4 +703,37 @@ for (const alias of ["resume", "build:resume"]) for (const status of ["completed
     assert.equal(resumeChoices(root).length, 0);
     db.acquireBuildAdmission("subsequent", "worker");
   } finally { process.exitCode = oldExit; db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("pending questions are answered before projection/provider preparation and the exact run is retained", async () => {
+  const dir = initializedProject();
+  try {
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"], builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
+    run = persistBuildSession(dir, run, "builder", scopedSession(dir, "question-session"));
+    run = releaseBuildLease(dir, run, "recoverable");
+    const db = new WorkflowDb(dir);
+    const decision = db.ensureHumanDecision({ runId: run.runId, decisionKey: "fixture-question", interruptionId: "ticket:T001", prompt: "Which source?", choices: [{ id: "option-1", label: "Local source" }] });
+    db.close();
+    let answered = false, projections = 0, launches = 0;
+    const command = buildBuildResumeCommand({
+      resolveHumanDecision: async current => { assert.equal(projections, 0); assert.equal(launches, 0); assert.equal(current.decisionId, decision.decisionId); answered = true; return "option-1"; },
+      resolveProjection: async (...args) => { assert.equal(answered, true); projections++; return availableProjection(args[0], args[1], args[2], args[3]); },
+      executeStart: args => { assert.equal(answered, true); assert.ok(args.includes(run.runId)); launches++; return 0; },
+    });
+    await command.parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" });
+    assert.equal(launches, 1); assert.ok(projections > 0);
+    const read = new WorkflowDb(dir); try { assert.equal(read.humanDecision(decision.decisionId)?.selectedChoiceId, "option-1"); } finally { read.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("safe pause at a pending question performs zero projection or launch calls", async () => {
+  const dir = initializedProject();
+  try {
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"], builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
+    run = releaseBuildLease(dir, run, "recoverable");
+    const db = new WorkflowDb(dir); db.ensureHumanDecision({ runId: run.runId, decisionKey: "pause-question", interruptionId: "ticket:T001", prompt: "Source?", choices: [{ id: "continue", label: "Continue" }] }); db.close();
+    const command = buildBuildResumeCommand({ resolveHumanDecision: async () => undefined, resolveProjection: async () => { throw new Error("projection must not launch"); }, executeStart: () => { throw new Error("provider must not launch"); } });
+    await command.parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" });
+    const read = new WorkflowDb(dir); try { assert.equal(read.pendingHumanDecisions(run.runId).length, 1); assert.equal(read.buildAdmission(), undefined); } finally { read.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

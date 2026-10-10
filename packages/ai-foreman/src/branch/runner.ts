@@ -1,3 +1,7 @@
+import { deliverBuilderGuidanceFollowup } from "../builderGuidanceFollowup.js";
+import { qaDigest } from "../qaProtocolV2.js";
+import { loadTickets } from "../tickets/ticketLoader.js";
+import { BuildControlBoundary } from "../buildInterventions.js";
 import { formatRecoveryCommand } from "../recoveryGuidance.js";
 import { WorkflowReader } from "../workflowReader.js";
 import { buildScopeRevision } from "../buildApproval.js";
@@ -33,6 +37,7 @@ import { checkGitLabMrMerged, createOrReuseMr, enableGitLabAutoMerge, pushBranch
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { WorkflowDb } from "../workflowDb.js";
+import { assertBuildAssignmentReconciled, BuildAssignmentRejected } from "../buildAssignment.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
 import { SessionUnavailableError } from "../adapters/sessionFailure.js";
 import { SessionUnavailableContinuityError } from "../continuity.js";
@@ -113,6 +118,7 @@ export interface BranchRunnerOptions {
 }
 
 export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRunSummary[]> {
+  assertBuildAssignmentReconciled(opts.projectDir, opts.runId);
   let qaResumedRecovery = opts.qaResumedRecovery;
   if (qaResumedRecovery) {
     const matches = opts.plan.nodes.filter((node) => node.ticket.id === qaResumedRecovery!.manifest.ticketId);
@@ -217,6 +223,8 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
     const commitOperation = finalizationOperationKey(protocolDb, opts.runId, node.ticket.id, "commit");
     const completionOperation = finalizationOperationKey(protocolDb, opts.runId, node.ticket.id, "ticket-complete");
     let completedDirectMerge = finalizationRecovery ? protocolDb.operation(directMergeOperation) : undefined;
+    try { if(finalizationRecovery)protocolDb.assertFinalizationControls(opts.runId,node.ticket.id); }
+    catch(error) { protocolDb.close();summaries.push(summaryFor(node,"needs-human",error instanceof Error?error.message:String(error)));continue; }
     if (completedDirectMerge?.status === "in_progress") {
       try {
         const intent = readDirectMergeIntent(completedDirectMerge.intent);
@@ -314,6 +322,8 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       }
     }
 
+    const admissionDb = new WorkflowDb(opts.projectDir);
+    try { admissionDb.assertAdmittedWork(opts.runId, node.ticket.id); } finally { admissionDb.close(); }
     opts.log.write("branch-start", {
       ticket: node.ticket.id,
       branch: node.branch,
@@ -393,7 +403,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         undefined,
         async (adapter) => opts.observeBuilderNativeCompactions?.(adapter, worktreePath),
         opts.observer, undefined, false, undefined, undefined, opts.runId,
-        opts.continueIndependentTickets ?? true, node.ticket.id,
+        opts.continueIndependentTickets ?? true, node.ticket.id, worktreePath,
       );
 
       const turn = async () => {
@@ -495,6 +505,35 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           observeNativeCompactions: opts.observeQaNativeCompactions,
           resolveBlocked: (adapter, reason) => foreman.resolveBlocker(adapter, reason, "qa"),
           evidence: (entry) => opts.log.write("qa-evidence", { ticket: node.ticket.id, ...entry }),
+          resumeBuilderGuidance: qaOnlyRecovery,
+          deliverBuilderFollowup: (instruction, followup) => deliverBuilderGuidanceFollowup({ projectDir: opts.projectDir, runId: opts.runId, ticketId: node.ticket.id, worktree: worktreePath }, instruction, followup, {
+            prepare: async instruction => {
+              if (!builder) throw new Error("Builder session unavailable");
+              const strategy = opts.builderSessionStrategy ?? "compact";
+              if (opts.builderSessionBoundary) builder = await opts.builderSessionBoundary(builder, instruction, strategy, worktreePath);
+              else if (strategy === "fresh") { await builder.close(); builder = await opts.createBuilder(worktreePath); }
+              else if (builder.sessionId()) { const compacted = await compactWithRetry(builder); if (!compacted.ok) { await builder.close(); builder = await opts.createBuilder(worktreePath); } }
+              if (opts.beforeBuilderTurn) builder = await opts.beforeBuilderTurn(builder, instruction, worktreePath);
+              return builder;
+            },
+            validateRequirements: () => {
+              const current = loadTickets(resolveTicketPaths(loadTicketsConfig(opts.projectDir),opts.projectDir).tickets).find(ticket => ticket.id === node.ticket.id);
+              if (!current || qaDigest("admitted-requirements",current) !== followup.requirementsDigest) throw new BuildAssignmentRejected("Ticket requirements changed during session preparation; renewed scope approval is required");
+            },
+            recordSession: adapter => {
+              const sessionId=adapter.sessionId(),sessionRef=adapter.sessionRef?.();
+              if (!sessionId) return;
+              builderStream={sessionId,...(sessionRef?{sessionRef}:{}),worktreePath};
+              const db=new WorkflowDb(opts.projectDir);
+              try {db.recordBranchResumeSession(opts.runId,{ticket:node.ticket.id,branch:node.branch,base:node.baseBranch,worktreePath,sessionId,sessionRef,logPath:"structured-recovery",deliveryUnitId:node.deliveryUnitId});} finally {db.close();}
+              opts.recordBuilderSession?.(sessionRef??sessionId,node.ticket.id,worktreePath);
+            },
+            completed: async (operationId,adapter) => {
+              builderWorkSessions += 1;
+              await opts.observeBuilderNativeCompactions?.(adapter,worktreePath);
+              opts.log.write("qa-fix",{kind:"builder-guidance-followup",ticket:node.ticket.id,operationId});
+            },
+          }),
           deliverFailure: async (request) => {
             if (!builder) return { ok: false, detail: "Builder session unavailable" };
             builderWorkSessions += 1;
@@ -560,6 +599,9 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           isError: false,
         });
       }
+
+      const finalControlsDb=new WorkflowDb(opts.projectDir);
+      try { finalControlsDb.assertFinalizationControls(opts.runId,node.ticket.id); } finally {finalControlsDb.close();}
 
       if (opts.qaEnabled && !qaWaived && !finalizationRecovery) {
         if (!qaPassCertificateId || !qaSourceStateDigest) throw new Error("QA passed without a durable pass certificate");
@@ -782,6 +824,10 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
 
       if (!opts.keepWorktrees && completionMode !== "direct-merge" && completesSharedUnit) await observeNode(opts, node, "cleanup", "removing ticket worktree", () => removeTicketWorktree(opts.projectDir, worktreePath));
     } catch (err) {
+      if (err instanceof BuildAssignmentRejected) {
+        summaries.push(summaryFor(node, "needs-human", err.message));
+        return summaries;
+      }
       if (err instanceof SessionUnavailableError || err instanceof SessionUnavailableContinuityError) {
         const message = err.message;
         opts.log.write("branch-issue", { ticket: node.ticket.id, code: "session_unavailable", message, blocking: true });

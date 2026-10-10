@@ -20,13 +20,17 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (request.method === 'thread/start' || request.method === 'thread/resume') {
     thread = p.threadId || thread;
     cwd = p.cwd || cwd;
-    send({ id: request.id, result: { thread: { id: thread, cwd: p.cwd || process.cwd() } } });
+    const capabilities = process.env.RAFI_FIXTURE_CAPABILITIES === '1' ? { sandbox: { type: p.sandbox === 'read-only' ? 'readOnly' : 'workspaceWrite', networkAccess: p.config?.sandbox_workspace_write?.network_access === true }, approvalPolicy: p.approvalPolicy } : {};
+    if (process.env.RAFI_FIXTURE_CAPABILITIES === '1') require('node:fs').appendFileSync(require('node:path').join(cwd, 'fixture-capabilities.jsonl'), JSON.stringify(capabilities) + '\n');
+    send({ id: request.id, result: { thread: { id: thread, cwd: p.cwd || process.cwd() }, ...capabilities } });
   } else if (request.method === 'turn/start') {
     const instruction = (p.input || []).map(item => item.text || '').join('\n');
+    const assignedTicket = instruction.match(/Assigned ticket: ([^\s.]+)\./)?.[1] || instruction.match(/Ticket scope: ([^\s.]+)\./)?.[1];
+    const ticketMarker = assignedTicket ? `ticket="${assignedTicket}" ` : '';
     if (process.env.RAFI_FIXTURE_QUESTION === "1" && !questionAsked && /You are being run by an automated foreman/.test(instruction)) {
       questionAsked = true;
       send({ id: request.id, result: { turn: { id: 'question-turn' } } });
-      send({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text: 'STEP_STATUS: needs_input | question="Fixture terminal decision?" choices="Continue|Cancel"\nRAFI_CONTINUITY_DELTA: ' + JSON.stringify(delta) } } });
+      send({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text: 'STEP_STATUS: needs_input | ' + ticketMarker + 'question="Fixture terminal decision?" choices="Continue|Cancel"\nRAFI_CONTINUITY_DELTA: ' + JSON.stringify(delta) } } });
       send({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'question-turn', status: 'completed' } } });
       return;
     }
@@ -38,7 +42,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
     send({ id: request.id, result: { turn: { id: 'turn' } } });
     send({ method: 'thread/tokenUsage/updated', params: { threadId: thread, tokenUsage: { total: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, last: { totalTokens: 20 }, modelContextWindow: 1000 } } });
-    send({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text: (instruction.includes('Reply with HANDOFF_ACCEPTED') ? 'HANDOFF_ACCEPTED\n' : 'STEP_STATUS: done | summary="scripted work complete"\n') + 'RAFI_CONTINUITY_DELTA: ' + JSON.stringify(delta) } } });
+    send({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text: (instruction.includes('Reply with HANDOFF_ACCEPTED') ? 'HANDOFF_ACCEPTED\n' : 'STEP_STATUS: done | ' + ticketMarker + 'summary="scripted work complete"\n') + 'RAFI_CONTINUITY_DELTA: ' + JSON.stringify(delta) } } });
     send({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'turn', status: 'completed' } } });
   } else send({ id: request.id, result: {} });
 });

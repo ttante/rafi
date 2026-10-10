@@ -1,3 +1,4 @@
+import { admitFixtureWork } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -13,7 +14,7 @@ const tables = ["qa_reports", "qa_findings", "qa_report_dispositions", "qa_repor
 const report = { version: 1, summary: "same content", findings: [], observations: [] };
 
 function seed(db: WorkflowDb, runId: string, ticketId: string, reviewNumber: number) {
-  db.ensureRun(runId);
+  admitFixtureWork(db,runId,ticketId);
   const attemptId = `${runId}/${ticketId}/${reviewNumber}`;
   const reportDigest = db.putEvidence("qa", Buffer.from(JSON.stringify(report)));
   db.beginQaReviewAttempt({ attemptId, runId, ticketId, reviewNumber, cycle: reviewNumber, remediationGeneration: reviewNumber - 1, sourceDigest: "source" });
@@ -38,7 +39,8 @@ function downgradeFixture(root: string): void {
         raw.prepare(`INSERT INTO ${table}(${keys.join(",")}) VALUES(${keys.map(() => "?").join(",")})`).run(...Object.values(old));
       }
       for (const table of ["qa_delivery_turns", "qa_remediation_authorizations", "qa_remediation_stops"]) raw.exec(`DROP TABLE ${table}`);
-      raw.prepare("DELETE FROM recovery_schema_migrations WHERE migration='003_qa_report_occurrences_and_turns'").run();
+      for(const table of ["build_instruction_events","build_instruction_deliveries","build_instructions","build_instruction_streams","build_work_events","build_reconciliations","build_ownership_conflicts","build_assignments","build_work_admissions","build_work_scope","build_project_identity","build_work_upgrade_backup"])raw.exec(`DROP TABLE IF EXISTS ${table}`);
+      raw.prepare("DELETE FROM recovery_schema_migrations WHERE migration IN ('003_qa_report_occurrences_and_turns','004_admitted_build_work','005_manager_controls')").run();
       raw.pragma("user_version = 2");
     })();
   } finally { raw.close(); }

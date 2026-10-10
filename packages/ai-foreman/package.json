@@ -1,6 +1,6 @@
 {
   "name": "ai-foreman",
-  "version": "1.7.20",
+  "version": "1.7.21",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
   "license": "Apache-2.0",
   "type": "module",
@@ -17,6 +17,30 @@
     "ai-foreman": "dist/index.js"
   },
   "exports": {
+    "./build-assignment.js": {
+      "types": "./dist/buildAssignment.d.ts",
+      "default": "./dist/buildAssignment.js"
+    },
+    "./build-ownership-reconciliation.js": {
+      "types": "./dist/buildOwnershipReconciliation.d.ts",
+      "default": "./dist/buildOwnershipReconciliation.js"
+    },
+    "./manager-evidence.js": {
+      "types": "./dist/managerEvidence.d.ts",
+      "default": "./dist/managerEvidence.js"
+    },
+    "./qa-evidence-reader.js": {
+      "types": "./dist/qaEvidenceReader.d.ts",
+      "default": "./dist/qaEvidenceReader.js"
+    },
+    "./manager-evidence-artifacts.js": {
+      "types": "./dist/managerEvidenceArtifacts.d.ts",
+      "default": "./dist/managerEvidenceArtifacts.js"
+    },
+    "./qa-timeline.js": {
+      "types": "./dist/qaTimeline.d.ts",
+      "default": "./dist/qaTimeline.js"
+    },
     "./activity.js": {
       "types": "./dist/activity.d.ts",
       "default": "./dist/activity.js"
@@ -188,6 +212,30 @@
     "./state-transfer.js": {
       "types": "./dist/stateTransfer.d.ts",
       "default": "./dist/stateTransfer.js"
+    },
+    "./human-decision.js": {
+      "types": "./dist/humanDecision.d.ts",
+      "default": "./dist/humanDecision.js"
+    },
+    "./build-approval.js": {
+      "types": "./dist/buildApproval.d.ts",
+      "default": "./dist/buildApproval.js"
+    },
+    "./build-work-admission.js": {
+      "types": "./dist/buildWorkAdmission.d.ts",
+      "default": "./dist/buildWorkAdmission.js"
+    },
+    "./build-work-migration.js": {
+      "types": "./dist/buildWorkMigration.d.ts",
+      "default": "./dist/buildWorkMigration.js"
+    },
+    "./build-interventions.js": {
+      "types": "./dist/buildInterventions.d.ts",
+      "default": "./dist/buildInterventions.js"
+    },
+    "./build-ownership-repair.js": {
+      "types": "./dist/buildOwnershipRepair.d.ts",
+      "default": "./dist/buildOwnershipRepair.js"
     }
   },
   "files": [
@@ -222,8 +270,8 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.148"
   },
   "dependencies": {
-    "special-agents": "0.8.12",
-    "rafi-spec": "0.8.13",
+    "special-agents": "0.8.13",
+    "rafi-spec": "0.8.14",
     "@clack/prompts": "^1.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",

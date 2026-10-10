@@ -65,6 +65,10 @@ export class CodexAdapter implements BuilderAdapter {
   private compactionUncertain = false;
   private observedToolCalls = 0;
   private activeProviderTurnId?: string;
+  private activeNativeTurnId?: string;
+  private connectionGeneration = 0;
+  private readonly approvalRequests = new Map<string, AbortController>();
+  private readonly answeredApprovalRequests = new Set<string>();
   private activeProviderTurnSpanId?: string;
   private readonly toolSpans = new Map<string, string>();
 
@@ -74,7 +78,9 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   buildInstruction(instruction: string): string {
-    return [this.opts.systemPromptAppend, this.buildSkillsAppendix(), instruction]
+    return [this.opts.systemPromptAppend,
+      this.opts.sessionRole === "builder" ? `Builder runtime contract: shell network ${this.effectiveNetworkAccess() ? "explicitly approved for this build" : "disabled"}; sandbox escalation ${this.effectiveApprovalPolicy() === "on-request" ? "requires separate approval for each exact operation" : "disabled"}. Web tools do not establish shell network access. If acquisition needs unavailable capabilities, request input before running acquisition, or use a local source/dependency bundle with verified provenance. A ticket answer does not change runtime permissions.` : undefined,
+      this.buildSkillsAppendix(), instruction]
       .filter((part): part is string => Boolean(part)).join("\n\n");
   }
 
@@ -104,7 +110,7 @@ export class CodexAdapter implements BuilderAdapter {
     const observer = this.opts.observer;
     if (!observer) {
       try { return await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction, policy)); }
-      finally { this.activeProviderTurnId = undefined; }
+      finally { this.activeProviderTurnId = undefined; this.activeNativeTurnId = undefined; }
     }
     const context = this.observationContext();
     const spanId = observer.store.startSpan(context, { spanId: turnId, kind: "provider_turn", name: `Codex ${activityPhase(this.opts.runtimePhase)}`, providerTurnId: turnId, attributes: { provider: "codex" } });
@@ -119,7 +125,7 @@ export class CodexAdapter implements BuilderAdapter {
       throw error;
     } finally {
       for (const [callId, toolSpanId] of this.toolSpans) { observer.store.finishSpan(toolSpanId, { outcome: "unknown", completionKnown: false }); this.toolSpans.delete(callId); }
-      this.activeProviderTurnId = undefined; this.activeProviderTurnSpanId = undefined;
+      this.activeProviderTurnId = undefined; this.activeNativeTurnId = undefined; this.activeProviderTurnSpanId = undefined;
     }
   }
 
@@ -136,13 +142,18 @@ export class CodexAdapter implements BuilderAdapter {
       this.turnUsageBaseline = this.providerSessionUsage ? { ...this.providerSessionUsage } : undefined;
       const completion = this.waitFor("turn/completed", (params) => params.threadId === this._sessionId, this.providerIdleTimeoutMs(), true);
       turnStartDispatched = true;
-      await this.request("turn/start", {
+      const started = await this.request("turn/start", {
         threadId: this._sessionId,
         input: [{ type: "text", text: providerInstruction, text_elements: [] }],
         cwd: this.opts.cwd,
         model: this.opts.model ?? null,
         effort: this.opts.effort ?? (this.opts.fast ? "low" : null),
+        approvalPolicy: this.effectiveApprovalPolicy(),
+        sandboxPolicy: this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa"
+          ? { type: "readOnly", networkAccess: false }
+          : { type: "workspaceWrite", writableRoots: [this.opts.cwd], networkAccess: this.effectiveNetworkAccess() },
       });
+      this.activeNativeTurnId = String((started as { turn?: { id?: string } }).turn?.id ?? "") || undefined;
       const params = await new OperationDeadline("Codex active turn", this.opts.turnDeadlineMs ?? 3_600_000).run(() => completion);
       const turn = params.turn as Record<string, unknown> | undefined;
       const responseOnlyViolation = Boolean(policy?.responseOnly && this.observedToolCalls !== toolsBefore);
@@ -417,8 +428,9 @@ export class CodexAdapter implements BuilderAdapter {
     try {
       result = await this.request(method, {
         ...(this._sessionId ? { threadId: this._sessionId } : {}), cwd: this.opts.cwd,
-        model: this.opts.model ?? null, approvalPolicy: "never",
-        sandbox: this.opts.sandboxMode === "read-only" ? "read-only" : "workspace-write",
+        model: this.opts.model ?? null, approvalPolicy: this.effectiveApprovalPolicy(),
+        config: { sandbox_workspace_write: { network_access: this.effectiveNetworkAccess() } },
+        sandbox: this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa" ? "read-only" : "workspace-write",
         developerInstructions: this.opts.systemPromptAppend ?? null,
       }) as Record<string, unknown>;
     } catch (error) {
@@ -433,6 +445,13 @@ export class CodexAdapter implements BuilderAdapter {
       }
       throw error;
     }
+    const effective = result.sandbox as { type?: string; networkAccess?: boolean } | undefined;
+    if (this.effectiveNetworkAccess() && !effective) throw new Error("Codex did not report an effective sandbox policy for the requested network grant; no turn dispatched");
+    const requestedSandbox = this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa" ? "readOnly" : "workspaceWrite";
+    if (effective && (effective.type !== requestedSandbox || effective.networkAccess === true && !this.effectiveNetworkAccess())) throw new Error("Codex effective sandbox exceeds the authorized role policy; no turn dispatched");
+    if (effective && this.effectiveNetworkAccess() && effective.networkAccess !== true) throw new Error("Codex did not enable the explicitly approved builder network; use an offline bundle or correct provider policy before implementation");
+    if (result.approvalPolicy !== undefined && result.approvalPolicy !== this.effectiveApprovalPolicy()) throw new Error("Codex effective approval policy differs from the requested role policy; no turn dispatched");
+    this.eventQueue.push({ kind: "activity", state: "Codex role capabilities", provider: "codex", detail: JSON.stringify({ requested: { sandbox: requestedSandbox, networkAccess: this.effectiveNetworkAccess(), approvalPolicy: this.effectiveApprovalPolicy() }, effective: effective ?? "unknown", approvalPolicy: result.approvalPolicy ?? "unknown" }) });
     const thread = result.thread as Record<string, unknown> | undefined;
     const returnedSessionId = String(thread?.id ?? this._sessionId ?? "") || undefined;
     if (this._sessionRef && returnedSessionId !== this._sessionRef.sessionId) {
@@ -515,6 +534,10 @@ export class CodexAdapter implements BuilderAdapter {
 
   private handle(message: RpcMessage): void {
     this.touchWaiters();
+    if (message.id !== undefined && message.method) {
+      void this.handleServerRequest(message);
+      return;
+    }
     if (message.id !== undefined) {
       const pending = this.pending.get(message.id);
       if (pending) { this.pending.delete(message.id); message.error ? pending.reject(new Error(message.error.message ?? `JSON-RPC error ${message.error.code ?? "unknown"}`)) : pending.resolve(message.result); }
@@ -661,6 +684,8 @@ export class CodexAdapter implements BuilderAdapter {
       this.notificationWaiters.set(method, waiters);
       if (timeoutMs !== undefined) {
         const arm = () => { timeout = setTimeout(() => {
+          // Human approval has its own bounded deadline; it is not provider idleness.
+          if (resetOnProviderActivity && this.approvalRequests.size > 0) { arm(); return; }
           const active = this.notificationWaiters.get(method) ?? [];
           this.notificationWaiters.set(method, active.filter((candidate) => candidate !== waiter));
           clear();
@@ -686,7 +711,57 @@ export class CodexAdapter implements BuilderAdapter {
     return Number.isFinite(configured) && configured! > 0 ? configured! : DEFAULT_PROVIDER_IDLE_TIMEOUT_MS;
   }
 
+  private effectiveNetworkAccess(): boolean {
+    return this.opts.sandboxMode !== "read-only" && this.opts.sessionRole !== "qa" && this.opts.networkAccess === true;
+  }
+
+  private effectiveApprovalPolicy(): "never" | "on-request" {
+    return this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa" ? "never" : this.opts.approvalPolicy ?? "never";
+  }
+
+  /** Fail closed; approval is for this operation only, never a session cache or policy amendment. */
+  private async handleServerRequest(message: RpcMessage): Promise<void> {
+    await Promise.resolve();
+    const id = message.id!;
+    const identity = `${typeof id}:${id}`;
+    if (this.approvalRequests.has(identity) || this.answeredApprovalRequests.has(identity)) return;
+    const params = message.params ?? {};
+    const command = message.method === "item/commandExecution/requestApproval";
+    const fileChange = message.method === "item/fileChange/requestApproval";
+    if (!command && !fileChange) {
+      this.write({ id, error: { code: -32601, message: `Unsupported server request: ${message.method}` } }); return;
+    }
+    const connection = this.process;
+    const generation = this.connectionGeneration;
+    const hostTurnId = this.activeProviderTurnId;
+    const controller = new AbortController();
+    this.approvalRequests.set(identity, controller);
+    let decision: "accept" | "decline" = "decline";
+    try {
+      if (this.effectiveApprovalPolicy() === "on-request" && params.threadId === this._sessionId && this.activeProviderTurnId && typeof params.turnId === "string" && typeof params.itemId === "string" && params.turnId === this.activeNativeTurnId && (params.cwd === undefined || canonicalSessionPath(String(params.cwd)) === canonicalSessionPath(this.opts.cwd))) {
+        const verdict = await new OperationDeadline("Codex approval", this.opts.approvalTimeoutMs ?? 300_000).run(() => this.opts.permission({
+          toolName: command ? "Bash" : "Write",
+          input: { ...params, providerSandboxEscalation: true, requestedCommand: params.command },
+          signal: controller.signal, toolUseID: String(params.itemId),
+          title: "Approve this exact sandbox escalation?", description: String(params.reason ?? "Provider requests access beyond the offline workspace sandbox"),
+        }), () => controller.abort());
+        if (!controller.signal.aborted && verdict.behavior === "allow" && params.threadId === this._sessionId && this.activeProviderTurnId === hostTurnId && params.turnId === this.activeNativeTurnId) decision = "accept";
+      }
+    } catch { controller.abort(); }
+    finally {
+      this.approvalRequests.delete(identity);
+      this.touchWaiters();
+      this.answeredApprovalRequests.add(identity);
+      if (generation === this.connectionGeneration && connection === this.process && !this.closed) {
+        try { this.write({ id, result: { decision } }); } catch { /* disconnected: no stale reply on another connection */ }
+      }
+    }
+  }
+
   private disconnect(error: Error): void {
+    this.connectionGeneration++;
+    for (const controller of this.approvalRequests.values()) controller.abort();
+    this.approvalRequests.clear(); this.answeredApprovalRequests.clear();
     const child = this.process;
     this.process = undefined; this.initialized = false; this.threadAttached = false;
     if (child && child.exitCode === null) child.kill("SIGTERM");

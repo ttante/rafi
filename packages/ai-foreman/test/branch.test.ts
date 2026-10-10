@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/types.js";
-import { runBranchPlan } from "../src/branch/runner.js";
+import { runAuthorizedBranchPlan as runBranchPlan } from "./helpers/workAdmission.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { buildDoctorCommand } from "../src/cli/doctor.js";
 import { buildStartCommand } from "../src/cli/start.js";
@@ -89,14 +89,14 @@ class FakeBuilder implements BuilderAdapter {
     private readonly writeOnFirstTurn = true,
   ) {}
 
-  async sendTurn(_text: string): Promise<TurnResult> {
+  async sendTurn(instruction: string): Promise<TurnResult> {
     this.turnCount++;
     if (this.writeOnFirstTurn && this.turnCount === 1) {
       mkdirSync(join(this.cwd, "src"), { recursive: true });
       writeFileSync(join(this.cwd, "src", "ticket.txt"), `turn ${this.turnCount}\n`, "utf8");
     }
     return {
-      text: 'Implemented.\nSTEP_STATUS: done | summary="implemented"',
+      text: `Implemented.\nSTEP_STATUS: done | ticket="${/Ticket scope: ([A-Za-z0-9_-]+)\./.exec(instruction)?.[1] ?? "T001"}" summary="implemented"`,
       isError: false,
       numTurns: 1,
       costUsd: 0,
@@ -185,6 +185,29 @@ function makeNode(ticket: TicketDef): BranchPlanNode {
   };
 }
 
+for (const qaEnabled of [true, false]) for (const kind of ["done", "plan_complete", "blocked", "needs_input"]) for (const identity of ["T002", "UNKNOWN", undefined]) {
+  test(`branch assignment rejects ${kind}/${identity ?? "missing"} with QA ${qaEnabled}`, async () => {
+    const { root, project, ticket, allowedBaseDirtyPaths } = initTicketGitRepo("branch-assignment-");
+    try {
+      let worktree = ""; let qaCalls = 0; let sends = 0;
+      const summaries = await runBranchPlan({ projectDir: project, runId: "assignment-test", plan: { baseRef: "main", nodes: [makeNode(ticket)], issues: [] }, log: new Log(join(project, ".foreman/test.jsonl")),
+        notificationsEnabled: false, qaEnabled, createPr: false, prReady: false, keepWorktrees: false, allowedBaseDirtyPaths,
+        createQa: async () => { qaCalls++; throw new Error("wrong identity must never reach QA"); },
+        createBuilder: async cwd => {
+          worktree = cwd;
+          const builder = new FakeBuilder(cwd);
+          builder.sendTurn = async () => { sends++; writeFileSync(join(cwd, "unexpected.txt"), "preserved source"); return { text: `STEP_STATUS: ${kind} | ${identity ? `ticket="${identity}" ` : ""}summary="foreign" reason="foreign" question="choose" choices="A|B"`, isError: false, numTurns: 1, costUsd: 0 }; };
+          return builder;
+        } });
+      assert.equal(summaries[0]?.buildStatus, "needs-human", summaries[0]?.detail);
+      assert.equal(qaCalls, 0); assert.equal(sends, 1);
+      assert.equal(readFileSync(join(worktree, "unexpected.txt"), "utf8"), "preserved source");
+      const db = new StateDb(join(project, ".tickets/ticket-state.sqlite"));
+      try { assert.equal(db.getState("T001")?.status, "in_progress"); assert.equal(db.getState("T002"), undefined); } finally { db.close(); }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
 test("branch answers resume the preserved ticket once and release deferred dependencies", async () => {
   const { root, project, allowedBaseDirtyPaths } = initTicketGitRepo("branch-answers-");
   const tickets = [makeDef("T001", 1000), makeDef("T002", 2000, { depends_on: ["T001"] }), makeDef("T003", 3000)];
@@ -205,7 +228,7 @@ test("branch answers resume the preserved ticket once and release deferred depen
           calls.push(ticket);
           if (calls.length === 1) {
             firstWorktree = cwd;
-            return { text: 'STEP_STATUS: needs_input | question="Which registry?" choices="Public|Local"', isError: false, numTurns: 1, costUsd: 0 };
+            return { text: 'STEP_STATUS: needs_input | ticket="T001" question="Which registry?" choices="Public|Local"', isError: false, numTurns: 1, costUsd: 0 };
           }
           if (ticket === "T003") {
             const db = new WorkflowDb(project);

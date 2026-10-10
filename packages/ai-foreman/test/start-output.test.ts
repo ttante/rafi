@@ -32,15 +32,15 @@ test("standalone Foreman omits unusable resume guidance without a session ID", (
 });
 
 
-test("durable run guidance lists pending choices and offers the picker for either executable", () => {
+test("durable run guidance lists concrete choices and exact-run recovery for either executable", () => {
   for (const executable of ["rafi", "ai-foreman"] as const) {
     const lines = formatResumeGuidance(executable, "/tmp/project", 1, "old-session", {
       runId: "run-1", decisions: [{ decisionId: "decision-1", prompt: "Continue?", choices: [{ id: "continue", label: "Continue" }] }],
     }).join("\n");
     assert.match(lines, /input required: Continue\?/);
-    assert.match(lines, /choices: continue \(Continue\)/);
-    assert.match(lines, /rafi build:decide \/tmp\/project --run run-1 --decision decision-1 --choice <choice-id>/);
-    assert.match(lines, /rafi resume \/tmp\/project/);
+    assert.match(lines, /  Continue\n/);
+    assert.ok(lines.includes(`${executable} build:decide /tmp/project --run run-1 --decision decision-1 --choice continue`));
+    assert.ok(lines.includes(executable === "rafi" ? "rafi resume /tmp/project --run run-1" : "ai-foreman manager /tmp/project --run run-1"));
     assert.doesNotMatch(lines, /old-session/);
   }
 });

@@ -11,6 +11,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -230,6 +231,19 @@ export async function importStateBundle(projectDir: string, bundleFile: string, 
       const out = join(staged, entry.path);
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, Buffer.from(entry.data, "base64"));
+    }
+    const workflowPath=join(staged,WORKFLOW_DB_FILE);
+    if(existsSync(workflowPath)) {
+      const preview=new Database(workflowPath,{readonly:true,fileMustExist:true});
+      try {
+        if(preview.pragma("integrity_check",{simple:true})!=="ok"||(preview.pragma("foreign_key_check") as unknown[]).length)throw new Error("Imported workflow database integrity failure");
+        if(Number(preview.pragma("user_version",{simple:true}))>4)throw new Error("Imported workflow requires a newer Rafi writer");
+        if(tableExists(preview,"build_work_scope"))for(const {name} of preview.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'qa_%'").all() as Array<{name:string}>) {
+          if(!/^qa_[a-z_]+$/.test(name))throw new Error("Unexpected imported QA table");
+          const columns=preview.prepare(`PRAGMA table_info(${name})`).all() as Array<{name:string}>;
+          if(columns.some(column=>column.name==="run_id")&&columns.some(column=>column.name==="ticket_id")&&preview.prepare(`SELECT 1 FROM ${name} q WHERE NOT EXISTS(SELECT 1 FROM build_work_scope s WHERE s.run_id=q.run_id AND s.work_id=q.ticket_id) LIMIT 1`).get())throw new Error(`Imported QA work is outside the ownership registry: ${name}`);
+        }
+      }finally{preview.close();rmSync(workflowPath+"-shm",{force:true});rmSync(workflowPath+"-wal",{force:true});}
     }
     const backup = backupExistingState(root, opts.now ?? new Date());
     backupDir = backup?.durableBackupDir;
@@ -468,6 +482,17 @@ function rewriteWorkflowDb(root: string, sourceRoot: string): void {
   if (!existsSync(path)) return;
   const db = new Database(path);
   registerHandbackWriter(db);
+  db.function("rafi_work_authority", () => 1);
+  if (tableExists(db, "build_project_identity")) {
+    const prior=db.prepare("SELECT project_id,canonical_root FROM build_project_identity WHERE singleton=1").get() as {project_id:string;canonical_root:string};
+    db.transaction(()=>{
+      db.exec("CREATE TABLE IF NOT EXISTS build_project_rebindings(sequence INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,previous_root TEXT NOT NULL,new_root TEXT NOT NULL,rebound_at TEXT NOT NULL)");
+      for(const action of ["INSERT","UPDATE","DELETE"])db.exec(`CREATE TRIGGER IF NOT EXISTS rebinding_protocol_${action} BEFORE ${action} ON build_project_rebindings BEGIN SELECT CASE WHEN rafi_writer_protocol()<>4 THEN RAISE(ABORT,'incompatible project rebinding writer') END; END`);
+      for(const action of ["UPDATE","DELETE"])db.exec(`CREATE TRIGGER IF NOT EXISTS rebinding_immutable_${action} BEFORE ${action} ON build_project_rebindings BEGIN SELECT RAISE(ABORT,'Project rebinding history is immutable'); END`);
+      db.prepare("INSERT INTO build_project_rebindings(project_id,previous_root,new_root,rebound_at) VALUES(?,?,?,?)").run(prior.project_id,prior.canonical_root,realpathSync(root),new Date().toISOString());
+      db.prepare("UPDATE build_project_identity SET canonical_root=? WHERE singleton=1").run(realpathSync(root));
+    })();
+  }
   // This connection only rewrites an offline imported snapshot. It cannot
   // dispatch; preserve imported ownership as unknown instead of adopting it.
   const importedOwner = tableExists(db, "build_admission") ? db.prepare("SELECT record_json FROM build_admission WHERE singleton=1").get() as {record_json:string}|undefined : undefined;

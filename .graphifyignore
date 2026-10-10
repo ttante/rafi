@@ -1,0 +1,36 @@
+# Hidden tooling and runtime state; keep .github/workflows eligible.
+.git/
+.claude/
+.codex/
+.agents/
+.aws/
+.pnpm-store/
+.rafi/
+.foreman/
+.tickets/
+.cache/
+
+# Dependencies, generated output, and reports at any depth.
+graphify-out/
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+*.log
+.DS_Store
+pnpm-lock.yaml
+
+# Secrets; example environment templates remain eligible.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Ticket bookkeeping and captured diagnostic artifacts.
+tickets.yaml
+crash-fix-docs/*audit.json
+crash-fix-docs/*evidence.json
+crash-fix-docs/*terminal-output.txt
+docs/manager-qa-and-resume-validation.json

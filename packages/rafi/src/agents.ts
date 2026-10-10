@@ -6,7 +6,8 @@ import { parse, stringify } from "yaml";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1, ConfigurableAgentRole, ProjectConfig, ResolvedAgentSettings, SessionStrategy } from "rafi-spec";
 import { validateAgentDefaults } from "rafi-spec";
 import { AGENT_ROLE_REGISTRY } from "ai-foreman/roles.js";
-import { probeRuntime } from "ai-foreman/runtime-readiness.js";
+import { probeRuntime, RuntimeCleanupError } from "ai-foreman/runtime-readiness.js";
+import { promptProbeCleanupRecovery } from "./runtimeReadiness.js";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 import {
   DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
@@ -226,8 +227,16 @@ export function buildAgentsCommand(): Command {
       const config = readConfig(root);
       const defaults: AgentDefaultsV1 = structuredClone(config.agent_defaults ?? { version: 1, revision: 0, roles: {} });
       if (settings.make) {
-        const readiness = await probeRuntime(root, settings.make, { phase: "capability-discovery" });
-        if (!readiness.ok) throw new Error(`cannot save unsupported settings: ${readiness.diagnostics || readiness.category}`);
+        while (true) {
+          try {
+            const readiness = await probeRuntime(root, settings.make, { phase: "capability-discovery" });
+            if (!readiness.ok) throw new Error(`cannot save unsupported settings: ${readiness.diagnostics || readiness.category}`);
+            break;
+          } catch (error) {
+            if (!(error instanceof RuntimeCleanupError) || !process.stdin.isTTY || !process.stdout.isTTY) throw error;
+            if (await promptProbeCleanupRecovery(error.message, "Agent settings") === "cancel") return;
+          }
+        }
       }
       for (const role of selected) {
         const roleSettings = !anyFlags ? promptedRoleSettings?.[role] : undefined;

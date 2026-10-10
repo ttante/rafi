@@ -1,6 +1,7 @@
 /** Rafi neutral schema — public surface. */
 export * from "./types.js";
 export {
+  managerEvidenceRequestV2Schema,
   rulePackSchema,
   skillManifestSchema,
   agentManifestSchema,
@@ -13,6 +14,7 @@ export {
   builderQaRemediationReportV3Schema,
 } from "./schemas.js";
 export {
+  validateManagerEvidenceRequestV2,
   type ValidationResult,
   validateRulePack,
   validateSkillManifest,
@@ -36,3 +38,11 @@ export {
   assertBuilderQaRemediationReportV2,
 } from "./validate.js";
 export * from "./qaFailureReport.js";
+
+export type { BuildWorkAdmissionV1, ManagerActionRequestV1 } from "./types.js";
+export { buildWorkAdmissionV1Schema, managerActionRequestV1Schema } from "./schemas.js";
+export { validateBuildWorkAdmissionV1, validateManagerActionRequestV1 } from "./validate.js";
+
+export type { BuildOwnershipRepairV1 } from "./types.js";
+export { buildOwnershipRepairV1Schema } from "./schemas.js";
+export { validateBuildOwnershipRepairV1 } from "./validate.js";

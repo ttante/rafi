@@ -205,9 +205,11 @@ export type QaReducerEventV2 =
   | { type: "remediation-source-changed"; reason: string }
   | { type: "source-drift-before-remediation"; reason: string }
   | { type: "operator-menu" }
+  | { type: "failed-review-restored"; reviewNumber: number; sourceStateDigest: string; reportDigest: string }
   | { type: "review-passed"; passCertificateId: string }
   | { type: "waived" }
   | { type: "pass-invalidated"; reason: string }
+  | { type: "builder-guidance-followup-intended" }
   | { type: "finalization-started" }
   | { type: "finalization-invalidated"; reason: string }
   | { type: "completed" };
@@ -259,6 +261,9 @@ export function reduceQaState(current: QaReducerStateV2, event: QaReducerEventV2
     case "operator-menu":
       if (!["idle", "source-frozen", "review-ready", "turn-intended", "turn-uncertain", "review-failed", "remediation-uncertain", "recheck-required"].includes(current.state)) invalid(current, event);
       return { ...next, state: "operator-menu", retrySlot: undefined };
+    case "failed-review-restored":
+      if (current.state !== "operator-menu" || current.reviewNumber !== event.reviewNumber || current.sourceStateDigest !== event.sourceStateDigest || !current.openReportDigests.includes(event.reportDigest)) invalid(current, event);
+      return { ...next, state: "review-failed", retrySlot: undefined };
     case "review-passed":
       if (current.state !== "turn-intended") invalid(current, event);
       return { ...next, state: "passed", retrySlot: undefined, openReportDigests: [], openReportOccurrenceIds: [], passCertificateId: event.passCertificateId };
@@ -268,6 +273,9 @@ export function reduceQaState(current: QaReducerStateV2, event: QaReducerEventV2
     case "pass-invalidated":
       if (current.state !== "passed" || !event.reason.trim()) invalid(current, event);
       return { ...next, state: "operator-menu", retrySlot: undefined, passCertificateId: undefined };
+    case "builder-guidance-followup-intended":
+      if (current.state !== "passed") invalid(current, event);
+      return { ...next, state: "operator-menu", retrySlot: undefined, passCertificateId: undefined, remediationGeneration: current.remediationGeneration + 1 };
     case "finalization-started":
       if (current.state !== "passed" && current.state !== "waived") invalid(current, event);
       return { ...next, state: "finalizing" };

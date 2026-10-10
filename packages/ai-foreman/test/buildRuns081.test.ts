@@ -1,3 +1,5 @@
+import { admitFixtureWork } from "./helpers/workAdmission.js";
+import { legacyTrackerWorkHints } from "../src/buildRuns.js";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -90,6 +92,7 @@ test("ticket recovery retains the QA finalization guard even when tracker says d
     try { tickets.upsertState("T001", { status: "done" }, new Date().toISOString()); } finally { tickets.close(); }
     const db = new WorkflowDb(dir);
     try {
+      admitFixtureWork(db,run.runId,"T001");
       const head = db.qaTicketHead(run.runId, "T001");
       db.transitionQa(run.runId, "T001", head.revision, { type: "source-frozen", sourceStateDigest: "a".repeat(64) });
       assert.throws(() => completeBuildRun(dir, run), /QA|qa/);
@@ -150,7 +153,7 @@ test("build records persist shared and mixed branch allocation modes", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("recoverable runs infer tickets omitted by legacy current-branch records", () => {
+test("legacy tracker correlations remain hints and never expand executable membership", () => {
   const dir = mkdtempSync(join(tmpdir(), "rafi-build-run-legacy-ticket-"));
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
@@ -180,8 +183,9 @@ test("recoverable runs infer tickets omitted by legacy current-branch records", 
     run = releaseBuildLease(dir, run, "recoverable");
 
     const recovered = recoverableBuildRuns(dir).find((candidate) => candidate.runId === run.runId);
-    assert.deepEqual(recovered?.tickets, ["T030"]);
-    assert.equal(recovered?.currentTicket, "T030");
+    assert.deepEqual(recovered?.tickets, []);
+    assert.equal(recovered?.currentTicket, undefined);
+    assert.deepEqual(legacyTrackerWorkHints(dir,run),["T030"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -369,5 +373,40 @@ test("unreadable tracker remains inspectable and never authorizes completion", a
     assert.deepEqual(currentBranchTicketProgress(dir, run)?.completed, []);
     assert.equal(finishRecoveredTicketScope(dir, run, "interrupted").status, "recoverable");
     assert.equal(readFileSync(path, "utf8"), "legacy or damaged tracker");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("34-ticket authorized scope survives interruption at the first ticket and excludes later work", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-batch-scope-"));
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    const ids = Array.from({ length: 34 }, (_, i) => `T${String(i + 1).padStart(3, "0")}`);
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ids, authorizedBatch: { tickets: ids, requestedSteps: 34, scopeRevision: "approval-revision", startedTickets: ["T001"] } });
+    run = releaseBuildLease(dir, run, "recoverable");
+    assert.deepEqual(readBuildRuns(dir)[0]!.authorizedBatch?.tickets, ids);
+    assert.deepEqual(recoveryExecutionTickets(run, [], false), ids);
+    assert.deepEqual(recoveryExecutionTickets(run, ["T001"], false), ["T001"]);
+    assert.throws(() => recoveryExecutionTickets(run, ["T035"], false), /scope/);
+    run = resumeBuildRun(dir, run.runId, {});
+    const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try { state.upsertState("T001", { status: "done" }, new Date().toISOString()); } finally { state.close(); }
+    run = finishRecoveredTicketScope(dir, run, "one-ticket-recovered");
+    assert.equal(run.status, "recoverable");
+    assert.deepEqual(run.progress.remainingTickets, ids.slice(1));
+    assert.deepEqual(run.authorizedBatch?.startedTickets, ["T001"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("legacy started-only scope cannot silently certify the whole batch complete", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-legacy-scope-"));
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"] });
+    run = saveBuildRun(dir, { ...run, authorizedBatch: undefined });
+    const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try { state.upsertState("T001", { status: "done" }, new Date().toISOString()); } finally { state.close(); }
+    run = finishRecoveredTicketScope(dir, run, "boundary");
+    assert.equal(run.status, "recoverable");
+    assert.equal(run.checkpoint, "legacy-scope-reconciliation-required");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

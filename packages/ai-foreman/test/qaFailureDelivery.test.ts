@@ -1,3 +1,4 @@
+import { admitFixtureWork } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
@@ -151,7 +152,7 @@ test("QA failure delivery service sends complete source-bound handoff and requir
     });
     const db = new WorkflowDb(root);
     try {
-      db.ensureRun("run");
+      db.ensureRun("run"); admitFixtureWork(db,"run",ticket.id, ticket);
       let head = db.qaTicketHead("run", ticket.id);
       head = db.transitionQa("run", ticket.id, head.revision, { type: "source-frozen", sourceStateDigest: source.digest });
       head = db.transitionQa("run", ticket.id, head.revision, { type: "review-ready", reviewBasisDigest: "basis-1", sessionGeneration: 0 });

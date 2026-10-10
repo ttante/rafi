@@ -23,6 +23,16 @@ export function cancelOwnedRuntimeProbes(): void { for (const cancel of ownedPro
 
 export interface BuildReadinessContext { project: string; runId: string; authority: BuildAdmission }
 export class RuntimeCleanupError extends Error { constructor(message: string) { super(message); this.name = "RuntimeCleanupError"; } }
+export function runtimeCleanupRecoveryHelp(): string {
+  return [
+    "Keep this Rafi process open while repairing visibility in another terminal, then choose retry.",
+    "Linux/WSL: check that /proc is mounted and readable by this user. Use a native Linux Node and provider installation in the same WSL distribution; inspect command -v node and command -v claude (or codex).",
+    "macOS: check that ps is available on PATH and process inspection is permitted by the terminal or host sandbox.",
+    "Windows: check that Windows PowerShell and process/Job Object inspection are available to the same user.",
+    "Retry first reconciles the original probe; no new provider starts until cleanup is verified. Avoid restarting Rafi to bypass this check or killing unrelated processes.",
+    "You may cancel deliberately; generated files remain available for a later create walkthrough.",
+  ].join("\n");
+}
 export interface ProbeRuntimeOptions {
   /** Omit only for standalone authentication/capability commands. Build callers use probeBuildRuntime. */
   build?: BuildReadinessContext;
@@ -235,6 +245,7 @@ async function probeRuntimeInternal(
       // Probe completion and process cleanup are independent. Clean on success too.
       clearTimeout(startupTimer);
       let cleaned = Boolean(spawnError && !child.pid);
+      let cleanupReason = "ownership reconciliation did not verify shutdown";
       if (authority && ownedProcess) {
         let journal: WorkflowDb | undefined;
         try {
@@ -248,6 +259,7 @@ async function probeRuntimeInternal(
       } else if (child.pid) {
         const row: ReadinessProcess = { id: tag, run_id: "standalone", owner: "standalone", pid: child.pid, process_start: childStart ?? null, host: (await import("node:os")).hostname(), state: "running", outcome_json: JSON.stringify({ protocol: windows ? "windows-job-v1" : "tagged-v2" }) };
         const evidence = await cleanupReadiness(row);
+        cleanupReason = evidence.reason;
         if (evidence.state !== "quiescent") {
           pendingStandaloneCleanup.set(tag, row);
           // The trusted holder exits on disconnect; retain the record until OS
@@ -270,7 +282,7 @@ async function probeRuntimeInternal(
       if (startupError) { rejectResult(new RuntimeCleanupError(`${startupError.message}${cleaned ? "; cleanup verified; retry readiness" : authority ? "; cleanup requires rafi resume" : "; standalone cleanup is unverified; restore process visibility and retry"}`)); return; }
       if (!cleaned) { rejectResult(new RuntimeCleanupError(authority
         ? "Readiness process cleanup is unverified; use rafi resume in the owning project to reconcile before continuing"
-        : "Standalone probe cleanup is unverified; restore process visibility and retry. No new probe will start until cleanup is verified.")); return; }
+        : `Standalone probe cleanup is unverified (${cleanupReason}); restore process visibility and retry. No new probe will start until cleanup is verified.`)); return; }
       spawnError ??= providerSpawnError;
       const diagnostics = sanitizeDiagnostics(spawnError?.message
         ? `${spawnError.message}\n${output.toString("utf8")}`

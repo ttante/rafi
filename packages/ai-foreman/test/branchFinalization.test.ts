@@ -1,3 +1,4 @@
+import { admitFixtureWork, seedQaReceipt } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -138,12 +139,12 @@ test("finalization rejects source changes made while capturing its prospective G
   try {
     const frozen = await captureFrozenQaSourceAsync(f.worktree);
     const protocol = new WorkflowDb(f.project);
-    protocol.ensureRun("run");
+    protocol.ensureRun("run"); admitFixtureWork(protocol,"run","T1");
     let head = protocol.qaTicketHead("run", "T1");
     head = protocol.transitionQa("run", "T1", head.revision, { type: "source-frozen", sourceStateDigest: frozen.digest });
     head = protocol.transitionQa("run", "T1", head.revision, { type: "review-ready", reviewBasisDigest: "basis", sessionGeneration: 0 });
     head = protocol.transitionQa("run", "T1", head.revision, { type: "turn-intended", slot: "initial" });
-    const certificate = protocol.issueQaPassCertificate({ runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: frozen.digest, reviewBasisDigest: "basis", turnReceiptDigest: "turn" });
+    const certificate = protocol.issueQaPassCertificate({ runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: frozen.digest, reviewBasisDigest: "basis", turnReceiptDigest: seedQaReceipt(protocol,"run","T1",head.reviewNumber,frozen.digest,"basis") });
     head = protocol.transitionQa("run", "T1", head.revision, { type: "review-passed", passCertificateId: certificate.certificateId });
     protocol.close();
     const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
@@ -173,12 +174,12 @@ for (const crash of ["staged", "committed", "cleaned", "changed"] as const) {
       const intent = prepareDirectMerge(f.project, "T1", "ticket/T1", "main", "squash");
       const db = new WorkflowDb(f.project);
       try {
-        db.ensureRun("run");
+        db.ensureRun("run"); admitFixtureWork(db,"run","T1");
         let head = db.qaTicketHead("run", "T1");
         head = db.transitionQa("run", "T1", head.revision, { type: "source-frozen", sourceStateDigest: "reviewed-source" });
         head = db.transitionQa("run", "T1", head.revision, { type: "review-ready", reviewBasisDigest: "basis", sessionGeneration: 0 });
         head = db.transitionQa("run", "T1", head.revision, { type: "turn-intended", slot: "initial" });
-        const certificate = db.issueQaPassCertificate({ runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: "reviewed-source", reviewBasisDigest: "basis", turnReceiptDigest: "receipt" });
+        const certificate = db.issueQaPassCertificate({ runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: "reviewed-source", reviewBasisDigest: "basis", turnReceiptDigest: seedQaReceipt(db,"run","T1",head.reviewNumber,"reviewed-source","basis") });
         head = db.transitionQa("run", "T1", head.revision, { type: "review-passed", passCertificateId: certificate.certificateId });
         db.beginQaFinalization({ runId: "run", ticketId: "T1", certificateId: certificate.certificateId, consumer: "branch-finalization:T1", expectedSourceStateDigest: "reviewed-source", expectedGitTree: runGit(f.worktree, ["rev-parse", "HEAD^{tree}"]).stdout, allowedProjectionPaths: [], expectedRevision: head.revision, operationId: "finalize" });
         db.planOperation({ runId: "run", idempotencyKey: "run:direct-merge:T1", kind: "direct-merge", intent });

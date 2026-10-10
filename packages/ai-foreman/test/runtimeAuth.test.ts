@@ -218,3 +218,25 @@ test("runtime command diagnostics preserve an SDK load failure after a successfu
     },
   );
 });
+
+test("standalone cleanup uncertainty reaches recovery before another provider can start", async () => {
+  const { RuntimeCleanupError } = await import("../src/runtimeReadiness.js");
+  let probes = 0;
+  let choices = 0;
+  const result = await ensureRuntimeReadyForCommand("/tmp/project", "claude", {
+    label: "create planner", yes: true,
+    check: async () => { if (++probes === 1) throw new RuntimeCleanupError("Standalone probe cleanup is unverified: inventory unavailable"); return { ok: true, runtime: "claude", phase: "readiness", category: "ready", executable: process.execPath, cwd: "/tmp/project", timedOut: false, exitCode: 0, signal: null, diagnostics: "OK", environmentNames: [], recoveryChoices: [] }; },
+    checkClaudeSdk: async () => {},
+    choose: async (failure, context) => {
+      choices++;
+      assert.equal(failure.cleanupUnverified, true);
+      assert.equal(context.allowSwitch, false);
+      assert.match(failure.message, /create planner is paused/);
+      assert.match(failure.message, /Linux\/WSL/);
+      return "retry";
+    },
+  });
+  assert.equal(result.runtime, "claude");
+  assert.equal(probes, 2);
+  assert.equal(choices, 1);
+});

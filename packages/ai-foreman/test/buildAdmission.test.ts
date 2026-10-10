@@ -132,7 +132,7 @@ test("unknown future ownership schema rejects readers and writers without migrat
   const root = mkdtempSync(join(tmpdir(), "rafi-future-schema-"));
   try {
     const initial = new WorkflowDb(root); const path = initial.path; initial.close();
-    const db = new Database(path); db.function("rafi_protocol_v3", () => 1); db.prepare("UPDATE build_ownership_schema SET version=99").run(); db.close();
+    const db = new Database(path); db.function("rafi_protocol_v3", () => 1); db.function("rafi_writer_protocol",()=>4); db.prepare("UPDATE build_ownership_schema SET version=99").run(); db.close();
     assert.throws(() => new WorkflowDb(root), /Unsupported build ownership schema/);
     assert.throws(() => new WorkflowReader(root), /Unsupported build ownership schema/);
     const after = new Database(path, { readonly: true });

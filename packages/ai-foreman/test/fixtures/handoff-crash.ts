@@ -30,6 +30,7 @@ const old = new Adapter("old", 2);
 const next = new Adapter("successor", 0);
 const db = new WorkflowDb(root);
 db.ensureRun("run");
+db.admitWork({runId:"run",kind:"ticket",ticketId:"T001",definition:{id:"T001"},approvalId:"fixture",scopeRevision:"fixture",provenance:{userTurn:"Implement T001",reason:"Authorized handoff crash fixture"}});
 db.publishContinuityCheckpoint({ runId: "run", role: "builder", delta, authoritativeStateRevision: 1, sessionRef: old.ref });
 db.claimInitialRoleLease("run", "builder", old.ref);
 db.recordBranchResumeSession("run", { ticket: "T001", branch: "feature/unit", base: "main", worktreePath: root, sessionId: "old", sessionRef: old.ref, logPath: "fixture" });

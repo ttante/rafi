@@ -193,6 +193,11 @@ export interface BuilderAdapterOptions {
   fast?: boolean;
   /** Codex sandbox mode. Defaults to workspace-write for implementation runs. */
   sandboxMode?: "workspace-write" | "read-only";
+  /** Explicit opt-in to per-command sandbox escalation. QA remains offline/never. */
+  approvalPolicy?: "never" | "on-request";
+  approvalTimeoutMs?: number;
+  /** Build-scoped explicit grant; ignored for read-only/QA roles. */
+  networkAccess?: boolean;
   /** Role system text to append to the harness system prompt (from .rafi/compiled or library). */
   systemPromptAppend?: string;
   /** Skill names to preload for this session (Claude: lazy-loaded; Codex: flattened). */

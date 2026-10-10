@@ -109,6 +109,7 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
   db.ensureRun(runId, "build");
   db.freezeAutonomyPolicy(runId, policy);
   let exitCode = 2;
+  let stopRequestSource: string | undefined;
   const supervisor = new DurableSupervisor({ projectDir, runId, policy, admission: localBuildAuthority(projectDir),
     checkpoint: () => db.getRun(runId)?.checkpoint ?? "preparing",
     spawnWorker: generation => {
@@ -142,7 +143,7 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
         killTimer.unref();
         try { process.kill(process.platform === "win32" ? child.pid! : -child.pid!, "SIGTERM"); } catch { /* exited */ }
       };
-      const watchdog = setInterval(() => { if (Date.now() - lastHeartbeat > 120_000) stop(); }, 5_000);
+      const watchdog = setInterval(() => { if (Date.now() - lastHeartbeat > 120_000) { stopRequestSource = "heartbeat-timeout"; stop(); } }, 5_000);
       watchdog.unref();
       child.on("message", message => { if (message && typeof message === "object" && "kind" in message && message.kind === "rafi-worker-heartbeat") lastHeartbeat = Date.now(); });
       child.on("message", message => {
@@ -165,6 +166,8 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
           if (killTimer) clearTimeout(killTimer);
           exitCode = code ?? 2;
           try {
+          const exitState = db.getRun(runId);
+          if (exitState) db.transitionSupervisor(runId, generation, { checkpoint: exitState.checkpoint, event: "worker_exit", payload: { code, signal, stopRequested: stopping, source: stopRequestSource ?? "unknown", at: new Date().toISOString(), generation } });
           // Durable records are authoritative even when the worker never sent IPC.
           const deadline = Date.now() + 5000;
           const owned = db.readinessProcesses(runId).filter(row => {
@@ -200,7 +203,8 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
             resolve({ kind: "waiting_for_human" });
           } else {
             const state = db.getRun(runId);
-            if (code === 0 && state?.status !== "completed") { exitCode = 2; resolve({ kind: "waiting_for_human" }); }
+            if (code === 0 && state?.status === "cancelled") { resolve({ kind: "completed" }); }
+            else if (code === 0 && state?.status !== "completed") { exitCode = 2; resolve({ kind: "waiting_for_human" }); }
             else resolve(code === 0 ? { kind: "completed" } : code === 2 ? { kind: "waiting_for_human" } : { kind: "failed", detail: `worker exited ${code}` });
           }
           } catch (error) { exitCode = 2; resolve({ kind: "failed", detail: `Worker reconciliation failed: ${String(error)}` }); }
@@ -209,10 +213,11 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
       return { pid: child.pid, result, stop };
     },
   });
-  const stop = () => supervisor.requestStop();
-  process.once("SIGINT", stop); process.once("SIGTERM", stop);
+  const stopInt = () => { stopRequestSource = "parent-SIGINT"; supervisor.requestStop(); };
+  const stopTerm = () => { stopRequestSource = "parent-SIGTERM"; supervisor.requestStop(); };
+  process.once("SIGINT", stopInt); process.once("SIGTERM", stopTerm);
   try { await supervisor.run(); }
-  finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); db.close(); }
+  finally { process.off("SIGINT", stopInt); process.off("SIGTERM", stopTerm); db.close(); }
   process.exitCode = exitCode;
   return true;
 }

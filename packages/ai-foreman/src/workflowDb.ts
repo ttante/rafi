@@ -1,3 +1,7 @@
+import { reconcileWork, type BuildOwnershipRepairV1 } from "./buildWorkReconciliation.js";
+import { migrateBuildInterventions, hasQueuedBuilderGuidance, reconcileGuidance, decisionWorkId, queuedControls, completeControl, verifyGuidance, builderVerificationContext, verifyBuilderGuidance, assertFinalizationControls, reserveGuidance, finishGuidance, instruction, type InstructionRecipient } from "./buildInterventions.js";
+import { migrateBuildWork } from "./buildWorkMigration.js";
+import { admitWork, admittedWork, assertAdmittedWork, type AdmitWorkInput } from "./buildWorkAdmission.js";
 import { cleanupReadiness, inspectReadiness, readinessMetadata, type ReadinessProcess } from "./readinessCleanup.js";
 import { windowsProbeJobState } from "./windowsProbeJob.js";
 import { originalBuildLease, rememberOriginalLease, forgetOriginalLease, registerLaunchChild, acknowledgeLaunchChild, reconcileLaunch, checkBuildOwnershipSchema, canonicalProject, launchDigest, localBuildAuthority, rememberBuildAuthority, forgetBuildAuthority, migrateBuildAdmission, acquireAdmission, readAdmission, assertAdmission, releaseAdmission, reserveLaunch, setLaunchState, claimLaunch, readLaunch, type BuildAdmission, type BuildLaunch } from "./buildAdmission.js";
@@ -6,6 +10,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statS
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { validateQaFailureReport } from "rafi-spec";
 import { migrateQaHandback, registerHandbackWriter, reportOccurrenceId } from "./qaHandbackMigration.js";
 import type {
   BuildRecoveryDecisionReceipt,
@@ -288,6 +293,7 @@ export class WorkflowDb {
   private writerLease?: ProjectLease;
   private coordinatorTransition = 0;
   private lineageTransition = 0;
+  private workAuthority = 0;
 
   constructor(readonly projectDir: string, path = join(resolve(projectDir), WORKFLOW_DB_FILE), private readonly readinessAccess?: { probeId: string } | { runId: string }) {
     this.path = path;
@@ -307,13 +313,14 @@ export class WorkflowDb {
     this.db.function("rafi_build_lease_generation", () => this.writerLease?.generation ?? -1);
     this.db.function("rafi_build_writer_token", () => this.writerAuthority?.token ?? "");
     this.db.function("rafi_build_writer_run", () => this.writerAuthority?.runId ?? "");
+    this.db.function("rafi_work_authority", () => this.workAuthority);
     registerHandbackWriter(this.db);
     if (!readinessAccess) this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = FULL");
     this.db.pragma("foreign_keys = ON");
     try {
       if (readinessAccess) this.restrictReadinessConnection(readinessAccess);
-      else { this.migrate(); migrateBuildAdmission(this.db); this.importLegacyOnce(); }
+      else { this.migrate(); migrateBuildAdmission(this.db); this.importLegacyOnce(); migrateBuildWork(this.db, projectDir); migrateBuildInterventions(this.db); }
     } catch (error) { this.db.close(); throw error; }
   }
 
@@ -332,6 +339,108 @@ export class WorkflowDb {
   }
 
   close(): void { this.db.close(); }
+  admitWork(input: AdmitWorkInput) {
+    this.assertInstructionOwner(input.runId);
+    this.workAuthority++;
+    try { return admitWork(this.db, input); } finally { this.workAuthority--; }
+  }
+  private assertInstructionOwner(runId: string): void {
+    if(this.writerAuthority) {assertAdmission(this.db,this.writerAuthority);if(this.writerAuthority.runId!==runId&&!this.db.prepare("SELECT 1 FROM build_child_runs WHERE child=? AND parent=?").get(runId,this.writerAuthority.runId))throw new Error("Instruction execution authority belongs to another run");return;}
+    if(this.buildAdmission())throw new Error("Instruction consumption requires the original build owner");
+    if(this.db.prepare("SELECT 1 FROM build_runtime_runs WHERE run_id=?").get(runId)) {
+      const held=this.currentLease();
+      if(!held||!this.writerLease||held.owner!==this.writerLease.owner||held.generation!==this.writerLease.generation||held.runId!==runId)throw new Error("Instruction execution requires the original workflow lease");
+    }
+  }
+  reserveGuidance(runId: string, workId: string, recipient: InstructionRecipient, operationId: string, sourceDigest: string, text: string, reserve = true) {
+    this.assertInstructionOwner(runId);
+    return reserveGuidance(this.db, runId, workId, recipient, operationId, sourceDigest, text, reserve);
+  }
+  reconcileInstructionDeliveries(runId:string,workId:string):void {this.assertInstructionOwner(runId);this.atomic(()=>reconcileGuidance(this.db,runId,workId));}
+  decisionWorkId(decision:PendingHumanDecision):string|undefined {return decisionWorkId(this.db,decision);}
+  finishGuidance(ids: string[], recipient: InstructionRecipient, result: Parameters<typeof finishGuidance>[3]) { for(const id of ids)this.assertInstructionOwner(instruction(this.db,id)!.request.runId); finishGuidance(this.db, ids, recipient, result); }
+  builderVerificationContext(runId:string,workId:string,sourceDigest:string) {return builderVerificationContext(this.db,runId,workId,sourceDigest);}
+  verifyBuilderGuidance(ids:string[],certificate:Parameters<typeof verifyBuilderGuidance>[2],response:string,receiptDigest:string) {for(const id of ids)this.assertInstructionOwner(instruction(this.db,id)!.request.runId);return this.atomic(()=>verifyBuilderGuidance(this.db,ids,certificate,response,receiptDigest));}
+  verifyGuidance(ids: string[], certificate: Parameters<typeof verifyGuidance>[2], response: string) { for(const id of ids)this.assertInstructionOwner(instruction(this.db,id)!.request.runId); return this.atomic(()=>verifyGuidance(this.db,ids,certificate,response)); }
+  hasQueuedBuilderGuidance(runId:string,workId:string):boolean { return hasQueuedBuilderGuidance(this.db,runId,workId); }
+  instruction(id: string) { return instruction(this.db, id); }
+  assertFinalizationControls(runId: string, workId: string) { assertFinalizationControls(this.db,runId,workId); }
+  consumeInstructionControls(runId: string, workId: string, kind: "questions" | "attempts" = "questions"): string | undefined {
+    return this.atomic(() => {
+      this.assertInstructionOwner(runId);
+      const admission = this.assertAdmittedWork(runId,workId);
+      const latestReview=this.qaReviewAttempts(runId,workId).at(-1);
+      let authorization: string | undefined = kind==="attempts" && latestReview && ["failed","passed"].includes(latestReview.status) ? (this.db.prepare("SELECT a.authorization_id FROM qa_remediation_authorizations a JOIN build_instruction_deliveries d ON json_extract(d.record_json,'$.receipt.authorizationId')=a.authorization_id JOIN build_instructions i USING(instruction_id) WHERE a.run_id=? AND a.ticket_id=? AND a.review_attempt_id=? AND a.consumed_by IS NULL AND d.state='applied' AND json_extract(i.record_json,'$.requirementsDigest')=? AND json_extract(i.record_json,'$.basis.assignmentId')=? AND json_extract(i.record_json,'$.basis.scopeRevision')=? ORDER BY i.sequence LIMIT 1").get(runId,workId,latestReview.attemptId,admission.requirementsDigest,admission.assignmentId,admission.scopeRevision) as {authorization_id:string}|undefined)?.authorization_id : undefined;
+      if (authorization) {
+        const head = this.qaTicketHead(runId,workId);
+        const eligible = latestReview?.status === "passed"
+          ? head.state === "passed" && this.hasQueuedBuilderGuidance(runId,workId)
+          : head.state === "review-failed" && this.unresolvedQaReports(runId,workId).some(report=>report.reviewNumber===latestReview!.reviewNumber&&report.reportDigest===latestReview!.reportDigest);
+        if (!eligible) authorization = undefined;
+      }
+      for (const record of queuedControls(this.db,runId,workId).filter(record=>kind==="questions" ? record.request.action==="answer_question" : record.request.action==="request_attempt")) {
+        const priorAuthorization=authorization;
+        try {
+          this.atomic(()=>{
+          if (record.requirementsDigest !== admission.requirementsDigest) throw new Error("Instruction requirements are stale");
+          if (record.request.action === "answer_question") {
+            const decision = this.humanDecision(record.request.decisionId!);
+            if (!decision || decision.runId!==runId || this.decisionWorkId(decision)!==workId || createHash("sha256").update(json(decision)).digest("hex")!==record.request.decisionRevision) throw new Error("Pending question identity or revision changed");
+            const choice = decision.choices.find(choice=>choice.id===record.request.text||choice.label===record.request.text) ?? decision.choices.find(choice=>choice.id==="custom"||choice.id==="answer");
+            if (!choice) throw new Error("Answer must name an offered choice or use a question accepting custom text");
+            const answer = this.answerHumanDecision(runId,decision.decisionId,choice.id,new Date(),choice.id==="custom"||choice.id==="answer"?record.request.text:undefined);
+            completeControl(this.db,record.instructionId,{decisionId:answer.decisionId,status:answer.status});
+          } else {
+            const latest = this.qaReviewAttempts(runId,workId).at(-1);
+            if (!latest || !["failed","passed"].includes(latest.status) || latest.attemptId!==record.basis.reviewAttemptId || authorization) throw new Error("One extra attempt requires the current eligible review; another authorization is already available");
+            if (record.basis.assignmentId !== admission.assignmentId || record.basis.scopeRevision !== admission.scopeRevision) throw new Error("Attempt authorization scope changed");
+            const head=this.qaTicketHead(runId,workId);
+            if (latest.status === "passed") {
+              if (head.state !== "passed" || !this.hasQueuedBuilderGuidance(runId,workId)) throw new Error("Follow-up authorization requires waiting Builder guidance on the current unfinalized pass");
+              authorization = this.authorizeQaRemediation(runId,workId,latest.attemptId,record.request.text);
+              completeControl(this.db,record.instructionId,{authorizationId:authorization,reviewAttemptId:latest.attemptId,consumed:false,kind:"builder-guidance-followup"});
+              return;
+            }
+            const report=this.unresolvedQaReports(runId,workId).find(report=>report.reviewNumber===latest.reviewNumber&&report.reportDigest===latest.reportDigest&&report.sourceStateDigest===latest.sourceDigest&&report.reviewBasisDigest===head.reviewBasisDigest);
+            if(!report||!validateQaFailureReport(report.report).valid||head.reviewNumber!==latest.reviewNumber||head.sourceStateDigest!==latest.sourceDigest||!["review-failed","operator-menu"].includes(head.state)||this.qaRemediationAttempts(runId,workId).some(attempt=>attempt.reviewAttemptId===latest.attemptId))throw new Error("Extra attempt requires an unconsumed validated failed-review basis; reconcile uncertain execution separately");
+            const decisions=(this.db.prepare("SELECT decision_id,status,decision_json FROM human_decisions WHERE run_id=? AND decision_key LIKE ?").all(runId,`${runId}:qa-nonconvergence:%`) as Array<{decision_id:string;status:string;decision_json:string}>).filter(row=>this.decisionWorkId(parseJson(row.decision_json) as PendingHumanDecision)===workId&&(parseJson(row.decision_json) as PendingHumanDecision).createdAt>=latest.createdAt);
+            if(decisions.some(row=>row.status==="answered"))throw new Error("The nonconvergence decision was already answered; resume that decision before requesting another attempt");
+            authorization = this.authorizeQaRemediation(runId,workId,latest.attemptId,record.request.text);
+            for(const row of decisions.filter(row=>row.status==="pending")) {
+              const decision=parseJson(row.decision_json) as PendingHumanDecision;
+              const at=new Date().toISOString();
+              this.db.prepare("UPDATE human_decisions SET status='cancelled',decision_json=?,updated_at=? WHERE decision_id=? AND status='pending'").run(json({...decision,status:"cancelled",cancellationReason:`Superseded by scoped attempt instruction ${record.instructionId}`,cancelledAt:at}),at,row.decision_id);
+              this.insertEvent(runId,"human_decision_cancelled","attempt-authorized",{decisionId:row.decision_id,instructionId:record.instructionId},at);
+            }
+            if(head.state==="operator-menu")this.transitionQa(runId,workId,head.revision,{type:"failed-review-restored",reviewNumber:latest.reviewNumber,sourceStateDigest:latest.sourceDigest,reportDigest:report.reportDigest});
+            completeControl(this.db,record.instructionId,{authorizationId:authorization,reviewAttemptId:latest.attemptId,consumed:false});
+          }
+          });
+        } catch (error) {authorization=priorAuthorization;completeControl(this.db,record.instructionId,undefined,String(error));}
+      }
+      return authorization;
+    });
+  }
+  reconcileWork(request: BuildOwnershipRepairV1, input: Parameters<typeof reconcileWork>[2]) {
+    this.assertInstructionOwner(request.runId);
+    if (this.writerAuthority) assertAdmission(this.db,this.writerAuthority);
+    this.workAuthority++;
+    try {return this.atomic(()=>reconcileWork(this.db,request,input));} finally {this.workAuthority--;}
+  }
+  reconciliation(id: string): Record<string,unknown> | undefined {
+    const row=this.db.prepare("SELECT record_json FROM build_reconciliations WHERE reconciliation_id=?").get(id) as {record_json:string}|undefined;
+    return row?JSON.parse(row.record_json):undefined;
+  }
+  workDefinitions(runId: string): Array<{workId:string;kind:string;definition:unknown}> {
+    return (this.db.prepare("SELECT work_id,kind,definition_json FROM build_work_scope WHERE run_id=? AND state='admitted' ORDER BY rowid").all(runId) as Array<{work_id:string;kind:string;definition_json:string}>).map(row=>({workId:row.work_id,kind:row.kind,definition:JSON.parse(row.definition_json)}));
+  }
+  recordWorkAssignment(runId: string, workId: string, operationId: string, record: unknown): void {
+    this.assertInstructionOwner(runId);
+    this.assertAdmittedWork(runId,workId); this.workAuthority++;
+    try { this.db.prepare("INSERT INTO build_assignments VALUES(?,?,?,?,?)").run(operationId,runId,workId,operationId,json(record)); } finally {this.workAuthority--;}
+  }
+  admittedWork(runId: string, workId: string) { return admittedWork(this.db, runId, workId); }
+  assertAdmittedWork(runId: string, workId: string) { return assertAdmittedWork(this.db, runId, workId); }
 
   /** Atomic local changes only; never await provider or filesystem work here. */
   atomic<T>(work: () => T): T { return this.db.transaction(work).immediate(); }
@@ -1036,6 +1145,20 @@ export class WorkflowDb {
     return decision;
   }
 
+  cancelPendingHumanDecisions(runId: string, reason: string, now = new Date()): void {
+    this.atomic(() => {
+      for (const decision of this.pendingHumanDecisions(runId)) {
+        const next = { ...decision, status: "cancelled", cancellationReason: reason, cancelledAt: now.toISOString() };
+        this.db.prepare("UPDATE human_decisions SET status='cancelled',decision_json=?,updated_at=? WHERE decision_id=? AND status='pending'").run(json(next), now.toISOString(), decision.decisionId);
+        this.insertEvent(runId, "human_decision_cancelled", "cancelled", { decisionId: decision.decisionId, reason }, now.toISOString());
+      }
+    });
+  }
+
+  humanDecisionKey(decisionId: string): string | undefined {
+    return (this.db.prepare("SELECT decision_key FROM human_decisions WHERE decision_id=?").get(decisionId) as { decision_key: string } | undefined)?.decision_key;
+  }
+
   humanDecision(decisionId: string): PendingHumanDecision | undefined {
     const row = this.db.prepare("SELECT decision_json FROM human_decisions WHERE decision_id=?").get(decisionId) as { decision_json: string } | undefined;
     return row ? parseJson(row.decision_json) as PendingHumanDecision : undefined;
@@ -1046,11 +1169,22 @@ export class WorkflowDb {
       .map((row) => parseJson(row.decision_json) as PendingHumanDecision);
   }
 
+  decisionContinuationAvailable(runId: string, decisionId: string): boolean {
+    const prior = this.operations(runId).filter(op => op.kind === "decision-continuation" && (op.intent as { decisionId?: string }).decisionId === decisionId);
+    return prior.every(op => op.status === "failed" && (op.result as { dispatchState?: string } | undefined)?.dispatchState === "not-sent");
+  }
+
+  nextDecisionContinuationKey(runId: string, decisionId: string): string {
+    if (!this.decisionContinuationAvailable(runId, decisionId)) throw new Error("Decision continuation requires reconciliation before replay");
+    const count = this.operations(runId).filter(op => op.kind === "decision-continuation" && (op.intent as { decisionId?: string }).decisionId === decisionId).length;
+    return `decision-continuation:${decisionId}${count ? `:retry-${count}` : ""}`;
+  }
+
   answeredTicketDecisions(runId: string, scopeRevision: string): PendingHumanDecision[] {
     return (this.db.prepare("SELECT decision_key,decision_json FROM human_decisions WHERE run_id=? AND status='answered'").all(runId) as Array<{ decision_key: string; decision_json: string }>)
       .filter(row => row.decision_key.includes(`:${scopeRevision}:`))
       .map(row => parseJson(row.decision_json) as PendingHumanDecision)
-      .filter(decision => decision.interruptionId.startsWith("ticket:") && !this.operation(`decision-continuation:${decision.decisionId}`) && !this.operation(`decision-supersession:${decision.decisionId}`));
+      .filter(decision => decision.interruptionId.startsWith("ticket:") && this.decisionContinuationAvailable(runId, decision.decisionId) && !this.operation(`decision-supersession:${decision.decisionId}`));
   }
 
   /** Unconsumed answers to an older definition must not silently reopen a ticket. */
@@ -1058,11 +1192,18 @@ export class WorkflowDb {
     return (this.db.prepare("SELECT decision_key,decision_json FROM human_decisions WHERE run_id=? AND status='answered'").all(runId) as Array<{ decision_key: string; decision_json: string }>)
       .filter(row => !row.decision_key.includes(`:${scopeRevision}:`))
       .map(row => parseJson(row.decision_json) as PendingHumanDecision)
-      .filter(decision => decision.interruptionId.startsWith("ticket:") && !this.operation(`decision-continuation:${decision.decisionId}`) && !this.operation(`decision-supersession:${decision.decisionId}`));
+      .filter(decision => decision.interruptionId.startsWith("ticket:") && this.decisionContinuationAvailable(runId, decision.decisionId) && !this.operation(`decision-supersession:${decision.decisionId}`));
   }
 
   refreshStaleTicketDecisions(runId: string, scopeRevision: string, tickets?: readonly string[]): void {
     this.atomic(() => {
+      for (const prior of this.pendingHumanDecisions(runId)) {
+        const key = this.humanDecisionKey(prior.decisionId) ?? "";
+        if (!prior.interruptionId.startsWith("ticket:") || tickets && !tickets.includes(prior.interruptionId.slice(7)) || key.includes(`:${scopeRevision}:`) || !(key.startsWith(`${runId}:builder:`) || key.startsWith(`${runId}:ticket-question:`))) continue;
+        this.ensureHumanDecision({ runId, decisionKey: `${runId}:ticket-question:${scopeRevision}:supersedes:${prior.decisionId}`, interruptionId: prior.interruptionId, prompt: prior.prompt, choices: prior.choices, evidence: prior.evidence });
+        this.db.prepare("UPDATE human_decisions SET status='cancelled',decision_json=?,updated_at=? WHERE decision_id=? AND status='pending'").run(json({ ...prior, status: "cancelled", cancellationReason: "ticket scope changed before the question was answered" }), new Date().toISOString(), prior.decisionId);
+        this.insertEvent(runId, "human_decision_superseded", "question-revised", { decisionId: prior.decisionId, scopeRevision }, new Date().toISOString());
+      }
       for (const prior of this.staleTicketDecisions(runId, scopeRevision)) {
         if (tickets && !tickets.includes(prior.interruptionId.slice(7))) continue;
         const next = this.ensureHumanDecision({ runId, decisionKey: `${runId}:ticket-question:${scopeRevision}:supersedes:${prior.decisionId}`, interruptionId: prior.interruptionId,
@@ -1330,7 +1471,8 @@ export class WorkflowDb {
     }
     if (linked.size !== recoveries.length) throw new Error("QA remediation budget requires legacy attempt reconciliation");
     const authorized = new Set((this.db.prepare("SELECT consumed_by FROM qa_remediation_authorizations WHERE run_id=? AND ticket_id=? AND consumed_by IS NOT NULL").all(runId, ticketId) as Array<{ consumed_by: string }>).map(r => r.consumed_by));
-    return attempts.filter(a => !authorized.has(a.attemptId)).length;
+    const followups = this.operations(runId).filter(operation => operation.kind === "build-assignment" && (operation.intent as {ticketId?:string;managerFollowup?:unknown}).ticketId === ticketId && (operation.intent as {managerFollowup?:unknown}).managerFollowup);
+    return attempts.filter(a => !authorized.has(a.attemptId)).length + followups.filter(operation => !authorized.has(operation.idempotencyKey)).length;
   }
 
   authorizeQaRemediation(runId: string, ticketId: string, reviewAttemptId: string, reason: string): string {
@@ -1799,9 +1941,9 @@ export class WorkflowDb {
     })();
   }
 
-  invalidateUnconsumedQaPassCertificates(runId: string, ticketId: string, reason: string, now = new Date()): void {
+  invalidateUnconsumedQaPassCertificates(runId: string, ticketId: string, reason: string, now = new Date(), issuedBefore?: string): void {
     const at = now.toISOString();
-    this.db.prepare("UPDATE qa_pass_certificates SET consumed_at=?,consumed_by=? WHERE run_id=? AND ticket_id=? AND consumed_at IS NULL").run(at, `invalidated:${reason}`, runId, ticketId);
+    this.db.prepare("UPDATE qa_pass_certificates SET consumed_at=?,consumed_by=? WHERE run_id=? AND ticket_id=? AND consumed_at IS NULL AND (? IS NULL OR issued_at<=?)").run(at, `invalidated:${reason}`, runId, ticketId, issuedBefore??null, issuedBefore??null);
   }
 
   invalidateQaPassBeforeFinalization(input: {
@@ -1824,6 +1966,7 @@ export class WorkflowDb {
     expectedSourceStateDigest: string; expectedGitTree: string; allowedProjectionPaths: string[]; expectedRevision: number; operationId: string;
   }, now = new Date()): QaReducerStateV2 {
     return this.db.transaction(() => {
+      this.assertFinalizationControls(input.runId,input.ticketId);
       const head = this.qaTicketHead(input.runId, input.ticketId);
       if (head.revision !== input.expectedRevision || head.state !== "passed") throw new Error(`QA finalization start raced for ${input.runId}/${input.ticketId}`);
       if (head.passCertificateId !== input.certificateId || head.sourceStateDigest !== input.expectedSourceStateDigest) {
@@ -1896,6 +2039,7 @@ export class WorkflowDb {
 
   completeQaFinalization(runId: string, ticketId: string, expectedRevision: number, receipt: unknown, now = new Date()): QaReducerStateV2 {
     return this.db.transaction(() => {
+      this.assertFinalizationControls(runId,ticketId);
       const head = this.qaTicketHead(runId, ticketId);
       if (head.revision !== expectedRevision || head.state !== "finalizing") throw new Error(`QA finalization completion raced for ${runId}/${ticketId}`);
       this.finishPendingQaFinalizationSteps(runId, ticketId, receipt, now);
@@ -2518,7 +2662,7 @@ function leaseVerifiedLive(lease: ProjectLease, now: Date, staleMs: number): boo
 function ensureRecoveryGitignore(projectDir: string): void {
   const localExclude = join(projectDir, ".git", "info", "exclude");
   const path = existsSync(localExclude) ? localExclude : join(projectDir, ".gitignore");
-  const entries = [WORKFLOW_DB_FILE, `${WORKFLOW_DB_FILE}-wal`, `${WORKFLOW_DB_FILE}-shm`, ".rafi/cache/handoffs/"];
+  const entries = [WORKFLOW_DB_FILE, `${WORKFLOW_DB_FILE}-wal`, `${WORKFLOW_DB_FILE}-shm`, ".rafi/cache/handoffs/", ".rafi/backups/work-admission-v4/"];
   const existing = existsSync(path) ? readFileSync(path, "utf8") : ""; const missing = entries.filter((entry) => !existing.split(/\r?\n/).includes(entry));
   if (missing.length) appendFileSync(path, `${existing && !existing.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`, "utf8");
 }

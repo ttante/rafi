@@ -1,3 +1,4 @@
+import { admitFixtureWork, seedQaReceipt } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -28,13 +29,13 @@ test("QA V2 durable head is CAS fenced and pass certificates are scoped and sing
   const root = mkdtempSync(join(tmpdir(), "rafi-qa-v2-"));
   const db = new WorkflowDb(root);
   try {
-    db.ensureRun("run");
+    db.ensureRun("run"); admitFixtureWork(db,"run","T1");
     let head = db.qaTicketHead("run", "T1");
     head = db.transitionQa("run", "T1", head.revision, { type: "source-frozen", sourceStateDigest: "s" });
     assert.throws(() => db.transitionQa("run", "T1", 0, { type: "review-ready", reviewBasisDigest: "b", sessionGeneration: 0 }), /stale QA transition/);
     head = db.transitionQa("run", "T1", head.revision, { type: "review-ready", reviewBasisDigest: "b", sessionGeneration: 0 });
     head = db.transitionQa("run", "T1", head.revision, { type: "turn-intended", slot: "initial" });
-    const certificate = db.issueQaPassCertificate({ runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: "s", reviewBasisDigest: "b", turnReceiptDigest: "t" });
+    const certificate = db.issueQaPassCertificate({ runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: "s", reviewBasisDigest: "b", turnReceiptDigest: seedQaReceipt(db,"run","T1",head.reviewNumber,"s","b") });
     head = db.transitionQa("run", "T1", head.revision, { type: "review-passed", passCertificateId: certificate.certificateId });
     db.consumeQaPassCertificate("run", "T1", certificate.certificateId, "test");
     assert.throws(() => db.consumeQaPassCertificate("run", "T1", certificate.certificateId, "again"), /already been consumed/);
@@ -55,17 +56,21 @@ test("failed rechecks retain a durable predecessor report chain", () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-qa-chain-"));
   const db = new WorkflowDb(root);
   try {
-    db.ensureRun("run");
+    db.ensureRun("run"); admitFixtureWork(db,"run","T1");
     let head = db.qaTicketHead("run", "T1");
     head = db.transitionQa("run", "T1", head.revision, { type: "source-frozen", sourceStateDigest: "source-1" });
     head = db.transitionQa("run", "T1", head.revision, { type: "review-ready", reviewBasisDigest: "basis-1", sessionGeneration: 0 });
     head = db.transitionQa("run", "T1", head.revision, { type: "turn-intended", slot: "initial" });
+    db.beginQaReviewAttempt({attemptId:"chain-review-1",runId:"run",ticketId:"T1",reviewNumber:1,cycle:1,remediationGeneration:0,sourceDigest:"source-1"});
+    db.finishQaReviewAttempt("chain-review-1",{status:"failed",reportDigest:"report-1"});
     head = db.commitQaFailure({ reportDigest: "report-1", runId: "run", ticketId: "T1", reviewNumber: 1, sourceStateDigest: "source-1", reviewBasisDigest: "basis-1", report: { summary: "first" } }, ["run/T1/r1/F1"], head.revision);
     head = db.transitionQa("run", "T1", head.revision, { type: "remediation-intended" });
     head = db.transitionQa("run", "T1", head.revision, { type: "remediation-received" });
     head = db.transitionQa("run", "T1", head.revision, { type: "source-frozen", sourceStateDigest: "source-2" });
     head = db.transitionQa("run", "T1", head.revision, { type: "review-ready", reviewBasisDigest: "basis-2", sessionGeneration: 1 });
     head = db.transitionQa("run", "T1", head.revision, { type: "turn-intended", slot: "initial" });
+    db.beginQaReviewAttempt({attemptId:"chain-review-2",runId:"run",ticketId:"T1",reviewNumber:2,cycle:2,remediationGeneration:1,sourceDigest:"source-2"});
+    db.finishQaReviewAttempt("chain-review-2",{status:"failed",reportDigest:"report-2"});
     db.commitQaFailure({ reportDigest: "report-2", runId: "run", ticketId: "T1", reviewNumber: 2, sourceStateDigest: "source-2", reviewBasisDigest: "basis-2", report: { summary: "second" } }, ["run/T1/r2/F1"], head.revision);
     assert.deepEqual(db.qaReportChains("report-2").map(({ predecessorReportDigest, successorReportDigest, relation }) => ({ predecessorReportDigest, successorReportDigest, relation })), [
       { predecessorReportDigest: "report-1", successorReportDigest: "report-2", relation: "recheck-failed" },
@@ -77,7 +82,7 @@ test("accepted failure, remediation, and pass boundaries commit their durable fa
   const root = mkdtempSync(join(tmpdir(), "rafi-qa-atomic-"));
   const db = new WorkflowDb(root);
   try {
-    db.ensureRun("run");
+    db.ensureRun("run"); admitFixtureWork(db,"run","T1");
     let head = db.qaTicketHead("run", "T1");
     head = db.transitionQa("run", "T1", head.revision, { type: "source-frozen", sourceStateDigest: "source-1" });
     head = db.transitionQa("run", "T1", head.revision, { type: "review-ready", reviewBasisDigest: "basis-1", sessionGeneration: 0 });
@@ -120,7 +125,7 @@ test("accepted failure, remediation, and pass boundaries commit their durable fa
     db.beginQaReviewAttempt({ attemptId: "review-2", runId: "run", ticketId: "T1", reviewNumber: 2, cycle: 2, remediationGeneration: 1, sourceDigest: "source-2" });
     head = db.transitionQa("run", "T1", head.revision, { type: "turn-intended", slot: "initial" });
     const certificate = db.commitQaPassAttempt("review-2", { runId: "run", ticketId: "T1", qaRevision: head.revision + 1,
-      sourceStateDigest: "source-2", reviewBasisDigest: "basis-2", turnReceiptDigest: "turn-2" }, "fixed", head.revision);
+      sourceStateDigest: "source-2", reviewBasisDigest: "basis-2", turnReceiptDigest: seedQaReceipt(db,"run","T1",head.reviewNumber,"source-2","basis-2") }, "fixed", head.revision);
     assert.equal(db.qaTicketHead("run", "T1").state, "passed");
     assert.equal(db.qaReviewAttempt("review-2")?.status, "passed");
     assert.equal(db.qaReport("report-1")?.disposition, "verified-fixed");
@@ -132,12 +137,12 @@ test("QA finalization atomically consumes its certificate, records intent, and c
   const root = mkdtempSync(join(tmpdir(), "rafi-qa-finalize-"));
   const db = new WorkflowDb(root);
   try {
-    db.ensureRun("run");
+    db.ensureRun("run"); admitFixtureWork(db,"run","T1");
     let head = db.qaTicketHead("run", "T1");
     head = db.transitionQa("run", "T1", head.revision, { type: "source-frozen", sourceStateDigest: "source" });
     head = db.transitionQa("run", "T1", head.revision, { type: "review-ready", reviewBasisDigest: "basis", sessionGeneration: 0 });
     head = db.transitionQa("run", "T1", head.revision, { type: "turn-intended", slot: "initial" });
-    const certificate = db.issueQaPassCertificate({ runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: "source", reviewBasisDigest: "basis", turnReceiptDigest: "turn" });
+    const certificate = db.issueQaPassCertificate({ runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: "source", reviewBasisDigest: "basis", turnReceiptDigest: seedQaReceipt(db,"run","T1",head.reviewNumber,"source","basis") });
     head = db.transitionQa("run", "T1", head.revision, { type: "review-passed", passCertificateId: certificate.certificateId });
     head = db.beginQaFinalization({ runId: "run", ticketId: "T1", certificateId: certificate.certificateId, consumer: "test", expectedSourceStateDigest: "source", expectedGitTree: "tree", allowedProjectionPaths: [], expectedRevision: head.revision, operationId: "finalize-1" });
     assert.equal(head.state, "finalizing");

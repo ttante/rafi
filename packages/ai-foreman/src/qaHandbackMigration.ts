@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { qaDigest } from "./qaProtocolV2.js";
 
-export const HANDBACK_SCHEMA_VERSION = 3;
+export const HANDBACK_SCHEMA_VERSION = 4;
 const migration = "003_qa_report_occurrences_and_turns";
 
 /** Review numbers are durably unique within a run/ticket, including before V3. */
@@ -14,7 +14,7 @@ export function reportOccurrenceId(runId: string, ticketId: string, reviewNumber
 export function registerHandbackWriter(db: Database.Database): void {
   const version = db.pragma("user_version", { simple: true }) as number;
   if (version > HANDBACK_SCHEMA_VERSION) throw new Error(`Recovery database schema ${version} requires a newer Rafi writer`);
-  db.function("rafi_writer_protocol", () => HANDBACK_SCHEMA_VERSION);
+  db.function("rafi_writer_protocol", () => version >= 4 ? 4 : 3);
 }
 
 /** No provider work or file I/O occurs inside this migration transaction. */
@@ -117,7 +117,7 @@ export function migrateQaHandback(db: Database.Database, faults?: { afterTableCo
       for (const { name } of allTables) for (const action of ["INSERT", "UPDATE", "DELETE"]) {
         db.exec(`CREATE TRIGGER handback_v3_${name}_${action} BEFORE ${action} ON "${name}" BEGIN SELECT CASE WHEN rafi_writer_protocol() != 3 THEN RAISE(ABORT,'incompatible Rafi writer') END; END;`);
       }
-      db.pragma(`user_version = ${HANDBACK_SCHEMA_VERSION}`);
+      db.pragma("user_version = 3");
     }).immediate();
   } finally { db.pragma("foreign_keys = ON"); }
 }

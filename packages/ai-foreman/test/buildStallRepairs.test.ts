@@ -7,7 +7,7 @@ import { stringify } from "yaml";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { durableHumanDecision, HumanDecisionRequired } from "../src/humanDecision.js";
 import { OperationDeadline } from "../src/util/deadline.js";
-import { Foreman } from "../src/foreman.js";
+import { AuthorizedForeman as Foreman } from "./helpers/workAdmission.js";
 import { Log } from "../src/log.js";
 import { cmdInit, cmdUpdate } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
@@ -126,7 +126,7 @@ test("an answered deferred question resumes at a safe boundary once", async t =>
       try { const question = db.pendingHumanDecisions(runId)[0]!; db.answerHumanDecision(runId, question.decisionId, "custom", undefined, "Use the local mirror"); }
       finally { db.close(); }
     }
-    const text = instructions.length === 1 ? 'STEP_STATUS: needs_input | question="Which registry?" choices="Public|Local"'
+    const text = instructions.length === 1 ? 'STEP_STATUS: needs_input | ticket="T001" question="Which registry?" choices="Public|Local"'
       : instructions.length === 2 ? 'STEP_STATUS: done | ticket="T002" summary="independent work"' : 'STEP_STATUS: done | ticket="T001" summary="used the mirror"';
     return { text, isError: false, numTurns: 1, costUsd: 0 };
   }, async *events(): AsyncIterable<BuilderEvent> {}, sessionId: () => "session", async close() {} };

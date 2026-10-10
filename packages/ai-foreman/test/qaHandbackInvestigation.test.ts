@@ -1,3 +1,5 @@
+import { runAuthorizedQa as runIsolatedQa } from "./helpers/workAdmission.js";
+import { admitFixtureWork } from "./helpers/workAdmission.js";
 // Desired invariants converted from all 26 October 2026 defect characterizations.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -11,7 +13,7 @@ import { baselineContinuityDelta, ContinuityAdapter } from "../src/continuity.js
 import { QaFailureDeliveryService } from "../src/qaFailureDelivery.js";
 import { canonicalJson, createQaFindingRefs, qaDigest } from "../src/qaProtocolV2.js";
 import { qaReportDigest } from "../src/qaRecovery.js";
-import { runIsolatedQa, type QaSessionHandle } from "../src/qaReview.js";
+import { type QaSessionHandle } from "../src/qaReview.js";
 import { captureFrozenQaSourceAsync } from "../src/qaSnapshot.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
@@ -42,7 +44,7 @@ for (const scenario of [
       const refs = createQaFindingRefs({ runId: "run", ticketId: ticket.id, reviewAttemptId: "review", reportDigest: digest, rawFindingIds: ["QA-1"] });
       const db = new WorkflowDb(root);
       try {
-        db.ensureRun("run");
+        db.ensureRun("run"); admitFixtureWork(db,"run",ticket.id, ticket);
         let head = db.qaTicketHead("run", ticket.id);
         head = db.transitionQa("run", ticket.id, head.revision, { type: "source-frozen", sourceStateDigest: source.digest });
         head = db.transitionQa("run", ticket.id, head.revision, { type: "review-ready", reviewBasisDigest: "basis", sessionGeneration: 0 });

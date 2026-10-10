@@ -1,0 +1,74 @@
+name: Build recovery
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recovery:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.2.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build workspace dependencies in order
+        shell: bash
+        run: |
+          set -e
+          pnpm --filter rafi-spec build
+          pnpm --filter special-agents build
+          pnpm --filter ai-foreman build
+          pnpm --filter @rafi-ai/cli build
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Shared storage, recovery selectors and launch contracts
+        run: node --import tsx --test --test-concurrency=1 packages/ai-foreman/test/readinessRecovery.test.ts packages/ai-foreman/test/buildRuns081.test.ts packages/ai-foreman/test/processIdentity.test.ts packages/ai-foreman/test/startArguments.test.ts packages/rafi/test/buildResume.test.ts packages/rafi/test/resume.test.ts packages/rafi/test/resumeLauncher.test.ts
+      - name: Packaged readiness faults and actual short-command recovery
+        if: runner.os != 'Windows'
+        run: node --test --test-concurrency=1 packages/ai-foreman/test/readinessFaultsPackaged.test.mjs packages/rafi/test/resumePackaged.test.mjs packages/rafi/test/establishedPackaged.test.mjs packages/rafi/test/interruptedPackaged.test.mjs
+      - name: Native Windows containment (skips fail this gate)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node -p "JSON.stringify({platform:process.platform,node:process.version,os:require('os').release()})" | Tee-Object windows-platform.log
+          $PSVersionTable | Out-String | Tee-Object -Append windows-platform.log
+          git rev-parse HEAD | Tee-Object -Append windows-platform.log
+          node --import tsx --test --test-concurrency=1 packages/ai-foreman/test/windowsProbeJob.test.ts packages/ai-foreman/test/readinessFaultsPackaged.test.mjs packages/rafi/test/resumePackaged.test.mjs packages/rafi/test/establishedPackaged.test.mjs packages/rafi/test/interruptedPackaged.test.mjs 2>&1 | Tee-Object windows-native.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Get-Content windows-native.log -Raw
+          foreach ($case in @('packaged readiness registration failure', 'packaged readiness acknowledgement failure', 'packaged readiness cleanup-recording failure', 'packaged readiness denied identity', 'packaged competing cleanup processes', 'packaged worker death reconciles durable readiness', 'packaged established supervised recovery', 'packaged established direct recovery', 'packaged established detached recovery', 'packaged resume cleans terminal history', 'packaged build:resume cleans terminal history', 'Windows production reconciliation fences a paused creator before late authorization')) {
+            if ($log -notmatch ('ok \d+ - ' + [regex]::Escape($case))) { throw "Required native case missing: $case" }
+          }
+          foreach ($alias in @('resume', 'build:resume')) {
+            foreach ($role in @('builder', 'qa')) {
+              foreach ($suffix in @('', ' with other work still blocked')) {
+                $case = "packaged $alias resumes interrupted $role ticket through production recovery$suffix"
+                if ($log -notmatch ('ok \d+ - ' + [regex]::Escape($case) + '(?:\r?\n|$)')) { throw "Required ticket recovery case missing: $case" }
+              }
+            }
+            $case = "packaged $alias resumes interrupted builder ticket through production recovery with eligible independent work"
+            if ($log -notmatch ('ok \d+ - ' + [regex]::Escape($case) + '(?:\r?\n|$)')) { throw "Required independent-ticket recovery case missing: $case" }
+          }
+          if ($log -notmatch '# skipped 0' -or $log -notmatch 'ok \d+ - Windows Job Object readiness normal' -or $log -notmatch 'ok \d+ - Windows helper stops its job') { throw 'Native Windows evidence missing or skipped' }
+      - name: Native Unix processes and actual CLI
+        if: runner.os != 'Windows'
+        run: node --import tsx --test --test-concurrency=1 packages/ai-foreman/test/buildAdmission.test.ts packages/ai-foreman/test/runtimeReadiness081.test.ts packages/ai-foreman/test/supervisedStart.test.ts packages/rafi/test/resumePty.test.ts
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Windows'
+        with:
+          name: windows-native-evidence
+          path: |
+            windows-native.log
+            windows-platform.log

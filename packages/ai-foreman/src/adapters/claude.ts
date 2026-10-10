@@ -59,6 +59,7 @@ export function buildClaudeQueryOptions(
   opts: Omit<BuilderAdapterOptions, "permission">,
 ): Record<string, unknown> {
   const qaReadOnly = opts.sessionRole === "qa" || opts.sandboxMode === "read-only";
+  const confinedBuilder = opts.sessionRole === "builder";
   const base: Record<string, unknown> = {
     cwd: opts.cwd,
     pathToClaudeCodeExecutable: opts.runtimeExecutable,
@@ -73,18 +74,24 @@ export function buildClaudeQueryOptions(
     // settings in those roles.
     settingSources: qaReadOnly ? ["user"] : ["user", "project", "local"],
     ...(qaReadOnly ? { disallowedTools: ["Write", "Edit", "NotebookEdit"] } : {}),
+    ...(confinedBuilder && !qaReadOnly ? { sandbox: {
+      enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
+      network: opts.networkAccess === true ? { allowedDomains: ["*"] } : { allowedDomains: [], deniedDomains: ["*"] },
+      filesystem: { allowWrite: [opts.cwd] },
+    } } : {}),
     ...(qaReadOnly ? { sandbox: {
       enabled: true,
       failIfUnavailable: true,
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
+      network: { allowedDomains: [], deniedDomains: ["*"] },
       filesystem: { allowWrite: [join(dirname(opts.cwd), "scratch")], denyWrite: [opts.cwd, ...(opts.configRoot ? [opts.configRoot] : [])] },
     } } : {}),
   };
   const exactSkills = opts.preloadedSkillContent?.length
     ? ["# Preloaded Skills", "Use the following skills for this run.", ...opts.preloadedSkillContent.map((skill) => skill.content)].join("\n\n")
     : undefined;
-  const systemAppend = [opts.systemPromptAppend, exactSkills].filter((part): part is string => Boolean(part)).join("\n\n");
+  const systemAppend = [opts.systemPromptAppend, opts.sessionRole === "builder" ? `Builder runtime contract: shell network ${opts.networkAccess === true ? "explicitly approved for this build" : "disabled"}; sandbox fallback disabled. If acquisition requires unavailable access, request input first or use a provenance-verified local bundle. A ticket answer does not grant runtime permissions.` : undefined, exactSkills].filter((part): part is string => Boolean(part)).join("\n\n");
   if (systemAppend) {
     base.systemPrompt = { type: "preset", preset: "claude_code", append: systemAppend };
   }

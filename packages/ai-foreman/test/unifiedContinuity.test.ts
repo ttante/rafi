@@ -689,3 +689,23 @@ for (const role of ["builder", "qa"] as const) for (const outcome of ["valid", "
     await continuous.close();
   } finally { db.close(); rmSync(projectDir, { recursive: true, force: true }); }
 });
+
+test("legacy missing threshold waits until 65 percent while explicit 50 stays configurable", async () => {
+  const projectDir = root("rafi-default-compact-");
+  const { auto_compact_threshold_percent: _missing, ...legacy } = SETTINGS;
+  const adapter = new FakeAdapter("default-session", [], [
+    { used: 60, maximum: 100, percentage: 60 },
+    { used: 65, maximum: 100, percentage: 65 },
+    { used: 20, maximum: 100, percentage: 20 },
+  ]);
+  const controller = new ThresholdCompactionController({ projectDir, runId: "default-run", role: "builder", initialSettings: legacy as ResolvedAgentSettings });
+  const below = await controller.atSafeBoundary(adapter, "frozen work");
+  assert.equal(below.effectiveThreshold, 65);
+  assert.equal(below.action, "below-threshold");
+  assert.equal(adapter.compactCalls, 0);
+  adapter.advanceUsage();
+  assert.equal((await controller.atSafeBoundary(adapter, "frozen work")).action, "compacted");
+  assert.equal(adapter.compactCalls, 1);
+  const explicit = new ThresholdCompactionController({ projectDir: root("rafi-explicit-compact-"), runId: "explicit-run", role: "builder", initialSettings: SETTINGS });
+  assert.equal(explicit.effectiveSettings().auto_compact_threshold_percent, 50);
+});

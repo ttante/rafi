@@ -114,7 +114,7 @@ export class RoleSessionController {
   }
 
   effectiveThreshold(): number {
-    if (!this.thresholdController) return this.options.settings.auto_compact_threshold_percent ?? 50;
+    if (!this.thresholdController) return this.options.settings.auto_compact_threshold_percent ?? 65;
     return this.thresholdController.effectiveThreshold();
   }
 
@@ -777,12 +777,12 @@ export class ThresholdCompactionController {
       ? effective
       : undefined;
   }
-  private threshold(): number { return this.runOnlyThreshold ?? this.providerEffectiveThreshold ?? this.settings.auto_compact_threshold_percent ?? 50; }
+  private threshold(): number { return this.runOnlyThreshold ?? this.providerEffectiveThreshold ?? this.settings.auto_compact_threshold_percent ?? 65; }
   private now(): Date { return this.options.now?.() ?? new Date(); }
 }
 
 function normalizeContextSettings(settings: ResolvedAgentSettings): ResolvedAgentSettings {
-  const threshold = settings.auto_compact_threshold_percent ?? 50;
+  const threshold = settings.auto_compact_threshold_percent ?? 65;
   const maximum = settings.compact_maximum ?? 10;
   if (!Number.isInteger(threshold) || threshold < 1 || threshold > 99) throw new Error("auto_compact_threshold_percent must be an integer from 1 to 99");
   if (!Number.isSafeInteger(maximum) || maximum < 1) throw new Error("compact_maximum must be a positive safe integer");

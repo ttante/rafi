@@ -350,8 +350,8 @@ export function cmdBlock(projectDir: string, ticketId: string, opts: BlockOption
       ctx.db.upsertState(ticketId, {
         status: "blocked",
         blocked_by_json: JSON.stringify(merged),
-        blocker_type: opts.blockerType ?? "dependency",
-        blocker_notes: opts.unblockCriteria ?? null,
+        blocker_type: opts.blockerType ?? (merged.length ? "dependency" : "external"),
+        blocker_notes: opts.unblockCriteria ?? opts.summary ?? "Resolve the external prerequisite before continuing",
         first_blocked_at: state?.first_blocked_at ?? now,
         last_checked_at: now,
         last_worked_at: now,

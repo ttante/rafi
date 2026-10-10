@@ -18,3 +18,16 @@ export function formatRecoveryCommand(projectDir: string, family: RecoveryComman
   }
   return canonical(projectDir) === canonical(cwd) ? "rafi resume" : `rafi resume ${shellArgument(resolve(projectDir))}`;
 }
+
+/** Fixed choices are executable; custom answers use the owning CLI's input flow. */
+export function formatDecisionCommands(projectDir: string, runId: string, decision: { decisionId: string; choices: Array<{ id: string; label: string }> }, family: RecoveryCommandFamily = commandFamily.getStore() ?? "rafi"): string[] {
+  return decision.choices.flatMap(choice => choice.id === "custom"
+    ? [family === "ai-foreman"
+      ? `  Custom response: use ${family} build:decide ${shellArgument(resolve(projectDir))} --run ${shellArgument(runId)} --decision ${shellArgument(decision.decisionId)} --choice custom with --answer followed by your shell-quoted response.`
+      : `  Custom response: run ${formatExactRunRecovery(projectDir, runId, family)} in an interactive terminal.`]
+    : [`  ${choice.label}`, `  ${family} build:decide ${shellArgument(resolve(projectDir))} --run ${shellArgument(runId)} --decision ${shellArgument(decision.decisionId)} --choice ${shellArgument(choice.id)}`]);
+}
+export function formatExactRunRecovery(projectDir: string, runId: string, family: RecoveryCommandFamily = commandFamily.getStore() ?? "rafi"): string {
+  if (family === "ai-foreman") return `ai-foreman manager ${shellArgument(resolve(projectDir))} --run ${shellArgument(runId)}`;
+  return `rafi resume ${shellArgument(resolve(projectDir))} --run ${shellArgument(runId)}`;
+}

@@ -68,6 +68,7 @@ test("Claude read-only roles load user authentication settings but no project se
     assert.equal((opts.env as NodeJS.ProcessEnv).TMPDIR, "/tmp/qa/scratch");
     assert.deepEqual(opts.sandbox, {
       enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
+      network: { allowedDomains: [], deniedDomains: ["*"] },
       filesystem: { allowWrite: ["/tmp/qa/scratch"], denyWrite: ["/tmp/qa/review", "/project"] },
     });
   }
@@ -240,4 +241,11 @@ test("CodexAdapter.buildInstruction returns instruction unchanged when no system
 test("requireClaudeSDK resolves to a module with a query function", async () => {
   const sdk = await requireClaudeSDK();
   assert.equal(typeof sdk.query, "function");
+});
+
+for (const networkAccess of [false, true]) test(`Claude builder sandbox applies explicit network grant: ${networkAccess}`, () => {
+  const opts = buildClaudeQueryOptions({ ...BASE_OPTS, sessionRole: "builder", networkAccess });
+  const sandbox = opts.sandbox as { enabled: boolean; failIfUnavailable: boolean; allowUnsandboxedCommands: boolean; network: unknown };
+  assert.equal(sandbox.enabled, true); assert.equal(sandbox.failIfUnavailable, true); assert.equal(sandbox.allowUnsandboxedCommands, false);
+  assert.deepEqual(sandbox.network, networkAccess ? { allowedDomains: ["*"] } : { allowedDomains: [], deniedDomains: ["*"] });
 });

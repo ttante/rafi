@@ -97,6 +97,7 @@ test("state import restores sqlite state and rewrites current project-local path
     cmdUpdate(source, "T001", { status: "done", evidence: "ok", validationResult: "passed" });
     const workflow = new WorkflowDb(source);
     workflow.createRun({ runId: "run-1", kind: "build", state: { worktree: source, qaReportRecovery: { packetPath: join(source, ".foreman", "qa-report-recovery", "packet") } } });
+    workflow.admitWork({runId:"run-1",kind:"ticket",ticketId:"T001",definition:{id:"T001"},approvalId:"fixture",scopeRevision:"fixture",provenance:{userTurn:"Build T001",reason:"Authorized branch transfer fixture"}});
     workflow.recordBranchResumeSession("run-1", { ticket: "T001", branch: "feature/t1", base: "main", worktreePath: join(source, ".foreman", "worktrees", "run-1", "feature__t1"), sessionId: "provider-session", logPath: join(source, ".foreman", "run.jsonl") });
     workflow.close();
     mkdirSync(join(source, ".foreman", "runs"), { recursive: true });

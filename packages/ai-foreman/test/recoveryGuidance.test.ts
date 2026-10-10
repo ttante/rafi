@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { shellArgument, formatRecoveryCommand, withRecoveryCommandFamily } from "../src/recoveryGuidance.js";
+import { shellArgument, formatRecoveryCommand, formatDecisionCommands, withRecoveryCommandFamily } from "../src/recoveryGuidance.js";
 
 test("recovery command executes with the owning project as one literal shell argument", () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-guidance-"));
@@ -29,4 +29,10 @@ test("standalone family is explicit and async-local", async () => {
 
 test("Windows guidance quotes PowerShell literals without interpolation", () => {
   assert.equal(shellArgument("C:\\work\\a'b $env:HOME", "win32"), "'C:\\work\\a''b $env:HOME'");
+});
+
+test("standalone custom answers use build:decide rather than manager review", () => {
+  const lines = formatDecisionCommands("/tmp/project", "run", { decisionId: "decision", choices: [{ id: "custom", label: "Custom" }] }, "ai-foreman");
+  assert.match(lines[0]!, /ai-foreman build:decide .*--choice custom with --answer/);
+  assert.doesNotMatch(lines[0]!, /manager/);
 });

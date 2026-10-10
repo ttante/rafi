@@ -4,6 +4,8 @@ import { Command } from "commander";
 export function addBuildRecoveryOptions(command: Command): Command {
   return command
     .option("--ticket <id>", "narrow mutation scope to one ticket while retaining run-wide context")
+    .option("--builder-network", "request separately approved builder internet access for this resumed build")
+    .option("--builder-approvals", "allow explicit per-operation builder sandbox approval requests; QA stays restricted")
     .option("--qa-revision <number>", "exact durable QA protocol revision to resume")
     .option("--inspect", "show recovery state and planned actions without mutation")
     .option("--yes", "auto-approve the implementation plan and later plan updates for this resumed process")

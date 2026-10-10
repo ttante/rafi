@@ -443,7 +443,7 @@ export interface AgentRoleDefaultsV1 {
   session_strategy?: SessionStrategy;
   /** Show authoritative provider cost or trustworthy cumulative tokens. */
   display_session_cost?: boolean;
-  /** Builder/QA live context threshold. Missing values normalize to 50. */
+  /** Builder/QA live context threshold. Missing values normalize to 65. */
   auto_compact_threshold_percent?: number;
   /** Builder/QA successful compactions allowed per provider session. */
   compact_maximum?: number;
@@ -561,7 +561,7 @@ export interface WorkflowIssue {
 
 export type OperationLifecycle = "planned" | "in_progress" | "confirmed" | "failed" | "uncertain";
 
-export type BuildRunStatus = "running" | "interrupted" | "recoverable" | "blocked" | "completed" | "failed" | "superseded";
+export type BuildRunStatus = "cancelled" | "running" | "interrupted" | "recoverable" | "blocked" | "completed" | "failed" | "superseded";
 export interface BuildRunRecordV1 {
   version: 1;
   runId: string;
@@ -631,6 +631,9 @@ export interface BuildRunRecordV2 extends Omit<BuildRunRecordV1, "version" | "re
     autoCompactThresholdPercent: number;
     thresholdSource: "project" | "cli" | "live" | "resume";
   };
+  /** Frozen authorized selection; tickets remain the completion scope, not a dispatch log. */
+  builderCapabilities?: { requestedNetwork: boolean; grantedNetwork: boolean; approvedAt?: string; grantWorkerPid?: number };
+  authorizedBatch?: { tickets: string[]; requestedSteps: number; scopeRevision: string; approvalRevisions?: string[]; startedTickets: string[] };
   recoveryDecision?: BuildRecoveryDecisionReceipt;
   /** Canonical provider conversations observed for this run. Raw role sessionIds remain compatibility mirrors only. */
   sessionBindings?: ProviderSessionRefV1[];
@@ -1185,6 +1188,30 @@ export interface ManagerEvidenceRequestV1 {
   operations: ManagerEvidenceOperationV1[];
 }
 
+export type ManagerEvidenceAvailability = "present" | "empty" | "unsupported_legacy" | "missing" | "unreadable" | "corrupt" | "pruned";
+export type ManagerQaEvidenceKind = "report" | "remediation_request" | "remediation_response" | "turn_response" | "delivery_receipt" | "verification" | "diff";
+export type ManagerEvidenceOperationV2 =
+  | { kind: "list_build_work" | "get_ownership_conflicts"; runId: string; cursor?: string }
+  | { kind: "list_qa_attempts" | "get_qa_timeline"; runId: string; workId: string; snapshotId?: string; cursor?: string }
+  | { kind: "get_qa_report"; runId: string; workId: string; attemptId: string; occurrenceId: string; snapshotId?: string; cursor?: string }
+  | { kind: "get_qa_evidence"; runId: string; workId: string; attemptId: string; occurrenceId: string; evidenceRef: { kind: ManagerQaEvidenceKind; id: string }; snapshotId?: string; cursor?: string }
+  | { kind: "get_intervention_status"; runId: string; workId: string; instructionId: string };
+export interface ManagerEvidenceRequestV2 { version: 2; requestId: string; operation: ManagerEvidenceOperationV2 }
+export interface ManagerEvidencePageV2 {
+  version: 2;
+  snapshotId: string;
+  asOf: string;
+  items: unknown[];
+  nextCursor?: string;
+  complete: boolean;
+  omissions: string[];
+  availability: ManagerEvidenceAvailability;
+  schemaCapabilities: string[];
+  redactions: Array<{ category: string; field: string; start: number; end: number }>;
+  error?: "invalid_scope" | "invalid_cursor" | "snapshot_expired";
+  restartAction?: string;
+}
+
 export interface ManagerEvidenceResponseV1 {
   version: 1;
   requestId: string;
@@ -1507,4 +1534,26 @@ export interface BuildRecoveryDecisionReceipt {
   /** Invocation-scoped policy for implementation-plan reviews in the resumed process. */
   planUpdateApproval: "auto" | "review";
   decidedAt: string;
+}
+
+/** Immutable host-authorized run/work membership. */
+export interface BuildWorkAdmissionV1 {
+  version: 1; projectId: string; runId: string; workId: string; kind: "ticket" | "synthetic";
+  ticketId?: string; assignmentId: string; approvalId: string; scopeRevision: string;
+  requirementsDigest: string; definitionDigest: string; admittedAt: string; admittedSequence: number;
+  provenance: { userTurn?: string; decisionId?: string; approvedPlanDigest?: string; reason: string };
+}
+export interface ManagerActionRequestV1 {
+  version: 1; requestId: string; runId: string; workId: string;
+  action: "guide_builder" | "guide_qa" | "guide_both" | "answer_question" | "pause" | "request_attempt" | "supersede" | "withdraw";
+  text: string; expectedRevision: number;
+  instructionId?: string; decisionId?: string; decisionRevision?: string;
+  pauseScope?: "work" | "run";
+}
+
+export interface BuildOwnershipRepairV1 {
+  version:1; requestId:string; runId:string; workId:string; expectedRevision:string;
+  choice:"link_provenance"|"authorize_mapped_work"|"quarantine";
+  inspectedSourceDigest:string; scopeRevision:string; authorization:string; attestation:string;
+  mapping:Array<{path:string;workId:string}>; decisionId?:string;
 }

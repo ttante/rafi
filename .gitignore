@@ -15,3 +15,6 @@ dist/
 # logs / misc
 *.log
 .DS_Store
+
+# Local Graphify artifacts (may contain source excerpts)
+graphify-out/

@@ -101,6 +101,7 @@ test("standard plan instruction excludes grill-me and keeps the output contract"
 
   assert.match(instruction, /Use the planner role guidance/);
   assert.match(instruction, /standard focused planning conversation/);
+  assert.match(instruction, /Builder auto-compaction threshold: 65%/);
   assert.doesNotMatch(instruction, /complete grill-me skill instructions/);
   assert.match(instruction, /Use prd-to-issues only as vertical-slice planning guidance/);
   assert.match(instruction, /Do not create issues\/\*\.md/);

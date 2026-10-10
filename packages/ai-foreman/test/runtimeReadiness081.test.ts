@@ -269,14 +269,13 @@ test("embedded eval callers launch only the packaged helper and create no standa
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("standalone denied inventory rejects success, blocks retry, and recovers after visibility returns", { skip: process.platform === "win32", timeout: 30000 }, async () => {
+test("standalone denied inventory rejects success, blocks retry, and recovers after visibility returns", { skip: process.platform !== "darwin", timeout: 30000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-standalone-denied-"));
   const prior = process.env.PATH;
   const helpers: number[] = [];
   try {
     writeFileSync(join(root, "codex"), `#!${process.execPath}\nconsole.log('OK');\n`, { mode: 0o755 });
-    // Identity remains available on Linux via procfs, but group/tag inventory
-    // is unavailable on both Unix implementations without ps.
+    // macOS needs ps for group/tag inventory; Linux uses procfs directly.
     process.env.PATH = root;
     const opts = { env: { PATH: root }, onTrace: (event: { phase: string; pid?: number }) => { if (event.phase === "spawn" && event.pid) helpers.push(event.pid); } };
     await assert.rejects(probeRuntime(root, "codex", opts), /Standalone probe cleanup is unverified/);
@@ -293,4 +292,15 @@ test("standalone denied inventory rejects success, blocks retry, and recovers af
     for (const pid of helpers) try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ }
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Linux standalone Claude cleanup does not require ps or a full PATH", { skip: process.platform !== "linux", timeout: 15000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-linux-procfs-"));
+  const prior = process.env.PATH;
+  try {
+    writeFileSync(join(root, "claude"), `#!${process.execPath}\nconsole.log('OK');`, { mode: 0o755 });
+    process.env.PATH = root;
+    const result = await probeRuntime(root, "claude", { env: { PATH: root }, timeoutMs: 5000 });
+    assert.equal(result.ok, true, result.diagnostics);
+  } finally { process.env.PATH = prior; rmSync(root, { recursive: true, force: true }); }
 });

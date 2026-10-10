@@ -53,7 +53,14 @@ for (const mode of ["current", "question", "branch", "crash", "preparation-crash
     assert.equal(alive, false, "orphaned or cancelled worker must stop within cleanup bound");
     const record = readBuildRuns(root)[0]!;
     const db = new WorkflowDb(root);
-    try { assert.equal(db.unresolvedRoleDispatches(record.runId, "builder").length, 1); assert.notEqual(record.status, "completed"); }
+    try {
+      assert.equal(db.unresolvedRoleDispatches(record.runId, "builder").length, 1); assert.notEqual(record.status, "completed");
+      if (mode !== "parent-death") {
+        const exit = [...db.events(record.runId)].reverse().find(event => event.type === "worker_exit");
+        assert.ok(exit, "supervisor must record actual worker termination");
+        assert.equal((exit.payload as { source?: string }).source, mode === "hung-worker" ? "heartbeat-timeout" : "parent-SIGTERM");
+      }
+    }
     finally { db.close(); }
     return;
   }
@@ -72,7 +79,7 @@ for (const mode of ["current", "question", "branch", "crash", "preparation-crash
       assert.match(output, /activity=paused/);
       assert.doesNotMatch(output, /activity=completed/);
       assert.ok(output.includes(`--run ${run.runId} --decision ${pending[0]!.decisionId}`), output);
-      assert.ok(output.includes("rafi resume"), output);
+      assert.ok(output.includes("ai-foreman manager"), output);
       assert.equal(existsSync(join(root, "implemented.txt")), false);
     } finally { db.close(); }
     return;

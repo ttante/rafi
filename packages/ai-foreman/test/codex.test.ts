@@ -510,3 +510,74 @@ test("Codex tool use cannot turn a response-only correction into success", async
   assert.match(turn.text, /Response-only correction used tools/);
   await a.close();
 });
+
+type ApprovalInternals = {
+  handleServerRequest(message: unknown): Promise<void>; handle(message: unknown): void;
+  write(message: unknown): void; _sessionId?: string; activeProviderTurnId?: string; activeNativeTurnId?: string;
+  ensureConnection(): Promise<void>; request(method: string, params: Record<string, unknown>): Promise<unknown>; ensureThreadInternal(): Promise<void>;
+  disconnect(error: Error): void;
+};
+for (const scenario of ["allow", "deny", "qa", "stale", "timeout", "duplicate", "unsupported", "disconnect"] as const) test(`Codex server approval routing: ${scenario}`, async () => {
+  let calls = 0;
+  const a = adapter({ approvalPolicy: "on-request", sessionRole: scenario === "qa" ? "qa" : "builder", approvalTimeoutMs: 20, permission: async () => {
+    calls++;
+    if (scenario === "timeout") return new Promise(() => {});
+    if (scenario === "disconnect") { internal.disconnect(new Error("gone")); return { behavior: "allow" }; }
+    return scenario === "deny" ? { behavior: "deny", message: "denied" } : { behavior: "allow" };
+  } });
+  const internal = a as unknown as ApprovalInternals, writes: unknown[] = [];
+  internal.write = value => { writes.push(value); };
+  internal._sessionId = "thread"; internal.activeProviderTurnId = "host-turn"; internal.activeNativeTurnId = "native-turn";
+  const request = { id: "server-1", method: scenario === "unsupported" ? "unknown/request" : "item/commandExecution/requestApproval", params: { threadId: scenario === "stale" ? "other" : "thread", turnId: "native-turn", itemId: "command-1", cwd: CWD, command: "git ls-remote https://example.test/repo" } };
+  await internal.handleServerRequest(request);
+  if (scenario === "duplicate") await internal.handleServerRequest(request);
+  if (scenario === "disconnect") assert.equal(writes.length, 0);
+  else if (scenario === "unsupported") assert.deepEqual(writes, [{ id: "server-1", error: { code: -32601, message: "Unsupported server request: unknown/request" } }]);
+  else assert.deepEqual(writes, [{ id: "server-1", result: { decision: ["allow", "duplicate"].includes(scenario) ? "accept" : "decline" } }]);
+  assert.equal(calls, ["qa", "stale", "unsupported"].includes(scenario) ? 0 : 1);
+});
+
+test("Codex response IDs do not route through permission handling", () => {
+  const a = adapter(), internal = a as unknown as ApprovalInternals;
+  internal.handleServerRequest = async () => { throw new Error("response was mistaken for request"); };
+  internal.handle({ id: 99, result: { ok: true } });
+});
+
+test("Codex human approval suspends provider idleness and restores its deadline afterward", async () => {
+  let release!: () => void;
+  const a = adapter({ approvalPolicy: "on-request", approvalTimeoutMs: 1000, permission: async () => {
+    await new Promise<void>(resolve => { release = resolve; });
+    return { behavior: "deny", message: "denied" };
+  } });
+  const internal = a as unknown as ApprovalInternals & {
+    waitFor(method: string, predicate: () => boolean, timeout: number, resetOnActivity: boolean): Promise<unknown>;
+  };
+  internal.write = () => {};
+  internal._sessionId = "thread"; internal.activeProviderTurnId = "host"; internal.activeNativeTurnId = "native";
+  const approval = internal.handleServerRequest({ id: "approval", method: "item/commandExecution/requestApproval", params: { threadId: "thread", turnId: "native", itemId: "command", cwd: CWD } });
+  await Promise.resolve();
+  let finished = false;
+  const waiting = internal.waitFor("turn/completed", () => true, 15, true).then(
+    () => { finished = true; return undefined; },
+    error => { finished = true; return error; },
+  );
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(finished, false, "user deliberation must not exhaust the provider idle deadline");
+  release(); await approval;
+  assert.match(String(await waiting), /provider wait timed out/);
+});
+for (const qa of [false, true]) test(`Codex explicit network grant is ${qa ? "ignored for QA" : "applied for builder"}`, async () => {
+  const a = adapter({ networkAccess: true, approvalPolicy: "on-request", sessionRole: qa ? "qa" : "builder", sandboxMode: qa ? "read-only" : "workspace-write" });
+  const internal = a as unknown as ApprovalInternals; let params: Record<string, unknown> | undefined;
+  internal.ensureConnection = async () => {};
+  internal.request = async (_method, input) => { params = input; return { thread: { id: "thread", cwd: CWD }, sandbox: { type: qa ? "readOnly" : "workspaceWrite", networkAccess: !qa }, approvalPolicy: qa ? "never" : "on-request" }; };
+  await internal.ensureThreadInternal();
+  assert.equal(params?.approvalPolicy, qa ? "never" : "on-request");
+  assert.equal((params?.config as { sandbox_workspace_write: { network_access: boolean } }).sandbox_workspace_write.network_access, !qa);
+});
+test("Codex rejects a broader effective sandbox before dispatch", async () => {
+  const internal = adapter() as unknown as ApprovalInternals;
+  internal.ensureConnection = async () => {};
+  internal.request = async () => ({ thread: { id: "thread" }, sandbox: { type: "dangerFullAccess" }, approvalPolicy: "never" });
+  await assert.rejects(internal.ensureThreadInternal(), /exceeds the authorized/);
+});

@@ -1,3 +1,5 @@
+import { createAuthorizedQaRecoveryPacket as createQaRecoveryPacket } from "./helpers/workAdmission.js";
+import { runAuthorizedQa as runIsolatedQa } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
@@ -7,9 +9,9 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { registerHandbackWriter } from "../src/qaHandbackMigration.js";
 import type { BuilderAdapter, BuilderEvent, CompactResult, TurnResult } from "../src/adapters/types.js";
-import { beginQaFinalization, completeQaFinalization, runIsolatedQa, verifyPendingQaFinalizationSource, type QaSessionBoundaryRecovery, type QaSessionBoundaryResult, type QaSessionHandle, type QaStreamState } from "../src/qaReview.js";
+import { beginQaFinalization, completeQaFinalization, verifyPendingQaFinalizationSource, type QaSessionBoundaryRecovery, type QaSessionBoundaryResult, type QaSessionHandle, type QaStreamState } from "../src/qaReview.js";
 import type { ProviderSessionRefV1 } from "rafi-spec";
-import { appendQaRecoveryResource, compareQaRecoveryReviewedState, createQaRecoveryPacket, LegacyQaRecoveryPacketError, loadQaRecoveryPacket, materializeQaRecoveryContext, recoverPendingQaRecoveryPublications, updateQaRecoveryPosition, validateManualQaReport } from "../src/qaRecovery.js";
+import { appendQaRecoveryResource, compareQaRecoveryReviewedState, LegacyQaRecoveryPacketError, loadQaRecoveryPacket, materializeQaRecoveryContext, recoverPendingQaRecoveryPublications, updateQaRecoveryPosition, validateManualQaReport } from "../src/qaRecovery.js";
 import { createDisposableQaSnapshot } from "../src/qaSnapshot.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { qaDigest, type HandoffAcceptanceReceiptV2, type ProviderSessionRefV2 } from "../src/qaProtocolV2.js";
@@ -363,7 +365,8 @@ test("rejected provider identity preserves exact returned evidence without accep
 test("packet storage is owner-only, digest-addressed, locally excluded, and mutation sealed", () => {
   const dir = repository();
   try {
-    const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "../run unsafe", ticketId: "T/1", cycle: 1, reviewAttempt: 1, recoveryStage: "same-session", reportJson: "{}", resources: { prompt: { value: "exact prompt", purpose: "prompt", exactText: true } } });
+    assert.throws(()=>createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "../run unsafe", ticketId: "T/1", cycle: 1, reviewAttempt: 1, recoveryStage: "same-session", resources: {} }), /Invalid work admission/);
+    const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "storage-run", ticketId: "T1", cycle: 1, reviewAttempt: 1, recoveryStage: "same-session", reportJson: "{}", resources: { prompt: { value: "exact prompt", purpose: "prompt", exactText: true } } });
     assert.ok(packet.directory.startsWith(join(realpathSync.native(dir), ".foreman/qa-report-recovery/")));
     assert.equal(lstatSync(packet.directory).mode & 0o777, 0o700);
     assert.equal(lstatSync(join(packet.directory, "manifest.json")).mode & 0o777, 0o600);

@@ -131,7 +131,7 @@ Provider sessions are historical after import. Resume with `rafi build:resume <p
 | `--branch-prefix <prefix>` | `feature` / `rafi` / another valid Git prefix | `feature` | Prefix for generated ticket branches. Explicit prefixes are preserved verbatim. |
 | `--max-branch-depth <n>` | positive integer | `5` | Maximum selected branch/PR stack depth (root PR is depth 1). |
 | `--show-session-cost` / `--hide-session-cost` | flags | saved role preferences | Show authoritative provider cost or trustworthy cumulative tokens for Builder and QA; does not change context occupancy display. |
-| `--auto-compact-threshold <percent>` | integer `1`–`99` | saved Builder value, then `50` | Initial run threshold override. A newer persistent settings revision wins at the next safe boundary. |
+| `--auto-compact-threshold <percent>` | integer `1`–`99` | saved Builder value, then `65` | Initial run threshold override. A newer persistent settings revision wins at the next safe boundary. |
 
 Auto-detected tracker files:
 
@@ -182,7 +182,7 @@ Owner-only recovery packets under `.foreman/qa-report-recovery/` bind the review
 
 ### `ai-foreman manager`
 
-Manager is a project-wide, read-only diagnostic conversation over every retained build run. It starts with a verified live run when one exists, otherwise the most recently updated run; `--run <id>` changes only that initial focus. Each question refreshes the catalog, active state, deterministic aggregates, and relevant run details.
+Manager provides project-wide diagnostic conversations and explicitly authorized, scoped controls over retained build runs. It starts with a verified live run when one exists, otherwise the most recently updated run; `--run <id>` changes only that initial focus. Each question refreshes the catalog, active state, deterministic aggregates, and relevant run details.
 
 Permanent sanitized run summaries keep timing, counts, provider/model configuration, usage coverage, failure category, and terminal Git facts useful after detailed spans expire. Detailed spans retain the configured 30-day policy. Missing historical facts are reported as partial rather than reconstructed or treated as zero.
 
@@ -192,6 +192,16 @@ When the initial bounded packet omits evidence needed for a question, Manager ca
 ai-foreman manager ./my-project
 ai-foreman manager ./my-project --run <run-id> --ask "Compare this run with the last five successful runs"
 ```
+
+Full QA history is available without a provider through `--ask '/qa-work <run>'`, `/qa-attempts <run> <work>`, `/qa-report <run> <work> <attempt> [occurrence]`, and `/qa-timeline <run> <work>`. One-shot output expands all pinned pages and artifacts before exiting, independently of bounded model packets. `/qa-export <run> <work> <attempt> [occurrence]` exports exact protected report bytes with their identity and digest. Interactive `/more <cursor>` and `/artifact <handle>` continuations belong to that session; a later invocation retrieves fresh evidence. Reads do not migrate workflow state.
+
+Explicit `/guide-builder`, `/guide-qa`, and `/guide-both` commands take a run, work ID, and exact advice. The owning process delivers one-use guidance at its next safe boundary. `/pause <run> <work> [run]` waits for the active turn to finish; withdraw the pause to allow continuation. `/request-attempt <run> <work> <reason>` grants one existing-ledger attempt authorization for the current failed review or waiting Builder guidance after an unfinalized pass. Guidance alone never grants attempts. Inspect truthful delivery and verification receipts with `/qa-instruction <run> <work> <instruction>`.
+
+If QA passes while Builder guidance is waiting, explicit resume applies that guidance within the existing approved ticket scope and remaining attempt allowance, then performs a complete fresh QA review. This works on the current branch and in isolated ticket worktrees. The follow-up consumes the same durable allowance as QA remediation; neither a fresh review nor a restart resets it. When the allowance is exhausted, authorize one scoped follow-up with `/request-attempt`, then resume. Changed requirements need renewed approval, and uncertain submissions require reconciliation before another Builder turn. Saving guidance alone does not start work.
+
+Ownership schema 4 requires admitted work before Builder/QA dispatch. Legacy QA records are retained in quarantine when authorization cannot be proved. Both resume aliases assess conflicts before selecting recovery mode. Use `/qa-conflicts <run>` and `/qa-repair-plan <run> <work>` to inspect the source mapping, then submit an explicit `/qa-repair <JSON>` decision with the displayed revision, source digest, approved scope, complete path mapping, and operator attestation. Stop the existing owner first. Repairs preserve source and historical packets and require fresh verification; uncertain provider dispatch needs separate reconciliation.
+
+The upgrade stores a coherent database backup and recovery packet copy under `.rafi/backups/work-admission-v4/<database digest>/` before committing its guards. Rollback means pausing execution and preserving newer evidence for forward repair. Older writers are rejected against upgraded databases; do not down-migrate or restore a backup without accounting for subsequent provider work.
 
 ### GitHub PR Failure Recovery
 

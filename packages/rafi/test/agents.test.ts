@@ -58,3 +58,17 @@ test("interactive agents wizard does not ask for compaction settings when Builde
   assert.equal(textCalls, 0);
   assert.deepEqual(summaries, []);
 });
+
+test("Builder and QA interviews recommend 65 percent by default", async () => {
+  const defaults: string[] = [];
+  const prompts = scriptedPrompts(["builder", "qa"], [], [false, true], []);
+  prompts.text = async rawOptions => {
+    const options = rawOptions as { message: string; defaultValue: string };
+    if (options.message.includes("threshold")) defaults.push(options.defaultValue);
+    return options.defaultValue;
+  };
+  const result = await promptAgentSettings(projectDir(), prompts);
+  assert.deepEqual(defaults, ["65", "65"]);
+  assert.equal(result.roleSettings?.builder?.auto_compact_threshold_percent, 65);
+  assert.equal(result.roleSettings?.qa?.auto_compact_threshold_percent, 65);
+});

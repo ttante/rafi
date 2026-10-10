@@ -4,6 +4,26 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## @rafi-ai/cli 0.9.21 / ai-foreman 1.7.21 / special-agents 0.8.13 / rafi-spec 0.8.14 - 2026-10-09
+
+### Added
+
+- Add scoped manager QA evidence browsing, timelines, report artifacts, guidance controls, and durable recipient receipts.
+- Add shared contracts for manager evidence V2, build work admission, manager actions, and ownership repair.
+
+### Fixed
+
+- Reconcile build assignments and work ownership, preserve synthetic work through recovery, and support explicit audited ownership repair.
+- Deliver Builder guidance at eligible recovery boundaries and require fresh QA before finalization.
+- Improve stop recovery, provider readiness, and Linux process inventory handling.
+
+### Packages
+
+- Bumped `rafi-spec` to `0.8.14` for the new shared contracts and validators.
+- Bumped `special-agents` to `0.8.13` for manager diagnostics instructions and its exact `rafi-spec@0.8.14` dependency.
+- Bumped `ai-foreman` to `1.7.21` for runtime, manager, QA, and recovery changes and its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.9.21` for CLI changes and its exact `ai-foreman@1.7.21`, `rafi-spec@0.8.14`, and `special-agents@0.8.13` dependencies.
+
 ## @rafi-ai/cli 0.9.20 / ai-foreman 1.7.20 / special-agents 0.8.12 / rafi-spec 0.8.13 - 2026-10-09
 
 ### Fixed

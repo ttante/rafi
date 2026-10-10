@@ -1,11 +1,16 @@
+import { buildScopeRevision } from "ai-foreman/build-approval.js";
+import { HumanDecisionCancelled, servicePendingHumanDecisions } from "ai-foreman/human-decision.js";
 import { addBuildRecoveryOptions } from "./buildRecoveryOptions.js";
 import { ResumeSpawnError, resumeExitCode, type ResumeLaunchResult, type ResumeLaunchContext } from "./resumeLauncher.js";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { validatePreparationArguments, validateRecoveryArguments } from "ai-foreman/cli/start.js";
 import { WorkflowReader } from "ai-foreman/workflow-reader.js";
+import { assessBuildOwnership } from "ai-foreman/build-ownership-reconciliation.js";
+import { readQaEvidenceSnapshot } from "ai-foreman/qa-evidence-reader.js";
+import { renderEvidenceText } from "ai-foreman/manager-evidence-artifacts.js";
 import { createHash } from "node:crypto";
 import { Command } from "commander";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   withBuildRecoveryInvocation,
   launchArgumentDigest,
@@ -15,6 +20,7 @@ import {
   currentBranchRecoveryTicket,
   readBuildRuns,
   recoverableBuildRuns,
+  legacyTrackerWorkHints,
   resolveBuildRecoveryProjection,
   saveBuildRun,
 } from "ai-foreman/build-runs.js";
@@ -24,7 +30,7 @@ import { continuityInstruction, parseContinuityDelta } from "ai-foreman/continui
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import { loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "ai-foreman/qa-recovery.js";
 import type { BuildRecoveryDecisionReceipt, BuildRecoveryMode, BuildRunRecordV2, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
-import { assertLifecycleForCommand } from "./lifecycle.js";
+import { assertLifecycleForCommand, detectProjectLifecycle } from "./lifecycle.js";
 
 export type RecoverableRun = BuildRunRecordV2 & { active: boolean; ownership?: "live" | "dead" | "unknown"; ownershipReason?: string; cleanupOnly?: boolean };
 
@@ -33,6 +39,7 @@ export interface BuildResumeCommandOptions {
   correctPreparationArguments?: (saved: string[], error: Error) => Promise<string[] | undefined>;
   selectRun?: (runs: RecoverableRun[]) => Promise<RecoverableRun | undefined>;
   selectTicket?: (tickets: string[]) => Promise<string | undefined>;
+  resolveHumanDecision?: (decision: import("rafi-spec").PendingHumanDecision) => Promise<string | undefined>;
   /** Deterministic provider probe injection for unit tests. */
   resolveProjection?: typeof resolveBuildRecoveryProjection;
   /** Deterministic plan-approval prompt injection for unit tests. */
@@ -48,7 +55,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       const root = resolve(project);
       let recoveryAuthority: ReturnType<WorkflowDb["acquireBuildRecoveryAdmission"]> | undefined;
       try {
-      assertLifecycleForCommand(root, "build-resume");
+      if(!admittedSyntheticRecovery(root))assertLifecycleForCommand(root, "build-resume");
       validateModeFlags(opts);
       validateApprovalFlags(opts);
       if (opts.agent && !["claude", "codex"].includes(String(opts.agent))) throw new Error("--agent must be claude or codex");
@@ -69,7 +76,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       }
       const runs = recoverableBuildRuns(root);
       if (runs.length === 0) { console.log("rafi build:resume: no unfinished or recoverable runs found"); return; }
-      let selected = selectByFlags(runs, opts);
+      let selected = selectByFlags(root,runs, opts);
       if (!selected && opts.run) throw new Error(`no recoverable build run found for run ID or prefix ${String(opts.run)}`);
       if (!selected && opts.ticket) {
         const knownTickets = [...new Set(runs.flatMap((run) => run.tickets))].sort();
@@ -77,6 +84,15 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       }
       if (!selected) selected = await (commandOpts.selectRun ?? promptRun)(runs);
       if (!selected) return;
+      if(!admittedSyntheticRecovery(root,selected.runId))assertLifecycleForCommand(root,"build-resume");
+      const ownershipAssessment = assessBuildOwnership(root, selected.runId);
+      if (ownershipAssessment.conflicts.length > 0) {
+        console.log(`rafi resume: build ${selected.runId} requires assignment/source reconciliation before choosing a recovery mode.`);
+        console.log(renderEvidenceText(JSON.stringify(ownershipAssessment)).text);
+        console.log(`Inspect retained evidence: rafi manager ${JSON.stringify(root)} --ask '/qa-conflicts ${selected.runId}'`);
+        if (!opts.inspect) process.exitCode = 2;
+        return;
+      }
       const cleanupPreview = new WorkflowReader(root);
       const blockers = cleanupPreview.readinessProcesses();
       cleanupPreview.close();
@@ -178,7 +194,11 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       const reconciliationDb = new WorkflowDb(root);
       recoveryAuthority = reconciliationDb.acquireBuildRecoveryAdmission(selected.runId);
       const reconciliationLease = reconciliationDb.acquireLease(selected.runId);
-      try { recoverPendingQaRecoveryPublications(root, selected.runId); }
+      try {
+        recoverPendingQaRecoveryPublications(root, selected.runId);
+        if (!opts.inspect && !await servicePendingHumanDecisions({ projectDir: root, runId: selected.runId, tickets: opts.ticket ? [String(opts.ticket)] : selected.tickets, scopeRevision: buildScopeRevision(root), prompt: commandOpts.resolveHumanDecision })) return;
+      }
+      catch (error) { if (!(error instanceof HumanDecisionCancelled)) throw error; console.log("rafi resume: cancelled"); return; }
       finally { reconciliationDb.releaseLease(reconciliationLease); reconciliationDb.close(); }
       const recoveryDb = new WorkflowDb(root);
       let recoveryVersion: string;
@@ -376,7 +396,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       }
       // Inferring the interrupted ticket selects the first work item; only an
       // explicit ticket or QA boundary narrows the requested recovery to one.
-      const remainingSteps = selected.branchMode === "current" ? selected.progress.remainingTickets.length || selected.tickets.length : selected.tickets.length;
+      const remainingSteps = selected.branchMode === "current" ? Math.min(selected.progress.remainingTickets.length || selected.tickets.length, selected.authorizedBatch ? Math.max(0, selected.authorizedBatch.requestedSteps - selected.progress.completedTickets.length) : selected.tickets.length) : selected.tickets.length;
       const recoverySteps = pendingQaProtocolTicket || opts.ticket ? 1 : Math.max(1, remainingSteps);
       const args = ["start", root, "--steps", String(recoverySteps), "--recover-run", selected.runId, "--recovery-mode", mode];
       args.push("--recovery-decision-digest", digest(receipt));
@@ -392,6 +412,8 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       if (settings.reasoning !== "default") args.push("--effort", settings.reasoning);
       if (settings.fast) args.push("--fast");
       const launchDb = new WorkflowDb(root);
+      if (opts.builderNetwork || selected.builderCapabilities?.requestedNetwork) args.push("--builder-network");
+      if (opts.builderApprovals) args.push("--builder-approvals");
       try {
         if (!launchAuthority) throw new Error("Recovery launch authority is missing");
         validateRecoveryArguments(args, root);
@@ -423,7 +445,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
 function recoveryStateVersion(db: WorkflowDb, runId: string): string {
   const run = db.getRun(runId);
   return digest({ run: run ? { status: run.status, checkpoint: run.checkpoint, remainingWork: run.remainingWork, state: run.state, updatedAt: run.updatedAt } : null,
-    packets: db.pendingQaRecoveryHeads(runId), qa: db.pendingQaTicketHeads(runId),
+    decisions: db.pendingHumanDecisions(runId), operations: db.operations(runId), packets: db.pendingQaRecoveryHeads(runId), qa: db.pendingQaTicketHeads(runId),
     continuity: ["run", "builder", "qa"].map((role) => db.continuityHead(runId, role as "run" | "builder" | "qa")) });
 }
 
@@ -582,13 +604,15 @@ function requestedSettings(run: BuildRunRecordV2, role: "builder" | "qa", opts: 
   return { ...captured, ...(opts.agent ? { make: String(opts.agent) as "claude" | "codex", source: "cli" as const } : {}), ...(opts.model ? { model: String(opts.model), source: "cli" as const } : {}) };
 }
 
-function selectByFlags(runs: RecoverableRun[], opts: Record<string, unknown>): RecoverableRun | undefined {
+function selectByFlags(projectDir:string,runs: RecoverableRun[], opts: Record<string, unknown>): RecoverableRun | undefined {
   if ((opts.yes || opts.no) && !opts.run && !opts.ticket) throw new Error("--yes and --no require --run or --ticket");
+  // A diagnostic match selects the run to inspect; it never grants membership.
+  const observed = (run:RecoverableRun):boolean => Boolean(opts.ticket && Object.values(readQaEvidenceSnapshot(projectDir,run.runId).rows).some(rows=>rows.some(row=>row.ticket_id===opts.ticket||row.work_id===opts.ticket)));
   const matches = opts.run ? runs.filter((run) => run.runId === opts.run || run.runId.startsWith(String(opts.run)))
-    : opts.ticket ? runs.filter((run) => run.currentTicket === opts.ticket || run.tickets.includes(String(opts.ticket))) : [];
+    : opts.ticket ? runs.filter((run) => run.currentTicket === opts.ticket || run.tickets.includes(String(opts.ticket)) || observed(run) || legacyTrackerWorkHints(projectDir,run).includes(String(opts.ticket))) : [];
   if (matches.length > 1) throw new Error(opts.ticket ? `multiple recoverable build runs found for ticket ${String(opts.ticket)}; choose one with --run (${matches.map((run) => run.runId.slice(0, 8)).join(", ")})` : "selection is ambiguous; provide a longer run ID");
   const selected = matches[0];
-  if (selected && opts.run && opts.ticket && selected.currentTicket !== opts.ticket && !selected.tickets.includes(String(opts.ticket))) {
+  if (selected && opts.run && opts.ticket && selected.currentTicket !== opts.ticket && !selected.tickets.includes(String(opts.ticket)) && !observed(selected) && !legacyTrackerWorkHints(projectDir,selected).includes(String(opts.ticket))) {
     throw new Error(`ticket ${String(opts.ticket)} is not part of run ${selected.runId}`);
   }
   return selected;
@@ -612,4 +636,16 @@ async function correctPreparationArguments(saved: string[], error: Error): Promi
     try { const parsed = JSON.parse(value ?? ""); return Array.isArray(parsed) && parsed.every(x => typeof x === "string") ? undefined : "Enter a JSON array of option strings"; } catch { return "Enter a JSON array of option strings"; }
   } });
   return isCancel(answer) ? undefined : [...saved.slice(0, 2), ...JSON.parse(answer)];
+}
+
+
+/** Explicit unticketed admissions can recover without inventing an initialized tracker. */
+function admittedSyntheticRecovery(root:string,runId?:string):boolean {
+  if(detectProjectLifecycle(root).state!=="initializing"||existsSync(join(root,".tickets/config.yaml"))||existsSync(join(root,".tickets/tickets.yaml"))||existsSync(join(root,".tickets/ticket-state.sqlite")))return false;
+  return recoverableBuildRuns(root).filter(run=>!runId||run.runId===runId).some(run=>{
+    if(!run.tickets.length)return false;
+    const snapshot=readQaEvidenceSnapshot(root,run.runId);
+    if(snapshot.availability!=="present")return false;
+    return run.tickets.every(workId=>(snapshot.rows.build_work_scope??[]).some(row=>row.work_id===workId&&row.kind==="synthetic"&&row.state==="admitted")&&(snapshot.rows.build_work_admissions??[]).some(row=>row.work_id===workId));
+  });
 }

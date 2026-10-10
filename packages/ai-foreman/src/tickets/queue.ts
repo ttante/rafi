@@ -75,7 +75,7 @@ export function buildNextQueue(
       blockedBy: blockedBy.length ? blockedBy.join(", ") : "None",
       size: ticket.size,
       risk: ticket.risk,
-      nextAction: state?.next_action ?? defaultNextAction(ticket, displayStatus, blockedBy),
+      nextAction: state?.next_action ?? (displayStatus === "blocked" && !blockedBy.length ? `Resolve blocker: ${state?.blocker_notes ?? "external prerequisite requires recovery"}` : defaultNextAction(ticket, displayStatus, blockedBy)),
       requiredTests: ticket.required_tests.join("; "),
       evidence: state?.evidence ?? "N/A until implemented.",
       likelyFiles: ticket.likely_files.length ? ticket.likely_files.join(", ") : "unknown",

@@ -1,4 +1,4 @@
-import { formatRuntimeProbeFailure, probeRuntime, type ProbeRuntimeOptions } from "./runtimeReadiness.js";
+import { formatRuntimeProbeFailure, probeRuntime, RuntimeCleanupError, runtimeCleanupRecoveryHelp, type ProbeRuntimeOptions } from "./runtimeReadiness.js";
 
 export type AgentRuntime = "claude" | "codex";
 
@@ -17,6 +17,7 @@ export class RuntimeAuthError extends Error {
   readonly stdout: string;
   readonly stderr: string;
   readonly authLikely: boolean;
+  readonly cleanupUnverified: boolean;
 
   constructor(opts: RuntimeAuthErrorOptions) {
     super(formatRuntimeAuthFailure(opts), { cause: opts.cause });
@@ -26,6 +27,7 @@ export class RuntimeAuthError extends Error {
     this.stdout = opts.stdout ?? "";
     this.stderr = opts.stderr ?? "";
     this.authLikely = isRuntimeAuthFailure(`${this.stderr}\n${this.stdout}`);
+    this.cleanupUnverified = opts.cause instanceof RuntimeCleanupError;
   }
 }
 
@@ -89,6 +91,7 @@ export function runtimeRepairCommands(runtime: AgentRuntime): string {
 }
 
 export function formatRuntimeAuthFailure(opts: RuntimeAuthErrorOptions): string {
+  if (opts.cause instanceof RuntimeCleanupError) return `${opts.cause.message}\n\n${opts.context} is paused before further provider work. This is a process cleanup problem; changing login or provider will not clear it.\n\n${runtimeCleanupRecoveryHelp()}`;
   const output = [opts.stderr, opts.stdout].filter(Boolean).join("\n").trim();
   const exit = opts.exitCode === undefined || opts.exitCode === null ? "unknown" : String(opts.exitCode);
   const authLine = isRuntimeAuthFailure(output)

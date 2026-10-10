@@ -66,6 +66,7 @@ for (const alias of ['resume', 'build:resume']) for (const role of ['builder', '
       writeFileSync(join(root, 'implemented.txt'), 'recovered T001\n');
       db = new WorkflowDb(root);
       const digest = captureFrozenQaSource(root).digest;
+      db.admitWork({runId:run.runId,kind:'ticket',ticketId:'T001',definition:{id:'T001'},approvalId:'fixture',scopeRevision:'fixture',provenance:{userTurn:'Build T001',reason:'Authorized interrupted QA fixture'}});
       db.beginQaReviewAttempt({ attemptId: 'interrupted-review', runId: run.runId, ticketId: 'T001', reviewNumber: 1, cycle: 1, remediationGeneration: 0, sourceDigest: digest });
       let head = db.qaTicketHead(run.runId, 'T001');
       head = db.transitionQa(run.runId, 'T001', head.revision, { type: 'source-frozen', sourceStateDigest: digest });

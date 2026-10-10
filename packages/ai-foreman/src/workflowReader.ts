@@ -35,9 +35,9 @@ export class WorkflowReader {
     if (!this.db) return [];
     try { return (this.db.prepare("SELECT * FROM workflow_runs WHERE status IN ('running','paused','blocked') ORDER BY created_at").all() as DbRun[]).map(toRun); } catch { return []; }
   }
-  buildRuns(): WorkflowRunSnapshot[] {
+  buildRuns(strict = false): WorkflowRunSnapshot[] {
     if (!this.db) return [];
-    try { return (this.db.prepare("SELECT * FROM workflow_runs WHERE kind='build' ORDER BY updated_at DESC").all() as DbRun[]).map(toRun); } catch { return []; }
+    try { return (this.db.prepare("SELECT * FROM workflow_runs WHERE kind='build' ORDER BY updated_at DESC").all() as DbRun[]).map(toRun); } catch (error) { if(strict)throw error; return []; }
   }
   events(runId: string): Array<{ sequence: number; type: string; checkpoint: string; payload: unknown; at: string }> {
     if (!this.db) return [];
@@ -47,9 +47,9 @@ export class WorkflowReader {
     if (!this.db) return [];
     try { return (this.db.prepare("SELECT issue_json FROM workflow_issues WHERE run_id=? ORDER BY issue_id").all(runId) as Array<{ issue_json: string }>).map(row => JSON.parse(row.issue_json)); } catch { return []; }
   }
-  operations(runId: string): OperationRecord[] {
+  operations(runId: string, strict = false): OperationRecord[] {
     if (!this.db) return [];
-    try { return (this.db.prepare("SELECT * FROM operation_journal WHERE run_id=? ORDER BY created_at,idempotency_key").all(runId) as Array<Record<string, unknown>>).map(row => ({ idempotencyKey: String(row.idempotency_key), runId: String(row.run_id), kind: String(row.kind), status: String(row.status) as OperationRecord["status"], intent: JSON.parse(String(row.intent_json)), ...(row.result_json ? { result: JSON.parse(String(row.result_json)) } : {}), ...(row.external_id ? { externalId: String(row.external_id) } : {}), ...(row.error ? { error: String(row.error) } : {}), createdAt: String(row.created_at), updatedAt: String(row.updated_at) })); } catch { return []; }
+    try { return (this.db.prepare("SELECT * FROM operation_journal WHERE run_id=? ORDER BY created_at,idempotency_key").all(runId) as Array<Record<string, unknown>>).map(row => ({ idempotencyKey: String(row.idempotency_key), runId: String(row.run_id), kind: String(row.kind), status: String(row.status) as OperationRecord["status"], intent: JSON.parse(String(row.intent_json)), ...(row.result_json ? { result: JSON.parse(String(row.result_json)) } : {}), ...(row.external_id ? { externalId: String(row.external_id) } : {}), ...(row.error ? { error: String(row.error) } : {}), createdAt: String(row.created_at), updatedAt: String(row.updated_at) })); } catch (error) { if (strict) throw error; return []; }
   }
   currentLease(): ProjectLease | undefined {
     if (!this.db) return undefined;

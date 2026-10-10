@@ -1,3 +1,4 @@
+import { admitFixtureWork } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
@@ -29,7 +30,7 @@ async function fixture(provider: "claude" | "codex" = "codex", responseText?: (t
   execFileSync("git", ["add", "."], { cwd: root });
   execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"], { cwd: root, stdio: "ignore" });
   const source = await captureFrozenQaSourceAsync(root);
-  const db = new WorkflowDb(root); db.ensureRun("run");
+  const db = new WorkflowDb(root); db.ensureRun("run"); admitFixtureWork(db,"run",ticket.id, ticket);
   const digest = db.putEvidence("qa", Buffer.from(canonicalJson(report)));
   const refs = createQaFindingRefs({ runId: "run", ticketId: "T1", reviewAttemptId: "review", reportDigest: digest, rawFindingIds: ["QA-1"] });
   let head = db.qaTicketHead("run", "T1");
@@ -135,6 +136,7 @@ for (const defect of ["foreign-review", "stale-generation", "superseded-report"]
     const db = new WorkflowDb(f.root);
     try {
       if (defect === "foreign-review") {
+        admitFixtureWork(db,"other-run","T1",ticket);
         db.beginQaReviewAttempt({ attemptId: "foreign-review", runId: "other-run", ticketId: "T1", reviewNumber: 1, cycle: 1, remediationGeneration: 0, sourceDigest: f.input.reviewedSourceStateDigest });
         db.finishQaReviewAttempt("foreign-review", { status: "failed", reportDigest: f.input.reportDigest });
         f.input.reviewAttemptId = "foreign-review";

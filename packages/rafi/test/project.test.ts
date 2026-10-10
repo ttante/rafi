@@ -24,8 +24,8 @@ test("--defaults produces a config that validates against ProjectConfig schema",
   const config = buildProjectConfig(defaultAnswers());
   assert.ok(validateProjectConfig(config).valid, "default config failed schema validation");
   assert.deepEqual(config.agent_defaults?.roles, {
-    builder: { session_strategy: "compact", display_session_cost: false, auto_compact_threshold_percent: 50, compact_maximum: 10 },
-    qa: { session_strategy: "compact", display_session_cost: false, auto_compact_threshold_percent: 50, compact_maximum: 10 },
+    builder: { session_strategy: "compact", display_session_cost: false, auto_compact_threshold_percent: 65, compact_maximum: 10 },
+    qa: { session_strategy: "compact", display_session_cost: false, auto_compact_threshold_percent: 65, compact_maximum: 10 },
     "ticket-maker": { session_strategy: "compact", display_session_cost: false },
     planner: { session_strategy: "fresh", display_session_cost: false },
     uninstaller: { session_strategy: "fresh", display_session_cost: false },

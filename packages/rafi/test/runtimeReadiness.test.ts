@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AgentRuntime } from "../src/compiler.js";
+import { RuntimeCleanupError } from "ai-foreman/runtime-readiness.js";
 import {
   ensureAgentRuntimesReady,
   RuntimeReadinessError,
@@ -96,12 +97,13 @@ test("runtime readiness can switch to the other runtime after verification", asy
 
 test("runtime readiness throws when fallback runtime is not ready", async () => {
   const checked: AgentRuntime[] = [];
+  let prompts = 0;
 
   await assert.rejects(
     ensureAgentRuntimesReady(
       "/tmp/project",
       ["claude"],
-      async () => "switch",
+      async () => ++prompts === 1 ? "switch" : "cancel",
       (_targetDir, runtime) => {
         checked.push(runtime);
         throw new RuntimeReadinessError({ runtime, stderr: "not logged in" });
@@ -111,4 +113,34 @@ test("runtime readiness throws when fallback runtime is not ready", async () => 
   );
 
   assert.deepEqual(checked, ["claude", "codex"]);
+  assert.equal(prompts, 2, "fallback failure must offer recovery instead of exiting directly");
+});
+
+test("cleanup uncertainty pauses with truthful diagnostics and retries the same runtime", async () => {
+  let checks = 0;
+  let prompts = 0;
+  const result = await ensureAgentRuntimesReady("/tmp/project", ["claude"], async err => {
+    prompts++;
+    assert.equal(err.cleanupUnverified, true);
+    assert.equal(err.authLikely, false);
+    assert.match(err.message, /inventory denied/);
+    assert.match(err.message, /Create is paused/);
+    assert.match(err.message, /Linux\/WSL/);
+    assert.doesNotMatch(err.message, /codex login/);
+    return "retry";
+  }, () => { if (++checks === 1) throw new RuntimeCleanupError("Standalone probe cleanup is unverified: inventory denied"); });
+  assert.deepEqual(result, ["claude"]);
+  assert.equal(checks, 2);
+  assert.equal(prompts, 1);
+});
+
+test("failed fallback can be repaired and retried without leaving create", async () => {
+  const checked: AgentRuntime[] = [];
+  let prompts = 0;
+  const result = await ensureAgentRuntimesReady("/tmp/project", ["claude"], async () => ++prompts === 1 ? "switch" : "retry", (_dir, runtime) => {
+    checked.push(runtime);
+    if (checked.length < 3) throw new RuntimeReadinessError({ runtime, stderr: "network unavailable" });
+  });
+  assert.deepEqual(result, ["codex"]);
+  assert.deepEqual(checked, ["claude", "codex", "codex"]);
 });

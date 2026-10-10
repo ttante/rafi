@@ -1,5 +1,5 @@
 import type { AgentRuntime } from "./compiler.js";
-import { probeRuntime, formatRuntimeProbeFailure } from "ai-foreman/runtime-readiness.js";
+import { probeRuntime, formatRuntimeProbeFailure, RuntimeCleanupError, runtimeCleanupRecoveryHelp } from "ai-foreman/runtime-readiness.js";
 import { requireClaudeSDK } from "ai-foreman/claude-adapter.js";
 import {
   isRuntimeAuthFailure,
@@ -24,6 +24,7 @@ export class RuntimeReadinessError extends Error {
   readonly stdout: string;
   readonly stderr: string;
   readonly authLikely: boolean;
+  readonly cleanupUnverified: boolean;
 
   constructor(opts: RuntimeReadinessErrorOptions) {
     super(formatRuntimeReadinessFailure(opts), { cause: opts.cause });
@@ -33,6 +34,7 @@ export class RuntimeReadinessError extends Error {
     this.stdout = opts.stdout ?? "";
     this.stderr = opts.stderr ?? "";
     this.authLikely = isRuntimeAuthFailure(`${this.stderr}\n${this.stdout}`);
+    this.cleanupUnverified = opts.cause instanceof RuntimeCleanupError;
   }
 }
 
@@ -63,15 +65,18 @@ export async function ensureAgentRuntimesReady(
   check: (targetDir: string, runtime: AgentRuntime) => void | Promise<void> = checkAgentRuntimeReady,
 ): Promise<AgentRuntime[]> {
   const selected = uniqueRuntimes(runtimes);
-  for (const runtime of selected) {
+  for (const originalRuntime of selected) {
+    let runtime = originalRuntime;
+    let switched = false;
     while (true) {
       try {
         await check(targetDir, runtime);
+        if (switched) return [runtime];
         break;
       } catch (err) {
         const failure = err instanceof RuntimeReadinessError
           ? err
-          : new RuntimeReadinessError({ runtime, cause: err });
+          : new RuntimeReadinessError({ runtime, cause: err, stderr: err instanceof Error ? err.message : String(err) });
         const fallbackRuntime = otherRuntime(runtime);
         const choice = await choose(failure, fallbackRuntime);
         if (choice === "retry") {
@@ -80,8 +85,9 @@ export async function ensureAgentRuntimesReady(
         }
         if (choice === "switch") {
           currentActivity()?.note(`rafi: checking fallback runtime ${fallbackRuntime}`);
-          await check(targetDir, fallbackRuntime);
-          return [fallbackRuntime];
+          runtime = fallbackRuntime;
+          switched = true;
+          continue;
         }
         throw failure;
       }
@@ -91,6 +97,7 @@ export async function ensureAgentRuntimesReady(
 }
 
 export function formatRuntimeReadinessFailure(opts: RuntimeReadinessErrorOptions): string {
+  if (opts.cause instanceof RuntimeCleanupError) return `${opts.cause.message}\n\nCreate is paused before further provider work. This is a process cleanup problem; changing login or provider will not clear it.\n\n${runtimeCleanupRecoveryHelp()}`;
   const output = [opts.stderr, opts.stdout].filter(Boolean).join("\n").trim();
   const exit = opts.exitCode === undefined || opts.exitCode === null ? "unknown" : String(opts.exitCode);
   const authLine = isRuntimeAuthFailure(output)
@@ -104,6 +111,23 @@ export function formatRuntimeReadinessFailure(opts: RuntimeReadinessErrorOptions
     indent(runtimeRepairCommands(opts.runtime)) +
     details
   );
+}
+
+export { runtimeCleanupRecoveryHelp } from "ai-foreman/runtime-readiness.js";
+
+export async function promptProbeCleanupRecovery(message: string, label: string): Promise<"retry" | "cancel"> {
+  const { select, isCancel, log } = await import("@clack/prompts");
+  log.error(message);
+  while (true) {
+    const choice = await select({ message: `${label} is paused until the previous probe is safely cleaned up.`, options: [
+      { value: "retry", label: "Recheck cleanup after repairing process visibility" },
+      { value: "help", label: "Show platform-specific resolution approaches" },
+      { value: "cancel", label: "Cancel deliberately; preserve current files and settings" },
+    ] });
+    if (isCancel(choice) || choice === "cancel") return "cancel";
+    if (choice === "help") { log.info(runtimeCleanupRecoveryHelp()); continue; }
+    return "retry";
+  }
 }
 
 function uniqueRuntimes(runtimes: readonly AgentRuntime[]): AgentRuntime[] {
