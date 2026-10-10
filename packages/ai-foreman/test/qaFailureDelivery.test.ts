@@ -1,3 +1,9 @@
+import { withGraphDerivedAccess } from "../src/graph/derived.js";
+import { graphExclusions } from "../src/graph/corpus.js";
+import { loadGraphConfig } from "../src/graph/config.js";
+import { digest } from "../src/graph/util.js";
+import { adoptGraph, disableGraph } from "../src/graph/maintenance.js";
+import { DEFAULT_GRAPH_CONFIG } from "rafi-spec";
 import { admitFixtureWork } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -61,7 +67,7 @@ class FakeBuilder implements BuilderAdapter {
   response = "";
   ref: ProviderSessionRefV1;
 
-  constructor(cwd: string) {
+  constructor(cwd: string, private readonly graphEnabled = false) {
     const now = new Date(0).toISOString();
     this.ref = {
       version: 1,
@@ -106,16 +112,17 @@ class FakeBuilder implements BuilderAdapter {
         'STEP_STATUS: done | summary="fixed"',
       ].join("\n");
     }
+    const wire = this.graphEnabled && this.instructions.length===1 ? JSON.stringify({kind:"rafi_graph_request",version:1,requestId:"impact",operations:[{operation:"query",query:"input"}]}) : this.response;
     const result: TurnResult = {
-      text: this.response,
+      text: wire,
       isError: false,
       numTurns: 1,
       costUsd: 0,
-      turnId: "builder-turn-1",
+      turnId: `builder-turn-${this.instructions.length}`,
       hostInstruction: instruction,
       providerInstruction: `provider role text\n${instruction}`,
-      rawResponse: this.response,
-      cleanedResponse: this.response,
+      rawResponse: wire,
+      cleanedResponse: wire,
       providerMetadata: { provider: "codex", sessionId: this.ref.sessionId, sessionRef: this.ref },
     };
     const event: BuilderEvent = { kind: "turn-complete", result, turnId: result.turnId };
@@ -130,7 +137,9 @@ class FakeBuilder implements BuilderAdapter {
   async close(): Promise<void> { this.closed = true; }
 }
 
-test("QA failure delivery service sends complete source-bound handoff and requires QA recheck", async () => {
+for (const scenario of [false, true, "retained-repair", "revoked-repair", "inherited-report"] as const) test(`QA failure delivery preserves its binding across graph exchange: ${scenario}`, async () => {
+  const graphEnabled = scenario === true;
+  const repair = scenario === "retained-repair" || scenario === "revoked-repair";
   const root = mkdtempSync(join(tmpdir(), "rafi-qa-delivery-"));
   try {
     execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
@@ -141,6 +150,7 @@ test("QA failure delivery service sends complete source-bound handoff and requir
     execFileSync("git", ["commit", "-m", "initial"], { cwd: root, stdio: "ignore" });
     writeFileSync(join(root, "input.ts"), "export const value = 2;\n");
 
+    if(graphEnabled || typeof scenario === "string")adoptGraph(root,{config:{...structuredClone(DEFAULT_GRAPH_CONFIG),mode:"code-only"},authorization:"explicit"});
     const source = await captureFrozenQaSourceAsync(root);
     const reportDigest = qaReportDigest(report);
     const findingRefs = createQaFindingRefs({
@@ -170,9 +180,22 @@ test("QA failure delivery service sends complete source-bound handoff and requir
       }, report.findings.map((finding) => finding.id), findingRefs.map((finding) => finding.findingKey), report.summary, head.revision);
     } finally { db.close(); }
 
-    const builder = new FakeBuilder(root);
-    const service = new QaFailureDeliveryService();
-    const result = await service.deliver({
+    const builder = new FakeBuilder(root,graphEnabled);
+    if (repair) {
+      const db = new WorkflowDb(root);
+      const access = { policyDigest: loadGraphConfig(root).policyDigest, workspace: root, paths: ["input.ts"], exclusionsDigest: digest("exclusions", graphExclusions(root, ["input.ts"]).text), sourceVersions: {} };
+      const key = digest("session-access", { provider: builder.agent, session: builder.sessionId() });
+      try { db.registerGraphEvidence(key, [access]); db.graphStore().put("session-access", key, { grants: [access] }); } finally { db.close(); }
+      const send = builder.sendTurn.bind(builder);
+      builder.sendTurn = async prompt => {
+        const result = await send(prompt);
+        if (builder.instructions.length === 1) result.text = result.rawResponse = result.cleanedResponse = "Malformed remediation report";
+        return result;
+      };
+    }
+    const service = new QaFailureDeliveryService(scenario === "revoked-repair" ? { afterResponseStored: () => disableGraph(root) } : {});
+    const inherited = scenario === "inherited-report" ? [{ policyDigest: loadGraphConfig(root).policyDigest, workspace: root, paths: ["input.ts"], exclusionsDigest: digest("exclusions", graphExclusions(root, ["input.ts"]).text), sourceVersions: {} }] : [];
+    const delivery = withGraphDerivedAccess(inherited, () => service.deliver({
       projectDir: root,
       runId: "run",
       ticket,
@@ -186,9 +209,16 @@ test("QA failure delivery service sends complete source-bound handoff and requir
       remediationGeneration: 0,
       latestBuilderResult: "implemented",
       history: [],
-    }, { adapter: () => builder, sessionStrategy: "compact" });
+    }, { adapter: () => builder, sessionStrategy: "compact" }));
 
+    if (scenario === "revoked-repair") {
+      await assert.rejects(delivery, /Graph access changed|revoked graph evidence/);
+      assert.equal(builder.instructions.length, 1);
+      return;
+    }
+    const result = await delivery;
     assert.equal(result.ok, true, result.detail);
+    assert.equal(builder.instructions.length,graphEnabled || repair?2:1);
     assert.match(builder.instructions[0] ?? "", /Current validated QA failure report/);
     assert.match(builder.instructions[0] ?? "", new RegExp(findingRefs[0]!.findingKey));
 
@@ -198,9 +228,19 @@ test("QA failure delivery service sends complete source-bound handoff and requir
       assert.equal(finalDb.qaRemediationAttempts("run", ticket.id).at(-1)?.status, "succeeded");
       const handoff = finalDb.qaFailureHandoffs("run", ticket.id).at(-1);
       assert.equal(handoff?.state, "recheck-required");
+      const turns=finalDb.qaDeliveryTurns(result.operationId!);
+      assert.deepEqual(turns.map(t=>t.kind),graphEnabled?["remediation","graph-continuation"]:repair?["remediation","response-repair"]:["remediation"]);
+      assert.equal(finalDb.qaRemediationAttempts("run",ticket.id).length,1);
       assert.equal(handoff?.reportDigest, reportDigest);
       assert.equal(handoff?.responseDigest, finalDb.qaRemediationAttempts("run", ticket.id).at(-1)?.responseDigest);
       assert.equal(handoff?.builderSession?.sessionId, "builder-session-1");
+      if (repair || scenario === "inherited-report") {
+        const summary = finalDb.qaRemediationAttempts("run", ticket.id).at(-1)?.summaryDigest;
+        assert.ok(summary);
+        assert.ok(finalDb.getEvidence(summary));
+        disableGraph(root);
+        assert.equal(finalDb.getEvidence(summary), undefined, "transformed repair summary remains derived");
+      }
     } finally { finalDb.close(); }
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -106,8 +106,8 @@ export function getAgent(role: string, opts: AgentComposeOptions = {}): Composed
     : "";
   return {
     manifest,
-    system: composeAgentSystem(manifest, opts) + roleAppendix,
-    skills: manifest.skills,
+    system: composeAgentSystem(manifest, opts) + roleAppendix + "\nUse the rafi-graph skill for substantial graph-assisted investigation when this project has adopted Graphify. Source evidence and mandatory role checks remain authoritative. Routine commands do not trigger graph work.\n",
+    skills: [...new Set([...manifest.skills, "rafi-graph"])],
     model: manifest.model ?? null,
     effort: manifest.effort ?? null,
   };

@@ -1,3 +1,4 @@
+import { validateDepthDecision } from "ai-foreman/qa-preparation-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -9,6 +10,7 @@ export const PLAN_PROPOSAL_END = "RAFI_PLAN_PROPOSAL_END";
 export const MAX_PLAN_STACK_DEPTH = 5;
 
 export interface PlanSliceProposal {
+  qa_preparation?: StructuredPlanSlice["qa_preparation"];
   local_ref: string;
   retains?: string;
   title: string;
@@ -78,6 +80,7 @@ export function validateStructuredPlanProposal(value: unknown): string[] {
   for (const [index, rawSlice] of proposal.slices.entries()) {
     if (!rawSlice || typeof rawSlice !== "object" || Array.isArray(rawSlice)) { issues.push(`slices[${index}] must be an object`); continue; }
     const slice = rawSlice as Record<string, unknown> & PlanSliceProposal;
+    if (slice.qa_preparation !== undefined) issues.push(...validateDepthDecision(slice.qa_preparation).map(issue => `slice ${slice.local_ref}.qa_preparation: ${issue}`));
     if (typeof slice.local_ref !== "string" || !slice.local_ref) { issues.push(`slices[${index}].local_ref is required`); continue; }
     if (localRefs.has(slice.local_ref)) issues.push(`duplicate slice local_ref ${slice.local_ref}`);
     localRefs.add(slice.local_ref);
@@ -165,9 +168,14 @@ export function materializeStructuredPlan(
   proposal: StructuredPlanProposalV1,
   previous?: StructuredPlanV1,
   allocate: () => string = randomUUID,
+  preparationPolicy?: import("rafi-spec").QaPreparationConfigV1,
 ): StructuredPlanV1 {
   const issues = validateStructuredPlanProposal(proposal);
   if (issues.length) throw new Error(issues.join("; "));
+  if (preparationPolicy?.mode === "enforce") for (const slice of proposal.slices) {
+    const issues = validateDepthDecision(slice.qa_preparation);
+    if (issues.length) throw new Error(`Slice ${slice.local_ref} requires planner QA depth: ${issues.join("; ")}`);
+  }
   const previousSlices = new Map(previous?.slices.map((slice) => [slice.slice_ref, slice]) ?? []);
   const previousStacks = new Map(previous?.stacks.map((stack) => [stack.stack_id, stack]) ?? []);
   const refMap = new Map<string, string>();
@@ -180,6 +188,7 @@ export function materializeStructuredPlan(
     acceptance: [...slice.acceptance], required_tests: [...slice.required_tests], likely_files: [...slice.likely_files],
     depends_on: slice.depends_on.map((ref) => refMap.get(ref)!),
     source_refs: slice.source_refs?.map((ref) => ({ ...ref })),
+    ...(slice.qa_preparation ? { qa_preparation: structuredClone(slice.qa_preparation) } : {}),
   }));
   const delivery_units = proposal.delivery_units.map((unit) => ({ ...unit, slice_refs: unit.slice_refs.map((ref) => refMap.get(ref)!) }));
   const stacks: StructuredPlanStack[] = proposal.stacks.map((stack) => {
@@ -187,6 +196,7 @@ export function materializeStructuredPlan(
     return { stack_id: stack.retains ?? `stk_${allocate()}`, name: stack.name, units: [...stack.units] };
   });
   const plan: StructuredPlanV1 = {
+    ...(preparationPolicy ? { qa_preparation_policy: structuredClone(preparationPolicy) } : {}),
     version: 1, plan_id: previous?.plan_id ?? `pln_${allocate()}`, revision: (previous?.revision ?? 0) + 1,
     content_digest: "", summary: proposal.summary, assumptions: [...proposal.assumptions],
     implementation_changes: [...proposal.implementation_changes], acceptance_criteria: [...proposal.acceptance_criteria],
@@ -219,6 +229,7 @@ export function validateMaterializedPlan(plan: StructuredPlanV1): string[] {
   for (const [index, rawSlice] of plan.slices.entries()) {
     if (!rawSlice || typeof rawSlice !== "object" || Array.isArray(rawSlice)) { issues.push(`slices[${index}] must be an object`); continue; }
     const slice = rawSlice as Record<string, unknown> & StructuredPlanSlice;
+    if (slice.qa_preparation !== undefined || plan.qa_preparation_policy?.mode === "enforce") issues.push(...validateDepthDecision(slice.qa_preparation).map(issue => `slice ${slice.slice_ref}.qa_preparation: ${issue}`));
     if (typeof slice.slice_ref !== "string" || !slice.slice_ref) issues.push(`slices[${index}].slice_ref is required`);
     else refs.add(slice.slice_ref);
     for (const field of ["title", "summary"] as const) if (typeof slice[field] !== "string" || !slice[field].trim()) issues.push(`slice ${slice.slice_ref || index}.${field} is required`);

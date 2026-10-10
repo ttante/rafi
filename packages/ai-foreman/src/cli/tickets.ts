@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { accent, error, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -1306,6 +1307,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     builder = roleBuilder.builder;
     viewer = printEvents(builder.events());
     const foreman = new Foreman(builder, log, { desktop: config.notifications.enabled, terminalBell: config.notifications.terminal_bell }, false, 3, dir);
+    foreman.setGraphPurpose("ticket-population");
 
     console.log(`foreman tickets: populating tickets with ${roleBuilder.runtime}`);
     console.log(`foreman tickets: project ${dir}`);
@@ -1957,7 +1959,7 @@ export function buildTicketsCommand(options: {
           evidence: opts.evidence as string | undefined,
           lastError: opts.lastError as string | undefined,
         });
-        console.log(`foreman tickets: updated ${ticketId}`);
+        console.log(`${accent("foreman tickets:")} updated ${sanitizeTerminalText(ticketId)}`);
       } catch (err) {
         fail(String(err instanceof Error ? err.message : err));
       }
@@ -1985,7 +1987,7 @@ export function buildTicketsCommand(options: {
           evidence: opts.evidence as string | undefined,
           validationNotes: opts.validationNotes as string | undefined,
         });
-        console.log(`foreman tickets: completed ${ticketId}`);
+        console.log(`${accent("foreman tickets:")} ${success("completed")} ${sanitizeTerminalText(ticketId)}`);
       } catch (err) {
         fail(String(err instanceof Error ? err.message : err));
       }
@@ -2011,7 +2013,7 @@ export function buildTicketsCommand(options: {
           actor: opts.actor as string | undefined,
           unblockCriteria: opts.unblockCriteria as string | undefined,
         });
-        console.log(`foreman tickets: blocked ${ticketId}`);
+        console.log(`${accent("foreman tickets:")} ${warning("blocked")} ${sanitizeTerminalText(ticketId)}`);
       } catch (err) {
         fail(String(err instanceof Error ? err.message : err));
       }
@@ -2031,7 +2033,7 @@ export function buildTicketsCommand(options: {
           summary: opts.summary as string | undefined,
           actor: opts.actor as string | undefined,
         });
-        console.log(`foreman tickets: unblocked ${ticketId}`);
+        console.log(`${accent("foreman tickets:")} ${success("unblocked")} ${sanitizeTerminalText(ticketId)}`);
       } catch (err) {
         fail(String(err instanceof Error ? err.message : err));
       }
@@ -2227,9 +2229,9 @@ export function buildTicketsCommand(options: {
       try {
         const result = cmdValidate(cwd(opts));
         if (result.issues.length === 0) {
-          console.log("foreman tickets: validation passed — all 4 passes clean");
+          console.log(`${accent("foreman tickets:")} ${success("validation passed")} — all 4 passes clean`);
         } else {
-          console.log(`foreman tickets: ${result.issues.length} issue(s) found:`);
+          console.log(`${accent("foreman tickets:")} ${error(`${result.issues.length} issue(s) found:`)}`);
           console.log(formatValidationIssues(result.issues));
           if (!result.clean) process.exit(1);
         }
@@ -2255,7 +2257,7 @@ export function buildTicketsCommand(options: {
           if (!lines.length) console.log("No remaining tickets."); else for (const line of lines) console.log(line);
           return;
         }
-        console.log("Batches: none configured. Queue is flat.");
+        console.log(`${accent("Batches:")} none configured. Queue is flat.`);
         const rows = cmdQueue(dir, opts.limit !== undefined ? Number(opts.limit) : undefined);
         if (rows.length === 0) {
           console.log("No remaining tickets.");

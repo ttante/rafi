@@ -64,3 +64,5 @@ If independent review is unavailable or disallowed, perform the same checklist y
 - Finish when the acceptance criteria are supported by evidence, required checks have passed, and confirmed in-scope defects are resolved. Otherwise report the work as incomplete or verification-limited, with the exact gap. Defer a known defect only when the user's scope or decision permits it, and disclose the deferral.
 
 The final report should state the resulting behavior, checks run and their outcomes, review mode and resolved findings, and any remaining gaps. Include the checkpoint path when one exists. Do not equate unrun checks with passes or a review with a guarantee of correctness. Committing, publishing, deployment, and unrelated cleanup follow the user's requested scope; they are not automatic completion steps.
+
+When substantial cross-file investigation warrants adopted graph evidence, follow the packaged `rafi-graph` skill. Reuse hosted packets when supplied; routine tests, bookkeeping, and handoff do not trigger refresh. Verify graph claims in source.

@@ -1,3 +1,4 @@
+export { withGraphDerivedAccess } from "./graph/derived.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, DEFAULT_CONFIG, type PermissionConfig } from "./config.js";
@@ -19,13 +20,17 @@ import { parse as parseYaml } from "yaml";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1, ConfigurableAgentRole, ProviderSessionRefV1 } from "rafi-spec";
 import { captureWorkspaceIdentity, createProviderSessionRef, resolveUniqueSessionBinding } from "./sessionIdentity.js";
 import { WorkflowDb } from "./workflowDb.js";
+import { graphContext, sendGraphTurn } from "./graph/turn.js";
+import type { GraphPurpose } from "rafi-spec";
 
 export type { EffortLevel } from "./adapters/types.js";
 
 export const VALID_EFFORT: readonly EffortLevel[] = ["low", "medium", "high", "xhigh"];
 
 export interface RoleBuilderOptions {
+  graphPurpose?: GraphPurpose;
   projectDir: string;
+  configRoot?: string;
   role: string;
   agent?: string;
   model?: string;
@@ -37,6 +42,7 @@ export interface RoleBuilderOptions {
   log?: Log;
   permissionConfig?: PermissionConfig;
   extraSkills?: string[];
+  preloadedSkillContent?: BuilderAdapterOptions["preloadedSkillContent"];
   sandboxMode?: BuilderAdapterOptions["sandboxMode"];
   /** Disable recovery-session persistence for isolated, non-recoverable roles such as Manager. */
   persistSessionBindings?: boolean;
@@ -50,6 +56,7 @@ export interface RoleBuilderOptions {
 }
 
 export interface RoleBuilder {
+  graphRoot?: string;
   builder: BuilderAdapter;
   runtime: AgentRuntime;
   model?: string;
@@ -172,13 +179,14 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
   if (!existsSync(opts.projectDir)) {
     throw new Error(`project directory not found: ${opts.projectDir}`);
   }
-  const saved = readRoleDefaultsForExecution(opts.projectDir, opts.role);
+  const executionRoot=opts.configRoot??opts.projectDir;
+  const saved = readRoleDefaultsForExecution(executionRoot, opts.role);
   if (opts.resumeSessionRef && opts.resumeSessionId && opts.resumeSessionRef.sessionId !== opts.resumeSessionId) {
     throw new Error("resume session ID does not match the supplied location-scoped reference");
   }
   let requestedResumeRef = opts.resumeSessionRef;
   if (!requestedResumeRef && opts.resumeSessionId) {
-    const bindingDb = new WorkflowDb(opts.projectDir);
+    const bindingDb = new WorkflowDb(executionRoot);
     try { requestedResumeRef = resolveUniqueSessionBinding(bindingDb.providerSessionBindings(opts.resumeSessionId), opts.resumeSessionId); }
     finally { bindingDb.close(); }
   }
@@ -186,19 +194,19 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
   const effectiveEffort = opts.effort ?? (VALID_EFFORT.includes(configuredEffort as EffortLevel) ? configuredEffort as EffortLevel : undefined);
   assertEffortLevel(effectiveEffort);
 
-  let runtime = resolveAgentForProject(opts.projectDir, opts.agent ?? requestedResumeRef?.provider ?? saved?.make);
+  let runtime = resolveAgentForProject(executionRoot, opts.agent ?? requestedResumeRef?.provider ?? saved?.make);
   if (requestedResumeRef && requestedResumeRef.provider !== runtime) {
     throw new Error(`session ${requestedResumeRef.sessionId} belongs to ${requestedResumeRef.provider}, but ${runtime} was selected`);
   }
   if (requestedResumeRef && requestedResumeRef.role !== configurableRole(opts.role)) {
     throw new Error(`session ${requestedResumeRef.sessionId} belongs to role ${requestedResumeRef.role}, not ${configurableRole(opts.role)}`);
   }
-  const config = loadConfig(join(opts.projectDir, "foreman.yaml"));
-  const log = opts.log ?? new Log(makeLogPath(opts.projectDir, opts.label.replace(/\s+/g, "-")));
-  const roleBundle = loadRoleBundle(opts.role, { projectDir: opts.projectDir });
+  const config = loadConfig(join(executionRoot, "foreman.yaml"));
+  const log = opts.log ?? new Log(makeLogPath(executionRoot, opts.label.replace(/\s+/g, "-")));
+  const roleBundle = loadRoleBundle(opts.role, { projectDir: opts.configRoot ?? opts.projectDir });
   const initialModel = opts.model ?? (saved?.model !== "default" ? saved?.model : undefined) ?? roleBundle.model ?? undefined;
   const effort = effectiveEffort ?? (roleBundle.effort as EffortLevel | null) ?? undefined;
-  const ready = await ensureRuntimeReadyForCommand(opts.projectDir, runtime, {
+  const ready = await ensureRuntimeReadyForCommand(executionRoot, runtime, {
     label: opts.label,
     yes: Boolean(opts.yes),
     allowSwitch: requestedResumeRef || opts.resumeSessionId ? false : opts.allowSwitch,
@@ -214,7 +222,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
   const makeAdapter = async (nextRuntime: AgentRuntime, resumeSessionId?: string, resumeSessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => {
     let scopedRef = resumeSessionRef;
     if (!scopedRef && resumeSessionId) {
-      const bindingDb = new WorkflowDb(opts.projectDir);
+      const bindingDb = new WorkflowDb(executionRoot);
       try { scopedRef = resolveUniqueSessionBinding(bindingDb.providerSessionBindings(resumeSessionId), resumeSessionId); }
       finally { bindingDb.close(); }
       scopedRef ??= createProviderSessionRef({
@@ -224,7 +232,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
         stream: opts.role,
         generation: 0,
         cwd: opts.projectDir,
-        configRoot: opts.projectDir,
+        configRoot: opts.configRoot ?? opts.projectDir,
         workspaceIdentity: captureWorkspaceIdentity(opts.projectDir),
         source: "legacy-inferred",
       });
@@ -234,7 +242,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
     }
     const adapterOpts: BuilderAdapterOptions = {
       cwd: opts.projectDir,
-      configRoot: opts.projectDir,
+      configRoot: opts.configRoot ?? opts.projectDir,
       runtimeExecutable,
       runtimePhase: phaseForRole(opts.role),
       onQuestionTrace: (trace) => log.write("question-round-trip", { ...trace }),
@@ -255,6 +263,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
       sandboxMode: opts.sandboxMode,
       systemPromptAppend: roleBundle.system || undefined,
       skills: skills.length > 0 ? skills : undefined,
+      preloadedSkillContent: opts.preloadedSkillContent,
     };
     const adapter = nextRuntime === "codex"
       ? new CodexAdapter(adapterOpts)
@@ -279,7 +288,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
   const initial = await makeAdapter(runtime, opts.resumeSessionId, requestedResumeRef);
   const persistSessionRef = (ref: ProviderSessionRefV1): void => {
     if (opts.persistSessionBindings === false) return;
-    const bindingDb = new WorkflowDb(opts.projectDir);
+    const bindingDb = new WorkflowDb(executionRoot);
     try { bindingDb.recordProviderSessionBinding(ref); }
     finally { bindingDb.close(); }
   };
@@ -292,7 +301,7 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
     enabled: interactive,
     allowSwitch: opts.allowSwitch !== false && !opts.resumeSessionId && !requestedResumeRef,
     recreate: async (nextRuntime, resumeSessionId, resumeSessionRef) => {
-      const nextReady = await ensureRuntimeReadyForCommand(opts.projectDir, nextRuntime, {
+      const nextReady = await ensureRuntimeReadyForCommand(executionRoot, nextRuntime, {
         label: opts.label,
         allowSwitch: false,
         model: nextRuntime === runtime ? model : undefined,
@@ -305,7 +314,13 @@ export async function createRoleBuilder(opts: RoleBuilderOptions): Promise<RoleB
     onSessionRef: persistSessionRef,
   });
 
-  return { builder, runtime, model, effort, roleBundle, skills, log };
+  return { builder, runtime, model, effort, roleBundle, skills, log, graphRoot: opts.configRoot ?? opts.projectDir };
+}
+
+export function sendRoleGraphTurn(role:RoleBuilder,instruction:string,purpose:GraphPurpose,policy?:Parameters<BuilderAdapter["sendTurn"]>[1]):Promise<TurnResult>{
+  const root=role.graphRoot;
+  if(!root)return role.builder.sendTurn(instruction,policy);
+  return sendGraphTurn(role.builder,instruction,graphContext(root,role.builder.sessionRef?.()?.cwd??root,purpose,instruction),policy);
 }
 
 function phaseForRole(role: string): BuilderAdapterOptions["runtimePhase"] {
@@ -364,6 +379,7 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
   const viewer = printEvents(builder.events());
   const config = loadConfig(join(opts.projectDir, "foreman.yaml"));
   const foreman = new Foreman(builder, log, { desktop: config.notifications.enabled, terminalBell: config.notifications.terminal_bell }, false, 3, opts.projectDir);
+  foreman.setGraphPurpose(opts.graphPurpose ?? ({planner:"planning",discovery:"discovery","ticket-maker":"ticket-population",uninstaller:"uninstall-analysis"} as Record<string,GraphPurpose>)[opts.role] ?? "implementation");
 
   try {
     const turn = await foreman.runInstruction(opts.instruction);

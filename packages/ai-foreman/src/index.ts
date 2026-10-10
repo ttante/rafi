@@ -2,6 +2,7 @@
 import { withRecoveryCommandFamily } from "./recoveryGuidance.js";
 import { HumanDecisionRequired } from "./humanDecision.js";
 import { Command } from "commander";
+import { buildGraphCommand } from "./cli/graph.js";
 import { readFileSync } from "node:fs";
 import { buildTicketsCommand } from "./cli/tickets.js";
 import { buildStartCommand } from "./cli/start.js";
@@ -23,6 +24,7 @@ program
   .version(PACKAGE_VERSION);
 
 program.addCommand(buildTicketsCommand());
+program.addCommand(buildGraphCommand());
 program.addCommand(buildStartCommand());
 program.addCommand(buildStatusCommand());
 program.addCommand(buildDoctorCommand());

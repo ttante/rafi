@@ -1,3 +1,5 @@
+import { currentGraphDerivedAccess } from "./graph/derived.js";
+import { bytesDigest } from "./graph/util.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -5,6 +7,8 @@ import { dirname } from "node:path";
 export interface LogRecord {
   ts: string;
   event:
+    | "graph-maintenance"
+    | "graph-evidence"
     | "batch-start"
     | "batch-end"
     | "branch-plan"
@@ -66,7 +70,11 @@ export class Log {
     const record: LogRecord = {
       ts: new Date().toISOString(),
       event,
-      ...fields,
+      ...(currentGraphDerivedAccess() ? {
+        graphDerived: true,
+        fieldsDigest: bytesDigest(JSON.stringify(fields)),
+        limitation: "Graph-derived details are retained only in access-checked evidence storage",
+      } : fields),
     };
     appendFileSync(this.path, JSON.stringify(record) + "\n");
   }

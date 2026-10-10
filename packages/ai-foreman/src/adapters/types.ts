@@ -1,3 +1,4 @@
+import type { ProviderTurnPurpose } from "../providerPhase.js";
 /**
  * Agent-agnostic interface over a coding agent ("builder").
  */
@@ -229,10 +230,15 @@ export interface BuilderAdapterOptions {
 }
 
 export interface BuilderAdapter {
+  graphRuntimeSettings?(): Pick<BuilderAdapterOptions, "model" | "effort" | "fast" | "runtimeExecutable"> | undefined;
   readonly agent: "claude" | "codex";
+  contractCapabilities?(): { sameSessionAcceptance: boolean; nativeCompactionBarrier: boolean };
+  enableContractEnforcement?(): void;
+  contractCompactionSequence?(): number;
+  acceptContractDelivery?(sequence: number): void;
 
   /** Send one instruction; resolves when that turn completes. */
-  sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string }): Promise<TurnResult>;
+  sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: ProviderTurnPurpose }): Promise<TurnResult>;
   /** Synchronous observation through the event owner. Terminal precedes sendTurn resolution. */
   observeEvents?(listener: (event: BuilderEvent) => void): () => void;
   /** Commit a deferred handback checkpoint only after the host validates the turn. */

@@ -1,3 +1,7 @@
+import { bytesDigest } from "./graph/util.js";
+import { measureQaPreparation, type QaMetricEvent } from "./qaPreparationMetrics.js";
+import { graphDerivedAllowed } from "./graph/derived.js";
+import { readGraphRecord, type GraphRecordKind } from "./graph/storage.js";
 import { type ReadinessProcess } from "./readinessCleanup.js";
 import { checkBuildOwnershipSchema, canonicalProject } from "./buildAdmission.js";
 import { existsSync } from "node:fs";
@@ -20,7 +24,37 @@ export class WorkflowReader {
     this.db.pragma("query_only = ON");
     try { checkBuildOwnershipSchema(this.db); } catch (error) { this.db.close(); throw error; }
   }
+  qaPreparation(runId: string): { mode: string; works: Array<{ workId: string; state: string; digest?: string; depth?: number; detail?: string }> } {
+    if (!this.db || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='qa_preparation_policy'").get()) return { mode: "legacy", works: [] };
+    const policy = this.db.prepare("SELECT record_json FROM qa_preparation_policy WHERE run_id=?").get(runId) as { record_json: string } | undefined;
+    const rows = this.db.prepare("SELECT h.work_id,h.state,h.digest,h.detail,c.record_json FROM qa_contract_heads h LEFT JOIN qa_verification_contracts c ON c.digest=h.digest WHERE h.run_id=?").all(runId) as Array<{ work_id: string; state: string; digest?: string; detail?: string; record_json?: string }>;
+    return { mode: policy ? JSON.parse(policy.record_json).mode : "legacy", works: rows.map(row => ({ workId: row.work_id, state: row.state, digest: row.digest, detail: row.detail && !this.graphEvidenceAllowed(bytesDigest(row.detail)) ? "Graph-derived preparation detail withheld; source-based recovery required" : row.detail, depth: row.record_json && this.graphEvidenceAllowed(bytesDigest(row.record_json)) ? JSON.parse(row.record_json).depthDecision?.level : undefined })) };
+  }
+  qaPreparationMetrics(runId: string) {
+    const events = this.qaPreparationEvents(runId), withheld = events.filter(event => event.kind === "evidence-unavailable").length;
+    return { ...measureQaPreparation(events.filter(event => event.kind === "metric").map(event => event.value as QaMetricEvent)), ...(withheld ? { withheldEvents: withheld, limitation: "Metrics are incomplete: graph-derived events are unavailable" } : {}) };
+  }
+  qaPreparationEvents(runId: string): Array<{ eventId: string; workId: string; kind: string; value: unknown }> {
+    if (!this.db || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='qa_preparation_events'").get()) return [];
+    return (this.db.prepare("SELECT event_id,work_id,kind,record_json FROM qa_preparation_events WHERE run_id=? ORDER BY rowid").all(runId) as Array<{ event_id: string; work_id: string; kind: string; record_json: string }>).map(row => ({ eventId: row.event_id, workId: row.work_id, kind: this.graphEvidenceAllowed(bytesDigest(row.record_json)) ? row.kind : "evidence-unavailable", value: this.graphEvidenceAllowed(bytesDigest(row.record_json)) ? JSON.parse(row.record_json) : { unavailable: "graph-access-revoked", originalDigest: bytesDigest(row.record_json) } }));
+  }
+  graphHostProjectIdentity():string|undefined {if(!this.db||!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='build_project_identity'").get())return;return (this.db.prepare("SELECT project_id FROM build_project_identity WHERE singleton=1").get() as {project_id:string}|undefined)?.project_id;}
+  graphEvidenceAllowed(digest:string):boolean {return this.db ? graphDerivedAllowed(this.db,this.projectDir,digest) : true;}
   close(): void { this.db?.close(); }
+  graphRecord<T>(kind: GraphRecordKind, id: string): { revision: number; value: T } | undefined { return readGraphRecord<T>(this.db, kind, id); }
+  graphReceiptSummaries(runId:string):unknown[]{
+    if(!this.db || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='graph_records'").get())return [];
+    return this.db.prepare("SELECT id AS receiptId,json_extract(value,'$.purpose') AS purpose,json_extract(value,'$.decision') AS decision,json_extract(value,'$.deliveredAt') AS deliveredAt,json_extract(value,'$.generationIds') AS generationIds FROM graph_records WHERE kind='receipt' AND json_extract(value,'$.runId')=? ORDER BY rowid DESC LIMIT 20").all(runId);
+  }
+  graphRecentJobs():Array<{id:string;state:string;reason?:string;generationId?:string}>{
+    if(!this.db || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='graph_records'").get())return [];
+    return this.db.prepare("SELECT id,json_extract(value,'$.state') AS state,json_extract(value,'$.reason') AS reason,json_extract(value,'$.generationId') AS generationId FROM graph_records WHERE kind='job' ORDER BY rowid DESC LIMIT 15").all() as Array<{id:string;state:string;reason?:string;generationId?:string}>;
+  }
+  graphGenerationForCorpus<T>(corpusDigest: string, policyDigest: string): T | undefined {
+    if (!this.db || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='graph_records'").get()) return;
+    const row=this.db.prepare("SELECT value FROM graph_records WHERE kind='generation' AND json_extract(value,'$.corpusDigest')=? AND json_extract(value,'$.policyDigest')=? ORDER BY json_extract(value,'$.createdAt') DESC LIMIT 1").get(corpusDigest,policyDigest) as {value:string}|undefined;
+    return row ? JSON.parse(row.value) as T : undefined;
+  }
   readinessProcesses(): ReadinessProcess[] {
     if (!this.db) return [];
     if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='build_owned_processes'").get()) return [];

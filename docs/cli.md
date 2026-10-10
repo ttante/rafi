@@ -20,6 +20,9 @@ Commander help does not visually mark every `requiredOption`. Source-derived req
 
 Runtime behavior not fully expressible in Commander help:
 
+- Human-readable CLI labels use restrained basic ANSI colors when the destination stream is a TTY. Ordinary prose stays at the terminal default color. Redirected output is plain by default; stdout and stderr are evaluated independently.
+- `NO_COLOR` disables color whenever it is present, including when empty. `TERM=dumb` and `FORCE_COLOR=0` also disable color. With neither override, `FORCE_COLOR=1`, `2`, or `3` enables color for human-readable output, including redirected output. Empty or invalid `FORCE_COLOR` values fall back to TTY detection. `NO_COLOR` and `TERM=dumb` take precedence over `FORCE_COLOR`.
+- Declared machine-readable output, including Manager JSON responses and mixed JSON/evidence host-command output, remains ANSI-free. Legacy Windows consoles without an ANSI capability signal receive plain text; Windows Terminal, WSL, macOS, and Linux use standard ANSI when enabled.
 - Foreground builds collect pending ticket questions when no independent authorized work remains, and collect questions at the step limit before returning. Safe pause/EOF retains a recoverable waiting record; explicit cancellation supersedes pending questions while preserving their evidence. Detached builds return with a durable waiting record.
 - Recovery collects applicable pending answers before provider readiness or model calls. Answers retain their decision identity and are journaled before continuation dispatch; uncertain dispatches require reconciliation before replay.
 - `--builder-network` requests internet access separately from ticket approval and `--yes`. Explicit approval applies to the current build worker and is checked again on recovery. QA remains read-only and offline. `--builder-approvals` enables separate, one-operation Codex sandbox escalation requests; approving a question does not grant either capability. Managed provider policy can still refuse access; use a verified local source/dependency bundle when offline.
@@ -95,6 +98,8 @@ Options:
   -h, --help                                          display help for command
 
 Commands:
+  graph                                               Adopt and inspect scoped local Graphify
+                                                      evidence. Reads never install or refresh.
   sources                                             Inspect and manage the project-wide planning
                                                       source registry.
   discover [options] [project]                        Run a read-only project continuation
@@ -215,7 +220,8 @@ Arguments:
   project                  path to the target repo
 
 Options:
-  --defaults               skip walkthrough and use built-in defaults
+  --defaults               accept disclosed setup defaults, including scoped Graphify adoption
+  --no-graph               opt out of Graphify for new setup
   --force                  overwrite existing doc files
   --docs-root <dir>        repo-relative directory for Rafi starter and tracker docs
   --runtime <runtime>      agent runtime targets to configure (both | claude | codex)
@@ -799,6 +805,8 @@ Options:
   -h, --help                   display help for command
 
 Commands:
+  graph                        Adopt and inspect scoped local Graphify
+                               evidence. Reads never install or refresh.
   tickets                      Manage the structured ticket tracker for a
                                project.
   start [options] <project>    Enlist a builder and drive it through a batch of
@@ -1449,3 +1457,259 @@ Options:
 ```
 
 When QA passes with Builder guidance still waiting, explicitly resuming the build applies the guidance within the existing approved ticket scope and remaining attempt allowance, then runs complete fresh QA. This applies to current-branch and isolated-worktree recovery. If the allowance is exhausted, `/request-attempt <run> <work> <reason>` authorizes one follow-up before resume. Changed requirements need renewed approval; uncertain submissions require reconciliation. Saving guidance alone does not start work or reset an allowance.
+
+### `rafi graph --help`
+
+```text
+Usage: rafi graph [options] [command]
+
+Adopt and inspect scoped local Graphify evidence. Reads never install or refresh.
+
+Options:
+  -h, --help                            display help for command
+
+Commands:
+  status [options] [project]
+  adopt [options] [project]
+  refresh [options] [project]
+  prune [project]
+  disable [project]
+  enable [project]
+  query [options] <query> [target]
+  node [options] <query> [target]
+  neighbors [options] <query> [target]
+  path [options] <query> [target]
+  impact [options] <query> [target]
+  help [command]                        display help for command
+```
+
+### `rafi graph status --help`
+
+```text
+Usage: rafi graph status [options] [project]
+
+Arguments:
+  project     project configuration root (default: ".")
+
+Options:
+  --json      emit structured status
+  -h, --help  display help for command
+```
+
+### `rafi graph adopt --help`
+
+```text
+Usage: rafi graph adopt [options] [project]
+
+Arguments:
+  project          project configuration root (default: ".")
+
+Options:
+  --yes            accept the displayed scope and selective maintenance policy
+  --config <file>  complete graph policy JSON
+  --code-only      explicitly omit semantic extraction
+  -h, --help       display help for command
+```
+
+### `rafi graph refresh --help`
+
+```text
+Usage: rafi graph refresh [options] [project]
+
+Arguments:
+  project                    project configuration root (default: ".")
+
+Options:
+  --workspace <path>         authorized source workspace
+  --task <id>                stable task id for idempotent retry
+  --semantic-request <file>  write captured host extraction packet (requires --task)
+  --semantic-result <file>   consume exact host result (requires --task)
+  -h, --help                 display help for command
+```
+
+### `rafi graph query --help`
+
+```text
+Usage: rafi graph query [options] <query> [target]
+
+Arguments:
+  query                    query text or node id
+  target                   target node for path
+
+Options:
+  --project <path>         configuration/source project root (default: ".")
+  --json                   structured evidence
+  --direction <direction>  incoming | outgoing | both (default: "both")
+  -h, --help               display help for command
+```
+
+### `rafi graph node --help`
+
+```text
+Usage: rafi graph node [options] <query> [target]
+
+Arguments:
+  query                    query text or node id
+  target                   target node for path
+
+Options:
+  --project <path>         configuration/source project root (default: ".")
+  --json                   structured evidence
+  --direction <direction>  incoming | outgoing | both (default: "both")
+  -h, --help               display help for command
+```
+
+### `rafi graph neighbors --help`
+
+```text
+Usage: rafi graph neighbors [options] <query> [target]
+
+Arguments:
+  query                    query text or node id
+  target                   target node for path
+
+Options:
+  --project <path>         configuration/source project root (default: ".")
+  --json                   structured evidence
+  --direction <direction>  incoming | outgoing | both (default: "both")
+  -h, --help               display help for command
+```
+
+### `rafi graph path --help`
+
+```text
+Usage: rafi graph path [options] <query> [target]
+
+Arguments:
+  query                    query text or node id
+  target                   target node for path
+
+Options:
+  --project <path>         configuration/source project root (default: ".")
+  --json                   structured evidence
+  --direction <direction>  incoming | outgoing | both (default: "both")
+  -h, --help               display help for command
+```
+
+### `rafi graph impact --help`
+
+```text
+Usage: rafi graph impact [options] <query> [target]
+
+Arguments:
+  query                    query text or node id
+  target                   target node for path
+
+Options:
+  --project <path>         configuration/source project root (default: ".")
+  --json                   structured evidence
+  --direction <direction>  incoming | outgoing | both (default: "both")
+  -h, --help               display help for command
+```
+
+### `rafi graph enable --help`
+
+```text
+Usage: rafi graph enable [options] [project]
+
+Arguments:
+  project     project configuration root (default: ".")
+
+Options:
+  -h, --help  display help for command
+```
+
+### `rafi graph disable --help`
+
+```text
+Usage: rafi graph disable [options] [project]
+
+Arguments:
+  project     project configuration root (default: ".")
+
+Options:
+  -h, --help  display help for command
+```
+
+### `rafi graph prune --help`
+
+```text
+Usage: rafi graph prune [options] [project]
+
+Arguments:
+  project     project configuration root (default: ".")
+
+Options:
+  -h, --help  display help for command
+```
+
+### `ai-foreman graph --help`
+
+```text
+Usage: ai-foreman graph [options] [command]
+
+Adopt and inspect scoped local Graphify evidence. Reads never install or
+refresh.
+
+Options:
+  -h, --help                            display help for command
+
+Commands:
+  status [options] [project]
+  adopt [options] [project]
+  refresh [options] [project]
+  prune [project]
+  disable [project]
+  enable [project]
+  query [options] <query> [target]
+  node [options] <query> [target]
+  neighbors [options] <query> [target]
+  path [options] <query> [target]
+  impact [options] <query> [target]
+  help [command]                        display help for command
+```
+
+### `ai-foreman graph status --help`
+
+```text
+Usage: ai-foreman graph status [options] [project]
+
+Arguments:
+  project     project configuration root (default: ".")
+
+Options:
+  --json      emit structured status
+  -h, --help  display help for command
+```
+
+### `ai-foreman graph adopt --help`
+
+```text
+Usage: ai-foreman graph adopt [options] [project]
+
+Arguments:
+  project          project configuration root (default: ".")
+
+Options:
+  --yes            accept the displayed scope and selective maintenance policy
+  --config <file>  complete graph policy JSON
+  --code-only      explicitly omit semantic extraction
+  -h, --help       display help for command
+```
+
+### `ai-foreman graph refresh --help`
+
+```text
+Usage: ai-foreman graph refresh [options] [project]
+
+Arguments:
+  project                    project configuration root (default: ".")
+
+Options:
+  --workspace <path>         authorized source workspace
+  --task <id>                stable task id for idempotent retry
+  --semantic-request <file>  write captured host extraction packet (requires
+                             --task)
+  --semantic-result <file>   consume exact host result (requires --task)
+  -h, --help                 display help for command
+```

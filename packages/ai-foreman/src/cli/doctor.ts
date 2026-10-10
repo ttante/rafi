@@ -11,6 +11,7 @@ import { resolveExecutablePath, sanitizeDiagnostics } from "../runtimeReadiness.
 import { ObservabilityReader, ObservabilityStore } from "../observability.js";
 import { WorkflowReader } from "../workflowReader.js";
 import { WorkflowDb } from "../workflowDb.js";
+import { error, success, warning } from "../terminalStyle.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -44,11 +45,11 @@ export function buildDoctorCommand(): Command {
       let errors = 0;
 
       const report = (ok: boolean, label: string, detail?: string): void => {
-        console.log(`${ok ? "ok" : "!!"} ${label}${detail ? ` — ${detail}` : ""}`);
+        console.log(`${ok ? success("ok") : error("!!")} ${label}${detail ? ` — ${detail}` : ""}`);
         if (!ok) errors++;
       };
       const warn = (label: string, detail?: string): void => {
-        console.log(`-- ${label}${detail ? ` — ${detail}` : ""}`);
+        console.log(`${warning("--")} ${label}${detail ? ` — ${detail}` : ""}`);
       };
 
       report(Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10) >= 20, "node >=20", process.version);

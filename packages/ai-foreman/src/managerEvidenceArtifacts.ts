@@ -14,6 +14,7 @@ export interface ManagerEvidenceArtifact {
 
 /** Host-owned copies pin bytes through concurrent retention; handles are never paths. */
 export class ManagerEvidenceArtifacts {
+  constructor(private readonly permitted:(digest:string)=>boolean=()=>true) {}
   private readonly artifacts = new Map<string, { metadata: ManagerEvidenceArtifact; raw: Buffer; rendered: Buffer }>();
   create(identity: ManagerEvidenceArtifact["identity"], bytes: Buffer): ManagerEvidenceArtifact {
     const raw = Buffer.from(bytes);
@@ -28,12 +29,14 @@ export class ManagerEvidenceArtifacts {
   bytes(handle: string, raw = false): Buffer {
     const artifact = this.artifacts.get(handle);
     if (!artifact) throw new Error("Evidence artifact expired; retrieve the report again");
+    if(!this.permitted(artifact.metadata.rawDigest))throw new Error("Evidence artifact access revoked; retained bytes withheld");
     return Buffer.from(raw ? artifact.raw : artifact.rendered);
   }
   chunks(handle: string, maximumBytes = 8192): Array<ManagerEvidenceArtifact & { offset: number; returnedBytes: number; body: string; redactionSpanCount: number }> {
     if (!Number.isInteger(maximumBytes) || maximumBytes < 4 || maximumBytes > 8192) throw new Error("Invalid evidence chunk size");
     const artifact = this.artifacts.get(handle);
     if (!artifact) throw new Error("Evidence artifact expired; retrieve the report again");
+    if(!this.permitted(artifact.metadata.rawDigest))throw new Error("Evidence artifact access revoked; retained bytes withheld");
     const chunks = [];
     let offset = 0;
     do {

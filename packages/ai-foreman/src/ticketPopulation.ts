@@ -1,3 +1,4 @@
+import { canonicalContractJson } from "./qaVerificationContract.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -12,6 +13,7 @@ import { loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
 import { StateDb } from "./tickets/stateDb.js";
 
 export interface TicketSliceProposal {
+  qa_preparation?: TicketDef["qa_preparation"];
   slice_ref: string;
   title: string; area: string; priority: TicketDef["priority"]; size: TicketDef["size"]; risk: TicketDef["risk"];
   summary: string; acceptance: string[]; required_tests: string[]; likely_files: string[];
@@ -35,6 +37,8 @@ export function validateTicketPopulationProposal(proposal: TicketPopulationPropo
   if (proposal.version !== 1 || proposal.plan_id !== plan.plan_id || proposal.revision !== plan.revision) issues.push("proposal plan identity does not match the approved structured plan");
   const planned = new Set(plan.slices.map((slice) => slice.slice_ref)); const mapped = new Set<string>();
   for (const ticket of proposal.tickets) {
+    const depth = plan.slices.find(slice => slice.slice_ref === ticket.slice_ref)?.qa_preparation;
+    if (ticket.qa_preparation && (!depth || canonicalContractJson(ticket.qa_preparation) !== canonicalContractJson(depth))) issues.push(`ticket-maker cannot override planner QA depth for ${ticket.slice_ref}`);
     if (!planned.has(ticket.slice_ref)) issues.push(`unknown slice mapping ${ticket.slice_ref}`);
     if (mapped.has(ticket.slice_ref)) issues.push(`duplicate slice mapping ${ticket.slice_ref}`); else mapped.add(ticket.slice_ref);
     for (const dep of ticket.depends_on) if (!planned.has(dep)) issues.push(`slice ${ticket.slice_ref} depends on unknown slice ${dep}`);
@@ -56,7 +60,7 @@ export function materializeTicketPopulation(proposal: TicketPopulationProposalV1
   const materialized = proposal.tickets.map((slice, index): TicketDef => {
     const retained = byPlanSlice.get(`${plan.plan_id}:${slice.slice_ref}`);
     return {
-      ...(retained ?? {}), id: sliceToTicket.get(slice.slice_ref)!, order: retained?.order ?? nextOrder(existing, index),
+      ...(retained ?? {}), qa_preparation: structuredClone(plan.slices.find(item => item.slice_ref === slice.slice_ref)?.qa_preparation), id: sliceToTicket.get(slice.slice_ref)!, order: retained?.order ?? nextOrder(existing, index),
       title: slice.title, area: slice.area, priority: slice.priority, size: slice.size, risk: slice.risk,
       depends_on: slice.depends_on.map((ref) => sliceToTicket.get(ref)!), summary: slice.summary,
       acceptance: [...slice.acceptance], required_tests: [...slice.required_tests], likely_files: [...slice.likely_files],

@@ -1,3 +1,4 @@
+import { graphCheckoutBoundary } from "./git.js";
 import { currentWorktreeBranch, findWorktreeForBranch, hasWorktreeChanges, mergeBranchToLocalBase, runGit } from "./git.js";
 import { captureProspectiveGitTree } from "../qaSnapshot.js";
 
@@ -69,6 +70,7 @@ export function removeDirectMergeWorktree(projectDir: string, intent: DirectMerg
   verifyDirectMergeWorktree(projectDir, intent);
   // Let Git reject edits made even after the preceding verification. Never
   // force-remove or recursively delete a finalization worktree on failure.
+  graphCheckoutBoundary(projectDir, worktree, "worktree-removed");
   runGit(projectDir, ["worktree", "remove", worktree]);
 }
 
@@ -86,7 +88,7 @@ export function hasExactStagedDirectMerge(projectDir: string, intent: DirectMerg
 
 export function executeDirectMerge(projectDir: string, intent: DirectMergeIntent, message: string): string {
   const completed = reconcileDirectMerge(projectDir, intent);
-  if (completed) return completed;
+  if (completed) { graphCheckoutBoundary(projectDir, projectDir, "merge-or-rebase"); return completed; }
   verifyDirectMergeWorktree(projectDir, intent);
   const indexTree = runGit(projectDir, ["write-tree"]).stdout;
   const baseTree = runGit(projectDir, ["rev-parse", `${intent.baseCommit}^{tree}`]).stdout;
@@ -97,6 +99,7 @@ export function executeDirectMerge(projectDir: string, intent: DirectMergeIntent
     // Git prepared the merge before the host crashed, but commit did not.
     // Only commit the exact tree frozen in the durable intent.
     runGit(projectDir, ["commit", "-m", message]);
+    graphCheckoutBoundary(projectDir, projectDir, "merge-or-rebase");
   } else {
     // Squash/merge publish the immutable source commit, even if an external
     // actor moves the human-readable branch between verification and Git.

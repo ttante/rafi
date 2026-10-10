@@ -1,5 +1,6 @@
 import { isLiveProcessIdentity } from "../processIdentity.js";
 import { Command } from "commander";
+import { accent, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
 import { resolve } from "node:path";
 import { readBuildRuns } from "../buildRuns.js";
 import { WorkflowDb } from "../workflowDb.js";
@@ -15,8 +16,8 @@ export function buildAttachCommand(): Command {
       const db = new WorkflowDb(projectDir);
       try {
         const supervisor = db.supervisorState(run.runId);
-        console.log(`rafi: run ${run.runId}`);
-        console.log(`rafi: phase ${"phase" in run && typeof run.phase === "string" ? run.phase : run.checkpoint}; status ${run.status}`);
+        console.log(`${accent("rafi:")} run ${sanitizeTerminalText(run.runId)}`);
+        console.log(`${accent("rafi:")} phase ${sanitizeTerminalText("phase" in run && typeof run.phase === "string" ? run.phase : run.checkpoint)}; status ${run.status === "completed" ? success(run.status) : warning(run.status)}`);
         console.log(`rafi: supervisor ${supervisor?.status ?? "unavailable"}${supervisor?.pid ? ` pid=${supervisor.pid}` : ""}`);
         const attempts = db.recoveryAttempts(run.runId);
         console.log(`rafi: recovery attempts ${attempts.length}`);

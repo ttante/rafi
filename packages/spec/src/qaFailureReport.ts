@@ -273,6 +273,8 @@ function validateBuilderFindingCoverage(report: BuilderQaRemediationReport, expe
 }
 
 /** JSON.parse with duplicate-key rejection. */
+export function parseStrictJson(source: string): unknown { scanJson(source); return JSON.parse(source) as unknown; }
+
 function scanJson(source: string): { value: unknown; objectKeys: Map<string, string[]> } {
   let at = 0;
   const objectKeys = new Map<string, string[]>();

@@ -1,3 +1,4 @@
+import { buildGraphCommand } from "ai-foreman/cli/graph.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Command } from "commander";
@@ -26,6 +27,7 @@ function commandByPath(names: string[], rootCommand: Command = program) {
 // Build the standalone command tree without importing its executable entry
 // point (which intentionally parses process.argv as a side effect).
 const foremanProgram = new Command().name("ai-foreman").description("Keep Codex / Claude Code builders moving through their step list.");
+foremanProgram.addCommand(buildGraphCommand());
 foremanProgram.addCommand(buildTicketsCommand());
 foremanProgram.addCommand(buildStartCommand());
 foremanProgram.addCommand(buildStatusCommand());
@@ -35,6 +37,8 @@ foremanProgram.addCommand(buildStateCommand());
 
 const cases: Array<[string, Command]> = [
   ["rafi --help", program],
+  ...["graph", "graph status", "graph adopt", "graph refresh", "graph query", "graph node", "graph neighbors", "graph path", "graph impact", "graph enable", "graph disable", "graph prune"].map(path=>[`rafi ${path} --help`,commandByPath(path.split(" "))] as [string,Command]),
+  ...["graph", "graph status", "graph adopt", "graph refresh"].map(path=>[`ai-foreman ${path} --help`,commandByPath(path.split(" "),foremanProgram)] as [string,Command]),
   ["rafi resume --help", commandByPath(["resume"])],
   ["rafi create --help", commandByPath(["create"])],
   ["rafi compile --help", commandByPath(["compile"])],

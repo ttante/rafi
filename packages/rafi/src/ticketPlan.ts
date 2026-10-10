@@ -1,3 +1,4 @@
+import { sendRoleGraphTurn, withGraphDerivedAccess } from "ai-foreman/agent-run.js";
 import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -178,6 +179,9 @@ export interface TicketPlanOptions {
 }
 
 export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.argv.slice(2)): Promise<void> {
+  return withGraphDerivedAccess([], () => runTicketPlanOwned(opts, rawArgv));
+}
+async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.argv.slice(2)): Promise<void> {
   assertEffortLevel(opts.effort);
   const interactive = !opts.yes && process.stdin.isTTY && process.stdout.isTTY;
   const argv = rawArgv;
@@ -333,13 +337,14 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
       },
     });
     roleRef = role;
+    const sendPlanningTurn = (instruction: string) => sendRoleGraphTurn(role, instruction, "planning");
     console.log(`rafi tickets plan: project ${String(config.appName ?? "unnamed")} at ${projectDir}`);
     console.log(`rafi tickets plan: runtime=${role.runtime} model=${role.model ?? role.roleBundle.model ?? "runtime default"} effort=${role.effort ?? "runtime default"}`);
     console.log(`rafi tickets plan: interview=${grill}; agent changes are disabled\n`);
     if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() } });
 
     const baseInstruction = buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" });
-    let result = await role.builder.sendTurn(rebuildingLostContinuity && grillState.answers.length
+    let result = await sendPlanningTurn(rebuildingLostContinuity && grillState.answers.length
       ? `${baseInstruction}\n\n${buildAuditAnswersContinuation(grillState)}`
       : baseInstruction);
     while (true) {
@@ -347,7 +352,7 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
       const marker = parseConversationMarker(result.text);
       if (marker.kind === "needs_input") {
         if (!marker.question?.trim()) {
-          result = await role.builder.sendTurn(grill === "exhaustive"
+          result = await sendPlanningTurn(grill === "exhaustive"
             ? `Your needs_input marker omitted its question. Return the same single user-judgment question again using exactly: STEP_STATUS: needs_input | question="..." choices="recommended option (Recommended)|meaningful alternative|Stop questions and make the plan now". Do not inspect the repository again and do not return a proposal yet.`
             : `Your needs_input marker omitted its question. Return the same focused question again using exactly: STEP_STATUS: needs_input | question="..." choices="recommended option|alternative". Do not inspect the repository again.`);
           continue;
@@ -359,13 +364,13 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
         rememberPlannerAnswer(marker.question, input.answer, "text");
         const observed = recordTextGrillAnswer(grillState, { question: marker.question, choices: marker.choices, answer: input.answer });
         persistGrillState(observed.state, observed.qualified ? "grill_answer_collected" : "provider_question_nonqualifying");
-        result = await role.builder.sendTurn(input.continuation!);
+        result = await sendPlanningTurn(input.continuation!);
         continue;
       }
       if (marker.kind !== "plan_complete") throw new Error("planning agent did not return proposal_ready or a valid question");
       let proposal = extractTicketPlanProposal(result.text, context.tickets);
       const issues = [...validateTicketPlanProposal(proposal, context.tickets), ...validateProposalSourceRefs(proposal, stagedSources, projectDir)];
-      if (issues.length) { result = await role.builder.sendTurn(`Your proposal failed validation. Correct it without changing agreed decisions:\n${issues.join("\n")}`); continue; }
+      if (issues.length) { result = await sendRoleGraphTurn(role, `Your proposal failed validation. Correct it without changing agreed decisions:\n${issues.join("\n")}`, "planning", {responseOnly:true}); continue; }
       let retryInterruptedAudit = false;
       if (grillState.auditStatus === "interrupted") {
         if (grillState.recoveryRetryUsed) {
@@ -422,7 +427,7 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
           await role.builder.close();
           throw new Error("grill-me verification questions were interrupted; tracker unchanged");
         }
-        result = await role.builder.sendTurn(buildAuditAnswersContinuation(grillState));
+        result = await sendPlanningTurn(buildAuditAnswersContinuation(grillState));
         continue;
       }
       console.log("\nrafi tickets plan: host-owned approval decisions");
@@ -441,14 +446,14 @@ export async function runTicketPlan(opts: TicketPlanOptions, rawArgv = process.a
           persistGrillState(grillState, "grill_exhaustive_activated");
           if (interview) interview = checkpointInterview(projectDir, interview, { planningMode: "exhaustive", answers: decisionsWithGrillState({ ...interview.answers, grill }, grillState) });
         }
-        result = await role.builder.sendTurn(upgrade
+        result = await sendPlanningTurn(upgrade
           ? `The user explicitly upgraded this same session to exhaustive planning. Retain the current proposal and conversation. Apply these complete grill-me instructions now:\n\n${loadSkill("grill-me").body ?? ""}\n\nUser feedback:\n${decision}`
           : decision);
         continue;
       }
       proposal = applyTicketPlanWorkModeDefault(proposal, workMode);
       const drift = planningFingerprintChanges(projectDir, fingerprint);
-      if (drift.length) { result = await role.builder.sendTurn(`The tracker/config changed during review (${drift.join(", ")}). Re-read current state, refresh the exact proposal, and request approval again.`); continue; }
+      if (drift.length) { result = await sendPlanningTurn(`The tracker/config changed during review (${drift.join(", ")}). Re-read current state, refresh the exact proposal, and request approval again.`); continue; }
       await role.builder.close();
       const applied = applyApprovedTicketPlan(projectDir, proposal, { expectedFingerprint: fingerprint, docsRoot });
       const publishedConfig = readProjectConfig(projectDir);

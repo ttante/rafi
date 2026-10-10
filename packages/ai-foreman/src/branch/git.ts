@@ -1,3 +1,4 @@
+import { invalidateGraphWorkspace } from "../graph/lifecycle.js";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -70,6 +71,7 @@ export function createTicketWorktree(
   const worktreePath = join(projectDir, ".foreman", "worktrees", runId, branch.replace(/\//g, "__"));
   mkdirSync(dirname(worktreePath), { recursive: true });
   runGit(projectDir, ["worktree", "add", "-b", branch, worktreePath, base]);
+  graphCheckoutBoundary(projectDir, worktreePath, "worktree-created");
   return worktreePath;
 }
 
@@ -84,7 +86,13 @@ export function findWorktreeForBranch(projectDir: string, branch: string): strin
   return undefined;
 }
 
+export function graphCheckoutBoundary(projectDir: string, workspace: string, reason: "merge-or-rebase" | "worktree-created" | "worktree-removed"): void {
+  try { invalidateGraphWorkspace(projectDir, workspace, reason); }
+  catch (error) { console.error(`rafi graph: checkout metadata invalidation failed: ${String(error)}`); }
+}
+
 export function removeTicketWorktree(projectDir: string, worktreePath: string): void {
+  graphCheckoutBoundary(projectDir, worktreePath, "worktree-removed");
   try {
     runGit(projectDir, ["worktree", "remove", "--force", worktreePath]);
   } catch {
@@ -149,7 +157,7 @@ export function mergeBranchToLocalBase(
 ): string {
   if (method === "rebase") {
     const branchWorktree = findWorktreeForBranch(projectDir, branch);
-    if (branchWorktree) runGit(branchWorktree, ["rebase", baseBranch]);
+    if (branchWorktree) { runGit(branchWorktree, ["rebase", baseBranch]); graphCheckoutBoundary(projectDir, branchWorktree, "merge-or-rebase"); }
     else runGit(projectDir, ["rebase", baseBranch, branch]);
   }
   if (currentGitRef(projectDir) !== baseBranch) {
@@ -165,6 +173,7 @@ export function mergeBranchToLocalBase(
   } else {
     runGit(projectDir, ["merge", "--ff-only", branch]);
   }
+  graphCheckoutBoundary(projectDir, projectDir, "merge-or-rebase");
   return runGit(projectDir, ["rev-parse", "--short", "HEAD"]).stdout;
 }
 

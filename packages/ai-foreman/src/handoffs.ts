@@ -1,3 +1,4 @@
+import { dispatchWithGraphAccess, withGraphSessionAccess } from "./graph/session.js";
 import { durableHumanDecision } from "./humanDecision.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -324,6 +325,13 @@ export class HandoffService {
     successor: BuilderAdapter,
     options: { finalizeFailure?: boolean; guidance?: string } = {},
   ): Promise<HandoffTransferResult> {
+    return withGraphSessionAccess(this.projectDir, successor, () => this.acceptStagedOwned(staged, successor, options));
+  }
+  private async acceptStagedOwned(
+    staged: StagedHandoff,
+    successor: BuilderAdapter,
+    options: { finalizeFailure?: boolean; guidance?: string } = {},
+  ): Promise<HandoffTransferResult> {
     const db = new WorkflowDb(this.projectDir);
     try {
       const qaBoundary = staged.manifest.role === "qa";
@@ -346,7 +354,7 @@ export class HandoffService {
       const sendAcceptance = async (prompt: string): Promise<TurnResult> => {
         const hostPromptDigest = db.putEvidence("handoff", Buffer.from(prompt));
         db.appendContinuityEvent({ runId: staged.manifest.runId, role: "host", kind: "handoff_acceptance_intended", payload: { generation: staged.manifest.generation, attempt: acceptanceAttempts.length + 1, hostPromptDigest, preparedRef }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0 });
-        const response = await successor.sendTurn(prompt);
+        const response = await dispatchWithGraphAccess(this.projectDir, successor, prompt, undefined, (text, policy) => successor.sendTurn(text, policy));
         const events = qaBoundary && response.turnId ? await collectHandoffTerminalEvents(successor, response.turnId) : [];
         const attempt = {
           hostPromptDigest,

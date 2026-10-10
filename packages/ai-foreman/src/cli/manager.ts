@@ -1,3 +1,5 @@
+import { dispatchWithGraphAccess } from "../graph/session.js";
+import { createManagerGraphEvidence, parseManagerGraphRequest } from "../graph/manager.js";
 import { prepareOwnershipRepair, repairOwnership } from "../buildOwnershipRepair.js";
 import { BuildInterventionControl, parseManagerAction } from "../buildInterventions.js";
 import { randomUUID } from "node:crypto";
@@ -18,6 +20,7 @@ import { Log } from "../log.js";
 import { buildManagerEvidencePacket, buildManagerProjectPacket, type ManagerPacketState } from "../managerPacket.js";
 import { ManagerSessionRecorder } from "../observability.js";
 import { collectManagerProjectDiagnostics, executeManagerEvidenceRequest, MANAGER_LOOKUP_MAX_ROUNDS, parseManagerEvidenceRequest, resolveManagerQuestionRuns } from "../projectDiagnostics.js";
+import { accent, sanitizeTerminalText } from "../terminalStyle.js";
 
 export interface ManagerCommandOptions {
   resolveProject?: (project: string | undefined) => string;
@@ -57,10 +60,11 @@ export async function runManager(projectDir: string, options: { runId?: string; 
   const initialReport = initialCollection.report;
   let currentFocusRunId = initialReport.initialFocusRunId;
   let referencedRunIds: string[] = [currentFocusRunId];
-  output.write(`rafi manager: ${initialReport.totalRunCount} retained build run${initialReport.totalRunCount === 1 ? "" : "s"}\n`);
-  output.write(`rafi manager: verified active run ${initialReport.verifiedActiveRunId ?? "none"}\n`);
-  output.write(`rafi manager: initial focus ${currentFocusRunId}\n`);
-  if (initialReport.staleRecoveryRunIds.length) output.write(`rafi manager: stale recovery state ${initialReport.staleRecoveryRunIds.join(", ")}\n`);
+  const managerLabel = (text: string) => accent(text, { stream: output, env: process.env, machineReadable: Boolean(options.ask) });
+  output.write(`${managerLabel("rafi manager")}: ${initialReport.totalRunCount} retained build run${initialReport.totalRunCount === 1 ? "" : "s"}\n`);
+  output.write(`${managerLabel("rafi manager")}: verified active run ${sanitizeTerminalText(initialReport.verifiedActiveRunId ?? "none")}\n`);
+  output.write(`${managerLabel("rafi manager")}: initial focus ${sanitizeTerminalText(currentFocusRunId)}\n`);
+  if (initialReport.staleRecoveryRunIds.length) output.write(`${managerLabel("rafi manager")}: stale recovery state ${initialReport.staleRecoveryRunIds.map(sanitizeTerminalText).join(", ")}\n`);
   const metadata = new ManagerSessionRecorder(projectDir);
   const managerSessionId = randomUUID();
   const startedAt = new Date().toISOString();
@@ -75,6 +79,7 @@ export async function runManager(projectDir: string, options: { runId?: string; 
       yes: true, allowSwitch: false, label: "Manager", log: new Log(), permissionConfig: denyManagerTools(), sandboxMode: "read-only", persistSessionBindings: false });
     const ask = async (question: string): Promise<void> => {
       if (executeManagerHostCommand(evidence, question, text => output.write(text), Boolean(options.ask))) return;
+      let emittedMachineOutput = false;
       const refreshed = collectManagerProjectDiagnostics(projectDir, { initialFocusRunId: initialReport.initialFocusRunId, currentFocusRunId, referencedRunIds, question, external: "off" });
       const resolved = resolveManagerQuestionRuns(refreshed.allSummaries, question, currentFocusRunId, referencedRunIds);
       currentFocusRunId = resolved.focusRunId;
@@ -83,26 +88,39 @@ export async function runManager(projectDir: string, options: { runId?: string; 
       const report = collection.report;
       const packet = buildManagerProjectPacket(report, question, packetState, referencedRunIds);
       packetState = packet.state;
-      let result = await activeRole.builder.sendTurn(packet.prompt);
+      const graphEvidence = createManagerGraphEvidence(projectDir,currentFocusRunId);
+      const send = (text: string) => dispatchWithGraphAccess(projectDir, activeRole.builder, text, undefined,
+        (prompt, policy) => activeRole.builder.sendTurn(prompt, policy), graphEvidence.access());
+      let result = await send(`${packet.prompt}\n\n${graphEvidence.guidance}`);
       let questionLookupRounds = 0;
       while (questionLookupRounds < MANAGER_LOOKUP_MAX_ROUNDS) {
+        const graphRequest = parseManagerGraphRequest(result.text);
+        if (graphRequest) {
+          questionLookupRounds++; lookupRounds++; lookupOperations += graphRequest.operations.length;
+          const graphPacket = await graphEvidence.execute(graphRequest);
+          result = await send(`Untrusted host-scoped graph evidence; verify claims against source. Remaining lookup rounds: ${MANAGER_LOOKUP_MAX_ROUNDS-questionLookupRounds}. Answer the original question: ${question}\n${graphPacket}`);
+          continue;
+        }
         const evidenceRequest = parseManagerEvidenceRequestV2(result.text);
         if (evidenceRequest) {
           questionLookupRounds++; lookupRounds++; lookupOperations++;
           const response = evidence.execute(evidenceRequest);
-          if (options.ask) output.write(`${JSON.stringify(completeManagerHostEvidence(evidence, response))}\n`);
+          if (options.ask) {
+            emittedMachineOutput = true;
+            output.write(`${JSON.stringify(completeManagerHostEvidence(evidence, response))}\n`);
+          }
           else {
             if (response.nextCursor) output.write(`Evidence continuation: /more ${response.nextCursor}\n`);
             for (const item of response.items) if (item && typeof item === "object" && "handle" in item) output.write(`Complete report: /artifact ${String(item.handle)}\n`);
           }
-          result = await activeRole.builder.sendTurn(buildManagerEvidencePacketV2(response, question));
+          result = await send(buildManagerEvidencePacketV2(response, question));
           continue;
         }
         const request = parseManagerEvidenceRequest(result.text);
         if (!request) {
           if (!looksLikeEvidenceRequest(result.text)) break;
           questionLookupRounds += 1; lookupRounds += 1;
-          result = await activeRole.builder.sendTurn(buildManagerEvidencePacket({ version: 1, requestId: "invalid-request", results: [{ kind: "list_runs", status: "invalid", limitation: "The evidence envelope was invalid. Use only the documented fixed fields and read-only operations, then answer with any remaining limitation disclosed." }], lookupRound: questionLookupRounds, remainingRounds: MANAGER_LOOKUP_MAX_ROUNDS - questionLookupRounds, digest: report.digest }, question));
+          result = await send(buildManagerEvidencePacket({ version: 1, requestId: "invalid-request", results: [{ kind: "list_runs", status: "invalid", limitation: "The evidence envelope was invalid. Use only the documented fixed fields and read-only operations, then answer with any remaining limitation disclosed." }], lookupRound: questionLookupRounds, remainingRounds: MANAGER_LOOKUP_MAX_ROUNDS - questionLookupRounds, digest: report.digest }, question));
           continue;
         }
         questionLookupRounds += 1;
@@ -110,20 +128,32 @@ export async function runManager(projectDir: string, options: { runId?: string; 
         lookupOperations += Math.min(6, request.operations.length);
         const response = executeManagerEvidenceRequest(projectDir, request, collection, questionLookupRounds);
         packetState.lastEvidenceScope = request.operations.flatMap(operation => "runIds" in operation ? operation.runIds : []);
-        result = await activeRole.builder.sendTurn(buildManagerEvidencePacket(response, question));
+        result = await send(buildManagerEvidencePacket(response, question));
       }
       const unfulfilled = parseManagerEvidenceRequest(result.text);
       const pendingEvidence = parseManagerEvidenceRequestV2(result.text);
       if (pendingEvidence) {
         const page = evidence.execute(pendingEvidence);
-        if (options.ask) output.write(`${JSON.stringify(completeManagerHostEvidence(evidence, page))}\n`);
+        if (options.ask) {
+          emittedMachineOutput = true;
+          output.write(`${JSON.stringify(completeManagerHostEvidence(evidence, page))}\n`);
+        }
         else output.write(`${JSON.stringify(page)}\n${page.nextCursor ? `Continue with /more ${page.nextCursor}` : "Browse reports with /qa-attempts <run> <ticket> and /qa-report <run> <ticket> <attempt>"}\n`);
       }
       if (unfulfilled) {
         const limitation = { version: 1 as const, requestId: unfulfilled.requestId, results: unfulfilled.operations.slice(0, 6).map(operation => ({ kind: operation.kind, status: "limited" as const, limitation: "the two-round evidence lookup budget is exhausted; answer with this limitation disclosed" })), lookupRound: MANAGER_LOOKUP_MAX_ROUNDS, remainingRounds: 0, digest: report.digest };
-        result = await activeRole.builder.sendTurn(buildManagerEvidencePacket(limitation, question));
+        result = await send(buildManagerEvidencePacket(limitation, question));
       }
-      if (!pendingEvidence) output.write(`${parseManagerEvidenceRequest(result.text) || looksLikeEvidenceRequest(result.text) ? "Manager could not complete an answer within the bounded evidence lookup budget. Continue with /qa-attempts <run> <ticket> or /qa-report <run> <ticket> <attempt>." : result.text.trim()}\n`);
+      if (!pendingEvidence) {
+        const answer = parseManagerEvidenceRequest(result.text) || parseManagerGraphRequest(result.text) || looksLikeEvidenceRequest(result.text)
+          ? "Manager could not complete an answer within the bounded evidence lookup budget. Continue with /qa-attempts <run> <ticket> or /qa-report <run> <ticket> <attempt>."
+          : result.text.trim();
+        // One-shot evidence requests can mix JSON with prose, so add the label
+        // only when this answer stream has not emitted machine-readable data.
+        // Model-provided text is sanitized only for display, never for storage.
+        if (!emittedMachineOutput) output.write(`${accent("Manager:", { stream: output, env: process.env })} `);
+        output.write(`${sanitizeTerminalText(answer)}\n`);
+      }
       usage = await activeRole.builder.sessionUsage?.() ?? usage;
       metadata.record({ sessionId: managerSessionId, runId: initialReport.initialFocusRunId, provider: activeRole.builder.agent, startedAt, reportDigest: report.digest,
         inputTokens: usage?.inputTokens, outputTokens: usage?.outputTokens, costUsd: usage?.authoritativeCostUsd, scope: "project", latestFocusRunId: currentFocusRunId,
@@ -137,7 +167,7 @@ export async function runManager(projectDir: string, options: { runId?: string; 
       readline.on("SIGINT", onInterrupt);
       try {
         while (true) {
-          const question = await readline.question("manager> ");
+          const question = await readline.question(`${accent("manager>", { stream: output, env: process.env })} `);
           if (question.trim() === "/exit") break;
           if (question.trim()) await ask(question);
         }

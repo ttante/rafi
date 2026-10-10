@@ -38,6 +38,17 @@ export function canonicalSessionPath(path: string): string {
  * administrative Git directory (not in the checked-out tree), so normal edits
  * and commits do not change it while removal/recreation cannot inherit it.
  */
+/** Existing identity only: graph reads must never initialize a worktree marker. */
+export function readWorkspaceIdentity(cwd:string):string|undefined {
+  try {
+    const canonicalCwd=canonicalSessionPath(cwd);
+    const gitDir=canonicalSessionPath(execFileSync("git",["rev-parse","--absolute-git-dir"],{cwd:canonicalCwd,encoding:"utf8",timeout:5000,stdio:["ignore","pipe","ignore"]}).trim());
+    const token=readFileSync(join(gitDir,"rafi-workspace-id-v1"),"utf8").trim();
+    if(!/^[0-9a-f-]{36}$/i.test(token))return undefined;
+    return createHash("sha256").update(`${canonicalCwd}\0${gitDir}\0${token}`).digest("hex");
+  }catch{return undefined;}
+}
+
 export function captureWorkspaceIdentity(cwd: string): string | undefined {
   try {
     const canonicalCwd = canonicalSessionPath(cwd);

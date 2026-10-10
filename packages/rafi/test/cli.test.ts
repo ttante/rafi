@@ -145,7 +145,8 @@ test("create never installs the Claude Agent SDK into the target application", {
   const projectRoot = join(HERE, "..");
   const output = execFileSync(
     tsxBin(projectRoot),
-    ["src/index.ts", "create", dir, "--defaults", "--runtime", "claude"],
+    // This readiness stub is not a semantic-extraction protocol peer.
+    ["src/index.ts", "create", dir, "--defaults", "--runtime", "claude", "--no-graph"],
     {
       cwd: projectRoot,
       encoding: "utf8",

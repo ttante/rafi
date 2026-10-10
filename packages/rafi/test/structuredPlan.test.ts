@@ -111,3 +111,19 @@ test("invalid materialized plan JSON returns validation errors before rendering 
   assert.ok(issues.includes("unit api.cleanup must be a boolean"));
   assert.throws(() => renderStructuredPlanMarkdown(edited as never), /plan data is invalid/);
 });
+
+test("enforcing depth decisions survive initial and revised materialization, digests and approved snapshots", () => {
+  const policy = { mode: "enforce" as const, policyVersion: "qa-preparation-v1" as const, wallTimeMs: [300000, 600000, 1200000, 1800000, 2700000] as [number, number, number, number, number] };
+  const depth = { version: 1 as const, decisionId: "planner-depth", level: 2 as const, rationale: "Source and behavior inspected", riskFactors: [], policyVersion: "qa-preparation-v1", plannerOperationId: "planner-op", plannerIdentity: "planner-session", timestamp: "2026-10-09T00:00:00Z", minimumLevel: 2 as const, minimumReasons: [] };
+  const p = proposal(); assert.throws(() => materializeStructuredPlan(p, undefined, undefined, policy), /depth/);
+  p.slices.forEach((slice, index) => { slice.qa_preparation = { ...depth, decisionId: `planner-depth-${index}` }; });
+  const first = materializeStructuredPlan(p, undefined, undefined, policy);
+  assert.deepEqual(first.qa_preparation_policy, policy); assert.deepEqual(first.slices[0]!.qa_preparation, p.slices[0]!.qa_preparation);
+  const root = mkdtempSync(join(tmpdir(), "qa-plan-snapshot-")); const paths = writeStructuredPlanArtifacts(root, "docs", first);
+  assert.deepEqual(readAndValidateStructuredPlanPair(paths.latestMarkdown, paths.latestData).slices[0]!.qa_preparation, p.slices[0]!.qa_preparation);
+  const revised = proposal(); revised.slices.forEach((slice, index) => { slice.retains = first.slices[index]!.slice_ref; slice.qa_preparation = { ...depth, decisionId: `revised-${index}`, predecessorDecisionId: `planner-depth-${index}` }; }); revised.stacks[0]!.retains = first.stacks[0]!.stack_id;
+  const next = materializeStructuredPlan(revised, first, undefined, policy); assert.equal(next.slices[0]!.slice_ref, first.slices[0]!.slice_ref); assert.equal(next.slices[0]!.qa_preparation?.decisionId, "revised-0"); assert.notEqual(next.content_digest, first.content_digest);
+  delete revised.slices[0]!.qa_preparation;
+  assert.throws(() => materializeStructuredPlan(revised, next, undefined, policy), /depth/);
+  const legacy = materializeStructuredPlan(revised, next); assert.equal(legacy.slices[0]!.qa_preparation, undefined);
+});

@@ -1,3 +1,10 @@
+import { registerQaGraphJournalWriter, ensureQaGraphJournalGuards } from "./qaDeliveryJournal.js";
+import { canonicalJson } from "./qaProtocolV2.js";
+import { resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
+import { registerGraphDerived, graphDerivedAllowed, currentGraphDerivedAccess, type GraphDerivedAccess } from "./graph/derived.js";
+import { parseContractCoverage, validateContractCoverage } from "./qaContractCoverage.js";
+import { QaPreparationStore, migrateQaPreparation, migrateQaPreparationGuards } from "./qaPreparationStore.js";
+import { GraphStore, migrateGraphStore } from "./graph/storage.js";
 import { reconcileWork, type BuildOwnershipRepairV1 } from "./buildWorkReconciliation.js";
 import { migrateBuildInterventions, hasQueuedBuilderGuidance, reconcileGuidance, decisionWorkId, queuedControls, completeControl, verifyGuidance, builderVerificationContext, verifyBuilderGuidance, assertFinalizationControls, reserveGuidance, finishGuidance, instruction, type InstructionRecipient } from "./buildInterventions.js";
 import { migrateBuildWork } from "./buildWorkMigration.js";
@@ -36,7 +43,7 @@ import type {
   SupervisorState,
   WorkflowIssue,
 } from "rafi-spec";
-import type { QaDeliveryTurnV3, QaDeliveryOutcome, QaDeliveryInvocationV3 } from "./qaDeliveryJournal.js";
+import type { QaDeliveryTurn, QaDeliveryOutcome, QaDeliveryInvocationV3 } from "./qaDeliveryJournal.js";
 import { providerSessionKey } from "./sessionIdentity.js";
 import { processGroupQuiescent, taggedProcesses, classifyProcess, isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
 import type { BranchResumeSession } from "./branch/resume.js";
@@ -315,12 +322,13 @@ export class WorkflowDb {
     this.db.function("rafi_build_writer_run", () => this.writerAuthority?.runId ?? "");
     this.db.function("rafi_work_authority", () => this.workAuthority);
     registerHandbackWriter(this.db);
+    registerQaGraphJournalWriter(this.db);
     if (!readinessAccess) this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = FULL");
     this.db.pragma("foreign_keys = ON");
     try {
       if (readinessAccess) this.restrictReadinessConnection(readinessAccess);
-      else { this.migrate(); migrateBuildAdmission(this.db); this.importLegacyOnce(); migrateBuildWork(this.db, projectDir); migrateBuildInterventions(this.db); }
+      else { this.migrate(); migrateQaPreparation(this.db); migrateBuildAdmission(this.db); this.importLegacyOnce(); migrateBuildWork(this.db, projectDir); migrateBuildInterventions(this.db); migrateQaPreparationGuards(this.db); }
     } catch (error) { this.db.close(); throw error; }
   }
 
@@ -339,10 +347,16 @@ export class WorkflowDb {
   }
 
   close(): void { this.db.close(); }
+  qaPreparationStore(): QaPreparationStore { return new QaPreparationStore(this.db, runId => this.assertInstructionOwner(runId), this.projectDir); }
+  graphStore(): GraphStore { migrateGraphStore(this.db); return new GraphStore(this.db); }
   admitWork(input: AdmitWorkInput) {
     this.assertInstructionOwner(input.runId);
     this.workAuthority++;
-    try { return admitWork(this.db, input); } finally { this.workAuthority--; }
+    try {
+      const result = admitWork(this.db, input);
+      this.qaPreparationStore().metric(input.runId, result.workId, result.requirementsDigest, `metric:approved:${input.runId}:${result.workId}:${result.requirementsDigest}`, "approved");
+      return result;
+    } finally { this.workAuthority--; }
   }
   private assertInstructionOwner(runId: string): void {
     if(this.writerAuthority) {assertAdmission(this.db,this.writerAuthority);if(this.writerAuthority.runId!==runId&&!this.db.prepare("SELECT 1 FROM build_child_runs WHERE child=? AND parent=?").get(runId,this.writerAuthority.runId))throw new Error("Instruction execution authority belongs to another run");return;}
@@ -436,7 +450,9 @@ export class WorkflowDb {
   }
   recordWorkAssignment(runId: string, workId: string, operationId: string, record: unknown): void {
     this.assertInstructionOwner(runId);
-    this.assertAdmittedWork(runId,workId); this.workAuthority++;
+    const admission = this.assertAdmittedWork(runId,workId);
+    this.qaPreparationStore().metric(runId, workId, admission.requirementsDigest, `metric:started:${runId}:${workId}:${admission.requirementsDigest}`, "implementation-started");
+    this.workAuthority++;
     try { this.db.prepare("INSERT INTO build_assignments VALUES(?,?,?,?,?)").run(operationId,runId,workId,operationId,json(record)); } finally {this.workAuthority--;}
   }
   admittedWork(runId: string, workId: string) { return admittedWork(this.db, runId, workId); }
@@ -949,6 +965,8 @@ export class WorkflowDb {
     this.ensureRun(input.runId, "build", now);
     const at = now.toISOString();
     const safePayload = sanitizeContinuityValue(input.payload);
+    const graphAccess = currentGraphDerivedAccess();
+    if (graphAccess) registerGraphDerived(this.db, json(safePayload), graphAccess);
     const session = sessionParts(input.sessionRef, undefined, input.sessionKey);
     const digest = digestJson({ runId: input.runId, role: input.role, kind: input.kind, payload: safePayload, authoritativeStateRevision: input.authoritativeStateRevision, sessionKey: session.key, at });
     const result = this.db.prepare(`INSERT INTO continuity_events(run_id,role,kind,payload_json,digest,authoritative_state_revision,session_key,session_ref_json,created_at)
@@ -958,6 +976,7 @@ export class WorkflowDb {
 
   continuityEvents(runId: string, afterSequence = 0): ContinuityEvent[] {
     const rows = this.db.prepare("SELECT * FROM continuity_events WHERE run_id=? AND sequence>? ORDER BY sequence").all(runId, afterSequence) as DbContinuityEvent[];
+    for (const row of rows) this.assertGraphContinuityAccess(row.payload_json);
     return rows.map(continuityEventFromRow);
   }
 
@@ -976,6 +995,8 @@ export class WorkflowDb {
       const previous = this.continuityHead(input.runId, input.role);
       const latestEvent = this.db.prepare("SELECT COALESCE(MAX(sequence),0) AS sequence FROM continuity_events WHERE run_id=?").get(input.runId) as { sequence: number };
       const safeDelta = sanitizeContinuityValue(input.delta) as unknown as ContinuityDelta;
+      const graphAccess = currentGraphDerivedAccess();
+      if (graphAccess) registerGraphDerived(this.db, json(safeDelta), graphAccess);
       const session = sessionParts(input.sessionRef, undefined, input.sessionKey);
       const digest = digestJson({ runId: input.runId, role: input.role, sequence: latestEvent.sequence, predecessorDigest: previous?.digest, delta: safeDelta, authoritativeStateRevision: input.authoritativeStateRevision, sessionKey: session.key });
       const result = this.db.prepare(`INSERT INTO continuity_checkpoints(run_id,role,event_sequence,state,delta_json,digest,predecessor_digest,authoritative_state_revision,session_key,session_ref_json,created_at)
@@ -998,12 +1019,20 @@ export class WorkflowDb {
     const rows = role
       ? this.db.prepare("SELECT * FROM continuity_checkpoints WHERE run_id=? AND role=? ORDER BY checkpoint_id").all(runId, role)
       : this.db.prepare("SELECT * FROM continuity_checkpoints WHERE run_id=? ORDER BY checkpoint_id").all(runId);
+    for (const row of rows as DbContinuityCheckpoint[]) this.assertGraphContinuityAccess(row.delta_json);
     return (rows as DbContinuityCheckpoint[]).map(continuityCheckpointFromRow);
   }
 
   latestContinuityCheckpoint(runId: string, role: "builder" | "qa"): ContinuityCheckpoint | undefined {
     const row = this.db.prepare("SELECT * FROM continuity_checkpoints WHERE run_id=? AND role=? ORDER BY checkpoint_id DESC LIMIT 1").get(runId, role) as DbContinuityCheckpoint | undefined;
+    if (row) this.assertGraphContinuityAccess(row.delta_json);
     return row ? continuityCheckpointFromRow(row) : undefined;
+  }
+
+  private assertGraphContinuityAccess(value: string): void {
+    const digest = createHash("sha256").update(value).digest("hex");
+    if (!graphDerivedAllowed(this.db, this.projectDir, digest))
+      throw new Error("Continuity contains revoked graph-derived evidence; explicit source-based recovery is required");
   }
 
   continuityHead(runId: string, role: "builder" | "qa" | "run"): ContinuityHead | undefined {
@@ -1279,6 +1308,11 @@ export class WorkflowDb {
     this.db.transaction(() => {
       this.db.prepare("UPDATE operation_journal SET status=?,result_json=?,external_id=?,error=?,updated_at=? WHERE idempotency_key=?")
         .run(status, details.result === undefined ? null : json(details.result), details.externalId ?? null, details.error ?? null, at, idempotencyKey);
+      if (status === "confirmed" && ["ticket-complete", "synthetic-completion"].includes(prior.kind)) {
+        const workId = (prior.intent as { ticket?: string; ticketId?: string; workId?: string }).workId ?? (prior.intent as { ticket?: string }).ticket ?? (prior.intent as { ticketId?: string }).ticketId;
+        const admission = workId && this.admittedWork(prior.runId, workId);
+        if (admission) this.qaPreparationStore().metric(prior.runId, workId!, admission.requirementsDigest, `metric:completed:${prior.runId}:${workId}`, "completed", { status: (this.getRun(prior.runId)?.state as { qaEnabled?: boolean })?.qaEnabled === false ? "disabled" : undefined, at });
+      }
       this.appendContinuityEvent({ runId: prior.runId, role: "host", kind: "operation_receipt", payload: { idempotencyKey, kind: prior.kind, status, externalId: details.externalId, error: details.error }, authoritativeStateRevision: this.continuityHead(prior.runId, "run")?.authoritativeStateRevision ?? 0 }, now);
     })();
     return this.operation(idempotencyKey)!;
@@ -1315,10 +1349,15 @@ export class WorkflowDb {
     if (bytes.length > maximum) throw new Error(`${kind} evidence exceeds the durable ${maximum}-byte item limit`);
     const digest = createHash("sha256").update(bytes).digest("hex");
     this.db.prepare("INSERT OR IGNORE INTO content_refs(digest,kind,content,created_at) VALUES(?,?,?,?)").run(digest, kind, bytes, now.toISOString());
+    const graphAccess = currentGraphDerivedAccess();
+    if (graphAccess && (kind === "qa" || kind === "handoff")) registerGraphDerived(this.db, bytes, graphAccess);
     return digest;
   }
 
+  registerGraphEvidence(value: string | Buffer, access: GraphDerivedAccess | GraphDerivedAccess[]): void { registerGraphDerived(this.db,value,access); }
+
   getEvidence(digest: string): Buffer | undefined {
+    if(!graphDerivedAllowed(this.db,this.projectDir,digest))return undefined;
     const row = this.db.prepare("SELECT content FROM content_refs WHERE digest=?").get(digest) as { content: Buffer } | undefined;
     return row?.content;
   }
@@ -1372,6 +1411,10 @@ export class WorkflowDb {
     const next = { ...prior, ...patch, updatedAt: now.toISOString() };
     this.db.prepare("UPDATE qa_review_attempts SET status=?,report_digest=?,record_json=?,updated_at=? WHERE attempt_id=?")
       .run(next.status, next.reportDigest ?? null, json({ findingIds: next.findingIds, namespacedFindingIds: next.namespacedFindingIds, detail: next.detail }), next.updatedAt, attemptId);
+    const admission = this.admittedWork(next.runId, next.ticketId);
+    const turns = this.db.prepare("SELECT receipt_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND review_number=? AND status='completed'").all(next.runId, next.ticketId, next.reviewNumber) as Array<{ receipt_json: string }>;
+    const terminalBlock = turns.some(row => { const receipt = parseJson(row.receipt_json) as QaTurnReceiptV2; const response = receipt.cleanedResponseDigest && this.getEvidence(receipt.cleanedResponseDigest); return receipt.terminalEventObserved && response && /STEP_STATUS:\s*(blocked|needs_input)\b/.test(response.toString()); });
+    if (admission && (next.status === "passed" || next.status === "failed" || terminalBlock)) this.qaPreparationStore().metric(next.runId, next.ticketId, admission.requirementsDigest, `metric:review:${attemptId}`, "substantive-review", { status: next.status === "passed" ? "passed" : next.status === "failed" ? "failed" : "blocked", at: now.toISOString(), evidenceRefs: next.reportDigest ? [next.reportDigest] : [] });
     return next;
   }
 
@@ -1435,7 +1478,8 @@ export class WorkflowDb {
       .run(record.invocationId, record.runId, record.ticketId, qaDigest("handback-invocation", intent), json(intent), record.status, json(record), record.startedAt, record.completedAt ?? new Date().toISOString());
   }
 
-  recordQaDeliveryTurn(turn: QaDeliveryTurnV3): void {
+  recordQaDeliveryTurn(turn: QaDeliveryTurn): void {
+    if (turn.version === 4) ensureQaGraphJournalGuards(this.db);
     const prior = this.qaDeliveryTurns(turn.operationId).find(t => t.turnRecordId === turn.turnRecordId);
     if (prior) {
       if (prior.status !== "intended") {
@@ -1451,8 +1495,8 @@ export class WorkflowDb {
       .run(turn.turnRecordId, turn.operationId, turn.reportOccurrenceId, turn.turnIndex, turn.kind, turn.status, json(turn), turn.startedAt, turn.completedAt ?? turn.startedAt);
   }
 
-  qaDeliveryTurns(operationId: string): QaDeliveryTurnV3[] {
-    return (this.db.prepare("SELECT record_json FROM qa_delivery_turns WHERE operation_id=? ORDER BY turn_index").all(operationId) as Array<{ record_json: string }>).map(row => parseJson(row.record_json) as QaDeliveryTurnV3);
+  qaDeliveryTurns(operationId: string): QaDeliveryTurn[] {
+    return (this.db.prepare("SELECT record_json FROM qa_delivery_turns WHERE operation_id=? ORDER BY turn_index").all(operationId) as Array<{ record_json: string }>).map(row => parseJson(row.record_json) as QaDeliveryTurn);
   }
 
   /** Attempts, including ambiguous intents, are the common legacy/production ledger. */
@@ -1752,6 +1796,11 @@ export class WorkflowDb {
     return this.db.transaction(() => {
       const predecessors = this.unresolvedQaReports(input.runId, input.ticketId);
       const current = this.recordQaReport(input, findingIds, now);
+      const admission = this.admittedWork(input.runId, input.ticketId), preparation = this.qaPreparationStore();
+      if (admission && preparation.policy(input.runId)) {
+        const evidence = preparation.putArtifact("finding-classification-input", { report: input, contractHead: preparation.head(input.runId, input.ticketId, admission.requirementsDigest), evidenceDisposition: "Cause remains unknown until supported assessment" });
+        for (const findingId of findingIds) preparation.metric(input.runId, input.ticketId, admission.requirementsDigest, `metric:finding-unknown:${current.reportOccurrenceId}:${findingId}`, "finding-classification", { findingId, classifier: "host-evidence-boundary", cause: "unknown", confidence: "unknown", evidenceRefs: [evidence], at: now.toISOString() });
+      }
       for (const predecessor of predecessors) {
         if (predecessor.reportOccurrenceId === current.reportOccurrenceId) continue;
         this.db.prepare(`INSERT OR IGNORE INTO qa_report_chains(predecessor_report_digest,successor_report_digest,predecessor_occurrence_id,successor_occurrence_id,relation,created_at)
@@ -1830,11 +1879,32 @@ export class WorkflowDb {
     for (const report of this.unresolvedQaReports(runId, ticketId)) this.setQaReportDisposition(report.reportOccurrenceId, "verified-fixed", "subsequent bound QA review passed", now);
   }
 
-  commitQaWaiver(runId: string, ticketId: string, expectedRevision: number, reason: string, now = new Date()): QaReducerStateV2 {
+  authorizeContractQaWaiver(runId: string, workId: string, decisionId: string): string {
+    this.assertInstructionOwner(runId);
+    const decision = this.humanDecision(decisionId);
+    if (!decision || decision.runId !== runId || decision.status !== "answered" || decision.selectedChoiceId !== "yes" || decision.interruptionId !== `ticket:${workId}` || !this.humanDecisionKey(decisionId)?.startsWith(`${runId}:qa-nonconvergence:`) || !decision.prompt.includes("QA waiver confirmation")) throw new Error("Whole-work waiver requires the actual answered operator confirmation");
+    const admission = this.assertAdmittedWork(runId, workId), store = this.qaPreparationStore(), head = store.head(runId, workId, admission.requirementsDigest), qa = this.qaTicketHead(runId, workId);
+    if (head.state !== "ready" || !head.digest) throw new Error("Whole-work waiver requires a current ready contract");
+    return store.putArtifact("waiver-authorization", { decisionId, runId, workId, admissionDigest: admission.requirementsDigest, contractDigest: head.digest, qaRevision: qa.revision, sourceDigest: qa.sourceStateDigest, reviewBasisDigest: qa.reviewBasisDigest, authorizedAt: decision.answeredAt });
+  }
+
+  commitQaWaiver(runId: string, ticketId: string, expectedRevision: number, reason: string, now = new Date(), authorizationRef?: string): QaReducerStateV2 {
     return this.db.transaction(() => {
       const head = this.qaTicketHead(runId, ticketId);
       if (head.revision !== expectedRevision) throw new Error(`QA waiver raced for ${runId}/${ticketId}`);
+      const store = this.qaPreparationStore();
+      if (store.policy(runId)?.mode === "enforce") {
+        const admission = this.assertAdmittedWork(runId, ticketId), contractHead = store.head(runId, ticketId, admission.requirementsDigest);
+        if (contractHead.state !== "ready" || !contractHead.digest || !reason.trim()) throw new Error("Whole-work waiver requires exact contract scope and operator reason");
+        const authority = authorizationRef ? store.artifact<{ decisionId: string; runId: string; workId: string; admissionDigest: string; contractDigest: string; qaRevision: number; sourceDigest: string; reviewBasisDigest: string }>(authorizationRef, "waiver-authorization") : undefined;
+        const decision = authority && this.humanDecision(authority.decisionId);
+        if (!authority || authority.runId !== runId || authority.workId !== ticketId || authority.admissionDigest !== admission.requirementsDigest || authority.contractDigest !== contractHead.digest || authority.qaRevision !== expectedRevision || authority.sourceDigest !== head.sourceStateDigest || authority.reviewBasisDigest !== head.reviewBasisDigest || decision?.status !== "answered" || decision.selectedChoiceId !== "yes") throw new Error("Missing or stale whole-work waiver authorization");
+        const contract = store.contract(contractHead.digest), review = this.qaReviewAttempts(runId, ticketId).at(-1);
+        store.event(runId, ticketId, `whole-work-waiver:${runId}:${ticketId}:${head.revision}`, "whole-work-waiver", { version: 1, runId, workId: ticketId, admissionDigest: admission.requirementsDigest, contractDigest: contract.contentDigest, revision: contract.revision, sourceDigest: review?.sourceDigest ?? null, reviewBasisDigest: head.reviewBasisDigest ?? null, mandatoryCheckIds: contract.checks.filter(check => check.obligation === "mandatory").map(check => check.id), unresolvedReports: this.unresolvedQaReports(runId, ticketId).map(report => report.reportOccurrenceId), reason, actor: "operator", authorizationRef, decisionId: authority.decisionId, mechanism: "existing-qa-nonconvergence-decision", at: now.toISOString(), completion: "waived" });
+      }
       for (const report of this.unresolvedQaReports(runId, ticketId)) this.setQaReportDisposition(report.reportOccurrenceId, "waived", reason, now);
+      const admission = this.admittedWork(runId, ticketId);
+      if (admission) store.metric(runId, ticketId, admission.requirementsDigest, `metric:waiver:${runId}:${ticketId}:${head.revision}`, "waived", { at: now.toISOString() });
       return this.transitionQa(runId, ticketId, head.revision, { type: "waived" }, now);
     })();
   }
@@ -1860,6 +1930,10 @@ export class WorkflowDb {
     return this.db.transaction(() => {
       this.recordBuilderRemediationReceipt(receipt);
       this.markQaReportsRecheckRequired(receipt.runId, receipt.ticketId, "Builder remediation received; QA recheck required", now);
+      const admission = this.admittedWork(receipt.runId, receipt.ticketId);
+      const remediation = this.qaRemediationAttempt(receipt.operationId);
+      const review = remediation ? this.qaReviewAttempt(remediation.reviewAttemptId) : undefined;
+      if (admission) this.qaPreparationStore().metric(receipt.runId, receipt.ticketId, admission.requirementsDigest, `metric:remediation:${receipt.operationId}`, "remediation", { phase: "remediation", findingIds: review?.namespacedFindingIds ?? [], at: now.toISOString() });
       return this.transitionQa(receipt.runId, receipt.ticketId, expectedRevision, { type: "remediation-received" }, now);
     })();
   }
@@ -1890,7 +1964,45 @@ export class WorkflowDb {
     })();
   }
 
+  private assertContractCertificate(input: Pick<QaPassCertificateV2, "runId" | "ticketId" | "sourceStateDigest" | "reviewBasisDigest" | "turnReceiptDigest" | "contractCoverage">): void {
+    const store = this.qaPreparationStore();
+    if (store.policy(input.runId)?.mode !== "enforce") return;
+    const binding = input.contractCoverage;
+    if (!binding || binding.version !== 1) throw new Error("Enforcing pass requires tagged contract coverage authority");
+    const admission = this.assertAdmittedWork(input.runId, input.ticketId);
+    const head = store.head(input.runId, input.ticketId, admission.requirementsDigest);
+    if (head.state !== "ready" || head.digest !== binding.contractDigest) throw new Error("Pass contract is stale or incomplete");
+    const contract = store.contract(binding.contractDigest);
+    if (contract.revision !== binding.revision) throw new Error("Pass revision mismatch");
+    const basisRow = this.db.prepare("SELECT basis_json FROM qa_review_bases WHERE digest=? AND run_id=? AND ticket_id=?").get(input.reviewBasisDigest, input.runId, input.ticketId) as { basis_json: string } | undefined;
+    if (!basisRow) throw new Error("Pass lacks immutable input basis");
+    const basis = parseJson(basisRow.basis_json) as QaReviewBasisV2;
+    const definition = this.workDefinitions(input.runId).find(work => work.workId === input.ticketId)?.definition;
+    if (!definition || basis.ticketDigest !== qaDigest("ticket", definition)) throw new Error("Pass ticket basis differs from frozen admitted scope");
+    const { digest, ...fields } = basis;
+    if (digest !== qaDigest("review-basis-fields", fields) || basis.contractBinding?.digest !== contract.contentDigest || basis.contractBinding.admissionDigest !== admission.requirementsDigest) throw new Error("Pass basis/contract binding mismatch");
+    const configuredMake = (this.getRun(input.runId)?.state as { qa?: { settings?: { make?: "claude" | "codex" } } })?.qa?.settings?.make;
+    if (configuredMake && resolveEffectiveQaConfiguration(this.projectDir, { make: configuredMake }).digest !== basis.contractBinding.commonConfigDigest) throw new Error("Effective QA configuration changed before pass authority; reconcile contract");
+    const attempt = this.qaReviewAttempt(binding.attemptId);
+    if (!attempt || attempt.runId !== input.runId || attempt.ticketId !== input.ticketId || attempt.sourceDigest !== input.sourceStateDigest || attempt.reviewNumber !== this.qaTicketHead(input.runId, input.ticketId).reviewNumber) throw new Error("Coverage review attempt is stale or foreign");
+    const coverage = store.artifact<import("rafi-spec").QaContractCoverageV1>(binding.coverageDigest, "final-coverage");
+    for (const check of contract.checks) for (const method of check.verification) if (method.equivalentAuthorityId && !store.equivalentResolver()(method.equivalentAuthorityId, contract, check, method, input.sourceStateDigest)) throw new Error("Equivalent verification authority is stale or foreign");
+    const errors = validateContractCoverage(contract, coverage, { phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest, attemptId: binding.attemptId, sessionId: binding.sessionId });
+    if (errors.length) throw new Error(errors.join("; "));
+    const initialTurns = this.db.prepare("SELECT intent_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND review_number=? AND source_state_digest=? AND review_basis_digest=?").all(input.runId, input.ticketId, attempt.reviewNumber, input.sourceStateDigest, input.reviewBasisDigest) as Array<{ intent_json: string }>;
+    const initial = initialTurns.map(row => parseJson(row.intent_json) as QaTurnIntentV2).find(turn => turn.slot === "initial");
+    if (!initial || initial.providerSession.sessionId !== binding.sessionId) throw new Error("Coverage lacks the actual fresh review dispatch identity");
+    const dispatchedInstruction = this.getEvidence(initial.instructionDigest)?.toString();
+    const envelope = `\nImmutable input-basis digest: ${basis.digest}. Coverage must bind this inputBasisDigest.`;
+    if (basis.contractBinding.transportVersion !== 1 || !dispatchedInstruction?.endsWith(envelope) || qaDigest("instruction", dispatchedInstruction.slice(0, -envelope.length)) !== basis.instructionDigest) throw new Error("Actual review dispatch differs from frozen base instruction and tagged input-basis envelope");
+    const receipts = this.db.prepare("SELECT receipt_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND source_state_digest=? AND review_basis_digest=? AND status='completed'").all(input.runId, input.ticketId, input.sourceStateDigest, input.reviewBasisDigest) as Array<{ receipt_json: string }>;
+    const receipt = receipts.map(row => parseJson(row.receipt_json) as QaTurnReceiptV2).find(row => qaDigest("turn-receipt", row) === input.turnReceiptDigest && row.terminalEventObserved);
+    const response = receipt?.cleanedResponseDigest ? this.getEvidence(receipt.cleanedResponseDigest) : undefined;
+    if (!receipt || !response || canonicalJson(parseContractCoverage(response.toString())) !== canonicalJson(coverage)) throw new Error("Coverage is not bound to the retained terminal review receipt");
+  }
+
   issueQaPassCertificate(input: Omit<QaPassCertificateV2, "version" | "certificateId" | "unresolvedReportCount" | "issuedAt">, now = new Date()): QaPassCertificateV2 {
+    this.assertContractCertificate(input);
     if (this.unresolvedQaReports(input.runId, input.ticketId).length) throw new Error("cannot issue QA pass certificate while reports remain unresolved");
     const certificate: QaPassCertificateV2 = { version: 2, certificateId: qaDigest("pass-certificate", { ...input, issuedAt: now.toISOString() }), ...input, unresolvedReportCount: 0, issuedAt: now.toISOString() };
     this.db.prepare("INSERT INTO qa_pass_certificates(certificate_id,run_id,ticket_id,qa_revision,source_state_digest,review_basis_digest,turn_receipt_digest,certificate_json,issued_at) VALUES(?,?,?,?,?,?,?,?,?)")
@@ -1922,6 +2034,7 @@ export class WorkflowDb {
         || attempt.sourceDigest !== input.sourceStateDigest || attempt.status !== "started") {
         throw new Error(`QA pass attempt binding mismatch: ${attemptId}`);
       }
+      this.assertContractCertificate(input);
       this.finishQaReviewAttempt(attemptId, { status: "passed", detail }, now);
       return this.commitQaPass(input, expectedRevision, now);
     })();
@@ -1932,6 +2045,7 @@ export class WorkflowDb {
       const row = this.db.prepare("SELECT certificate_json,consumed_at FROM qa_pass_certificates WHERE certificate_id=? AND run_id=? AND ticket_id=?").get(certificateId, runId, ticketId) as { certificate_json: string; consumed_at: string | null } | undefined;
       if (!row) throw new Error("QA pass certificate is missing or scoped to another run/ticket");
       if (row.consumed_at) throw new Error("QA pass certificate has already been consumed");
+      this.assertContractCertificate(parseJson(row.certificate_json) as QaPassCertificateV2);
       if (this.unresolvedQaReports(runId, ticketId).length) throw new Error("QA pass certificate cannot be consumed with unresolved reports");
       const at = now.toISOString();
       const certificate = { ...(parseJson(row.certificate_json) as QaPassCertificateV2), consumedAt: at, consumedBy: consumer };
@@ -2043,6 +2157,8 @@ export class WorkflowDb {
       const head = this.qaTicketHead(runId, ticketId);
       if (head.revision !== expectedRevision || head.state !== "finalizing") throw new Error(`QA finalization completion raced for ${runId}/${ticketId}`);
       this.finishPendingQaFinalizationSteps(runId, ticketId, receipt, now);
+      const admission = this.admittedWork(runId, ticketId);
+      if (admission) this.qaPreparationStore().metric(runId, ticketId, admission.requirementsDigest, `metric:completed:${runId}:${ticketId}`, "completed", { at: now.toISOString() });
       return this.transitionQa(runId, ticketId, head.revision, { type: "completed" }, now);
     })();
   }

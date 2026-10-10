@@ -29,6 +29,7 @@ export class RecoveringAdapter implements BuilderAdapter {
   private readonly eventQueue = new AsyncQueue<BuilderEvent>();
   private eventPump: Promise<void>;
   private closed = false;
+  private contractEnforcing = false;
 
   constructor(private readonly opts: RecoveringAdapterOptions) {
     this.adapter = opts.initial;
@@ -36,10 +37,15 @@ export class RecoveringAdapter implements BuilderAdapter {
     this.eventPump = this.forwardEvents(this.adapter);
   }
 
+  graphRuntimeSettings() { return this.adapter.graphRuntimeSettings?.(); }
   get agent(): "claude" | "codex" {
     return this.adapter.agent;
   }
 
+  contractCapabilities() { return this.adapter.contractCapabilities?.() ?? { sameSessionAcceptance: false, nativeCompactionBarrier: false }; }
+  enableContractEnforcement(): void { this.contractEnforcing = true; this.adapter.enableContractEnforcement?.(); }
+  contractCompactionSequence(): number { return this.adapter.contractCompactionSequence?.() ?? 0; }
+  acceptContractDelivery(sequence: number): void { this.adapter.acceptContractDelivery?.(sequence); }
   async sendTurn(text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     while (true) {
       const result = await this.adapter.sendTurn(text, policy);
@@ -54,6 +60,9 @@ export class RecoveringAdapter implements BuilderAdapter {
       // The host cannot know whether a missing exact session received this
       // instruction. Never replay it or silently switch providers.
       if (result.failure.category === "session-unavailable" || result.failure.dispatchState === "unknown") return result;
+      // A replacement has new host-side barriers, even when it resumes the
+      // same native session. Only the shared build gate can renew acceptance.
+      if (this.contractEnforcing) return { ...result, text: `${result.text}\nContract-enforcing runtime recovery requires an explicit host resume through the shared preparation/delivery gate; this turn was not replayed.` };
 
       const otherRuntime = this.runtime === "claude" ? "codex" : "claude";
       const choice = this.opts.choose

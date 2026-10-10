@@ -1,3 +1,4 @@
+import { ProviderPhaseBarrier, type ProviderTurnPurpose } from "../providerPhase.js";
 import { OperationDeadline } from "../util/deadline.js";
 import type {
   Query,
@@ -228,6 +229,7 @@ export function claudeApiRetryEvent(message: {
  */
 export class ClaudeAdapter implements BuilderAdapter {
   readonly agent = "claude" as const;
+  graphRuntimeSettings() { return { model: this.opts.model, effort: this.opts.effort, fast: this.opts.fast, runtimeExecutable: this.opts.runtimeExecutable }; }
 
   private readonly inbox = new AsyncQueue<SDKUserMessage>();
   private readonly eventQueue = new BuilderEventQueue();
@@ -273,6 +275,12 @@ export class ClaudeAdapter implements BuilderAdapter {
   };
   private questionTrace?: QuestionRoundTripTrace;
   private responseOnlyTurn = false;
+  readonly phaseBarrier = new ProviderPhaseBarrier();
+  contractCapabilities() { return { sameSessionAcceptance: true, nativeCompactionBarrier: true }; }
+  enableContractEnforcement(): void { this.phaseBarrier.enableEnforcement(); }
+  contractCompactionSequence(): number { return this.phaseBarrier.compactionSequence; }
+  acceptContractDelivery(sequence: number): void { this.phaseBarrier.accept(sequence); }
+
   private terminalResult?: TurnResult;
   private streamEnded = false;
   private closed = false;
@@ -315,6 +323,7 @@ export class ClaudeAdapter implements BuilderAdapter {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private constructor(private readonly opts: BuilderAdapterOptions, query: (o: any) => Query) {
+    this.phaseBarrier.begin("initialization");
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
     this._sessionRef = opts.resumeSessionRef;
     this.sessionIdentityReady = new Promise<ProviderSessionRefV1>((resolve, reject) => {
@@ -331,7 +340,14 @@ export class ClaudeAdapter implements BuilderAdapter {
       options: {
         ...buildClaudeQueryOptions(opts),
         abortController: this.abort,
-        hooks: { SessionStart: [{ hooks: [async (input: HookInput) => {
+        hooks: {
+          PreToolUse: [{ hooks: [async (input: HookInput) => {
+            if (input.hook_event_name !== "PreToolUse") return {};
+            const reason = this.phaseBarrier.denial(input.tool_name);
+            return reason ? { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: reason } } : {};
+          }] }],
+          PreCompact: [{ hooks: [async () => { this.phaseBarrier.compact(); return {}; }] }],
+          SessionStart: [{ hooks: [async (input: HookInput) => {
           if (input.hook_event_name !== "SessionStart" || input.agent_id) return {};
           try { this.observeSession(input.session_id, input.cwd); }
           catch (error) {
@@ -572,9 +588,10 @@ export class ClaudeAdapter implements BuilderAdapter {
     }
   }
 
-  async sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string }): Promise<TurnResult> {
+  async sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: ProviderTurnPurpose }): Promise<TurnResult> {
     if (this.pending) throw new Error("a turn is already in progress");
     this.responseOnlyTurn = Boolean(policy?.responseOnly);
+    this.phaseBarrier.begin(policy?.purpose ?? (policy?.responseOnly ? "response-repair" : "implementation"));
     const turnId = randomUUID();
     this.activeProviderTurnId = turnId;
     const observer = this.opts.observer;

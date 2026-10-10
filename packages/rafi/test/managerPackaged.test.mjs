@@ -90,10 +90,18 @@ test('separate one-shot Manager processes render every page and metadata artifac
       db.ensureHumanDecision({ runId: 'run', decisionKey: 'large-question', interruptionId: 'ticket:T1', prompt: 'oversized question '.repeat(4000), choices: [{ id: 'answer', label: 'Answer' }] });
     } finally { db.close(); }
     const databasePath = join(root, '.rafi/recovery.sqlite3'), before = readFileSync(databasePath);
-    const invoke = ask => spawnSync(process.execPath, [fileURLToPath(new URL('../dist/index.js', import.meta.url)), 'manager', root, '--ask', ask], { encoding: 'utf8', timeout: 30000, env: { ...process.env, PATH: '' } });
+    const invoke = (ask, extraEnv = {}) => {
+      const env = { ...process.env };
+      for (const [key, value] of Object.entries(extraEnv)) {
+        if (value === null) delete env[key]; else env[key] = value;
+      }
+      env.PATH = '';
+      return spawnSync(process.execPath, [fileURLToPath(new URL('../dist/index.js', import.meta.url)), 'manager', root, '--ask', ask], { encoding: 'utf8', timeout: 30000, env });
+    };
     for (const command of ['/qa-attempts run T1', '/qa-timeline run T1']) {
-      const cli = invoke(command);
+      const cli = invoke(command, { FORCE_COLOR: '3', NO_COLOR: null, TERM: 'xterm' });
       assert.equal(cli.status, 0, cli.stdout + cli.stderr);
+      assert.doesNotMatch(cli.stdout, /\x1b/);
       const page = JSON.parse(cli.stdout);
       assert.equal(page.complete, true);
       assert.equal(page.nextCursor, undefined);

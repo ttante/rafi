@@ -26,6 +26,19 @@ const SUCCESS: TurnResult = {
   costUsd: 0,
 };
 
+for (const choice of ["retry", "switch"] as const) test(`enforcing recovery returns to the host gate without ${choice} replay`, async () => {
+  let choices = 0, replacements = 0, enabled = 0;
+  const first = new FakeAdapter("claude", FAILURE, "session-1");
+  const adapter = new RecoveringAdapter({ initial: Object.assign(first, { enableContractEnforcement: () => { enabled++; }, acceptContractDelivery: () => {} }), runtime: "claude", enabled: true, allowSwitch: true, label: "Builder", choose: async () => { choices++; return choice; }, recreate: async () => { replacements++; return new FakeAdapter("claude", SUCCESS, "session-1"); } });
+  try {
+    adapter.enableContractEnforcement(); adapter.acceptContractDelivery(0);
+    const result = await adapter.sendTurn("Implement", { purpose: "implementation" });
+    assert.equal(result.isError, true); assert.deepEqual(result.failure, FAILURE.failure);
+    assert.match(result.text, /host resume.*shared preparation\/delivery gate/);
+    assert.equal(enabled, 1); assert.equal(choices, 0); assert.equal(replacements, 0); assert.deepEqual(first.prompts, ["Implement"]);
+  } finally { await adapter.close(); }
+});
+
 class FakeAdapter implements BuilderAdapter {
   readonly agent: AgentRuntime;
   readonly prompts: string[] = [];

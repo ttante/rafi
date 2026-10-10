@@ -1,3 +1,4 @@
+import { sendRoleGraphTurn } from "ai-foreman/agent-run.js";
 import { createHash } from "node:crypto";
 import {
   createRoleBuilder,
@@ -277,7 +278,7 @@ export async function runIndependentGrillAudit(opts: RunGrillAuditOptions): Prom
       sandboxMode: "read-only",
       onProviderQuestion: () => { interactiveToolAttempted = true; },
     });
-    const result = await role.builder.sendTurn(buildGrillAuditInstruction(opts));
+    const result = await sendRoleGraphTurn(role, buildGrillAuditInstruction(opts), "planning-audit");
     if (interactiveToolAttempted) throw new Error("auditor attempted an interactive question tool");
     if (result.isError) throw new Error(`auditor agent failed: ${result.text.slice(0, 300)}`);
     const verdict = parseGrillAuditVerdict(result.text);

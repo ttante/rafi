@@ -1,3 +1,4 @@
+import { WorkflowReader } from "./workflowReader.js";
 import { decisionBelongsToWork } from "./buildInterventions.js";
 import { randomUUID } from "node:crypto";
 import { validateManagerEvidenceRequestV2, type ManagerEvidenceOperationV2, type ManagerEvidencePageV2, type ManagerEvidenceRequestV2 } from "rafi-spec";
@@ -12,11 +13,12 @@ interface Cursor { snapshotId: string; ordinal: number; scope: string }
 
 /** Per-host immutable snapshots and opaque continuations are independent of model lookup budgets. */
 export class ManagerEvidenceService {
-  readonly artifacts = new ManagerEvidenceArtifacts();
+  readonly artifacts: ManagerEvidenceArtifacts;
+  private graphPermitted(digest:string):boolean{const reader=new WorkflowReader(this.projectDir);try{return reader.graphEvidenceAllowed(digest);}finally{reader.close();}}
   private readonly snapshots = new Map<string, SnapshotPage>();
   private readonly cursors = new Map<string, Cursor>();
   private readonly hostMetadata = new Map<string, unknown>();
-  constructor(readonly projectDir: string, private readonly now = Date.now, private readonly lifetimeMs = 15 * 60 * 1000) {}
+  constructor(readonly projectDir: string, private readonly now = Date.now, private readonly lifetimeMs = 15 * 60 * 1000) { this.artifacts=new ManagerEvidenceArtifacts(digest=>this.graphPermitted(digest)); }
   close(): void { this.snapshots.clear(); this.cursors.clear(); this.hostMetadata.clear(); this.artifacts.clear(); }
   execute(request: ManagerEvidenceRequestV2): ManagerEvidencePageV2 {
     if (!validateManagerEvidenceRequestV2(request).valid) return this.failure("invalid_scope", "Use a valid scoped ManagerEvidenceRequestV2 request");
@@ -72,11 +74,13 @@ export class ManagerEvidenceService {
   /** Preserve the already-sanitized structure; rendered report text need not be valid JSON. */
   hostMetadataItem(handle: string): unknown {
     if (!this.hostMetadata.has(handle)) throw new Error("Metadata artifact expired; retrieve the scoped evidence again");
+    this.artifacts.bytes(handle);
     return structuredClone(this.hostMetadata.get(handle));
   }
   private page(snapshotId: string, ordinal: number): ManagerEvidencePageV2 {
     const stored = this.snapshots.get(snapshotId);
     if (!stored || stored.expires <= this.now()) return this.failure("snapshot_expired", "Restart the original scoped request without its cursor");
+    if([...stored.snapshot.blobs.keys()].some(digest=>!this.graphPermitted(digest)))return this.failure("snapshot_expired","Graph-derived evidence access changed; restart the scoped request");
     const items: unknown[] = [];
     let byteCount = 0;
     let next = ordinal;

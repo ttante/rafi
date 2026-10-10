@@ -1,3 +1,4 @@
+import { resolveQaPreparationConfig } from "ai-foreman/qa-preparation-policy.js";
 import { loadDefaults } from "special-agents";
 import { assertProjectConfig } from "rafi-spec";
 import type { AgentDefaultsV1, AutonomyConfig, ProjectConfig, HarnessTarget, RuntimeArtifactConfig, TicketBuildBranchStrategy } from "rafi-spec";
@@ -25,6 +26,7 @@ export const DEFAULT_AUTONOMY_CONFIG: AutonomyConfig = {
 export type RuntimeSelection = typeof RUNTIME_SELECTIONS[number];
 
 export interface WalkthroughAnswers {
+  graph?: import("rafi-spec").GraphConfigV1;
   appName: string;
   timezone: string;
   frontend: string;
@@ -92,6 +94,7 @@ export function resolveExplicitRafiProject(project: string): DiscoveredRafiProje
 
 export const RAFI_AGENT_NAMES = ["builder", "qa", "planner", "ticket-maker", "uninstaller", "manager", "discovery"] as const;
 export const RAFI_SKILL_NAMES = [
+  "rafi-graph",
   "better-sqlite3-rebuild",
   "grill-me",
   "handoff",
@@ -210,6 +213,7 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
     docs: {
       root: answers.docsRoot ?? DEFAULT_DOCS_ROOT,
     },
+    ...(answers.graph ? { graph: answers.graph } : {}),
     agent_defaults: normalizeProjectAgentDefaults(answers.agentDefaults),
     autonomy: cloneAutonomyConfig(DEFAULT_AUTONOMY_CONFIG),
     ...(normalizePlanningSources(answers.planningSources).length > 0
@@ -232,6 +236,7 @@ export function normalizeProjectConfig(raw: unknown): ProjectConfig {
   const cfg = raw as Partial<ProjectConfig>;
   const normalized = {
     ...cfg,
+    ...(cfg.qa_preparation !== undefined ? { qa_preparation: resolveQaPreparationConfig(cfg.qa_preparation) } : {}),
     agent_files: cfg.agent_files ?? {
       mode: "overwrite",
       codex: "./AGENTS.md",

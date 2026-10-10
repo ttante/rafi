@@ -474,6 +474,7 @@ export interface ResolvedAgentSettings {
 // ───────────────────────────── Structured plans ─────────────────────────────
 
 export interface StructuredPlanSlice {
+  qa_preparation?: import("./qaPreparation.js").QaPreparationDepthDecisionV1;
   slice_ref: string;
   title: string;
   summary: string;
@@ -514,6 +515,7 @@ export interface StructuredPlanStack {
 }
 
 export interface StructuredPlanV1 {
+  qa_preparation_policy?: import("./qaPreparation.js").QaPreparationConfigV1;
   version: 1;
   plan_id: string;
   revision: number;
@@ -902,6 +904,8 @@ export interface RuntimeArtifactConfig {
  * the library defaults, which reproduce today's hardcoded guidance.
  */
 export interface ProjectConfig {
+  qa_preparation?: Partial<import("./qaPreparation.js").QaPreparationConfigV1> & { mode: import("./qaPreparation.js").QaPreparationMode };
+  graph?: import("./graph.js").GraphConfigV1;
   appName: string;
   timezone: string;
   stack: ProjectStack;

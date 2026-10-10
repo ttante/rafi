@@ -1,3 +1,9 @@
+import { assertBuilderContractCoverage } from "./qaBuilderCoverage.js";
+import { resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
+import { contractDigest } from "./qaVerificationContract.js";
+import { queueGraphMaintenance } from "./graph/boundary.js";
+import { actualContractSession, assertContractReceipt } from "./qaContractDelivery.js";
+import type { BuilderAdapter } from "./adapters/types.js";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
@@ -65,7 +71,7 @@ export function assertBuildAssignmentReconciled(projectDir: string, runId: strin
 }
 
 /** Commit response/source bytes before interpreting any scoped outcome. */
-export function beginBuildAssignment(projectDir: string, runId: string, ticketId: string, worktree: string, instruction: string, followup?: BuilderGuidanceFollowup): BuildAssignmentCapture {
+export function beginBuildAssignment(projectDir: string, runId: string, ticketId: string, worktree: string, instruction: string, followup?: BuilderGuidanceFollowup, adapter?: BuilderAdapter): BuildAssignmentCapture {
   assertBuildAssignmentReconciled(projectDir, runId,worktree);
   const operationId = `build-assignment:${runId}:${randomUUID()}`;
   const db = new WorkflowDb(projectDir);
@@ -75,6 +81,16 @@ export function beginBuildAssignment(projectDir: string, runId: string, ticketId
     db.atomic(() => {
       db.ensureRun(runId);
       const admission = db.assertAdmittedWork(runId, ticketId);
+      let contractBinding: { digest: string; revision: number; receiptOperationId: string; session: ReturnType<typeof actualContractSession> } | undefined;
+      if (db.qaPreparationStore().policy(runId)?.mode === "enforce") {
+        const contract = assertContractReceipt(db.qaPreparationStore(), runId, ticketId, admission.requirementsDigest, adapter ? actualContractSession(adapter, worktree, projectDir) : undefined, adapter);
+        const session = actualContractSession(adapter!, worktree, projectDir);
+        const receipt = db.qaPreparationStore().receipts(contract.contentDigest).find(row => row.sessionId === session.sessionId && row.generation === session.generation && row.workspace === session.workspace && row.compactionSequence === session.compactionSequence)!;
+        contractBinding = { digest: contract.contentDigest, revision: contract.revision, receiptOperationId: receipt.operationId, session };
+        const qaMake = (db.getRun(runId)?.state as { qa?: { settings?: { make?: "claude" | "codex" } } })?.qa?.settings?.make ?? adapter!.agent;
+        const current = resolveEffectiveQaConfiguration(projectDir, { make: qaMake });
+        if (contract.inputs.find(input => input.kind === "rules")?.digest !== current.digest || contract.inputs.find(input => input.kind === "checklist")?.digest !== contractDigest("input-checklist", current.checklist)) throw new BuildAssignmentRejected("Canonical QA rules, skills or checklist changed after delivery; reconcile the contract before implementation");
+      }
       guidance = db.reserveGuidance(runId, ticketId, "builder", operationId, before.digest, instruction);
       if (followup) {
         if (admission.requirementsDigest !== followup.requirementsDigest) throw new BuildAssignmentRejected("Ticket requirements changed; renewed scope approval is required before the Builder follow-up");
@@ -87,7 +103,7 @@ export function beginBuildAssignment(projectDir: string, runId: string, ticketId
         db.transitionQa(runId, ticketId, head.revision, { type: "builder-guidance-followup-intended" });
       }
       const instructionDigest = db.putEvidence("qa", Buffer.from(guidance.text));
-      db.planOperation({ runId, idempotencyKey: operationId, kind: "build-assignment", intent: { ticketId, worktree, admissionId: admission.assignmentId, requirementsDigest: admission.requirementsDigest, instructionDigest, before: retainSource(db, before), ...(followup ? { managerFollowup: followup } : {}) } });
+      db.planOperation({ runId, idempotencyKey: operationId, kind: "build-assignment", intent: { ticketId, worktree, admissionId: admission.assignmentId, requirementsDigest: admission.requirementsDigest, instructionDigest, ...(contractBinding ? { contractBinding } : {}), before: retainSource(db, before), ...(followup ? { managerFollowup: followup } : {}) } });
       db.recordWorkAssignment(runId,ticketId,operationId,{requirementsDigest:admission.requirementsDigest,worktree,sourceDigest:before.digest,ownerGeneration:db.currentLease()?.generation,instructionDigest});
       db.updateOperation(operationId, "in_progress");
     });
@@ -105,10 +121,16 @@ export function finishBuildAssignment(projectDir: string, assignment: BuildAssig
   const db = new WorkflowDb(projectDir);
   try {
     db.atomic(() => {
+      if (!rejection && !result.isError && !result.failure && ["done", "plan_complete"].includes(status.kind) && after) {
+        try { assertBuilderContractCoverage(db, assignment.runId, assignment.ticketId, assignment.operationId, after.digest); }
+        catch (error) { rejection = String(error); }
+      }
       const responseDigest = db.putEvidence("qa", Buffer.from(result.rawResponse ?? result.text));
       const cleanedResponseDigest = db.putEvidence("qa", Buffer.from(result.cleanedResponse ?? result.text));
       const providerInstructionDigest = result.providerInstruction ? db.putEvidence("qa", Buffer.from(result.providerInstruction)) : undefined;
       db.updateOperation(assignment.operationId, result.failure?.dispatchState === "unknown" || result.isError && !result.failure?.dispatchState && status.kind === "unknown" ? "uncertain" : "confirmed", { result: { turnId:result.turnId, responseDigest, cleanedResponseDigest, providerInstructionDigest, providerMetadata: result.providerMetadata, dispatchState: result.failure?.dispatchState, status, rejection, sourceError, after: after ? retainSource(db, after) : undefined } });
+      const admission = db.assertAdmittedWork(assignment.runId, assignment.ticketId);
+      db.qaPreparationStore().metric(assignment.runId, assignment.ticketId, admission.requirementsDigest, `metric:builder-result:${assignment.operationId}`, "phase-observation", { phase: "builder", durationMs: Math.max(0, Date.now() - Date.parse(assignment.before.capturedAt)), costUsd: result.costAuthoritative ? result.costUsd : null, inputTokens: result.inputTokens ?? null, outputTokens: result.outputTokens ?? null });
       db.finishGuidance(assignment.guidanceIds, "builder", {submitted: result.failure?.dispatchState === "not-sent" ? false : result.turnId ? true : undefined, receipt: result.turnId ? {turnId:result.turnId,responseDigest,providerInstructionDigest,postSourceDigest:after?.digest} : undefined, applied: !rejection && status.kind === "done" && assignment.guidanceIds.every(id => result.text.includes(id))});
       if (rejection || sourceError) {
         const run = db.getRun(assignment.runId)!;
@@ -116,6 +138,7 @@ export function finishBuildAssignment(projectDir: string, assignment: BuildAssig
       }
     });
   } finally { db.close(); }
+  if(!rejection&&!sourceError&&!result.isError&&status.kind==="done"&&after){try{queueGraphMaintenance(projectDir,assignment.worktree,assignment.operationId,result.text,after.contentDigest!==assignment.before.contentDigest);}catch(error){console.error(`Graph maintenance deferred: ${String(error)}`);}}
   return rejection ?? (sourceError ? `Builder source evidence is unavailable: ${sourceError}. Reconcile before continuing.` : undefined);
 }
 

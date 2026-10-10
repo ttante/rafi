@@ -1,3 +1,4 @@
+import { graphDerivedAllowed } from "./graph/derived.js";
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -41,6 +42,12 @@ export function readQaEvidenceSnapshot(projectDir: string, runId: string): QaEvi
         // Invalid JSON must remain visible instead of becoming empty history.
         for (const row of result.rows[name]!) for (const [field, value] of Object.entries(row)) {
           if (field.endsWith("_json") && typeof value === "string") {
+            if (!graphDerivedAllowed(connection, projectDir, evidenceDigest(Buffer.from(value)))) {
+              row[field] = null;
+              row[`${field}_availability`] = "revoked-graph-evidence";
+              result.gaps.push(`${name}/${field}: graph-derived evidence withheld by current policy`);
+              continue;
+            }
             try { JSON.parse(value); } catch { result.gaps.push(`${name}/${field}: corrupt retained JSON`); result.availability = "corrupt"; }
           }
         }
@@ -89,6 +96,7 @@ export function readQaEvidenceSnapshot(projectDir: string, runId: string): QaEvi
       }
       if (!tables.has("content_refs")) result.gaps.push("content_refs: unsupported legacy schema");
       else for (const digest of references) {
+        if(!graphDerivedAllowed(connection,projectDir,digest)){result.gaps.push(`content ${digest}: graph access revoked`);continue;}
         const row = connection.prepare("SELECT content FROM content_refs WHERE digest=?").get(digest) as { content: Buffer } | undefined;
         if (row) {
           const bytes = Buffer.from(row.content);

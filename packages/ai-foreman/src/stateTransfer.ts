@@ -1,3 +1,5 @@
+import { registerQaGraphJournalWriter } from "./qaDeliveryJournal.js";
+import { normalizeTransferredGraphState } from "./graph/storage.js";
 import { WorkflowReader } from "./workflowReader.js";
 import { classifyProcess } from "./processIdentity.js";
 import Database from "better-sqlite3";
@@ -373,6 +375,7 @@ async function stageSqliteBackup(root: string, rel: string, dest: string): Promi
   const db = new Database(source, { readonly: true, fileMustExist: true });
   try {
     await db.backup(dest);
+    if (rel === WORKFLOW_DB_FILE) { const stagedDb = new Database(dest); try { normalizeTransferredGraphState(stagedDb); } finally { stagedDb.close(); } }
   } finally {
     db.close();
   }
@@ -481,7 +484,9 @@ function rewriteWorkflowDb(root: string, sourceRoot: string): void {
   const path = join(root, WORKFLOW_DB_FILE);
   if (!existsSync(path)) return;
   const db = new Database(path);
+  normalizeTransferredGraphState(db);
   registerHandbackWriter(db);
+  registerQaGraphJournalWriter(db);
   db.function("rafi_work_authority", () => 1);
   if (tableExists(db, "build_project_identity")) {
     const prior=db.prepare("SELECT project_id,canonical_root FROM build_project_identity WHERE singleton=1").get() as {project_id:string;canonical_root:string};

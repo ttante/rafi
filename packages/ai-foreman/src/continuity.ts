@@ -1,3 +1,4 @@
+import { dispatchWithGraphAccess, withGraphSessionAccess } from "./graph/session.js";
 import { localBuildAuthority, type BuildAdmission } from "./buildAdmission.js";
 import { randomUUID, createHash } from "node:crypto";
 import type { ContinuityCheckpoint, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
@@ -123,6 +124,12 @@ export interface ContinuityAdapterOptions {
 /** Enforces a durable role checkpoint after every completed provider turn. */
 export class ContinuityAdapter implements BuilderAdapter {
   private adapter: BuilderAdapter;
+  contractCapabilities() { return this.adapter.contractCapabilities?.() ?? { sameSessionAcceptance: false, nativeCompactionBarrier: false }; }
+  private contractEnforcing = false;
+  enableContractEnforcement(): void { this.contractEnforcing = true; this.adapter.enableContractEnforcement?.(); }
+  contractCompactionSequence(): number { return this.adapter.contractCompactionSequence?.() ?? 0; }
+  acceptContractDelivery(sequence: number): void { this.adapter.acceptContractDelivery?.(sequence); }
+
   private readonly queue = new BuilderEventQueue();
   private sourcePump?: Promise<void>;
   private recoveryLeasePending: boolean;
@@ -166,7 +173,10 @@ export class ContinuityAdapter implements BuilderAdapter {
 
   get agent(): "claude" | "codex" { return this.adapter.agent; }
 
-  async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string }): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: import("./providerPhase.js").ProviderTurnPurpose }): Promise<TurnResult> {
+    return withGraphSessionAccess(this.options.projectDir, this.adapter, () => this.sendTurnOwned(instruction, policy));
+  }
+  private async sendTurnOwned(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: import("./providerPhase.js").ProviderTurnPurpose }): Promise<TurnResult> {
     const db = new WorkflowDb(this.options.projectDir);
     try {
       db.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "turn_started", payload: { role: this.options.role, instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) }, authoritativeStateRevision: this.revision() });
@@ -194,7 +204,7 @@ export class ContinuityAdapter implements BuilderAdapter {
         journal.planOperation({ runId: this.options.runId, idempotencyKey: dispatchId, kind: "provider-dispatch", intent: { role: this.options.role, sessionRef: this.adapter.sessionRef?.(), instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) } });
         journal.updateOperation(dispatchId, "in_progress");
       });
-      try { original = await this.adapter.sendTurn(providerInstruction, policy); }
+      try { original = await dispatchWithGraphAccess(this.options.projectDir, this.adapter, providerInstruction, policy, (text, p) => this.adapter.sendTurn(text, p)); }
       catch (error) { journal.updateOperation(dispatchId, "uncertain", { error: String(error) }); throw error; }
       const responseDigest = journal.putEvidence("handoff", original.rawResponse ?? original.text);
       journal.updateOperation(dispatchId, original.failure?.dispatchState === "unknown" ? "uncertain" : "confirmed", { result: { responseDigest, isError: original.isError, failure: original.failure, turnId: original.turnId, sessionRef: this.adapter.sessionRef?.() } });
@@ -233,7 +243,7 @@ export class ContinuityAdapter implements BuilderAdapter {
         return this.sendTurn([
           "Continue the frozen action after the accepted Rafi handoff. Do not repeat completed side effects.",
           instruction,
-        ].join("\n\n"));
+        ].join("\n\n"), policy);
       }
       return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
         rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
@@ -256,12 +266,12 @@ export class ContinuityAdapter implements BuilderAdapter {
         throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "shared protocol correction budget exhausted");
       }
     } finally { budget.close(); }
-    const repair = await this.adapter.sendTurn([
+    const repair = await dispatchWithGraphAccess(this.options.projectDir, this.adapter, [
       "Continuity protocol repair only. Do not run tools, repeat work, or change files.",
       `Your prior turn's continuity record was invalid: ${parsed.error?.problems.join("; ")}.`,
       continuityInstruction(),
       "Return only the continuity record.",
-    ].join("\n"), { ...policy, responseOnly: true });
+    ].join("\n"), { ...policy, purpose: "response-repair", responseOnly: true }, (text, p) => this.adapter.sendTurn(text, p));
     const repaired = parseContinuityDelta(repair.text);
     if (repaired.delta && !repair.isError && !repair.failure) {
       this.publish(repaired.delta, "turn_completed_after_repair", original);
@@ -269,7 +279,7 @@ export class ContinuityAdapter implements BuilderAdapter {
       const successor = await this.options.handleHandoffRequest?.(original.text, this.adapter, instruction);
       if (successor && successor !== this.adapter) {
         await this.adoptValidatedSuccessor(successor);
-        return this.sendTurn(["Continue the frozen action after the accepted Rafi handoff. Do not repeat completed side effects.", instruction].join("\n\n"));
+        return this.sendTurn(["Continue the frozen action after the accepted Rafi handoff. Do not repeat completed side effects.", instruction].join("\n\n"), policy);
       }
       return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
         rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
@@ -307,7 +317,7 @@ export class ContinuityAdapter implements BuilderAdapter {
     if (!this.options.createSuccessor) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "continuity repair failed in the original session and no validated successor is configured");
 
     const successor = await this.options.createSuccessor(handoff);
-    const accepted = await successor.sendTurn(`${handoff}\n\nReply with HANDOFF_ACCEPTED on the first line, then ${continuityInstruction()}`);
+    const accepted = await dispatchWithGraphAccess(this.options.projectDir, successor, `${handoff}\n\nReply with HANDOFF_ACCEPTED on the first line, then ${continuityInstruction()}`, { purpose: "contract-acceptance", responseOnly: true }, (text, p) => successor.sendTurn(text, p));
     const successorDelta = parseContinuityDelta(accepted.text);
     const firstAcceptanceLine = accepted.text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
     if (firstAcceptanceLine !== "HANDOFF_ACCEPTED" || !successorDelta.delta || !successor.sessionId()) {
@@ -350,6 +360,7 @@ export class ContinuityAdapter implements BuilderAdapter {
   restoreNativeCompactions(compactions: NativeCompaction[]): void { this.adapter.restoreNativeCompactions?.(compactions); }
   contextUsageAfterNativeCompaction(compaction: NativeCompaction): Promise<ContextUsage | undefined> { return this.adapter.contextUsageAfterNativeCompaction?.(compaction) ?? Promise.resolve(undefined); }
   contextUsage(): Promise<ContextUsage | undefined> { return this.adapter.contextUsage?.() ?? Promise.resolve(undefined); }
+  graphRuntimeSettings() { return this.adapter.graphRuntimeSettings?.(); }
   sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.adapter.sessionUsage?.() ?? Promise.resolve(undefined); }
   switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> { return this.adapter.switchSettings ? this.adapter.switchSettings(settings) : Promise.resolve({ ok: false, error: "provider adapter does not support settings changes" }); }
   events(): AsyncIterable<import("./adapters/types.js").BuilderEvent> { return this.queue; }
@@ -357,6 +368,11 @@ export class ContinuityAdapter implements BuilderAdapter {
 
   /** Keep the observable wrapper and event stream stable while moving to an accepted successor. */
   async adoptValidatedSuccessor(successor: BuilderAdapter): Promise<void> {
+    if (this.contractEnforcing) {
+      successor.enableContractEnforcement?.();
+      if (successor !== this.adapter) await successor.close().catch(() => {});
+      throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "Replacement Builder requires host contract delivery before any continuation; completed turn must be reconciled without automatic replay");
+    }
     if (successor === this.adapter) return;
     const prior = this.adapter;
     await prior.close();

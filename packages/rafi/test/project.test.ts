@@ -225,3 +225,13 @@ test("explicit project resolution never searches ancestors and recognizes legacy
   assert.equal(resolveExplicitRafiProject(child), undefined);
   assert.deepEqual(resolveExplicitRafiProject(root), { root, configFile: "project.yaml", legacy: true });
 });
+
+test("QA preparation config preserves absent legacy behavior and normalizes explicit modes without changing final QA", () => {
+  const base = buildProjectConfig(defaultAnswers()); assert.equal(base.qa_preparation, undefined); assert.equal(normalizeProjectConfig(base).qa_preparation, undefined);
+  for (const mode of ["legacy", "shadow", "enforce"] as const) {
+    const configured = normalizeProjectConfig({ ...base, qa_preparation: { mode } });
+    assert.equal(configured.qa_preparation?.mode, mode); assert.equal(configured.qa_preparation?.policyVersion, "qa-preparation-v1"); assert.deepEqual(configured.qa_preparation?.wallTimeMs, [300000, 600000, 1200000, 1800000, 2700000]); assert.deepEqual(configured.tickets, base.tickets);
+  }
+  assert.throws(() => normalizeProjectConfig({ ...base, qa_preparation: { mode: "automatic" } }), /mode/);
+  assert.throws(() => normalizeProjectConfig({ ...base, qa_preparation: { mode: "enforce", wallTimeMs: [300000, 300000, 300000, 300000, 300000] } }), /ceilings/);
+});

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BuilderEvent } from "./adapters/types.js";
 import { AsyncQueue } from "./util/asyncQueue.js";
+import { accent, error, info, sanitizeTerminalText, success, warning } from "./terminalStyle.js";
 
 export interface ActivityOutput {
   write(text: string): void;
@@ -17,6 +18,8 @@ export interface ActivityReporterOptions {
   usefulProgressWarningMs?: number;
   /** Override the safe automatic TTY rendering mode for tests or embedding hosts. */
   ttyMode?: ActivityTtyMode;
+  /** Environment used for color policy; useful for isolated hosts and tests. */
+  colorEnvironment?: NodeJS.ProcessEnv;
 }
 
 export type ActivityTtyMode = "auto" | "cursor" | "records";
@@ -38,6 +41,7 @@ export class ActivityReporter {
   private usefulProgressWarningPrinted = false;
   private pauseStartedAt = 0;
   private readonly ttyMode: Exclude<ActivityTtyMode, "auto">;
+  private readonly colorEnvironment: NodeJS.ProcessEnv;
   private readonly commandStartedAt: number;
   private readonly phases = new Map<number, ActivePhase>();
   private nextPhaseId = 1;
@@ -66,6 +70,7 @@ export class ActivityReporter {
     this.quietWarningMs = options.quietWarningMs ?? 60_000;
     this.usefulProgressWarningMs = options.usefulProgressWarningMs ?? 300_000;
     this.ttyMode = resolveTtyMode(options.ttyMode);
+    this.colorEnvironment = options.colorEnvironment ?? process.env;
     this.commandStartedAt = this.now();
   }
 
@@ -117,15 +122,16 @@ export class ActivityReporter {
 
   note(message: string): void {
     this.clearLine();
-    this.output.write(`${clean(message, 500)}\n`);
+    this.output.write(`${sanitizeTerminalText(message).replace(/[\r\t]+/g, " ").slice(0, 500)}\n`);
     this.render(true);
   }
 
   writePersistent(text: string): void {
     if (!text) return;
     this.clearLine();
-    this.output.write(text);
-    if (!text.endsWith("\n")) this.output.write("\n");
+    const safeText = sanitizeTerminalText(text);
+    this.output.write(safeText);
+    if (!safeText.endsWith("\n")) this.output.write("\n");
     this.render(true);
   }
 
@@ -220,7 +226,14 @@ export class ActivityReporter {
     const quiet = quietFor >= this.quietWarningMs ? `provider quiet ${formatDuration(quietFor)}; RAFI is responsive` : this.detail;
     const body = [phase?.label, provider || undefined, phase ? quiet : undefined, this.agentStatusLine].filter(Boolean).join(" — ");
     if (this.output.isTTY) {
-      const line = `${FRAMES[this.frame++ % FRAMES.length]} RAFI working: ${body} (${formatDuration(now - this.commandStartedAt)})`;
+      const color = { stream: this.output, env: this.colorEnvironment };
+      const status = phase?.label.toLowerCase() ?? "";
+      const marker = status.includes("fail") || status.includes("error") ? error("!", color)
+        : status.includes("complete") || status.includes("success") ? success("✓", color)
+          : status.includes("warn") || status.includes("quiet") ? warning("!", color)
+            : info(FRAMES[this.frame++ % FRAMES.length], color);
+      const safeBody = sanitizeTerminalText(body);
+      const line = `${marker} ${accent("RAFI", color)} working: ${safeBody} (${formatDuration(now - this.commandStartedAt)})`;
       const semanticKey = semanticStatusKey(body);
       if (this.ttyMode === "records") {
         if (semanticKey === this.lastSemanticKey) return;
@@ -244,7 +257,8 @@ export class ActivityReporter {
     if (semanticKey === this.lastSemanticKey) return;
     if (force || now - this.lastHeartbeatAt >= this.heartbeatMs) {
       this.lastHeartbeatAt = now;
-      this.output.write(`[${new Date(now).toISOString()}] rafi working: ${body} (${formatDuration(now - this.commandStartedAt)})\n`);
+      const color = { stream: this.output, env: this.colorEnvironment };
+      this.output.write(`[${new Date(now).toISOString()}] ${accent("rafi", color)} working: ${sanitizeTerminalText(body)} (${formatDuration(now - this.commandStartedAt)})\n`);
       this.lastSemanticKey = semanticKey;
     }
   }
@@ -346,7 +360,7 @@ function isFailedToolCompletion(event: Extract<BuilderEvent, { kind: "tool" }>):
 }
 
 function clean(value: string, maximum: number): string {
-  return value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, maximum);
+  return sanitizeTerminalText(value).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, maximum);
 }
 
 function semanticStatusKey(body: string): string {

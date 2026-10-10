@@ -1,6 +1,10 @@
 #!/usr/bin/env node
+import { initializeSetupGraph, pendingSetupGraph } from "./graphSetup.js";
+import { DEFAULT_GRAPH_CONFIG, DEFAULT_GRAPH_LIMITS, assertGraphConfig } from "rafi-spec";
+import { adoptGraph, ensureGraphInstallation, loadGraphConfig } from "ai-foreman/graph-maintenance.js";
 import { launchResumeStart } from "./resumeLauncher.js";
 import { Command } from "commander";
+import { buildGraphCommand } from "ai-foreman/cli/graph.js";
 import { resolve, join } from "node:path";
 import { existsSync, realpathSync } from "node:fs";
 import { readFileSync } from "node:fs";
@@ -49,6 +53,7 @@ import { buildManagerCommand } from "ai-foreman/cli/manager.js";
 import { buildStateCommand } from "ai-foreman/cli/state.js";
 import { buildAttachCommand, buildDecideCommand, buildStopCommand } from "ai-foreman/cli/recovery.js";
 import { withActivityContext } from "ai-foreman/activity.js";
+import { accent, error as errorText, sanitizeTerminalText, success } from "ai-foreman/terminal-style.js";
 import { buildPlanCommand, runPlanWorkflow } from "./plan.js";
 import { resolvePlanningRuntime } from "./planningRuntime.js";
 import { buildTicketPlanCommand } from "./ticketPlan.js";
@@ -77,6 +82,7 @@ const PACKAGE_VERSION = JSON.parse(
 )?.version as string;
 
 export const program = new Command();
+program.addCommand(buildGraphCommand());
 program
   .name("rafi")
   .description("Scaffold and compile Rafi AI framework configs for a target repo.")
@@ -96,18 +102,18 @@ program
     const rootFileMode = parseRootFileMode(opts.rootFileMode);
     const loaded = loadRafiConfig(targetDir);
     if (!loaded) {
-      console.error(`rafi: ${RAFI_CONFIG_FILE} not found at ${join(targetDir, RAFI_CONFIG_FILE)}`);
+      console.error(`${errorText("rafi:", { stream: process.stderr })} ${RAFI_CONFIG_FILE} not found at ${sanitizeTerminalText(join(targetDir, RAFI_CONFIG_FILE))}`);
       process.exit(1);
     }
     if (loaded.migrated) {
       writeRafiConfigYaml(targetDir, loaded.config);
-      console.log(`rafi: migrated ${LEGACY_PROJECT_CONFIG_FILE} to ${RAFI_CONFIG_FILE}; you can delete ${LEGACY_PROJECT_CONFIG_FILE}.`);
+    console.log(`${success("rafi: migrated")} ${LEGACY_PROJECT_CONFIG_FILE} to ${RAFI_CONFIG_FILE}; you can delete ${LEGACY_PROJECT_CONFIG_FILE}.`);
     }
     await compileAsync(targetDir, loaded.config, {
       force: opts.force as boolean | undefined,
       rootFileMode,
     });
-    console.log(`rafi: compiled ${targetDir}`);
+    console.log(`${success("rafi: compiled")} ${sanitizeTerminalText(targetDir)}`);
     console.log(`rafi: custom skills or agents can replace Rafi defaults by setting artifact_source: existing and editing their paths in ${RAFI_CONFIG_FILE}.`);
   });
 
@@ -115,7 +121,8 @@ program
   .command("create")
   .description("Run the walkthrough, write rafi-config.yaml, and compile the target repo.")
   .argument("<project>", "path to the target repo")
-  .option("--defaults", "skip walkthrough and use built-in defaults")
+  .option("--defaults", "accept disclosed setup defaults, including scoped Graphify adoption")
+  .option("--no-graph", "opt out of Graphify for new setup")
   .option("--force", "overwrite existing doc files")
   .option("--docs-root <dir>", "repo-relative directory for Rafi starter and tracker docs")
   .option("--runtime <runtime>", "agent runtime targets to configure (both | claude | codex)")
@@ -125,6 +132,9 @@ program
   .action(async (project: string, opts, command: Command) => {
     const targetDir = resolve(project);
     assertLifecycleForCommand(targetDir, "create");
+    const preexistingConfig = loadRafiConfig(targetDir);
+    const graphSetupEligible = !preexistingConfig && !readInstallManifest(targetDir);
+    if (!opts.defaults && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error("Noninteractive create requires --defaults; setup choices have not been accepted");
     if (existsSync(targetDir) && !readInstallManifest(targetDir)) {
       const dirty = gitDirtyPaths(targetDir);
       if (dirty.length) {
@@ -351,9 +361,22 @@ program
       };
     }
 
+    if (preexistingConfig?.config.graph) answers.graph = preexistingConfig.config.graph;
+    else { const adopted=loadGraphConfig(targetDir); if(adopted.adoption)answers.graph=adopted.config; }
+    if (graphSetupEligible && opts.graph !== false) {
+      console.log(`Graphify setup: local AST plus host semantic extraction; selective maintenance; source code, tests, configuration, documentation and active captured sources as version-pinned reference material (no inferred requirement approval); secrets, generated files and runtime state excluded. Limits: ${JSON.stringify(DEFAULT_GRAPH_LIMITS)}. Missing capability is deferred without blocking setup.`);
+      let accepted=Boolean(opts.defaults);
+      if(!opts.defaults){const {confirm,isCancel}=await import("@clack/prompts"); const choice=await confirm({message:"Accept setup with Graphify enabled under this policy?",initialValue:true}); if(isCancel(choice))return;accepted=choice;}
+      if(accepted) answers.graph=structuredClone(DEFAULT_GRAPH_CONFIG);
+      checkpointCreateAnswer("graph-policy", "graph", answers.graph ?? null);
+    }
     let config = await applyCollisionChoices(targetDir, buildProjectConfig(answers), rootFileMode);
     if (interview) interview = checkpointInterview(targetDir, interview, { checkpoint: "write-config" });
     writeRafiConfigYaml(targetDir, config);
+    if (graphSetupEligible && answers.graph?.enabled) {
+      const acceptedGraph = adoptGraph(targetDir, { config: answers.graph, authorization: "setup" });
+      config = { ...config, graph: acceptedGraph.config };
+    }
     updateCreateGitignore(targetDir, createGitignoreModeFromSelection(answers.gitignoreMode));
     config = await compileCreateConfig(
       targetDir,
@@ -391,8 +414,15 @@ program
       }
     }
 
+    const initialGraphAdoption = pendingSetupGraph(targetDir);
+    if(initialGraphAdoption){
+      const adoption = initialGraphAdoption;
+      try { const python=await ensureGraphInstallation(targetDir); const outcome=await initializeSetupGraph(targetDir,adoption.initialOperationId,python); if(outcome.state!=="published")console.log(`rafi: Graphify enabled-unavailable: ${outcome.reason}. Recover with rafi graph refresh.`); }
+      catch(error){console.log(`rafi: Graphify enabled-unavailable: ${String(error)}. Recover with rafi graph refresh.`);}
+    }
+
     const aiStatus = config.flags.usesAI ? "on" : "off";
-    console.log(`rafi: compiled ${targetDir}`);
+    console.log(`${success("rafi: compiled")} ${sanitizeTerminalText(targetDir)}`);
     console.log(`rafi: AI rules: ${aiStatus === "off" ? "excluded — re-run \`rafi compile\` after setting usesAI: true to add them" : "included"}`);
     console.log(`rafi: custom skills or agents can replace Rafi defaults by setting artifact_source: existing and editing their paths in ${RAFI_CONFIG_FILE}.`);
 
@@ -683,7 +713,7 @@ export async function runCreateTicketHandoff(
   const interactive = dependencies.interactive ?? (!defaultsMode && process.stdin.isTTY && process.stdout.isTTY);
 
   if (!interactive) {
-    console.log("\nrafi: next steps:");
+    console.log(`\n${success("rafi: next steps:")}`);
     console.log(`  ${planCommand}`);
     console.log(`  ${setupInitCommand(targetDir, answers, docsRoot)}`);
     console.log(`  ${populateCommand}`);
@@ -769,7 +799,7 @@ export async function runCreateTicketHandoff(
     await buildTicketsCommand().parseAsync(["node", "rafi-tickets", ...setupArgs]);
     updateCreateGitignore(targetDir, opts.gitignoreMode);
   } else {
-    console.log("\nrafi: ticket setup commands:");
+    console.log(`\n${accent("rafi: ticket setup commands:")}`);
     console.log(`  ${setupInitCommand(targetDir, answers, docsRoot, approvedPlanIntent)}`);
     console.log(`  ${populateCommand}`);
     console.log(`  rafi resume ${shellQuote(targetDir)}`);
@@ -844,6 +874,7 @@ async function resumeInterview(projectDir: string, record: InterviewRecord): Pro
     // Create's saved values are retained for audit and recovery. Its historical
     // prompt implementation does not yet accept answer injection, so re-enter
     // the walkthrough rather than replacing configuration with defaults.
+    if(record.answers.graph){assertGraphConfig(record.answers.graph);adoptGraph(projectDir,{config:record.answers.graph,authorization:"setup"});}
     args = ["create", projectDir];
     if (invocation.force) args.push("--force");
     if (typeof invocation.docsRoot === "string") args.push("--docs-root", invocation.docsRoot);
@@ -890,7 +921,7 @@ async function resumeCreateTicketSetupPrompt(projectDir: string, record: Intervi
     completeInterview(projectDir, record);
     return;
   }
-  console.log("\nrafi: ticket setup commands:");
+  console.log(`\n${accent("rafi: ticket setup commands:")}`);
   console.log(`  ${setupCommand}`);
   console.log(`  ${populateCommand}`);
   checkpointInterview(projectDir, record, { status: "paused", checkpoint: "ticket-setup-prompt" });
@@ -1052,10 +1083,10 @@ program
     const loaded = loadRafiConfig(discovered.root);
     if (!loaded) throw new Error(`unable to load ${discovered.configFile} from ${discovered.root}`);
     if (discovered.legacy) {
-      console.log(`rafi: legacy ${LEGACY_PROJECT_CONFIG_FILE} found; run \`rafi compile ${shellQuote(discovered.root)}\` to migrate to ${RAFI_CONFIG_FILE}.`);
+      console.log(`${accent("rafi:")} legacy ${LEGACY_PROJECT_CONFIG_FILE} found; run \`rafi compile ${shellQuote(discovered.root)}\` to migrate to ${RAFI_CONFIG_FILE}.`);
     }
-    console.log(`rafi: project ${loaded.config.appName}`);
-    console.log(`rafi: root ${discovered.root}`);
+    console.log(`${accent("rafi:")} project ${sanitizeTerminalText(loaded.config.appName)}`);
+    console.log(`${accent("rafi:")} root ${sanitizeTerminalText(discovered.root)}`);
     runStatus(discovered.root);
   });
 program.addCommand(buildDoctorCommand());
@@ -1068,7 +1099,7 @@ export async function runRafiCli(argv = process.argv): Promise<void> {
 
 if (isDirectCliEntrypoint()) {
   runRafiCli().catch((err) => {
-    console.error(`rafi: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`${errorText("rafi:", { stream: process.stderr })} ${err instanceof Error ? err.message : String(err)}`);
     process.exit(err instanceof Error && err.name === "HumanDecisionRequired" ? 2 : 1);
   });
 }

@@ -409,12 +409,16 @@ export const agentDefaultsSchema = {
   ...agentDefaultsShape,
 } as const;
 
+import { graphConfigSchema } from "./graph.js";
+
 export const projectConfigSchema = {
   $id: "rafi/projectConfig",
   type: "object",
   additionalProperties: false,
   required: ["appName", "timezone", "stack", "flags", "harness", "agent_files", "agents", "skills"],
   properties: {
+    qa_preparation: { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { enum: ["legacy", "shadow", "enforce"] }, policyVersion: { const: "qa-preparation-v1" }, wallTimeMs: { type: "array", minItems: 5, maxItems: 5, items: [300000, 600000, 1200000, 1800000, 2700000].map(minimum => ({ type: "integer", minimum })) } } },
+    graph: graphConfigSchema,
     appName: { type: "string", minLength: 1 },
     timezone: { type: "string", minLength: 1 },
     stack: stringRecord(["frontend", "backend", "database", "cloud", "packageManager"]),

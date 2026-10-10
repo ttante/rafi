@@ -23,6 +23,7 @@ const EXPECTED = [
   "implementor",
   "improve-codebase-architecture",
   "prd-to-issues",
+  "rafi-graph",
   "tdd",
   "write-a-prd",
 ];

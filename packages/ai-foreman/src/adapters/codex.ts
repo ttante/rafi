@@ -1,3 +1,4 @@
+import type { ProviderTurnPurpose } from "../providerPhase.js";
 import { OperationDeadline } from "../util/deadline.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -36,6 +37,7 @@ const DEFAULT_PROVIDER_IDLE_TIMEOUT_MS = 30 * 60_000;
 /** Persistent JSON-RPC controller for one live Codex thread. */
 export class CodexAdapter implements BuilderAdapter {
   readonly agent = "codex" as const;
+  graphRuntimeSettings() { return { model: this.opts.model, effort: this.opts.effort, fast: this.opts.fast, runtimeExecutable: this.opts.runtimeExecutable }; }
   private readonly eventQueue = new BuilderEventQueue();
   private process?: ChildProcessWithoutNullStreams;
   private nextId = 1;
@@ -77,6 +79,8 @@ export class CodexAdapter implements BuilderAdapter {
     this._sessionRef = opts.resumeSessionRef;
   }
 
+  contractCapabilities() { return { sameSessionAcceptance: true, nativeCompactionBarrier: false }; }
+
   buildInstruction(instruction: string): string {
     return [this.opts.systemPromptAppend,
       this.opts.sessionRole === "builder" ? `Builder runtime contract: shell network ${this.effectiveNetworkAccess() ? "explicitly approved for this build" : "disabled"}; sandbox escalation ${this.effectiveApprovalPolicy() === "on-request" ? "requires separate approval for each exact operation" : "disabled"}. Web tools do not establish shell network access. If acquisition needs unavailable capabilities, request input before running acquisition, or use a local source/dependency bundle with verified provenance. A ticket answer does not change runtime permissions.` : undefined,
@@ -104,7 +108,7 @@ export class CodexAdapter implements BuilderAdapter {
     args.push(instruction); return args;
   }
 
-  async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string }): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: ProviderTurnPurpose }): Promise<TurnResult> {
     const turnId = randomUUID();
     this.activeProviderTurnId = turnId;
     const observer = this.opts.observer;
@@ -129,7 +133,7 @@ export class CodexAdapter implements BuilderAdapter {
     }
   }
 
-  private async sendTurnInternal(instruction: string, policy?: { responseOnly?: boolean }): Promise<TurnResult> {
+  private async sendTurnInternal(instruction: string, policy?: { responseOnly?: boolean; purpose?: ProviderTurnPurpose }): Promise<TurnResult> {
     if (this.closed) throw new Error("builder is closed");
     this.eventQueue.push({ kind: "activity", state: "starting Codex turn", provider: "codex", model: this.opts.model });
     let turnStartDispatched = false;
@@ -148,8 +152,8 @@ export class CodexAdapter implements BuilderAdapter {
         cwd: this.opts.cwd,
         model: this.opts.model ?? null,
         effort: this.opts.effort ?? (this.opts.fast ? "low" : null),
-        approvalPolicy: this.effectiveApprovalPolicy(),
-        sandboxPolicy: this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa"
+        approvalPolicy: policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" ? "never" : this.effectiveApprovalPolicy(),
+        sandboxPolicy: policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" || this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa"
           ? { type: "readOnly", networkAccess: false }
           : { type: "workspaceWrite", writableRoots: [this.opts.cwd], networkAccess: this.effectiveNetworkAccess() },
       });
@@ -303,7 +307,7 @@ export class CodexAdapter implements BuilderAdapter {
     if (!this.usage?.maximum) {
       if (this.opts.allowAutoCompactionSetupTurn === false) return;
       const toolsBefore = this.observedToolCalls;
-      const setup = await this.sendTurnInternal("Rafi internal initialization only. Do not call tools or modify files. Reply briefly that the context is ready.");
+      const setup = await this.sendTurnInternal("Rafi internal initialization only. Do not call tools or modify files. Reply briefly that the context is ready.", { purpose: "initialization", responseOnly: true });
       if (setup.isError) throw new Error(`Codex automatic-compaction setup failed: ${setup.text.slice(0, 240)}`);
       if (this.observedToolCalls !== toolsBefore) throw new Error("Codex automatic-compaction setup unexpectedly called a tool");
     }

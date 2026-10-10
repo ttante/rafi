@@ -1,4 +1,5 @@
 /** Rafi neutral schema — public surface. */
+export * from "./graph.js";
 export * from "./types.js";
 export {
   managerEvidenceRequestV2Schema,
@@ -46,3 +47,7 @@ export { validateBuildWorkAdmissionV1, validateManagerActionRequestV1 } from "./
 export type { BuildOwnershipRepairV1 } from "./types.js";
 export { buildOwnershipRepairV1Schema } from "./schemas.js";
 export { validateBuildOwnershipRepairV1 } from "./validate.js";
+
+export * from "./qaPreparation.js";
+
+export * from "./qaPreparationSchemas.js";

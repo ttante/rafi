@@ -1,3 +1,4 @@
+import { reconcileGraphSourceSelection } from "../graph/sources.js";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
@@ -99,6 +100,8 @@ export function saveSourceRegistry(projectDir: string, registry: SourceRegistryC
   writeFileSync(configPath, stringify(raw, { lineWidth: 100 }), "utf8");
   backfillUniqueTicketSourceIds(root, registry);
   ensurePrivateCacheIgnored(root);
+  try { reconcileGraphSourceSelection(root); }
+  catch (error) { console.error(`rafi graph: registered-source selection unavailable: ${String(error)}. Existing graph evidence must not substitute a later capture.`); }
 }
 
 export function addPendingSourceDescription(registry: SourceRegistryConfig, description: string, now = new Date()): SourceRegistryConfig {

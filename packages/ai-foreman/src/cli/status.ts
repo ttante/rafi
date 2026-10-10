@@ -7,11 +7,12 @@ import { recoverableBuildRuns } from "../buildRuns.js";
 import { WorkflowDb, WORKFLOW_DB_FILE } from "../workflowDb.js";
 import { WorkflowReader } from "../workflowReader.js";
 import { formatWorkflowIssue } from "../outcomes.js";
+import { accent, error, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
 
 type StatusGitHubFailureCode = GitHubFailureCode | "pr_failed";
 
 function fail(message: string): never {
-  console.error(`foreman: ${message}`);
+  console.error(`${error("foreman:", { stream: process.stderr })} ${message}`);
   process.exit(1);
 }
 
@@ -40,6 +41,14 @@ export function runStatus(project: string): void {
       const workflowPath = join(projectDir, WORKFLOW_DB_FILE);
       const workflow = existsSync(workflowPath) ? new WorkflowReader(projectDir, workflowPath) : undefined;
       const activeWorkflows = workflow?.activeRuns() ?? [];
+      for (const run of activeWorkflows) {
+        const preparation = workflow?.qaPreparation(run.runId);
+        if (!preparation || preparation.mode === "legacy") continue;
+        console.log(`foreman: QA preparation ${preparation.mode} — ${run.runId}`);
+        const metrics = workflow!.qaPreparationMetrics(run.runId);
+        console.log(`  admitted ${metrics.approved}; started ${metrics.started}; first reviews ${metrics.firstReviews}; passes ${metrics.firstReviewPasses}; unknown finding causes ${metrics.causes.unknown}`);
+        for (const work of preparation.works) console.log(`  ${work.workId}: ${work.state}; depth ${work.depth ?? "assessment pending"}; contract ${work.digest ?? "unpublished"}${work.detail ? `; ${work.detail}` : ""}`);
+      }
       if (!existsSync(dir) && activeWorkflows.length === 0) { workflow?.close(); fail(`no foreman runs found under ${dir}`); }
       const logs = readdirSync(dir)
         .filter((f) => f.endsWith(".jsonl"))
@@ -65,8 +74,8 @@ export function runStatus(project: string): void {
       const latestFailure = findLatestGitHubFailure(records);
       const batchEnd = [...records].reverse().find((r) => r.event === "batch-end");
 
-      console.log(`foreman: latest run ${logs[logs.length - 1]}`);
-      console.log(`foreman: ${steps.length} step record(s), ${escalations.length} escalation(s)`);
+      console.log(`${accent("foreman:")} latest run ${sanitizeTerminalText(logs[logs.length - 1] ?? "")}`);
+      console.log(`${accent("foreman:")} ${steps.length} step record(s), ${escalations.length} escalation(s)`);
       if (branchEvents.length || prEvents.length) {
         const completed = branchEvents.filter((r) => r.event === "branch-complete").length;
         const issues = branchEvents.filter((r) => r.event === "branch-issue").length;
@@ -74,10 +83,14 @@ export function runStatus(project: string): void {
         console.log(`foreman: branch mode — ${completed} completed, ${issues} issue(s), ${prs} PR(s)`);
       }
       if (batchEnd) {
-        console.log(`foreman: outcome — ${batchEnd.outcome} (${batchEnd.completed}/${batchEnd.requested})`);
+        const outcome = sanitizeTerminalText(String(batchEnd.outcome ?? ""));
+        const styledOutcome = /success|complete|pass/i.test(outcome) ? success(outcome)
+          : /fail|error/i.test(outcome) ? error(outcome)
+            : /warn|partial|blocked/i.test(outcome) ? warning(outcome) : outcome;
+        console.log(`${accent("foreman:")} outcome — ${styledOutcome} (${batchEnd.completed}/${batchEnd.requested})`);
         if (batchEnd.detail) console.log(`foreman: ${batchEnd.detail}`);
       } else {
-        console.log("ai-foreman: run is still in progress or did not finish");
+        console.log(`${accent("ai-foreman:")} run is still in progress or did not finish`);
       }
       if (latestFailure) {
         console.log(`foreman: latest GitHub failure — ${latestFailure.code}: ${latestFailure.message}`);

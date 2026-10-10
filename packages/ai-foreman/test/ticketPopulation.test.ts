@@ -49,3 +49,19 @@ test("ticket-maker proposal parsing errors remain distinct from plan discovery f
     /ticket-maker output is missing RAFI_TICKET_POPULATION_PROPOSAL_START/,
   );
 });
+
+test("ticket-maker preserves planner depth through population and cannot override or retain stale metadata", async () => {
+  const { decision } = await import("./qaPreparationFixtures.js");
+  const approved = structuredClone(plan), generated = structuredClone(proposal);
+  approved.slices[0]!.qa_preparation = decision(2);
+  generated.tickets[0]!.qa_preparation = Object.fromEntries(Object.entries(decision(2)).reverse()) as ReturnType<typeof decision>;
+  assert.deepEqual(validateTicketPopulationProposal(generated, approved, [old]), []);
+  const populated = materializeTicketPopulation(generated, approved, [old]);
+  assert.deepEqual(populated.tickets.find(ticket => ticket.id === "T009")!.qa_preparation, decision(2));
+  populated.tickets.find(ticket => ticket.id === "T009")!.qa_preparation!.rationale = "Changed ticket";
+  assert.notEqual(approved.slices[0]!.qa_preparation!.rationale, "Changed ticket");
+  generated.tickets[0]!.qa_preparation = decision(1); assert.ok(validateTicketPopulationProposal(generated, approved, [old]).some(issue => issue.includes("cannot override")));
+  delete generated.tickets[0]!.qa_preparation; delete approved.slices[0]!.qa_preparation;
+  const stale = { ...old, qa_preparation: decision(4) };
+  assert.equal(materializeTicketPopulation(generated, approved, [stale]).tickets.find(ticket => ticket.id === "T009")!.qa_preparation, undefined);
+});

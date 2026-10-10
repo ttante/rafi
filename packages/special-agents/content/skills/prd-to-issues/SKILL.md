@@ -90,3 +90,5 @@ Reference by number from the parent PRD:
 </issue-template>
 
 Do NOT close or modify the parent PRD file.
+
+When substantial cross-file investigation warrants adopted graph evidence, follow the packaged `rafi-graph` skill. Reuse hosted packets when supplied; routine tests, bookkeeping, and handoff do not trigger refresh. Verify graph claims in source.

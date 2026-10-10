@@ -17,6 +17,7 @@ export class HumanDecisionRequired extends Error {
 export async function durableHumanDecision<T>(input: {
   projectDir: string; runId: string; key: string; prompt: string; choices: HumanDecisionChoice[];
   ticketId?: string; defer?: boolean; observer?: RunObserver; operation: (signal?: AbortSignal) => Promise<T>;
+  onAnswered?: (decision: import("rafi-spec").PendingHumanDecision) => void;
 }): Promise<T> {
   const db = new WorkflowDb(input.projectDir);
   try {
@@ -25,6 +26,7 @@ export async function durableHumanDecision<T>(input: {
     const decision = legacy ?? db.ensureHumanDecision({ decisionKey: key, runId: input.runId, interruptionId: input.ticketId ? `ticket:${input.ticketId}` : input.key, prompt: input.prompt, choices: input.choices });
     if (decision.status === "answered") {
       if (input.ticketId && !db.decisionContinuationAvailable(input.runId, decision.decisionId)) throw new Error("Answered ticket decision has already been dispatched or is uncertain; reconcile before reusing its answer");
+      input.onAnswered?.(decision);
       return decisionResponse(decision) as T;
     }
     console.error(`rafi: input required: ${input.prompt} [decision ${decision.decisionId}]`);
@@ -48,12 +50,13 @@ export async function durableHumanDecision<T>(input: {
     const wait = () => pauseActivityForInput(()=>Promise.race([input.operation(controller.signal),remote]));
     let answer:T;
     try {answer = await (input.observer ? input.observer.span("user_wait", input.prompt, wait) : wait());} finally {if(poll)clearInterval(poll);controller.abort();}
-    if(remoteAnswered) {const current=db.getRun(input.runId)!;db.transition(input.runId,{status:previous.status,checkpoint:"decision-received",state:{...current.state,pendingDecisionId:undefined}});return answer;}
+    if(remoteAnswered) {input.onAnswered?.(db.humanDecision(decision.decisionId)!);const current=db.getRun(input.runId)!;db.transition(input.runId,{status:previous.status,checkpoint:"decision-received",state:{...current.state,pendingDecisionId:undefined}});return answer;}
     if (isCancel(answer) || answer === undefined) return answer;
     const selected = String(answer);
     const choice = decision.choices.find(item => item.id === selected || item.label === selected);
     if (!choice && !input.choices.some(item => item.id === "custom")) throw new Error("answer does not match the durable decision choices");
-    db.answerHumanDecision(input.runId, decision.decisionId, choice?.id ?? "custom", undefined, choice ? undefined : selected);
+    const answered = db.answerHumanDecision(input.runId, decision.decisionId, choice?.id ?? "custom", undefined, choice ? undefined : selected);
+    input.onAnswered?.(answered);
     db.transition(input.runId, { status: previous.status, checkpoint: "decision-received", state: { ...previous.state, pendingDecisionId: undefined } });
     return answer;
   } finally { db.close(); }

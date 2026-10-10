@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { adoptGraph, disableGraph } from "ai-foreman/graph-maintenance.js";
+import { WorkflowDb } from "ai-foreman/workflow-db.js";
+import { DEFAULT_GRAPH_CONFIG } from "rafi-spec";
 import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -626,4 +630,32 @@ test("plan workflow stops after three unsuccessful structured proposal repairs",
   } finally {
     rmSync(dir, { recursive: true });
   }
+});
+
+
+test("actual planner marker correction refuses a recovered session with revoked graph history", async () => {
+  const dir = tempDir(); installRafiConfig(dir);
+  const adoption = adoptGraph(dir, { authorization: "explicit", config: { ...structuredClone(DEFAULT_GRAPH_CONFIG), mode: "code-only" } });
+  let calls = 0, session: string | undefined;
+  try {
+    const outcome = await runPlanWorkflow({ project: dir, brief: "Add labels.", yes: true, rawArgs: ["--no-grill-me"],
+      createPlanner: async () => ({ runtime: "codex", roleBundle: {} as never, skills: [], log: { write() {} } as never, graphRoot: dir,
+        builder: { agent: "codex", sessionId: () => session, events: async function* () {}, close: async () => {}, sendTurn: async () => {
+          calls++;
+          if (calls > 1) return { text: planCompleteOutput(validStructuredProposal()), isError: false, numTurns: 1, costUsd: 0 };
+          // The provider exposes its recovered session identity only on first return.
+          session = "planner-history";
+          const key = createHash("sha256").update("rafi-graph:session-access:v1\0").update(JSON.stringify({ provider: "codex", session })).digest("hex");
+          const db = new WorkflowDb(dir);
+          const access = { policyDigest: adoption.policyDigest, workspace: dir, paths: [], sourceVersions: {}, exclusionsDigest: createHash("sha256").update("rafi-graph:exclusions:v1\0").update(JSON.stringify(JSON.stringify({ graphify: existsSync(join(dir, ".graphifyignore")) ? readFileSync(join(dir, ".graphifyignore"), "utf8") : "", gitIgnores: existsSync(join(dir, ".gitignore")) ? [{ path: ".gitignore", text: readFileSync(join(dir, ".gitignore"), "utf8") }] : [] }))).digest("hex") };
+          try { db.registerGraphEvidence(key, [access]); db.graphStore().put("session-access", key, { grants: [access] }); } finally { db.close(); }
+          disableGraph(dir);
+          return { text: "Planning complete without the required marker", isError: false, numTurns: 1, costUsd: 0 };
+        } },
+      }),
+    });
+    assert.equal(outcome.status, "failed");
+    assert.equal(calls, 1, "marker correction cannot redispatch recovered graph history");
+    assert.equal(existsSync(join(dir, "docs/rafi-plan.json")), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

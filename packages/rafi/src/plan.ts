@@ -1,3 +1,6 @@
+import { loadQaPreparationPolicy } from "ai-foreman/qa-effective-config.js";
+import { qaPreparationDepthDecisionV1Schema } from "rafi-spec";
+import { sendRoleGraphTurn, withGraphDerivedAccess } from "ai-foreman/agent-run.js";
 import { Command } from "commander";
 import {
   appendFileSync,
@@ -108,6 +111,7 @@ const TICKET_GUIDANCE_REQUIREMENTS = [
 
 export interface PlanInstructionOptions {
   brief: string;
+  qaPreparationPolicy?: import("rafi-spec").QaPreparationConfigV1;
   sources?: string[];
   docsRoot: string;
   latestPlanPath: string;
@@ -186,6 +190,8 @@ Permissions and file rules:
 
 Inspect the repository enough to make the plan concrete. Prefer facts from files over assumptions.${mode === "standard" ? ` If a decision is genuinely blocked, ask one focused question with:
 STEP_STATUS: needs_input | question="..." choices="recommended option|alternative"` : " In exhaustive mode, use only the machine-recognizable grill-me question shape above."}
+
+QA preparation planning policy: ${JSON.stringify(opts.qaPreparationPolicy ?? { mode: "legacy" })}. In enforcing mode, select qa_preparation for every slice using this schema: ${JSON.stringify(qaPreparationDepthDecisionV1Schema)}. Standard is the starting policy; Focused requires cited low-risk assessment. Host risk minimums: interaction/compatibility/state/external-dependency=3; authorization/security/migration/data-integrity/concurrency/recovery/deployment=4; unresolved architecture uncertainty=5. The ticket-maker must preserve this decision.
 
 Output contract:
 - Cover the planning concepts Goal, Problem Statement, Repo Findings, Locked Decisions, Open Questions, Scope, Out Of Scope, Risks, Rollback Notes, and Ticket-Maker Guidance in the corresponding structured fields. Include a branch/batch strategy for repeated component-library work when relevant.
@@ -463,6 +469,9 @@ export function buildPlanCommand(): Command {
 }
 
 export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<WorkflowOutcome<PlanResult>> {
+  return withGraphDerivedAccess([], () => runPlanWorkflowOwned(opts));
+}
+async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<WorkflowOutcome<PlanResult>> {
   const projectDir = resolve(opts.project);
   let interview: InterviewRecord | undefined;
   let workflow: WorkflowDb | undefined;
@@ -614,6 +623,7 @@ export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<Workfl
     });
     sourceHints.push(...(stagedSources.pending ?? []).map((item) => `Pending source description (interpret and request if needed): ${item.description}`));
     const instruction = buildPlanInstruction({
+      qaPreparationPolicy: loadQaPreparationPolicy(projectDir),
       brief,
       sources: sourceHints,
       docsRoot,
@@ -1006,13 +1016,13 @@ async function runPlannerTurn(
   role: RoleBuilder,
   instruction: string,
 ): Promise<RoleInstructionRunResult["turn"]> {
-  let result = await role.builder.sendTurn(instruction);
+  let result = await sendRoleGraphTurn(role, instruction, "planning");
   let status = parsePlannerStepStatus(result.text);
   if (status.kind === "unknown") {
     if (!status.error && plannerOutputLooksLikeQuestion(result.text)) {
       status = { kind: "needs_input", question: lastNonEmptyLine(result.text), choices: ["Continue", "Cancel"] };
     } else {
-      result = await role.builder.sendTurn("Protocol correction only: based on the planning work already completed, return exactly one final STEP_STATUS: plan_complete, blocked, or needs_input marker. Do not repeat tools, repository inspection, or source intake.");
+      result = await sendRoleGraphTurn(role, "Protocol correction only: based on the planning work already completed, return exactly one final STEP_STATUS: plan_complete, blocked, or needs_input marker. Do not repeat tools, repository inspection, or source intake.", "planning", {responseOnly:true});
       status = parsePlannerStepStatus(result.text);
       if (status.kind === "unknown") status = { ...status, error: `protocol correction exhausted: ${status.error ?? "missing final marker"}` };
     }
@@ -1113,7 +1123,7 @@ function parseRepairablePlan(
       ...(workMode === "current" ? { completion: "none" as const, provider: "local" as const, pr_ready: false, cleanup: false, dependency_mode: unit.dependency_mode === "stack" ? "wait" as const : unit.dependency_mode } : {}),
     }));
     if (workMode === "current") proposal.stacks = [];
-    const plan = materializeStructuredPlan(proposal, previous);
+    const plan = materializeStructuredPlan(proposal, previous, undefined, loadQaPreparationPolicy(projectDir));
     const invalidRefs = plan.slices.flatMap((slice) => (slice.source_refs ?? [])
       .map((ref) => validateSourceVersionRef(stagedSources, ref, projectDir))
       .filter((issue): issue is string => Boolean(issue)));

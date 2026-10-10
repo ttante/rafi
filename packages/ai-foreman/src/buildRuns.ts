@@ -1,3 +1,4 @@
+import { loadQaPreparationPolicy } from "./qaEffectiveConfig.js";
 export { withBuildInvocation as withBuildRecoveryInvocation, launchDigest as launchArgumentDigest } from "./buildAdmission.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -108,6 +109,7 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
   try {
     workflow.ensureRun(run.runId, "build", now);
     const authority = workflow.acquireLease(run.runId, undefined, now, BUILD_LEASE_STALE_MS);
+    workflow.qaPreparationStore().freezePolicy(run.runId, loadQaPreparationPolicy(input.repositoryRoot));
     return saveBuildRun(input.repositoryRoot, bindBuildAuthority(run, authority), now);
   } finally { workflow.close(); }
 }

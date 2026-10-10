@@ -1,3 +1,4 @@
+import { sendRoleGraphTurn } from "ai-foreman/agent-run.js";
 import { buildScopeRevision } from "ai-foreman/build-approval.js";
 import { HumanDecisionCancelled, servicePendingHumanDecisions } from "ai-foreman/human-decision.js";
 import { addBuildRecoveryOptions } from "./buildRecoveryOptions.js";
@@ -534,8 +535,10 @@ async function collectGuidedCheckpoint(input: GuidedCheckpointInput): Promise<Co
   const effort = ["low", "medium", "high", "xhigh"].includes(input.settings.reasoning)
     ? input.settings.reasoning as "low" | "medium" | "high" | "xhigh"
     : undefined;
+  const sourceWorkspace=(input.projection as {worktree?:string})?.worktree;
   const recovery = await createRoleBuilder({
-    projectDir: input.projectDir,
+    projectDir: sourceWorkspace && existsSync(sourceWorkspace) ? sourceWorkspace : input.projectDir,
+    configRoot: input.projectDir,
     role: input.role,
     agent: input.settings.make,
     model: input.settings.model === "default" ? undefined : input.settings.model,
@@ -575,7 +578,7 @@ async function collectGuidedCheckpoint(input: GuidedCheckpointInput): Promise<Co
         continuityInstruction(),
       ].join("\n\n");
       first = false;
-      const result = await recovery.builder.sendTurn(prompt);
+      const result = await sendRoleGraphTurn(recovery, prompt, "guided-recovery");
       if (result.isError) {
         console.warn(`rafi build:resume: ${input.role} recovery turn failed; provide correction or cancel: ${result.text.slice(0, 240)}`);
         continue;

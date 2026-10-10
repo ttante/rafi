@@ -45,6 +45,10 @@
       "types": "./dist/activity.d.ts",
       "default": "./dist/activity.js"
     },
+    "./terminal-style.js": {
+      "types": "./dist/terminalStyle.d.ts",
+      "default": "./dist/terminalStyle.js"
+    },
     "./agent-run.js": {
       "types": "./dist/agentRun.d.ts",
       "default": "./dist/agentRun.js"
@@ -236,21 +240,45 @@
     "./build-ownership-repair.js": {
       "types": "./dist/buildOwnershipRepair.d.ts",
       "default": "./dist/buildOwnershipRepair.js"
-    }
+    },
+    "./graph.js": {
+      "types": "./dist/graph/turn.d.ts",
+      "default": "./dist/graph/turn.js"
+    },
+    "./graph-maintenance.js": {
+      "types": "./dist/graph/maintenance.d.ts",
+      "default": "./dist/graph/maintenance.js"
+    },
+    "./cli/graph.js": {
+      "types": "./dist/cli/graph.d.ts",
+      "default": "./dist/cli/graph.js"
+    },
+    "./qa-preparation-policy.js": {
+      "types": "./dist/qaPreparationPolicy.d.ts",
+      "default": "./dist/qaPreparationPolicy.js"
+    },
+    "./qa-effective-config.js": {
+      "types": "./dist/qaEffectiveConfig.d.ts",
+      "default": "./dist/qaEffectiveConfig.js"
+    },
+    "./install-ownership.js": "./dist/installOwnership.js"
   },
   "files": [
     "dist",
     "README.md",
     "foreman.yaml",
-    "LICENSE"
+    "LICENSE",
+    "scripts/copy-graph-assets.mjs",
+    "scripts/graph-evaluation.mjs",
+    "scripts/graph-benchmark.mjs"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-graph-assets.mjs",
     "dev": "tsx src/index.ts",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 tsx --test test/providerSmoke.test.ts",
-    "prepublishOnly": "tsc -p ../spec/tsconfig.build.json && tsc -p tsconfig.build.json && pnpm --filter ai-foreman test && tsc --noEmit"
+    "prepublishOnly": "tsc -p ../spec/tsconfig.build.json && pnpm build && pnpm --filter ai-foreman test && tsc --noEmit"
   },
   "keywords": [
     "claude",
@@ -270,16 +298,17 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.148"
   },
   "dependencies": {
-    "special-agents": "0.8.13",
-    "rafi-spec": "0.8.14",
     "@clack/prompts": "^1.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "better-sqlite3": "^12.10.0",
     "commander": "^12.1.0",
+    "ignore": "7.0.5",
     "luxon": "^3.7.2",
     "parse5": "7.2.1",
     "pdfjs-dist": "4.10.38",
+    "rafi-spec": "0.8.14",
+    "special-agents": "0.8.13",
     "yaml": "^2.5.1"
   },
   "devDependencies": {

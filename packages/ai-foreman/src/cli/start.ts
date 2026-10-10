@@ -1,3 +1,5 @@
+import { finalQaRoleInstructions, resolveEffectiveQaConfiguration } from "../qaEffectiveConfig.js";
+import { graphContext, sendGraphTurn } from "../graph/turn.js";
 import { initializeSyntheticWork } from "../buildSyntheticWork.js";
 import { admitApprovedTicket } from "../buildWorkAuthorization.js";
 import { WorkflowReader } from "../workflowReader.js";
@@ -10,6 +12,7 @@ import { assertBuildAssignmentReconciled } from "../buildAssignment.js";
 import { durableHumanDecision, HumanDecisionRequired, HumanDecisionCancelled, servicePendingHumanDecisions } from "../humanDecision.js";
 import { requiresBuildApproval, buildScopeRevision, createBuildApprovalGate } from "../buildApproval.js";
 import { Command, Option } from "commander";
+import { accent, error, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
 import { resolve, join, relative } from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -69,7 +72,6 @@ import { ObservabilityStore, RunObserver } from "../observability.js";
 import { loadProjectAutonomyConfig, resolveAutonomyPolicy, resolveQaEnablement } from "../recoveryPolicy.js";
 import { loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "../qaRecovery.js";
 import { qaDigest, type HandoffAcceptanceReceiptV2, type ProviderSessionRefV2 } from "../qaProtocolV2.js";
-import { loadSkill } from "special-agents";
 import { acceptQaRuntimeHandoff, describeQaRuntimeHandle, frozenQaRuntimeSettings, type QaRuntimeMetadata } from "../qaRuntime.js";
 
 const FOREMAN_VERSION = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
@@ -957,21 +959,9 @@ export function buildStartCommand(): Command {
 
       const qaRuntimeMetadata = new WeakMap<BuilderAdapter, QaRuntimeMetadata>();
       const resolveQaRuntimeMetadata = (qaCwd: string, settings: ResolvedAgentSettings): QaRuntimeMetadata => {
-        const bundle = loadRoleBundle("qa", { projectDir: qaCwd });
-        const effectiveRoleInstructions = `${bundle.system}\n\nYou are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.`;
-        const skills = bundle.skills.map((name) => {
-          const runtimeRoot = settings.make === "codex" ? ".codex" : ".claude";
-          const path = [join(qaCwd, runtimeRoot, "skills", name, "SKILL.md"), join(qaCwd, ".agents", "skills", name, "SKILL.md")].find(existsSync);
-          if (path) {
-            const content = `## ${name}\n${readFileSync(path, "utf8").trim()}`;
-            return { name, path, content, digest: createHash("sha256").update(content).digest("hex") };
-          }
-          const bundled = loadSkill(name);
-          if (!bundled.body?.trim()) throw new Error(`QA runtime ${settings.make} skill ${name} has no exact dispatchable content`);
-          const content = `## ${bundled.name}\n${bundled.body.trim()}`;
-          return { name, path: `special-agents:${name}`, content, digest: createHash("sha256").update(content).digest("hex") };
-        });
-        return { settings: structuredClone(settings), effectiveRoleInstructions, skills };
+        const effective = resolveEffectiveQaConfiguration(cwd, settings);
+        const effectiveRoleInstructions = finalQaRoleInstructions(effective.qaRules);
+        return { settings: structuredClone(settings), effectiveRoleInstructions, skills: effective.skills.map(skill=>({...skill,digest:createHash("sha256").update(skill.content).digest("hex")})) };
       };
 
       const createBuilderForSettings = async (builderCwd: string, settings: ResolvedAgentSettings): Promise<BuilderAdapter> => {
@@ -1757,7 +1747,7 @@ export function buildStartCommand(): Command {
           try {
             auditBuilder = await createBuilder(cwd);
             auditViewer = printEvents(auditBuilder.events());
-            const audit = await auditBuilder.sendTurn(buildBranchAuditInstruction(plan.nodes.map((node) => node.ticket)));
+            const audit = await sendGraphTurn(auditBuilder, buildBranchAuditInstruction(plan.nodes.map((node) => node.ticket)), graphContext(cwd, auditBuilder.sessionRef?.()?.cwd ?? cwd, "branch-dependency-audit", plan.nodes.map(node=>node.ticket.id).join(" ")), { purpose: "planning" });
             if (audit.isError) throw new Error(audit.text);
             const auditDependencies = parseAuditDependencies(audit.text);
             plan = buildBranchPlan(tickets, states, {
@@ -2310,10 +2300,10 @@ export function buildStartCommand(): Command {
         builderFast ? "fast" : null,
         qaEnabled ? null : "qa=off",
       ].filter(Boolean).join(" ");
-      console.log(`foreman: driving a ${agent} builder through ${steps} step(s)${modifiers ? ` [${modifiers}]` : ""}`);
-      console.log(`foreman: project ${cwd}`);
-      if (trackerRelPath) console.log(`foreman: tracker ${trackerRelPath}`);
-      console.log(`foreman: log ${logPath}\n`);
+      console.log(`${accent("foreman:")} driving a ${sanitizeTerminalText(agent)} builder through ${steps} step(s)${modifiers ? ` [${sanitizeTerminalText(modifiers)}]` : ""}`);
+      console.log(`${accent("foreman:")} project ${sanitizeTerminalText(cwd)}`);
+      if (trackerRelPath) console.log(`${accent("foreman:")} tracker ${sanitizeTerminalText(trackerRelPath)}`);
+      console.log(`${accent("foreman:")} log ${sanitizeTerminalText(logPath)}\n`);
 
       const viewer = printEvents(builder.events());
 
@@ -2459,8 +2449,12 @@ export function buildStartCommand(): Command {
         activeObserver = undefined;
         process.off("exit", finishObservationOnExit);
 
-        console.log(`\nforeman: ${result.completed}/${result.requested} step(s) completed`);
-        console.log(`foreman: outcome — ${result.outcome}`);
+        console.log(`\n${accent("foreman:")} ${result.completed}/${result.requested} step(s) completed`);
+        const safeOutcome = sanitizeTerminalText(result.outcome);
+        const resultOutcome = /success|complete|pass/i.test(safeOutcome) ? success(safeOutcome)
+          : /fail|error/i.test(safeOutcome) ? error(safeOutcome)
+            : /warn|partial|blocked/i.test(safeOutcome) ? warning(safeOutcome) : safeOutcome;
+        console.log(`${accent("foreman:")} outcome — ${resultOutcome}`);
         if (result.detail) console.log(`foreman: ${result.detail}`);
         if (buildRun.status === "completed") printHandoffPruneCommand(buildRun.runId);
         if (result.outcome !== "all-done" && result.outcome !== "plan-complete") {
@@ -2632,8 +2626,10 @@ export function createQaNonconvergenceHandler(projectDir: string, noninteractive
     if (!runId) throw new Error("QA nonconvergence requires its owning build run");
     const scope = createHash("sha256").update(JSON.stringify([buildScopeRevision(projectDir), context.ticket, context.history])).digest("hex");
     let round = 0;
+    let waiverDecisionId: string | undefined;
     const ask = <T>(phase: string, choices: Array<{ id: string; label: string }>, operation: () => Promise<T>) => durableHumanDecision({
       projectDir, runId, ticketId: context.ticket.id, observer: observer?.(), defer: noninteractive,
+      onAnswered: decision => { if (phase.startsWith("QA waiver confirmation") && decision.selectedChoiceId === "yes") waiverDecisionId = decision.decisionId; },
       key: `qa-nonconvergence:${scope}:${round}:${phase}`, prompt: `${context.ticket.id}: ${phase}`, choices, operation,
     });
     while (true) {
@@ -2652,7 +2648,9 @@ export function createQaNonconvergenceHandler(projectDir: string, noninteractive
         ] }));
         if (approved === "yes") {
           const db = new WorkflowDb(projectDir);
+          let authorizationRef: string | undefined;
           try {
+            if (db.qaPreparationStore().policy(runId)?.mode === "enforce") authorizationRef = db.authorizeContractQaWaiver(runId, context.ticket.id, waiverDecisionId!);
             const lease = db.currentLease();
             if (lease) {
               const detail = JSON.stringify({ decision: "waive", ticket: context.ticket.id, unresolved: context.history, at: new Date().toISOString() });
@@ -2661,7 +2659,7 @@ export function createQaNonconvergenceHandler(projectDir: string, noninteractive
             }
           } finally { db.close(); }
           console.log(`foreman: QA WAIVER recorded for ${context.ticket.id}; validation_result will be failed`);
-          return { action: "waive" };
+          return { action: "waive", ...(authorizationRef ? { authorizationRef } : {}) };
         }
         continue;
       }

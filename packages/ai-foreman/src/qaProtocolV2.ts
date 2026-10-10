@@ -42,6 +42,7 @@ export interface QaConfinementV2 {
 }
 
 export interface QaReviewBasisV2 {
+  contractBinding?: { version: 1; transportVersion?: 1; revision: number; digest: string; admissionDigest: string; commonConfigDigest: string };
   version: 2;
   ticketDigest: string;
   instructionDigest: string;
@@ -157,6 +158,7 @@ export interface BuilderRemediationReceiptV3 extends Omit<BuilderRemediationRece
 }
 
 export interface QaPassCertificateV2 {
+  contractCoverage?: { version: 1; contractDigest: string; revision: number; coverageDigest: string; attemptId: string; sessionId: string };
   version: 2;
   certificateId: string;
   runId: string;
@@ -212,6 +214,7 @@ export type QaReducerEventV2 =
   | { type: "builder-guidance-followup-intended" }
   | { type: "finalization-started" }
   | { type: "finalization-invalidated"; reason: string }
+  | { type: "contract-amended"; predecessorDigest: string; contractDigest: string; reason: string }
   | { type: "completed" };
 
 export function initialQaReducerState(runId: string, ticketId: string): QaReducerStateV2 {
@@ -222,6 +225,9 @@ export function initialQaReducerState(runId: string, ticketId: string): QaReduce
 export function reduceQaState(current: QaReducerStateV2, event: QaReducerEventV2): QaReducerStateV2 {
   const next = { ...current, revision: current.revision + 1 };
   switch (event.type) {
+    case "contract-amended":
+      if (["completed", "waived", "finalizing", "turn-intended", "turn-uncertain", "remediation-intended", "remediation-uncertain"].includes(current.state) || !event.reason.trim()) invalid(current, event);
+      return { ...next, state: "recheck-required", reviewBasisDigest: undefined, retrySlot: undefined, passCertificateId: undefined };
     case "source-frozen":
       if (!["idle", "recheck-required", "operator-menu", "turn-uncertain", "remediation-uncertain", "passed"].includes(current.state)) invalid(current, event);
       return { ...next, state: "source-frozen", sourceStateDigest: event.sourceStateDigest, reviewBasisDigest: undefined, retrySlot: undefined, passCertificateId: undefined };

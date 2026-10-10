@@ -1,3 +1,5 @@
+import { renderBuildWorkContext } from "../buildWorkContext.js";
+import { loadTicketSetupConfigWithDefaults } from "../tickets/setupConfig.js";
 import { deliverBuilderGuidanceFollowup } from "../builderGuidanceFollowup.js";
 import { qaDigest } from "../qaProtocolV2.js";
 import { loadTickets } from "../tickets/ticketLoader.js";
@@ -363,7 +365,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         });
       });
 
-      let ticketInstruction = resumeSession ? buildBranchTicketResumeInstruction(node, opts.trackerPaths) : buildBranchTicketInstruction(node, opts.trackerPaths);
+      let ticketInstruction = resumeSession ? buildBranchTicketResumeInstruction(node, { ...opts.trackerPaths, validationChecklist: loadTicketSetupConfigWithDefaults(opts.projectDir).build.validation_checklist }) : buildBranchTicketInstruction(node, { ...opts.trackerPaths, validationChecklist: loadTicketSetupConfigWithDefaults(opts.projectDir).build.validation_checklist });
       if (continuations.length) ticketInstruction += "\n\nScoped answers authorizing this ticket continuation:\n" + continuations.map(decision => `${decision.prompt}\nAnswer: ${decision.answer ?? decision.selectedChoiceId}`).join("\n");
       // Reattach the predecessor even for a `fresh` strategy so the host can
       // publish and validate a cumulative handoff before creating its successor.
@@ -392,7 +394,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         3,
         opts.projectDir,
         undefined,
-        undefined,
+        opts.createQa,
         opts.qaSessionStrategy ?? "compact",
         undefined,
         opts.builderSessionStrategy ?? "compact",
@@ -1065,12 +1067,14 @@ function failureLogFields(node: BranchPlanNode, pr: PrResult): Record<string, un
 
 export function buildBranchTicketInstruction(
   node: BranchPlanNode,
-  trackerPaths: { progressDoc?: string; archiveDoc?: string } = {},
+  trackerPaths: { progressDoc?: string; archiveDoc?: string; validationChecklist?: string[] } = {},
 ): string {
   const progressDoc = trackerPaths.progressDoc ?? "docs/ticket-progress.md";
   return `Implement exactly this ticket in the current branch/worktree:
 
 ${node.ticket.id}: ${node.ticket.title}
+
+${renderBuildWorkContext(node.ticket, trackerPaths.validationChecklist ?? [])}
 
 Summary:
 ${node.ticket.summary}
@@ -1092,19 +1096,21 @@ Branch-mode rules:
 - If another selected ticket is required before this one can be completed, stop and end with STEP_STATUS: blocked | ticket="${node.ticket.id}" branch_dependency="<ticket-id>" reason="<why>".
 - End with STEP_STATUS: done | ticket="${node.ticket.id}" summary="<what changed>" when the ticket is implemented.
 
-QA will happen in this same builder session after implementation.
+Final QA runs independently in a separate disposable snapshot and fresh reviewer conversation.
 
 ${MARKER_SPEC}`;
 }
 
 export function buildBranchTicketResumeInstruction(
   node: BranchPlanNode,
-  trackerPaths: { progressDoc?: string; archiveDoc?: string } = {},
+  trackerPaths: { progressDoc?: string; archiveDoc?: string; validationChecklist?: string[] } = {},
 ): string {
   const progressDoc = trackerPaths.progressDoc ?? "docs/ticket-progress.md";
   return `Continue the existing builder session for this ticket in the current branch/worktree:
 
 ${node.ticket.id}: ${node.ticket.title}
+
+${renderBuildWorkContext(node.ticket, trackerPaths.validationChecklist ?? [])}
 
 Resume from the current repository state. Inspect the worktree if needed, then finish only this ticket.
 
@@ -1116,7 +1122,7 @@ Branch-mode rules:
 - If another selected ticket is required before this one can be completed, stop and end with STEP_STATUS: blocked | ticket="${node.ticket.id}" branch_dependency="<ticket-id>" reason="<why>".
 - End with STEP_STATUS: done | ticket="${node.ticket.id}" summary="<what changed>" when the ticket is implemented.
 
-QA will happen in this same builder session after implementation.
+Final QA runs independently in a separate disposable snapshot and fresh reviewer conversation.
 
 ${MARKER_SPEC}`;
 }

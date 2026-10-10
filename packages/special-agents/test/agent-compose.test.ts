@@ -61,7 +61,7 @@ test("composition is deterministic", () => {
 test("getAgent bundles system text, skills, model, and effort", () => {
   const qa = getAgent("qa");
   assert.equal(qa.manifest.role, "qa");
-  assert.deepEqual(qa.skills, ["grill-me", "tdd"]);
+  assert.deepEqual(qa.skills, ["grill-me", "tdd", "rafi-graph"]);
   assert.equal(qa.model, null);
   assert.equal(qa.effort, null);
   assert.ok(qa.system.includes("## Security, Privacy, And Compliance"));

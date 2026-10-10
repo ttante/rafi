@@ -7,6 +7,8 @@ function output(isTTY: boolean): { chunks: string[]; target: { isTTY: boolean; w
   return { chunks, target: { isTTY, write: (text) => { chunks.push(text); } } };
 }
 
+function stripAnsi(value: string): string { return value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ""); }
+
 test("status spam cannot hide useful-progress age and human waits do not consume it", () => {
   const sink = output(false);
   let now = 0;
@@ -34,7 +36,7 @@ test("TTY activity continuously redraws one elapsed-time line and cleans it up",
     });
   }, { output: sink.target, displayDelayMs: 0, tickMs: 5, quietWarningMs: 10_000, ttyMode: "cursor" });
   const rendered = sink.chunks.join("");
-  assert.match(rendered, /RAFI working: planning tickets/);
+  assert.match(stripAnsi(rendered), /RAFI working: planning tickets/);
   assert.match(rendered, /\r\x1b\[2K/);
   assert.equal(rendered.endsWith("\r\x1b[2K"), true);
 });
@@ -50,6 +52,32 @@ test("non-TTY activity coalesces unchanged heartbeats without ANSI", async () =>
   assert.match(rendered, /rafi working: fetching sources/);
   assert.doesNotMatch(rendered, /\x1b/);
   assert.equal(rendered.trim().split("\n").length, 1);
+});
+
+test("TTY activity colors host labels, while redirected forced color remains opt-in", () => {
+  const ttySink = output(true);
+  const ttyReporter = new ActivityReporter("test", { output: ttySink.target, colorEnvironment: {}, displayDelayMs: 0, ttyMode: "records" });
+  const ttyEnd = ttyReporter.begin("building");
+  ttyEnd(); ttyReporter.dispose();
+  assert.match(ttySink.chunks.join(""), /\x1b\[36mRAFI\x1b\[39m/);
+
+  const pipeSink = output(false);
+  const pipeReporter = new ActivityReporter("test", { output: pipeSink.target, colorEnvironment: {}, displayDelayMs: 0 });
+  const pipeEnd = pipeReporter.begin("building");
+  pipeEnd(); pipeReporter.dispose();
+  assert.doesNotMatch(pipeSink.chunks.join(""), /\x1b/);
+});
+
+test("activity note and persistent output cannot emit hostile terminal controls", () => {
+  const sink = output(false);
+  const reporter = new ActivityReporter("test", { output: sink.target, colorEnvironment: {} });
+  reporter.note("safe\x1b]0;title\x07 text\nnext");
+  reporter.writePersistent("persistent\x1b[2J\nline\x01");
+  const rendered = sink.chunks.join("");
+  assert.doesNotMatch(rendered, /\x1b\](?:0;title|\[2J)/);
+  assert.doesNotMatch(rendered, /\x01/);
+  assert.match(rendered, /safe text\nnext\n/);
+  assert.match(rendered, /persistent\nline/);
 });
 
 test("non-TTY activity coalesces numeric-only status changes", () => {
@@ -180,7 +208,7 @@ test("automatic TTY records coalesce timer and numeric-only changes without ANSI
     process.env.TERM = "xterm-256color";
     const sink = output(true);
     let now = 0;
-    const reporter = new ActivityReporter("build", { output: sink.target, now: () => now, displayDelayMs: 0 });
+    const reporter = new ActivityReporter("build", { output: sink.target, colorEnvironment: { NO_COLOR: "" }, now: () => now, displayDelayMs: 0 });
     const end = reporter.begin("checking ticket 1");
     now = 10_000;
     reporter.update("checking ticket 2");
@@ -207,7 +235,7 @@ test("record TTY resets semantic coalescing after an activity lifecycle ends", (
   const reporter = new ActivityReporter("test", { output: sink.target, displayDelayMs: 0, ttyMode: "records" });
   reporter.begin("checking ticket 1")();
   reporter.begin("checking ticket 2")();
-  assert.equal(sink.chunks.filter((chunk) => chunk.includes("RAFI working: checking ticket")).length, 2);
+  assert.equal(sink.chunks.filter((chunk) => stripAnsi(chunk).includes("RAFI working: checking ticket")).length, 2);
   reporter.dispose();
 });
 
@@ -215,10 +243,10 @@ test("record TTY keeps persistent output without repeating the current status", 
   const sink = output(true);
   const reporter = new ActivityReporter("test", { output: sink.target, displayDelayMs: 0, ttyMode: "records" });
   const end = reporter.begin("running command 1");
-  const statusLinesBefore = sink.chunks.filter((chunk) => chunk.includes("RAFI working:")).length;
+  const statusLinesBefore = sink.chunks.filter((chunk) => stripAnsi(chunk).includes("RAFI working:")).length;
   reporter.writePersistent("command output");
   reporter.note("rafi: retrying provider request");
-  const statusLinesAfter = sink.chunks.filter((chunk) => chunk.includes("RAFI working:")).length;
+  const statusLinesAfter = sink.chunks.filter((chunk) => stripAnsi(chunk).includes("RAFI working:")).length;
   assert.equal(statusLinesAfter, statusLinesBefore);
   assert.match(sink.chunks.join(""), /command output\n/);
   assert.match(sink.chunks.join(""), /rafi: retrying provider request\n/);
@@ -235,8 +263,8 @@ test("non-TTY heartbeat behavior ignores TTY rendering overrides", () => {
   reporter.dispose();
   const rendered = sink.chunks.join("");
   assert.match(rendered, /^\[/);
-  assert.match(rendered, /rafi working:/);
-  assert.doesNotMatch(rendered, /RAFI working:/);
+  assert.match(stripAnsi(rendered), /rafi working:/);
+  assert.doesNotMatch(stripAnsi(rendered), /RAFI working:/);
   assert.doesNotMatch(rendered, /\x1b/);
 });
 

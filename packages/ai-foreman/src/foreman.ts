@@ -1,4 +1,13 @@
+import { withGraphSessionAccess } from "./graph/session.js";
+import { collectBuilderContractCoverage } from "./qaBuilderCoverage.js";
+import { maintainGraphTask } from "./graph/boundary.js";
+import { ensureBuilderContract } from "./qaBuildGate.js";
+import { actualContractSession } from "./qaContractDelivery.js";
+import { renderBuildWorkContext } from "./buildWorkContext.js";
+import { loadTicketSetupConfigWithDefaults } from "./tickets/setupConfig.js";
 import { deliverBuilderGuidanceFollowup } from "./builderGuidanceFollowup.js";
+import { graphContext, sendGraphTurn } from "./graph/turn.js";
+import type { GraphPurpose } from "rafi-spec";
 import { qaDigest } from "./qaProtocolV2.js";
 import { BuildControlBoundary } from "./buildInterventions.js";
 import { buildScopeRevision } from "./buildApproval.js";
@@ -313,6 +322,8 @@ export interface ForemanNotificationOptions {
 
 /** Drives one builder through a batch of N steps via the STEP_STATUS protocol. */
 export class Foreman {
+  private graphPurpose: GraphPurpose = "implementation";
+  setGraphPurpose(purpose:GraphPurpose):void {this.graphPurpose=purpose;}
   private readonly ticketsEnabled: boolean;
   private readonly notificationsEnabled: boolean;
   private readonly terminalBellEnabled: boolean;
@@ -427,18 +438,34 @@ export class Foreman {
     instruction: string,
     mode: "builder" | "qa" = "builder",
   ): Promise<{ result: TurnResult; status: StepStatus }> {
+    return this.projectDir
+      ? withGraphSessionAccess(this.projectDir, adapter, () => this.doTurnWithOwned(adapter, instruction, mode))
+      : this.doTurnWithOwned(adapter, instruction, mode);
+  }
+  private async doTurnWithOwned(
+    adapter: BuilderAdapter,
+    instruction: string,
+    mode: "builder" | "qa" = "builder",
+  ): Promise<{ result: TurnResult; status: StepStatus }> {
     const ticket = mode === "builder" ? this.currentTicketId : undefined;
     const scopedInstruction = (text: string): string => !ticket || text.includes(`Ticket scope: ${ticket}.`) ? text
       : `${text}\nTicket scope: ${ticket}. Do not substitute another ticket. Include ticket="${ticket}" in any STEP_STATUS marker.`;
     instruction = scopedInstruction(instruction);
     const send = async (text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> => {
-      const finalInstruction = scopedInstruction(text);
-      const assignment = ticket && this.projectDir ? beginBuildAssignment(this.projectDir, this.qaRunId, ticket, this.builderWorktree ?? this.projectDir, finalInstruction) : undefined;
-      const response = await adapter.sendTurn(assignment?.instruction ?? finalInstruction, policy);
+      const context = ticket && this.projectDir ? renderBuildWorkContext(this.ticketForQa(0, ticket), loadTicketSetupConfigWithDefaults(this.projectDir).build.validation_checklist) : "";
+      const contractContext = ticket && this.projectDir ? await ensureBuilderContract(this.projectDir, this.qaRunId, ticket, this.builderWorktree ?? this.projectDir, adapter, this.qaFactory) : "";
+      const finalInstruction = scopedInstruction([text, context, contractContext].filter(Boolean).join("\n\n"));
+      const assignment = ticket && this.projectDir ? beginBuildAssignment(this.projectDir, this.qaRunId, ticket, this.builderWorktree ?? this.projectDir, finalInstruction, undefined, adapter) : undefined;
+      const submitted=assignment?.instruction??finalInstruction;
+      const response = this.projectDir
+        ? await sendGraphTurn(adapter,submitted,graphContext(this.projectDir,this.builderWorktree??this.projectDir,this.graphPurpose,submitted,{...(assignment?{operationId:`graph:${assignment.operationId}`} : {}),logicalTaskId:assignment?.operationId??randomUUID(),runId:this.qaRunId,workId:ticket}),policy)
+        : await adapter.sendTurn(submitted, policy);
       const parsed = parseStepStatus(response.text);
       const applicable = parsed.kind === "unknown" && looksLikeQuestion(response.text) ? { kind: "needs_input" as const, question: lastLine(response.text) } : parsed;
+      if (assignment && !response.isError && !response.failure && ["done", "plan_complete"].includes(applicable.kind)) await collectBuilderContractCoverage(this.projectDir!, assignment.runId, assignment.ticketId, assignment.worktree, adapter, assignment.operationId, submitted, response);
       const rejection = assignment ? finishBuildAssignment(this.projectDir!, assignment, response, applicable) : undefined;
       if (rejection) throw new BuildAssignmentRejected(rejection);
+      if(assignment&&!response.isError&&applicable.kind==="done"){try{const graphOutcome=await maintainGraphTask(this.projectDir!,assignment.worktree,assignment.operationId,adapter);if(graphOutcome)this.log.write("graph-maintenance",{outcome:graphOutcome});}catch(error){this.log.write("graph-maintenance",{state:"deferred",detail:String(error)});}}
       return response;
     };
     if (adapter === this.builder && this.beforeBuilderTurn) {
@@ -591,7 +618,7 @@ export class Foreman {
   async runPreflight(n: number, ticketsContent?: string, preferredTicketId?: string, executionTickets?: readonly string[]): Promise<string> {
     const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId) + (executionTickets ? `\nAuthorized ticket scope: ${executionTickets.join(", ")}. Plan only these tickets. Tickets awaiting answers are not eligible for implementation.` : "");
     if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, instruction);
-    const result = await this.builder.sendTurn(instruction);
+    const result = this.projectDir ? await sendGraphTurn(this.builder,instruction,graphContext(this.projectDir,this.builderWorktree??this.projectDir,"build-preflight",instruction), { purpose: "planning" }) : await this.builder.sendTurn(instruction, { purpose: "planning" });
     await this.observeBuilderNative(this.builder);
     this.log.write("preflight", {
       ticketsProvided: ticketsContent !== undefined,
@@ -606,7 +633,7 @@ export class Foreman {
   /** Send user feedback on the plan; builder responds with a revised list. Does not count toward steps. */
   async sendPreflightFeedback(feedback: string): Promise<void> {
     if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, feedback);
-    const result = await this.builder.sendTurn(feedback);
+    const result = this.projectDir ? await sendGraphTurn(this.builder,feedback,graphContext(this.projectDir,this.builderWorktree??this.projectDir,"build-preflight",feedback), { purpose: "planning" }) : await this.builder.sendTurn(feedback, { purpose: "planning" });
     await this.observeBuilderNative(this.builder);
     this.log.write("preflight", { feedback: true, costUsd: result.costUsd, isError: result.isError });
     if (result.isError) throw new Error(result.text);

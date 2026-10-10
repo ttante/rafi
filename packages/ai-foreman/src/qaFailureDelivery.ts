@@ -1,7 +1,14 @@
+import { dispatchWithGraphAccess } from "./graph/session.js";
+import { currentGraphDerivedAccess, inheritGraphDerivedAccess, withGraphDerivedAccess } from "./graph/derived.js";
+import { collectBuilderContractCoverage, assertBuilderContractCoverage } from "./qaBuilderCoverage.js";
+import { queueGraphMaintenance, maintainGraphTask } from "./graph/boundary.js";
+import { ensureBuilderContract } from "./qaBuildGate.js";
+import { actualContractSession, assertContractReceipt } from "./qaContractDelivery.js";
+import { graphContext, parseGraphRequest, prepareGraphInstruction, sendGraphTurn } from "./graph/turn.js";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { reportOccurrenceId } from "./qaHandbackMigration.js";
-import type { QaDeliveryOutcome, QaDeliveryTurnV3, QaDeliveryInvocationV3 } from "./qaDeliveryJournal.js";
+import type { QaDeliveryOutcome, QaDeliveryTurn, QaDeliveryInvocationV3 } from "./qaDeliveryJournal.js";
 import { boundedQaHistory, evidenceDigest, utf8Prefix } from "./qaHandbackHistory.js";
 import {
   BUILDER_QA_REMEDIATION_END,
@@ -115,7 +122,7 @@ interface QaFailureHandoffV3 {
   createdAt: string;
 }
 
-interface DispatchedTurn { turn?: TurnResult; record: QaDeliveryTurnV3; contract?: BuilderQaRemediationContract; detail?: string }
+interface DispatchedTurn { turn?: TurnResult; record: QaDeliveryTurn; contract?: BuilderQaRemediationContract; detail?: string }
 
 /** Narrow fault hooks for crash testing; production callers supply none. */
 export interface QaDeliveryFaultHooks {
@@ -127,6 +134,12 @@ export interface QaDeliveryFaultHooks {
 export class QaFailureDeliveryService {
   constructor(private readonly faults: QaDeliveryFaultHooks = {}) {}
   async deliver(input: QaFailureDeliveryInput, controller: QaFailureDeliveryController): Promise<QaFailureDeliveryResult> {
+    const inherited = currentGraphDerivedAccess();
+    const grants = inherited ? [...(Array.isArray(inherited) ? inherited : [inherited])] : [];
+    try { return await withGraphDerivedAccess(grants, () => this.deliverOwned(input, controller)); }
+    finally { inheritGraphDerivedAccess(grants); }
+  }
+  private async deliverOwned(input: QaFailureDeliveryInput, controller: QaFailureDeliveryController): Promise<QaFailureDeliveryResult> {
     const began = performance.now();
     const handoffId = qaDigest("qa-failure-handoff", { runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, remediationGeneration: input.remediationGeneration + 1 });
     const operationId = qaDigest("builder-remediation-operation", { runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, handoffId, remediationGeneration: input.remediationGeneration + 1 });
@@ -205,6 +218,7 @@ export class QaFailureDeliveryService {
     else if (builder.compact) { const compacted = await builder.compact(); if (!compacted.ok) return { ok: false, outcome: "delivery-uncertain", detail: `Builder compaction failed: ${compacted.error}` }; }
     controller.setAdapter?.(builder);
     if (controller.beforeTurn) { builder = await phase("before-dispatch-readiness", () => controller.beforeTurn!(builder!, instruction, input.builderWorktree)); controller.setAdapter?.(builder); }
+    instruction += "\n" + await ensureBuilderContract(input.projectDir, input.runId, input.ticket.id, input.builderWorktree, builder);
     const preDispatch = await phase("source-before-dispatch", () => captureFrozenQaSourceAsync(input.builderWorktree));
     if (preDispatch.digest !== input.reviewedSourceStateDigest) return this.drift(input, "source-drift-before-dispatch", preDispatch.digest, handoffId);
     let session: ProviderSessionRefV1;
@@ -212,15 +226,21 @@ export class QaFailureDeliveryService {
     catch (error) { return { ok: false, outcome: "delivery-uncertain", detail: String(error), handoffId, operationId }; }
     // Byte counts are not token counts. This deliberately conservative bound also
     // reserves wrapper instructions, response and continuity against known capacity.
+    const graphDeliveryContext = graphContext(input.projectDir,input.builderWorktree,"remediation",instruction,{operationId:`graph-delivery:${operationId}`,logicalTaskId:operationId,sourceRef:preDispatch.digest,runId:input.runId,workId:input.ticket.id,qualifies:input.report.findings.some(f=>f.locations.length>1)});
+    let graphPrepared = await prepareGraphInstruction(instruction,graphDeliveryContext);
     const usage = await builder.contextUsage?.();
+    if (usage?.maximum && Buffer.byteLength(graphPrepared.instruction) + 16_384 > usage.maximum - usage.used) graphPrepared = { instruction, bytes: 0 };
+    instruction = graphPrepared.instruction;
     if (usage?.maximum && Buffer.byteLength(instruction) + 16_384 > usage.maximum - usage.used) return { ok: false, outcome: "response-invalid", detail: "QA handback capacity error: mandatory requirements/findings and response reserve exceed available model context", handoffId, operationId };
     const db = new WorkflowDb(input.projectDir);
     let intent: { recoveryId: string; expectedRevision: number };
-    let record: QaDeliveryTurnV3;
+    let record: QaDeliveryTurn;
     let guidanceIds: string[] = [];
     try {
       intent = db.atomic(() => {
         const head = validateReviewBinding(db, input);
+        const admission = db.assertAdmittedWork(input.runId, input.ticket.id);
+        if (db.qaPreparationStore().policy(input.runId)?.mode === "enforce") assertContractReceipt(db.qaPreparationStore(), input.runId, input.ticket.id, admission.requirementsDigest, actualContractSession(builder!, input.builderWorktree, input.projectDir), builder!);
         const guidance = db.reserveGuidance(input.runId, input.ticket.id, "builder", operationId, preDispatch.digest, instruction);
         instruction = guidance.text; guidanceIds = guidance.ids;
         const policy = db.autonomyPolicy(input.runId);
@@ -235,10 +255,24 @@ export class QaFailureDeliveryService {
       });
     } finally { db.close(); }
     this.faults.afterIntent?.();
-    let response = await phase("initial-work-and-validation", () => this.dispatch(input, builder!, record!, instruction));
+    let response!: DispatchedTurn;
+    let graphSequence=0;
+    const exchangeResult = await phase("initial-work-and-validation", () => sendGraphTurn(builder!,instruction,graphDeliveryContext,{handback:true,logicalActionId:operationId},async(prompt)=>{
+      if(graphSequence>0){const nextDb=new WorkflowDb(input.projectDir);try{
+        const head=nextDb.qaTicketHead(input.runId,input.ticket.id);
+        const active=nextDb.qaRemediationAttempt(operationId);
+        if(head.revision!==intent.expectedRevision || head.state!=="remediation-intended" || active?.status!=="started" || active.reviewAttemptId!==input.reviewAttemptId) throw new Error("Graph continuation lost its remediation authority");
+        record=this.turnIntent(nextDb,operationId,occurrence,session,prompt,graphSequence,"graph-continuation");}finally{nextDb.close();}}
+      graphSequence++;
+      response=await this.dispatch(input,builder!,record!,prompt);
+      if(!response.turn) return {text:response.detail??"Remediation dispatch uncertain",isError:true,costUsd:0,numTurns:0};
+      if(response.record.validationErrors?.length) return {...response.turn,isError:true};
+      return response.turn;
+    },{...graphPrepared,instruction}));
     const guidanceDb = new WorkflowDb(input.projectDir);
     try { guidanceDb.finishGuidance(guidanceIds, "builder", {submitted:response.record.status === "completed" && response.record.providerTurnId ? true : undefined, receipt:response.record.providerTurnId ? response.record : undefined}); } finally {guidanceDb.close();}
-    let outcome = this.classify(response);
+    let outcome: QaDeliveryOutcome = exchangeResult.isError ? "delivery-uncertain" : this.classify(response);
+    if(exchangeResult.isError) response.detail = exchangeResult.text;
     if (outcome === "response-invalid" && response.record.sourceCapture === "captured") {
       const correction = [
         "Builder QA remediation response correction only. Do not inspect files, run tools, edit source, or perform additional remediation.",
@@ -250,11 +284,15 @@ export class QaFailureDeliveryService {
       ].join("\n\n");
       enforceMandatoryPromptLimit(Buffer.from(correction));
       const repairDb = new WorkflowDb(input.projectDir);
-      try { record = this.turnIntent(repairDb, operationId, occurrence, session, correction, 1); }
+      try { record = this.turnIntent(repairDb, operationId, occurrence, session, correction, graphSequence, "response-repair"); }
       finally { repairDb.close(); }
       const before = response.record.postSourceDigest;
       response = await phase("response-repair-and-validation", () => this.dispatch(input, builder!, record, correction, before));
       outcome = this.classify(response);
+    }
+    if (outcome === "remediation-reported" && response.turn) {
+      try { await collectBuilderContractCoverage(input.projectDir, input.runId, input.ticket.id, input.builderWorktree, builder!, operationId, instruction, response.turn); }
+      catch (error) { outcome = "response-invalid"; response.detail = String(error); }
     }
     if (outcome === "remediation-reported" || outcome === "blocked" || outcome === "needs-input") {
       if (!response.turn?.continuityErrors?.length) {
@@ -274,6 +312,7 @@ export class QaFailureDeliveryService {
       const summaryDigest = finishDb.putEvidence("qa", Buffer.from(response.contract?.report?.summary ?? detail));
       finishDb.atomic(() => {
         this.faults.beforeOutcomeCommit?.();
+        if (outcome === "remediation-reported") assertBuilderContractCoverage(finishDb, input.runId, input.ticket.id, operationId, response.record.postSourceDigest!);
         finishDb.commitQaRemediationOutcome({ recoveryAttemptId: intent.recoveryId, remediationAttemptId: operationId, outcome: outcome === "remediation-reported" ? "succeeded" : outcome === "delivery-uncertain" ? "uncertain" : "failed", detail, responseDigest: response.record.rawResponseDigest, summaryDigest, expectedRevision: intent.expectedRevision,
           ...(outcome === "remediation-reported" ? { receipt: { version: 3 as const, operationId, runId: input.runId, ticketId: input.ticket.id, reportDigest: input.reportDigest, reportOccurrenceId: occurrence, turnRecordId: response.record.turnRecordId, sourceStateDigest: input.reviewedSourceStateDigest, requestDigest, responseDigest: response.record.rawResponseDigest!, summaryDigest, providerTurnId: response.record.providerTurnId!, completedAt: receipt.completedAt } } : {}) });
         const state = outcome === "remediation-reported" ? "remediation-reported" : outcome === "blocked" || outcome === "needs-input" ? "builder-blocked" : outcome === "source-drift" ? "response-invalid" : outcome;
@@ -293,17 +332,28 @@ export class QaFailureDeliveryService {
         }
       });
     } finally { finishDb.close(); }
+    if(outcome==="remediation-reported"&&response.turn){
+      try{queueGraphMaintenance(input.projectDir,input.builderWorktree,operationId,response.turn.text,response.record.postSourceDigest!==preDispatch.digest);await maintainGraphTask(input.projectDir,input.builderWorktree,operationId,builder);}catch(error){console.error(`rafi graph: optional maintenance failed after accepted handback: ${String(error)}`);}
+    }
     return { ok: outcome === "remediation-reported", outcome, detail, response: response.turn?.text, summary: response.contract?.report?.summary, providerTurnId: response.record.providerTurnId, handoffId, operationId, turnRecordId: response.record.turnRecordId };
   }
 
-  private turnIntent(db: WorkflowDb, operationId: string, occurrence: string, session: ProviderSessionRefV1, prompt: string, index: number): QaDeliveryTurnV3 {
-    const turn: QaDeliveryTurnV3 = { version: 3, turnRecordId: qaDigest("qa-delivery-turn-v3", { operationId, index }), operationId, reportOccurrenceId: occurrence, turnIndex: index, kind: index ? "response-repair" : "remediation", ...(index ? { parentTurnRecordId: qaDigest("qa-delivery-turn-v3", { operationId, index: 0 }) } : {}), status: "intended", intendedSession: session, hostInstructionDigest: db.putEvidence("handoff", Buffer.from(prompt)), hostInstructionBytes: Buffer.byteLength(prompt), providerInstructionAvailability: "unavailable", sourceCapture: "pending", startedAt: new Date().toISOString() };
+  private turnIntent(db: WorkflowDb, operationId: string, occurrence: string, session: ProviderSessionRefV1, prompt: string, index: number, kind: "remediation" | "graph-continuation" | "response-repair" = index ? "response-repair" : "remediation"): QaDeliveryTurn {
+    const turn: QaDeliveryTurn = { version: 4, turnRecordId: qaDigest("qa-delivery-turn-v4", { operationId, index }), operationId, reportOccurrenceId: occurrence, turnIndex: index, kind, ...(index ? { parentTurnRecordId: qaDigest("qa-delivery-turn-v4", { operationId, index: 0 }) } : {}), status: "intended", intendedSession: session, hostInstructionDigest: db.putEvidence("handoff", Buffer.from(prompt)), hostInstructionBytes: Buffer.byteLength(prompt), providerInstructionAvailability: "unavailable", sourceCapture: "pending", startedAt: new Date().toISOString() };
     if (db.qaDeliveryTurns(operationId).some(t => t.turnIndex === index)) throw new Error("Delivery turn already intended; reconcile without redispatch");
     db.recordQaDeliveryTurn(turn);
     return turn;
   }
 
-  private async dispatch(input: QaFailureDeliveryInput, builder: BuilderAdapter, record: QaDeliveryTurnV3, prompt: string, responseOnlySourceDigest?: string): Promise<DispatchedTurn> {
+  private async dispatch(input: QaFailureDeliveryInput, builder: BuilderAdapter, record: QaDeliveryTurn, prompt: string, responseOnlySourceDigest?: string): Promise<DispatchedTurn> {
+    let result!: DispatchedTurn;
+    await dispatchWithGraphAccess(input.projectDir, builder, prompt, undefined, async () => {
+      result = await this.dispatchOwned(input, builder, record, prompt, responseOnlySourceDigest);
+      return result.turn ?? { text: result.detail ?? "Dispatch failed", isError: true, costUsd: 0, numTurns: 0 };
+    });
+    return result;
+  }
+  private async dispatchOwned(input: QaFailureDeliveryInput, builder: BuilderAdapter, record: QaDeliveryTurn, prompt: string, responseOnlySourceDigest?: string): Promise<DispatchedTurn> {
     const events: BuilderEvent[] = [];
     let unsubscribe: (() => void) | undefined;
     let turn: TurnResult | undefined, error: string | undefined;
@@ -312,8 +362,8 @@ export class QaFailureDeliveryService {
       if (!builder.observeEvents) throw new Error("Provider cannot establish correlated terminal/tool observation; automatic dispatch disabled");
       if (stableBuilderSessionIdentity(validateBuilderSession(builder, input)) !== stableBuilderSessionIdentity(record.intendedSession)) throw new Error("Builder session identity changed before dispatch");
       unsubscribe = builder.observeEvents(event => { events.push(event); });
-      turn = await withActivityPhase(record.turnIndex ? "correcting Builder QA remediation response" : "delivering source-bound QA failure handoff to Builder", () => builder.sendTurn(prompt, { handback: true, responseOnly: Boolean(record.turnIndex) }));
-    } catch (caught) { error = `Builder ${record.turnIndex ? "correction " : ""}dispatch uncertain: ${String(caught)}`; }
+      turn = await withActivityPhase(record.kind === "response-repair" ? "correcting Builder QA remediation response" : "delivering source-bound QA failure handoff to Builder", () => builder.sendTurn(prompt, { handback: true, responseOnly: record.kind === "response-repair" }));
+    } catch (caught) { error = `Builder ${record.kind === "response-repair" ? "correction " : ""}dispatch uncertain: ${String(caught)}`; }
     finally { unsubscribe?.(); }
     record.providerElapsedMs = performance.now() - began;
     const db = new WorkflowDb(input.projectDir);
@@ -349,12 +399,14 @@ export class QaFailureDeliveryService {
       try { record.postSourceDigest = (await captureFrozenQaSourceAsync(input.builderWorktree)).digest; record.sourceCapture = "captured"; }
       catch (caught) { record.sourceCapture = "unavailable"; record.sourceCaptureError = String(caught); errors.push(`Post-dispatch source capture failed: ${String(caught)}`); }
       record.captureElapsedMs = performance.now() - captureStart;
-      if (record.turnIndex) {
+      if (record.kind === "response-repair") {
         record.responseOnlyViolations = record.toolCount ? ["Builder used tools during response correction"] : [];
         record.responseOnlySourceChanged = Boolean(record.postSourceDigest && record.postSourceDigest !== responseOnlySourceDigest);
         if (record.responseOnlySourceChanged) record.responseOnlyViolations.push(`source changed during response correction (${responseOnlySourceDigest} -> ${record.postSourceDigest})`);
       }
-      const contract = turn ? parseBuilderQaRemediationContract(turn.cleanedResponse ?? turn.text, { handoffId: qaDigest("qa-failure-handoff", { runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, remediationGeneration: input.remediationGeneration + 1 }), findings: createQaFindingRefs({ runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, rawFindingIds: input.report.findings.map(f => f.id) }) }) : undefined;
+      let graphRequest = false;
+      try { graphRequest = Boolean(turn && parseGraphRequest(turn.cleanedResponse ?? turn.text)); } catch (caught) { errors.push(String(caught)); }
+      const contract = turn && !graphRequest ? parseBuilderQaRemediationContract(turn.cleanedResponse ?? turn.text, { handoffId: qaDigest("qa-failure-handoff", { runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, remediationGeneration: input.remediationGeneration + 1 }), findings: createQaFindingRefs({ runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, rawFindingIds: input.report.findings.map(f => f.id) }) }) : undefined;
       record.parserErrors = [...(contract?.errors ?? []), ...(turn?.continuityErrors ?? [])];
       record.validationErrors = errors;
       if (contract?.report) record.parsedResponseDigest = db.putEvidence("qa", Buffer.from(canonicalEvidence(contract.report)));

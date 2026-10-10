@@ -82,6 +82,9 @@ export function migrateBuildWork(db: Database.Database, projectDir: string, faul
       const columns = db.prepare(`PRAGMA table_info(${name})`).all() as Array<{name:string}>;
       let scope: (target:string) => string;
       if (columns.some(column => column.name === "run_id") && columns.some(column => column.name === "ticket_id")) scope = target => `s.run_id=${target}.run_id AND s.work_id=${target}.ticket_id`;
+      else if (columns.some(column => column.name === "run_id") && columns.some(column => column.name === "work_id")) scope = target => `s.run_id=${target}.run_id AND s.work_id=${target}.work_id`;
+      else if (name === "qa_preparation_attempts" || name === "qa_preparation_progress") scope = target => `EXISTS(SELECT 1 FROM qa_preparation_budgets b WHERE b.id=${target}.budget_id AND b.run_id=s.run_id AND b.work_id=s.work_id)`;
+      else if (name === "qa_contract_receipts") scope = target => `EXISTS(SELECT 1 FROM qa_verification_contracts c WHERE c.digest=${target}.contract_digest AND c.run_id=s.run_id AND c.work_id=s.work_id)`;
       else if (columns.some(column => column.name === "report_occurrence_id")) scope = target => `EXISTS(SELECT 1 FROM qa_reports r WHERE r.report_occurrence_id=${target}.report_occurrence_id AND r.run_id=s.run_id AND r.ticket_id=s.work_id)`;
       else if (columns.some(column => column.name === "operation_id")) scope = target => `EXISTS(SELECT 1 FROM qa_turns t WHERE t.operation_id=${target}.operation_id AND t.run_id=s.run_id AND t.ticket_id=s.work_id)`;
       else continue;

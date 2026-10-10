@@ -124,6 +124,35 @@ function qaHandleForPacket(adapter: Adapter, cwd: string, packet: ReturnType<typ
 }
 const unavailableBoundary = async (): Promise<QaSessionBoundaryResult> => { throw new Error("unexpected QA session boundary"); };
 
+test("QA report repair checks retained graph session access before redispatch", async () => {
+  const { DEFAULT_GRAPH_CONFIG } = await import("rafi-spec");
+  const { adoptGraph, disableGraph } = await import("../src/graph/maintenance.js");
+  const { loadGraphConfig } = await import("../src/graph/config.js");
+  const { graphExclusions } = await import("../src/graph/corpus.js");
+  const { digest } = await import("../src/graph/util.js");
+  const dir = repository();
+  const adapter = new Adapter("graph-repair-session", () => 'STEP_STATUS: qa_fail | issues="missing report"');
+  try {
+    adoptGraph(dir, { authorization: "explicit", config: { ...structuredClone(DEFAULT_GRAPH_CONFIG), mode: "code-only" } });
+    const config = loadGraphConfig(dir);
+    const access = { policyDigest: config.policyDigest, workspace: dir, exclusionsDigest: digest("exclusions", graphExclusions(dir).text), sourceVersions: {}, paths: [] };
+    const db = new WorkflowDb(dir);
+    try {
+      const id = digest("session-access", { provider: adapter.agent, session: adapter.id });
+      db.registerGraphEvidence(id, [access]);
+      db.graphStore().put("session-access", id, { grants: [access] });
+    } finally { db.close(); }
+    await assert.rejects(runIsolatedQa({
+      ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
+      builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0,
+      recovery: { projectDir: dir, runId: "graph-repair" }, sessionBoundary: unavailableBoundary,
+      createQa: qaFactory(adapter), observeNativeCompactions: async () => { disableGraph(dir); },
+      onReportRecovery: async () => ({ action: "pause" }),
+    }), /revoked graph evidence/);
+    assert.equal(adapter.instructions.length, 1, "Revocation must stop the correction before provider dispatch");
+  } finally { await adapter.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("wrong-scope resumed packets are rejected before snapshot or QA session allocation", async () => {
   const dir = repository();
   try {
