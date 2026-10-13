@@ -133,7 +133,7 @@ export interface AutonomyRuleOverride {
   max_attempts?: number;
 }
 
-export interface RuntimeDeadlines { preparation_ms: number; rpc_ms: number; compaction_ms: number; shutdown_ms: number; turn_ms: number; }
+export interface RuntimeDeadlines { preparation_ms: number; rpc_ms: number; compaction_ms: number; shutdown_ms: number; turn_ms: number; heartbeat_ms?: number; }
 
 export interface AutonomyConfig {
   runtime_deadlines?: Partial<RuntimeDeadlines>;
@@ -626,6 +626,7 @@ export interface BuildRunRecordV2 extends Omit<BuildRunRecordV1, "version" | "re
   legacy?: boolean;
   /** Frozen run-level workflow/Git decisions. Optional on old V2 records. */
   runDecisions?: {
+    dirtyWork?: { mode: "preserve" | "include"; base: string; recordPath: string };
     workMode: TicketBuildBranchStrategy;
     workModeSource: "project" | "cli" | "resume";
     branchPrefix: string;
@@ -1240,6 +1241,7 @@ export interface ManagerProjectDiagnosticReportV1 {
   generatedAt: string;
   projectDigest: string;
   totalRunCount: number;
+  projectState?: { configPresent: boolean; dirtyPaths: string[]; planningSessions: Array<{ id: string; workflow: string; status: string; checkpoint: string; updatedAt: string; failure?: string }>; tickets?: { count: number; queue: unknown[]; validationIssues: unknown[] }; errors: string[] };
   dateRange?: { earliestCreatedAt: string; latestCreatedAt: string; latestCompletedAt?: string };
   statusDistribution: Record<string, number>;
   capabilityDistribution: Record<string, number>;

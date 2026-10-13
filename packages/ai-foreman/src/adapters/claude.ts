@@ -259,6 +259,9 @@ export class ClaudeAdapter implements BuilderAdapter {
   private activeProviderTurnId?: string;
   private activeProviderTurnSpanId?: string;
   private readonly toolSpans = new Map<string, string>();
+  private readonly toolCalls = new Map<string, { name: string; input: unknown }>();
+  private readonly completedToolCalls = new Set<string>();
+  private readonly unknownToolResults = new Map<string, string>();
   private pending?: {
     resolve: (r: TurnResult) => void;
     reject: (e: Error) => void;
@@ -464,6 +467,8 @@ export class ClaudeAdapter implements BuilderAdapter {
           this.opts.observer?.signal(true);
         } else if (block.type === "tool_use") {
           const callId = block.id;
+          this.toolCalls.set(callId, { name: block.name, input: block.input });
+          if (this.toolCalls.size > 1000) this.toolCalls.delete(this.toolCalls.keys().next().value!);
           this.eventQueue.push({
             kind: "tool",
             name: block.name,
@@ -663,13 +668,28 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.eventQueue.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType: "tool_result", payload: structuredClone(block), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
       const callId = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
       if (!callId) continue;
+      if (this.completedToolCalls.has(callId)) continue;
+      const call = this.toolCalls.get(callId);
       const spanId = this.toolSpans.get(callId);
       const text = typeof block.content === "string" ? block.content : JSON.stringify(block.content ?? "");
-      const sanitized = text.replace(/\b(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[REDACTED]");
+      const sanitized = text.replace(/\b(token|password|secret|api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[REDACTED]");
       const failed = block.is_error === true;
+      // TIME_ELAPSED alone does not establish success or failure. Preserve it as unknown.
+      const elapsedOnly = /^\s*TIME_ELAPSED\s*$/.test(text);
+      const status = failed && /timed?\s*out|timeout/i.test(text) ? "timed_out" : failed && /cancel(?:led|ed)/i.test(text) ? "cancelled" : elapsedOnly ? "unknown" : failed ? "failed" : "completed";
+      if (status !== "unknown") {
+        this.completedToolCalls.add(callId);
+        if (this.completedToolCalls.size > 1000) this.completedToolCalls.delete(this.completedToolCalls.values().next().value!);
+        this.toolCalls.delete(callId);
+      }
       const outputDigest = createHash("sha256").update(text).digest("hex");
-      this.eventQueue.push({ kind: "tool", name: "tool_result", input: {}, inputCompleteness: "unavailable", lifecycle: "completed", callId, status: failed ? "failed" : "completed", outputSummary: sanitized.slice(0, 1000), outputDigest, outputCompleteness: block.is_truncated === true ? "truncated" : "complete", rawOutputBytes: Buffer.byteLength(text), completionKnown: true, providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
-      if (spanId && this.opts.observer) { this.opts.observer.store.finishSpan(spanId, { outcome: failed ? "failed" : "completed", completionKnown: true, attributes: { callId, outputSummary: sanitized.slice(0, 1000), outputDigest } }); this.toolSpans.delete(callId); }
+      if (status === "unknown") {
+        if (this.unknownToolResults.get(callId) === outputDigest) continue;
+        this.unknownToolResults.set(callId, outputDigest);
+        if (this.unknownToolResults.size > 1000) this.unknownToolResults.delete(this.unknownToolResults.keys().next().value!);
+      } else this.unknownToolResults.delete(callId);
+      this.eventQueue.push({ kind: "tool", name: call?.name ?? "unidentified tool", input: call?.input ?? {}, inputCompleteness: call ? "complete" : "unavailable", lifecycle: "completed", callId, status, outputSummary: sanitized.slice(0, 1000), outputDigest, outputCompleteness: block.is_truncated === true ? "truncated" : "complete", rawOutputBytes: Buffer.byteLength(text), completionKnown: status !== "unknown", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
+      if (spanId && this.opts.observer && status !== "unknown") { this.opts.observer.store.finishSpan(spanId, { outcome: status, completionKnown: true, attributes: { callId, outputSummary: sanitized.slice(0, 1000), outputDigest } }); this.toolSpans.delete(callId); }
       this.opts.observer?.signal(true);
     }
   }

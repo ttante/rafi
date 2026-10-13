@@ -29,7 +29,9 @@ import type { TicketDef } from "../src/tickets/ticketSchema.js";
 const ticket:TicketDef={id:"T001",order:1,title:"Guard",area:"core",priority:"P2",size:"S",risk:"Low",depends_on:[],summary:"Guard empty input",acceptance:["empty input is guarded"],required_tests:["inspect"],likely_files:["source.txt"]};
 const failure={version:1,summary:"Guard missing",checks_run:[{check:"inspect",outcome:"failed",evidence:"missing guard"}],findings:[{id:"QA-1",requirement:"empty input is guarded",locations:["source.txt"],problem:"missing guard",evidence:"source",expected:"guard",fix_direction:"add guard",verification:["inspect"]}],observations:[]};
 const delta=JSON.stringify({version:1,decisions:[],constraints:[],discoveries:[],completedActions:["turn"],evidence:[],failures:[],blockers:[],openWork:[],nextAction:"continue"});
-for(const provider of ["claude","codex"] as const)for(const target of ["builder","qa","both"] as const)for(const scenario of (target==="qa"?["in-cycle","after-pass"]:["in-cycle",...(target==="builder"?["extra-attempt"]:[]),"after-pass","after-pass-budget","after-pass-pause","after-pass-withdraw","after-pass-stale","after-pass-drift","after-pass-fails","after-pass-repeat","after-pass-branch"]))test(`${provider} ${target} ${scenario} guidance reaches the next in-cycle prompts through the production wrapper stack`,async()=>{
+const providers = (["claude", "codex"] as const).filter(provider => !process.env.RAFI_TEST_PROVIDER_SHARD || process.env.RAFI_TEST_PROVIDER_SHARD === provider);
+if (!providers.length) throw new Error("Invalid offline provider shard");
+for(const provider of providers)for(const target of ["builder","qa","both"] as const)for(const scenario of (target==="qa"?["in-cycle","after-pass"]:["in-cycle",...(target==="builder"?["extra-attempt"]:[]),"after-pass","after-pass-budget","after-pass-pause","after-pass-withdraw","after-pass-stale","after-pass-drift","after-pass-fails","after-pass-repeat","after-pass-branch"]))test(`${provider} ${target} ${scenario} guidance reaches the next in-cycle prompts through the production wrapper stack`,async()=>{
   const root=process.env.RAFI_GUIDANCE_CRASH_ROOT??mkdtempSync(join(tmpdir(),"guidance-delivery-"));const prompts:Array<{role:string;text:string}>=[];const adapters:BuilderAdapter[]=[];let reviews=0;let instructionId="";
   try {
     execFileSync("git",["init","-q",root]);cmdInit(root,{});saveTickets(join(root,".tickets/tickets.yaml"),[ticket]);writeFileSync(join(root,"source.txt"),"base\n");execFileSync("git",["add","."],{cwd:root});execFileSync("git",["-c","user.name=Test","-c","user.email=test@example.test","commit","-qm","base"],{cwd:root});
@@ -182,7 +184,7 @@ for(const provider of ["claude","codex"] as const)for(const target of ["builder"
 });
 
 
-if(!process.env.RAFI_GUIDANCE_CRASH)for(const provider of ["claude","codex"] as const)for(const target of ["builder","both"] as const)for(const scenario of ["in-cycle","after-pass"])for(const boundary of ["reservation","submission","receipt"] as const)test(`${provider} ${target} ${scenario} guidance survives a process crash after ${boundary} through production wrappers`,{skip:process.platform==="win32"},()=>{
+if(!process.env.RAFI_GUIDANCE_CRASH)for(const provider of providers)for(const target of ["builder","both"] as const)for(const scenario of ["in-cycle","after-pass"])for(const boundary of ["reservation","submission","receipt"] as const)test(`${provider} ${target} ${scenario} guidance survives a process crash after ${boundary} through production wrappers`,{skip:process.platform==="win32"},()=>{
   const root=mkdtempSync(join(tmpdir(),"guidance-wrapper-crash-"));
   try {
     const child=spawnSync(process.execPath,["--import","tsx","--test",`--test-name-pattern=${provider} ${target} ${scenario} guidance reaches`,new URL(import.meta.url).pathname],{encoding:"utf8",timeout:60000,env:{...process.env,NODE_TEST_CONTEXT:undefined,RAFI_GUIDANCE_CRASH:boundary,RAFI_GUIDANCE_CRASH_ROOT:root}});

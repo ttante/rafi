@@ -12,6 +12,7 @@ import { ObservabilityReader, ObservabilityStore } from "../observability.js";
 import { WorkflowReader } from "../workflowReader.js";
 import { WorkflowDb } from "../workflowDb.js";
 import { error, success, warning } from "../terminalStyle.js";
+import { readInterviewRecords } from "../interviews.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -56,6 +57,8 @@ export function buildDoctorCommand(): Command {
       report(Boolean(PACKAGE_VERSION), "foreman package version", PACKAGE_VERSION);
       report(existsSync(cwd), "project directory exists", cwd);
       if (!existsSync(cwd)) process.exit(1);
+      const unfinishedPlanning = readInterviewRecords(cwd).records.filter(record => record.status !== "completed");
+      if (unfinishedPlanning.length) warn("saved planning sessions", `${unfinishedPlanning.length} unfinished; run \`rafi plan:doctor\` to select and recover one`);
 
       try {
         loadConfig(join(cwd, "foreman.yaml"));

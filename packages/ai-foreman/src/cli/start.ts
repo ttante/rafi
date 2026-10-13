@@ -36,6 +36,7 @@ import { loadTickets } from "../tickets/ticketLoader.js";
 import { StateDb } from "../tickets/stateDb.js";
 import { applySharedDeliveryBranch, applySizeBranchPolicy, buildBranchAuditInstruction, buildBranchPlan, parseAuditDependencies } from "../branch/planner.js";
 import { collectBaseWorktreeDirtyPaths, currentGitRef, ensureCleanBaseWorktree, generatedTrackerDirtyPaths } from "../branch/git.js";
+import { captureDirtyBaseline } from "../branch/dirtyBaseline.js";
 import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
@@ -425,6 +426,7 @@ export function savedStartArguments(command: Command, projectDir: string, opts: 
 
 /** Pure validation shared by interactive start and persisted preparation. */
 export function validateStartOptions(opts: Record<string, any>, requireCount: boolean): void {
+  if (opts.dirtyWork !== undefined && !["preserve", "include"].includes(opts.dirtyWork)) throw new Error("--dirty-work must be preserve or include");
   const recovery = Boolean(opts.resume || opts.continue || opts.recoverRun);
   const tickets = opts.ticket ?? [];
   if (!recovery && tickets.length > 1) throw new Error("new-ticket selection supports exactly one --ticket");
@@ -513,10 +515,12 @@ export function buildStartCommand(): Command {
     .option("--builder-network", "request build-scoped builder internet access with separate explicit approval; rechecked on resume")
     .option("--builder-approvals", "allow the builder to request explicit per-operation sandbox approvals; QA stays restricted")
     .option("--keep-worktrees", "keep successful ticket worktrees for inspection")
+    .option("--dirty-work <mode>", "preserve | include: continue in isolated branches without merging into the dirty checkout")
     .option("--ticket <id>", "select one new ticket, or identify recovery tickets with --resume/--continue/--recover-run", collectTicket, [])
     .option("--skip-delivery-unit <id>", "skip one unfinished delivery unit for this run", collectTicket, [])
     .action(async (project: string, opts, command: Command) => withBuildInvocation(async () => {
       try { validateStartOptions(opts, false); } catch (error) { fail((error as Error).message); }
+      if (opts.dirtyWork) { opts.branchPerTicket = true; opts.completion = "none"; opts.keepWorktrees = true; }
       const requestedTicketIds = (opts.ticket as string[] | undefined) ?? [];
       const recoveryIntent = Boolean(opts.resume || opts.continue || opts.recoverRun);
       if (!recoveryIntent && requestedTicketIds.length > 1) fail("new-ticket selection supports exactly one --ticket");
@@ -549,6 +553,7 @@ export function buildStartCommand(): Command {
       const cwd = resolve(project);
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
       const recoveryRecord = opts.recoverRun ? readBuildRuns(cwd).find((run) => run.runId === opts.recoverRun) : undefined;
+      let dirtyWork = recoveryRecord?.runDecisions?.dirtyWork;
       if (opts.recoverRun && !recoveryRecord) fail(`recoverable build run not found: ${opts.recoverRun}`);
       const autonomyProfile = opts.autonomy as AutonomyProfile | undefined;
       if (autonomyProfile && !["supervised", "balanced", "unattended"].includes(autonomyProfile)) fail("--autonomy must be supervised, balanced, or unattended");
@@ -717,6 +722,7 @@ export function buildStartCommand(): Command {
         fail("current-branch build recovery supports exactly one --ticket");
       }
       if (branchMode) {
+        if (dirtyWork) { branchDefaults.completionMode = "none"; branchDefaults.createReview = false; branchDefaults.cleanupBranches = false; opts.keepWorktrees = true; }
         if (opts.resume && continueTickets.length > 1) {
           fail("--resume <sessionId> in branch mode supports exactly one --ticket; use --continue for multiple tickets");
         }
@@ -1649,7 +1655,7 @@ export function buildStartCommand(): Command {
       if (branchMode) {
         const ticketsConfig = loadTicketsConfig(cwd);
         const allowedBaseDirtyPaths = generatedTrackerDirtyPaths(ticketsConfig.paths);
-        const baseWorktreePolicy = recoveryRecord ? "skip" as const : "enforce" as const;
+        let baseWorktreePolicy: "skip" | "enforce" = recoveryRecord ? "skip" : "enforce";
         if (baseWorktreePolicy === "skip") {
           const projection = recoveryRecord ? projectBuildRecovery(cwd, recoveryRecord) : undefined;
           if (projection?.expectedChanges.length) {
@@ -1664,7 +1670,27 @@ export function buildStartCommand(): Command {
           try {
             ensureCleanBaseWorktree(cwd, { allowedDirtyPaths: allowedBaseDirtyPaths });
           } catch (err) {
-            fail(err instanceof Error ? err.message : String(err));
+            let mode = opts.dirtyWork as string | undefined;
+            if (!mode && process.stdin.isTTY && process.stdout.isTTY && !opts.yes) {
+              const choice = await select({ message: "Uncommitted work found. How should the isolated build start?", options: [
+                { value: "preserve", label: "Preserve changes; build from committed code (Recommended)" },
+                { value: "include", label: "Include current files as a private build baseline" },
+                { value: "stop", label: "Stop for manual commit or stash" },
+              ] });
+              if (isCancel(choice) || choice === "stop") return;
+              mode = String(choice);
+            }
+            if (mode !== "preserve" && mode !== "include") fail(`${err instanceof Error ? err.message : String(err)}\nContinue safely with --dirty-work preserve (committed input) or --dirty-work include (current files). Both keep your checkout and index intact and retain isolated worktrees.`);
+            const baseline = captureDirtyBaseline(cwd, mode);
+            dirtyWork = { mode, ...baseline };
+            opts.base = baseline.base;
+            branchDefaults.completionMode = "none";
+            branchDefaults.createReview = false;
+            branchDefaults.cleanupBranches = false;
+            branchDefaults.rootBaseBranches = false;
+            opts.keepWorktrees = true;
+            baseWorktreePolicy = "skip";
+            console.log(`rafi: ${mode} dirty-work baseline ${baseline.base}; evidence ${baseline.recordPath}; results stay in isolated branches.`);
           }
         }
         if (branchDefaults.createReview && branchDefaults.reviewProvider) {
@@ -1860,7 +1886,7 @@ export function buildStartCommand(): Command {
           builderCapabilities, tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
           repositoryRoot: cwd, branchMode: branchPresentation.allocationMode, baseRef: plan.baseRef, builder: capturedBranchBuilder, qa: capturedBranchQa,
           frozenPolicy, autonomyProfile, qaEnabled,
-          runDecisions: { workMode: "branch-per-ticket", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBranchBuilder.auto_compact_threshold_percent ?? 65, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
+          runDecisions: { dirtyWork, workMode: "branch-per-ticket", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBranchBuilder.auto_compact_threshold_percent ?? 65, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
         });
         activeContinuityRunId = masterRun.runId;
         if (requiresBuildApproval(cwd, plan.nodes.map(node => node.ticket.id), autoApprovePlanUpdates, approvalConsequences) && plan.issues.every((issue) => !issue.blocking)) {

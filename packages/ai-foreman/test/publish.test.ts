@@ -9,14 +9,16 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_DIR = join(HERE, "..");
+let packedFiles: string[] | undefined;
 
 function packList(): string[] {
+  if (packedFiles) return packedFiles;
   const out = execSync("npm pack --dry-run --json 2>/dev/null", {
     cwd: PKG_DIR,
     encoding: "utf8",
   });
   const parsed = JSON.parse(out) as Array<{ files: Array<{ path: string }> }>;
-  return parsed[0].files.map((f) => f.path);
+  return packedFiles = parsed[0].files.map((f) => f.path);
 }
 
 test("ai-foreman pack includes dist/ output", () => {

@@ -80,6 +80,8 @@ import {
   completeInterview,
   createInterviewRecord,
   failInterview,
+  readInterviewRecords,
+  resumeInterviewRecord,
   type InterviewRecord,
 } from "../interviews.js";
 import { applyTicketPopulation, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, recoverTicketPublications, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
@@ -232,6 +234,7 @@ export function buildPopulateAgentRunOptions(opts: {
   fast?: boolean;
   yes?: boolean;
   log: Log;
+  resumeSession?: string;
 }): RoleBuilderOptions {
   return {
     projectDir: opts.projectDir,
@@ -245,10 +248,12 @@ export function buildPopulateAgentRunOptions(opts: {
     log: opts.log,
     permissionConfig: readOnlyPermissionConfig(),
     sandboxMode: "read-only",
+    resumeSessionId: opts.resumeSession,
   };
 }
 
 interface SetupCommandOptions {
+  interviewId?: string;
   project?: string;
   defaults?: boolean;
   yes?: boolean;
@@ -274,6 +279,7 @@ interface SetupCommandOptions {
 }
 
 interface PopulateCommandOptions {
+  interviewId?: string;
   project?: string;
   agent?: string;
   model?: string;
@@ -282,6 +288,7 @@ interface PopulateCommandOptions {
   fast?: boolean;
   yes?: boolean;
   authorizeRetire?: string[];
+  resumeSession?: string;
 }
 
 interface TicketSetupPatch {
@@ -310,7 +317,7 @@ async function cmdSetupInitCli(opts: SetupCommandOptions): Promise<void> {
   let interview = beginTicketSetupInterview(dir, "tickets-setup-init", opts);
   if (hasTicketSetupConfig(dir)) {
     console.log("foreman tickets setup: existing setup found; opening setup:update");
-    await cmdSetupUpdateCli(opts);
+    await cmdSetupUpdateCli({ ...opts, interviewId: undefined });
     const existing = loadTicketSetupConfigWithDefaults(dir);
     await continueTrackerSetup(dir, opts, existing);
     if (interview) completeInterview(dir, interview);
@@ -487,6 +494,7 @@ function beginTicketSetupInterview(
   workflow: "tickets-setup-init" | "tickets-setup-update",
   opts: SetupCommandOptions,
 ): InterviewRecord | undefined {
+  if (opts.interviewId) return checkpointInterview(projectDir, resumeInterviewRecord(projectDir, opts.interviewId, workflow), {});
   if (!shouldPrompt(opts)) return undefined;
   const record = createInterviewRecord({
     workflow,
@@ -1293,6 +1301,9 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
   const config = loadConfig(join(dir, "foreman.yaml"));
   let builder: Awaited<ReturnType<typeof createRoleBuilder>>["builder"] | undefined;
   let viewer: Promise<void> | undefined;
+  const savedPlanning = opts.interviewId ? readInterviewRecords(dir).records.find(record => record.id === opts.interviewId && record.workflow === "tickets-populate" && record.status !== "completed") : undefined;
+  if (opts.interviewId && !savedPlanning) throw new Error("Saved population session not found; run `rafi plan:doctor` to select another");
+  let planningRecord = checkpointInterview(dir, savedPlanning ?? createInterviewRecord({ workflow: "tickets-populate", invocation: { projectDir: dir, ...opts }, checkpoint: "agent-run", answers: { approvedPlanPath: approvedPlan.path, contextSources }, outputs: [approvedPlan.path, ".tickets/tickets.yaml"] }), {});
 
   try {
     const roleBuilder = await createRoleBuilder(buildPopulateAgentRunOptions({
@@ -1303,8 +1314,10 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
       fast: opts.fast,
       yes: Boolean(opts.yes),
       log,
+      resumeSession: opts.resumeSession,
     }));
     builder = roleBuilder.builder;
+    planningRecord = checkpointInterview(dir, planningRecord, { runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() } });
     viewer = printEvents(builder.events());
     const foreman = new Foreman(builder, log, { desktop: config.notifications.enabled, terminalBell: config.notifications.terminal_bell }, false, 3, dir);
     foreman.setGraphPurpose("ticket-population");
@@ -1319,6 +1332,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
       console.log(`foreman tickets: context sources ${contextSources.join(" ")}`);
     }
     const turn = await foreman.runInstruction(buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc));
+    planningRecord = checkpointInterview(dir, planningRecord, { runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() }, decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text } });
     await builder.close();
     await viewer;
 
@@ -1331,7 +1345,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     });
 
     if (turn.result.isError) {
-      fail(`builder turn errored: ${turn.result.text.slice(0, 200)}`);
+      throw new Error(`builder turn errored: ${turn.result.text.slice(0, 200)}`);
     }
     if (turn.status.kind === "blocked") {
       throw new Error(`blocked — ${turn.status.reason ?? "builder reported blocked"}`);
@@ -1356,11 +1370,13 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     }
     authorizeTicketRetirements(materialized.retirements, { interactiveConfirmed: retirementsConfirmed, authorizedIds: opts.authorizeRetire, computerRun: Boolean(opts.yes) });
     const applied = applyTicketPopulation(dir, materialized);
+    completeInterview(dir, planningRecord);
     console.log(`foreman tickets: populated atomically (run ${applied.runId}, transaction ${applied.transactionId})`);
   } catch (err) {
+    failInterview(dir, planningRecord, planningRecord.checkpoint, err);
     await builder?.close().catch(() => {});
     await viewer?.catch(() => {});
-    fail(String(err instanceof Error ? err.message : err));
+    fail(`${err instanceof Error ? err.message : String(err)}\nRecover with \`rafi plan:doctor\`.`);
   }
 }
 
@@ -1553,7 +1569,7 @@ function isApprovedPlanArtifact(projectDir: string, source: string, approvedData
 }
 
 export interface TicketOwnershipReceipt { path: string; category: "tickets"; origin: string }
-function ticketOwnershipReceipts(projectDir: string, commandName: string, _afterWrite: boolean): TicketOwnershipReceipt[] {
+export function ticketOwnershipReceipts(projectDir: string, commandName: string, _afterWrite: boolean): TicketOwnershipReceipt[] {
   const candidates = [
     ".tickets/config.yaml", ".tickets/tickets.yaml", ".tickets/delivery.yaml", ".tickets/tracker-rules.md",
     ".tickets/schema/tickets.schema.json", ".tickets/migrations/001_init.sql", ".tickets/.gitignore",
@@ -1642,15 +1658,17 @@ export function buildTicketsCommand(options: {
     "Manage the structured ticket tracker for a project.",
   );
   tickets.hook("preAction", (_thisCommand, actionCommand) => {
-    const commandOptions = actionCommand.opts() as { project?: string };
+    const commandOptions = actionCommand.opts() as { project?: string; refresh?: boolean };
     const projectDir = cwd(commandOptions);
+    if (["show", "validate"].includes(actionCommand.name()) || actionCommand.name() === "queue" && !commandOptions.refresh) return;
     recoverTicketPublications(projectDir);
     recoverTicketResetPublications(projectDir);
-    if (options.prepareOwnership && !["show", "validate", "queue"].includes(actionCommand.name())) {
+    if (options.prepareOwnership && !["show", "validate", "queue", "plan"].includes(actionCommand.name())) {
       options.prepareOwnership(projectDir, ticketOwnershipReceipts(projectDir, actionCommand.name(), false));
     }
   });
   tickets.hook("postAction", (_thisCommand, actionCommand) => {
+    if (["show", "validate", "queue", "plan"].includes(actionCommand.name())) return;
     if (!options.recordOwnership) return;
     const commandOptions = actionCommand.opts() as { project?: string };
     const projectDir = cwd(commandOptions);
@@ -1661,6 +1679,7 @@ export function buildTicketsCommand(options: {
 
   tickets
     .command("setup:init")
+    .option("--interview-id <id>", "recover an exact saved setup interview (normally selected by plan:doctor)")
     .description("Configure ticket population, supporting context, and build defaults in rafi-config.yaml.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--defaults", "skip prompts and use recommended ticket setup defaults")
@@ -1695,6 +1714,7 @@ export function buildTicketsCommand(options: {
 
   tickets
     .command("setup:update")
+    .option("--interview-id <id>", "recover an exact saved setup interview (normally selected by plan:doctor)")
     .description("Update ticket population, supporting context, and build settings in rafi-config.yaml.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--defaults", "skip prompts and keep existing values unless explicit options are provided")
@@ -1785,6 +1805,8 @@ export function buildTicketsCommand(options: {
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--sources <paths...>", "supporting files, folders, URLs, or globs to check first")
     .option("--fast", "fast mode - lower latency")
+    .option("--resume-session <id>", "resume a saved Ticket Maker session (normally selected by plan:doctor)")
+    .option("--interview-id <id>", "recover an exact saved population interview (normally selected by plan:doctor)")
     .option("--authorize-retire <ids...>", "exact ticket IDs authorized to become obsolete in computer-run mode")
     .option("-y, --yes", "computer-run approval; retirements still require --authorize-retire exact IDs")
     .action(async (opts) => {
@@ -2264,6 +2286,7 @@ export function buildTicketsCommand(options: {
         } else {
           for (const r of rows) {
             console.log(`  ${r.rank}. [${r.status}] ${r.ticket}: ${r.title} (${r.priority}, blocked: ${r.blockedBy})`);
+            if (r.status === "blocked") console.log(`     Next: ${sanitizeTerminalText(r.nextAction)}`);
           }
         }
       } catch (err) {

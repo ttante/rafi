@@ -106,8 +106,15 @@ test("project collection identifies stale recovery state and produces a bounded 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("project collection exits actionably when no build runs exist", () => {
+test("project collection supports setup before any build without fabricating a run", () => {
   const root = temp();
-  try { assert.throws(() => collectManagerProjectDiagnostics(root), /no build runs found.*rafi start/); }
+  try {
+    const { report } = collectManagerProjectDiagnostics(root);
+    assert.equal(report.totalRunCount, 0);
+    assert.deepEqual(report.runCatalog, []);
+    assert.equal(report.currentFocusRunId, "");
+    assert.equal(report.projectState?.configPresent, false);
+    assert.match(buildManagerProjectPacket(report, "How do I set up tickets?").prompt, /projectState/);
+  }
   finally { rmSync(root, { recursive: true, force: true }); }
 });

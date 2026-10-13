@@ -38,10 +38,10 @@ importers:
         specifier: 4.10.38
         version: 4.10.38
       rafi-spec:
-        specifier: 0.8.14
+        specifier: 0.8.15
         version: link:../spec
       special-agents:
-        specifier: 0.8.13
+        specifier: 0.8.14
         version: link:../special-agents
       yaml:
         specifier: ^2.5.1
@@ -73,7 +73,7 @@ importers:
         specifier: ^1.4.0
         version: 1.5.0
       ai-foreman:
-        specifier: 1.7.21
+        specifier: 1.7.22
         version: link:../ai-foreman
       ajv:
         specifier: ^8.20.0
@@ -82,10 +82,10 @@ importers:
         specifier: ^12.1.0
         version: 12.1.0
       rafi-spec:
-        specifier: 0.8.14
+        specifier: 0.8.15
         version: link:../spec
       special-agents:
-        specifier: 0.8.13
+        specifier: 0.8.14
         version: link:../special-agents
       yaml:
         specifier: ^2.5.1
@@ -123,7 +123,7 @@ importers:
         specifier: ^8.20.0
         version: 8.20.0
       rafi-spec:
-        specifier: 0.8.14
+        specifier: 0.8.15
         version: link:../spec
       yaml:
         specifier: ^2.5.1

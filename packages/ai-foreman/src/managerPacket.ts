@@ -33,7 +33,7 @@ export function buildManagerProjectPacket(report: ManagerProjectDiagnosticReport
   const previousProject = previous && "projectDigest" in previous.report ? previous.report as ManagerProjectDiagnosticReportV1 : undefined;
   const canDelta = Boolean(previousProject && previous?.currentFocusRunId === report.currentFocusRunId && previous.subject === subject);
   const payload: Record<string, unknown> = canDelta
-    ? { kind: "manager-project-update", generatedAt: report.generatedAt, projectDigest: report.projectDigest, currentFocusRunId: report.currentFocusRunId, verifiedActiveRunId: report.verifiedActiveRunId, statusDistribution: report.statusDistribution, allRuns: report.allRuns, successfulCompletedRuns: report.successfulCompletedRuns, topRuns: report.topRuns, sourceCoverage: report.sourceCoverage, focusedReports: report.focusedReports.map(boundSingleReport), changed: projectDelta(previousProject!, report) }
+    ? { kind: "manager-project-update", projectState: report.projectState, generatedAt: report.generatedAt, projectDigest: report.projectDigest, currentFocusRunId: report.currentFocusRunId, verifiedActiveRunId: report.verifiedActiveRunId, statusDistribution: report.statusDistribution, allRuns: report.allRuns, successfulCompletedRuns: report.successfulCompletedRuns, topRuns: report.topRuns, sourceCoverage: report.sourceCoverage, focusedReports: report.focusedReports.map(boundSingleReport), changed: projectDelta(previousProject!, report) }
     : { kind: "manager-project-diagnostic-report", report };
   const prompt = boundProjectPrompt(payload, report, question);
   return { prompt, state: { digest: report.digest, report, subject, projectDigest: report.projectDigest, runCatalogDigest: catalogDigest, perRunDigests: Object.fromEntries(report.runCatalog.map(item => [item.runId, item.digest])), detailedReportDigests: Object.fromEntries(report.focusedReports.map(item => [item.runId, item.digest])), currentFocusRunId: report.currentFocusRunId, referencedRunIds, previousAggregateResults: [report.allRuns, report.successfulCompletedRuns] } };
@@ -66,6 +66,7 @@ export function buildManagerEvidencePacketV2(response: ManagerEvidencePageV2, qu
 function instructions(question: string, payload: unknown): string {
   return [
     "You are the Rafi Manager. The project, not one run, is the default scope. Answer only from host-calculated evidence.",
+    "Use projectState to help with create, plan, tickets, validation, dirty work, and recovery before or between builds. Zero retained builds is a valid setup state. Recommend public Rafi commands, including rafi plan:doctor for saved planning failures. Never invent a build ID or issue build controls without a real run.",
     "An accepted successor has acknowledged context; that alone does not prove implementation was dispatched. Distinguish acceptance, adoption, dispatch, completion, pending human decisions, and uncertain work. Identify the worktree when code may be outside the main checkout.",
     "Identify every run-specific claim with its run ID. Distinguish verified active, stale recovery, recoverable, completed, failed, superseded, and legacy runs.",
     "For cumulative claims, report metric coverage and exclusions. Missing data is unavailable, never zero. Performance abnormality requires at least five successful completed runs.",

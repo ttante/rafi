@@ -1,5 +1,23 @@
 import { hostname } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readInterviewRecords } from "./interviews.js";
+import { cmdQueue, cmdValidate } from "./tickets/commands.js";
+import { getAllTicketDetails } from "./tickets/details.js";
+
+function collectProjectState(root: string): NonNullable<ManagerProjectDiagnosticReportV1["projectState"]> {
+  const state: NonNullable<ManagerProjectDiagnosticReportV1["projectState"]> = { configPresent: existsSync(join(root, "rafi-config.yaml")), dirtyPaths: [], planningSessions: [], errors: [] };
+  const sessions = readInterviewRecords(root);
+  state.planningSessions = sessions.records.map(record => ({ id: record.id, workflow: record.workflow, status: record.status, checkpoint: record.checkpoint, updatedAt: record.updatedAt, failure: record.failure?.summary }));
+  state.errors.push(...sessions.problems.map(problem => `${problem.path}: ${problem.reason}`));
+  try { state.dirtyPaths = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n").filter(Boolean).slice(0, 100); } catch { /* projects need not use Git */ }
+  if (existsSync(join(root, ".tickets/config.yaml"))) {
+    try { state.tickets = { count: getAllTicketDetails(root).ticket_count, queue: cmdQueue(root), validationIssues: cmdValidate(root).issues }; }
+    catch (error) { state.errors.push(String(error)); }
+  }
+  return state;
+}
 import type {
   BuildRunRecordV2,
   DiagnosticSourceResultV1,
@@ -67,15 +85,15 @@ export function collectManagerProjectDiagnostics(projectDir: string, options: Co
     const rollupById = new Map(rollups.map(rollup => [rollup.runId, rollup]));
     const workflowById = new Map(workflowRuns.map(run => [run.runId, run]));
     const ids = new Set<string>([...buildById.keys(), ...storedById.keys(), ...rollupById.keys(), ...workflowById.keys()]);
-    if (!ids.size) throw new Error("no build runs found for this project; start one with `rafi start` before opening Manager");
+    const projectState = collectProjectState(root);
 
     const defaultFocus = activeRunId && ids.has(activeRunId)
       ? activeRunId
-      : [...ids].sort((a, b) => runUpdatedAt(b, buildById, storedById, workflowById, rollupById).localeCompare(runUpdatedAt(a, buildById, storedById, workflowById, rollupById)))[0]!;
+      : [...ids].sort((a, b) => runUpdatedAt(b, buildById, storedById, workflowById, rollupById).localeCompare(runUpdatedAt(a, buildById, storedById, workflowById, rollupById)))[0] ?? "";
     const initialFocus = options.initialFocusRunId ?? defaultFocus;
-    if (!ids.has(initialFocus)) throw new Error(`build run not found: ${initialFocus}`);
+    if (initialFocus && !ids.has(initialFocus)) throw new Error(`build run not found: ${initialFocus}`);
     const currentFocus = options.currentFocusRunId ?? initialFocus;
-    if (!ids.has(currentFocus)) throw new Error(`build run not found: ${currentFocus}`);
+    if (currentFocus && !ids.has(currentFocus)) throw new Error(`build run not found: ${currentFocus}`);
 
     const summaries = [...ids].map(runId => mergeSummary({ runId, build: buildById.get(runId), stored: storedById.get(runId), rollup: rollupById.get(runId), workflow: workflowById.get(runId), activeRunId, leaseRunId: lease?.runId, now, schemaVersion: observability.schemaVersion() }))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.createdAt.localeCompare(a.createdAt) || a.runId.localeCompare(b.runId));
@@ -108,10 +126,11 @@ export function collectManagerProjectDiagnostics(projectDir: string, options: Co
     const staleRecoveryRunIds = summaries.filter(item => item.activeState === "stale_recovery").map(item => item.runId);
     const completedDates = summaries.filter(item => item.status === "completed").map(item => item.completedAt).filter((item): item is string => Boolean(item)).sort();
     const createdDates = summaries.map(item => item.createdAt).sort();
-    const projectBasis = { ids: summaries.map(item => [item.runId, item.digest]), activeRunId, initialFocus, currentFocus };
+    const projectBasis = { ids: summaries.map(item => [item.runId, item.digest]), activeRunId, initialFocus, currentFocus, projectState };
     const withoutDigest: Omit<ManagerProjectDiagnosticReportV1, "digest"> = {
       version: 1, generatedAt: now.toISOString(), projectDigest: diagnosticDigest(projectBasis), totalRunCount: summaries.length,
-      dateRange: { earliestCreatedAt: createdDates[0]!, latestCreatedAt: createdDates.at(-1)!, ...(completedDates.length ? { latestCompletedAt: completedDates.at(-1)! } : {}) },
+      projectState,
+      ...(createdDates.length ? { dateRange: { earliestCreatedAt: createdDates[0]!, latestCreatedAt: createdDates.at(-1)!, ...(completedDates.length ? { latestCompletedAt: completedDates.at(-1)! } : {}) } } : {}),
       statusDistribution, capabilityDistribution, ...(activeRunId ? { verifiedActiveRunId: activeRunId } : {}), staleRecoveryRunIds,
       initialFocusRunId: initialFocus, currentFocusRunId: currentFocus, allRuns, successfulCompletedRuns, topRuns,
       runCatalog, omittedRunCount: Math.max(0, summaries.length - runCatalog.length), focusedReports,

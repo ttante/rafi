@@ -78,7 +78,7 @@ export function validateAutonomyConfig(value: unknown): AutonomyConfig {
   const deadlines = input.runtime_deadlines as Record<string, unknown> | undefined;
   if (deadlines !== undefined) {
     if (!deadlines || typeof deadlines !== "object" || Array.isArray(deadlines)) throw new Error("autonomy.runtime_deadlines must be an object");
-    rejectUnknown(deadlines, ["preparation_ms", "rpc_ms", "compaction_ms", "shutdown_ms", "turn_ms"], "autonomy.runtime_deadlines");
+    rejectUnknown(deadlines, ["preparation_ms", "rpc_ms", "compaction_ms", "shutdown_ms", "turn_ms", "heartbeat_ms"], "autonomy.runtime_deadlines");
     for (const [key, value] of Object.entries(deadlines)) if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > (key === "compaction_ms" ? 180_000 : 86_400_000)) throw new Error(`invalid runtime deadline ${key}`);
   }
   const overrides: AutonomyConfig["rules"] = {};

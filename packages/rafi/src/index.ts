@@ -5,7 +5,7 @@ import { adoptGraph, ensureGraphInstallation, loadGraphConfig } from "ai-foreman
 import { launchResumeStart } from "./resumeLauncher.js";
 import { Command } from "commander";
 import { buildGraphCommand } from "ai-foreman/cli/graph.js";
-import { resolve, join } from "node:path";
+import { dirname, resolve, join } from "node:path";
 import { existsSync, realpathSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -44,7 +44,7 @@ import {
   type WalkthroughAnswers,
 } from "./project.js";
 import { docsRootPathExists, firstAvailableDocsRoot, validateDocsRoot } from "./docs.js";
-import { buildTicketsCommand } from "ai-foreman/cli/tickets.js";
+import { buildTicketsCommand, ticketOwnershipReceipts } from "ai-foreman/cli/tickets.js";
 import { buildStartCommand } from "ai-foreman/cli/start.js";
 import { runStatus } from "ai-foreman/cli/status.js";
 import { buildDoctorCommand } from "ai-foreman/cli/doctor.js";
@@ -62,6 +62,7 @@ import { buildDiscoveryCommand } from "./discovery.js";
 import { collectCreateStackInterview } from "./createStackInterview.js";
 import { buildAgentsCommand, defaultAgentDefaults, promptSessionStrategyDefaults } from "./agents.js";
 import { buildResumeCommand } from "./resume.js";
+import { buildPlanDoctorCommand } from "./planDoctor.js";
 import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
 import { buildUninstallCleanupCommand, buildUninstallCommand, buildUninstallRestoreCommand, interpretUninstallInstruction } from "./uninstall.js";
@@ -74,6 +75,7 @@ import {
   completeInterview,
   createInterviewRecord,
   findInterviewRecord,
+  resumeInterviewRecord,
   type InterviewRecord,
 } from "ai-foreman/interviews.js";
 
@@ -120,9 +122,11 @@ program
 program
   .command("create")
   .description("Run the walkthrough, write rafi-config.yaml, and compile the target repo.")
+  .option("--interview-id <id>", "recover an exact saved create interview (normally selected by plan:doctor)")
   .argument("<project>", "path to the target repo")
   .option("--defaults", "accept disclosed setup defaults, including scoped Graphify adoption")
   .option("--no-graph", "opt out of Graphify for new setup")
+  .option("--dirty-work <mode>", "preserve: record exact preimages and continue with uncommitted work")
   .option("--force", "overwrite existing doc files")
   .option("--docs-root <dir>", "repo-relative directory for Rafi starter and tracker docs")
   .option("--runtime <runtime>", "agent runtime targets to configure (both | claude | codex)")
@@ -130,6 +134,7 @@ program
   .option("--grill-me", "use exhaustive initial planning when planning is accepted")
   .option("--no-grill-me", "use standard initial planning (default)")
   .action(async (project: string, opts, command: Command) => {
+    if (opts.dirtyWork !== undefined && opts.dirtyWork !== "preserve") throw new Error("--dirty-work for create must be preserve");
     const targetDir = resolve(project);
     assertLifecycleForCommand(targetDir, "create");
     const preexistingConfig = loadRafiConfig(targetDir);
@@ -138,14 +143,19 @@ program
     if (existsSync(targetDir) && !readInstallManifest(targetDir)) {
       const dirty = gitDirtyPaths(targetDir);
       if (dirty.length) {
-        if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(`repository has uncommitted changes (${dirty.join(", ")}); rerun interactively to snapshot exact preimages or commit/stash first`);
-        const { select, isCancel } = await import("@clack/prompts");
-        const choice = await select({ message: `Repository has ${dirty.length} uncommitted path(s). How should installation proceed?`, options: [
-          { value: "snapshot", label: "Record exact preimages and continue" },
-          { value: "stop", label: "Stop so I can commit or stash first" },
-        ] });
-        if (isCancel(choice) || choice === "stop") { console.log("rafi create: stopped before writing install state"); return; }
-        initializeInstallManifest(targetDir, "snapshot-and-continue");
+        if (!process.stdin.isTTY || !process.stdout.isTTY) {
+          if (opts.dirtyWork !== "preserve") throw new Error(`repository has uncommitted changes (${dirty.join(", ")}); use --dirty-work preserve to record exact preimages and continue, or rerun interactively`);
+          initializeInstallManifest(targetDir, "snapshot-and-continue");
+          console.log("rafi create: recording exact preimages of uncommitted files before installation; existing work is preserved.");
+        } else {
+          const { select, isCancel } = await import("@clack/prompts");
+          const choice = await select({ message: `Repository has ${dirty.length} uncommitted path(s). How should installation proceed?`, options: [
+            { value: "snapshot", label: "Record exact preimages and continue" },
+            { value: "stop", label: "Stop so I can commit or stash first" },
+          ] });
+          if (isCancel(choice) || choice === "stop") { console.log("rafi create: stopped before writing install state"); return; }
+          initializeInstallManifest(targetDir, "snapshot-and-continue");
+        }
       } else initializeInstallManifest(targetDir, "clean");
     }
     const createArgv = rawCommandArgs(command);
@@ -171,7 +181,9 @@ program
       timezone: detectedTimezone,
     };
     const interactiveInterview = !opts.defaults && process.stdin.isTTY && process.stdout.isTTY;
-    let interview: InterviewRecord | undefined = interactiveInterview
+    let interview: InterviewRecord | undefined = opts.interviewId
+      ? resumeInterviewRecord(targetDir, opts.interviewId, "create")
+      : interactiveInterview
       ? createInterviewRecord({
         workflow: "create",
         invocation: { projectDir: targetDir, force: Boolean(opts.force), docsRoot: docsRootOption, runtime: runtimeOption, rootFileMode },
@@ -180,6 +192,7 @@ program
       })
       : undefined;
     if (interview) interview = checkpointInterview(targetDir, interview, { checkpoint: "app-name" });
+    if (opts.interviewId && interview) answers = { ...answers, ...interview.answers } as WalkthroughAnswers;
     const checkpointCreateAnswer = (checkpoint: string, key: string, value: unknown): void => {
       if (!interview) return;
       interview = checkpointInterview(targetDir, interview, {
@@ -447,6 +460,7 @@ program.addCommand(buildResumeCommand({
   resumeBuild: async (args) => { await buildBuildResumeCommand({ executeStart: (args, context) => launchResumeStart(fileURLToPath(import.meta.url), args, context) }).parseAsync(args, { from: "user" }); },
   resumeInterview,
 }));
+program.addCommand(buildPlanDoctorCommand({ resume: resumeInterview }));
 
 function loadRafiConfig(targetDir: string): { config: ProjectConfig; migrated: boolean } | undefined {
   const configPath = join(targetDir, RAFI_CONFIG_FILE);
@@ -860,7 +874,7 @@ async function resumeInterview(projectDir: string, record: InterviewRecord): Pro
     if (typeof brief !== "string" || !brief.trim()) {
       throw new Error("the saved plan interview has no brief yet; rerun `rafi plan` to answer the brief question");
     }
-    args = ["plan", projectDir, "--brief", brief, "--yes"];
+    args = ["plan", projectDir, "--brief", brief, "--interview-id", record.id];
     for (const [key, option] of [["agent", "--agent"], ["model", "--model"], ["effort", "--effort"]] as const) {
       if (typeof invocation[key] === "string") args.push(option, invocation[key] as string);
     }
@@ -875,22 +889,27 @@ async function resumeInterview(projectDir: string, record: InterviewRecord): Pro
     // prompt implementation does not yet accept answer injection, so re-enter
     // the walkthrough rather than replacing configuration with defaults.
     if(record.answers.graph){assertGraphConfig(record.answers.graph);adoptGraph(projectDir,{config:record.answers.graph,authorization:"setup"});}
-    args = ["create", projectDir];
+    args = ["create", projectDir, "--interview-id", record.id];
     if (invocation.force) args.push("--force");
     if (typeof invocation.docsRoot === "string") args.push("--docs-root", invocation.docsRoot);
     if (typeof invocation.runtime === "string") args.push("--runtime", invocation.runtime);
     if (typeof invocation.rootFileMode === "string") args.push("--root-file-mode", invocation.rootFileMode);
   } else if (record.workflow === "tickets-plan") {
-    args = ["tickets", "plan", "--project", projectDir];
+    args = ["tickets", "plan", "--project", projectDir, "--interview-id", record.id];
     if (typeof record.answers.brief === "string") args.push("--brief", record.answers.brief);
     if (record.runtime.sessionId) args.push("--resume-session", record.runtime.sessionId);
+  } else if (record.workflow === "tickets-populate") {
+    args = ["tickets", "populate", "--project", projectDir, "--interview-id", record.id];
+    if (record.runtime.sessionId) args.push("--resume-session", record.runtime.sessionId);
+    if (Array.isArray(invocation.sources)) args.push("--sources", ...invocation.sources.map(String));
+    for (const [key, option] of [["agent", "--agent"], ["model", "--model"], ["effort", "--effort"]] as const) if (typeof invocation[key] === "string") args.push(option, String(invocation[key]));
   } else {
-    args = ["tickets", record.workflow === "tickets-setup-init" ? "setup:init" : "setup:update", "--project", projectDir];
+    args = ["tickets", record.workflow === "tickets-setup-init" ? "setup:init" : "setup:update", "--project", projectDir, "--interview-id", record.id];
   }
   const result = spawnSync(process.execPath, [...process.execArgv, entry, ...args], { stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`resumed ${record.workflow} exited with status ${result.status ?? "unknown"}`);
-  completeInterview(projectDir, record);
+  // The workflow owns completion. Exit zero also covers a cancelled review.
 }
 
 async function resumeCreateTicketSetupPrompt(projectDir: string, record: InterviewRecord): Promise<void> {
@@ -1033,7 +1052,10 @@ const ticketsCommand = buildTicketsCommand({
     for (const receipt of receipts) finalizePreparedOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category);
   },
 });
-ticketsCommand.addCommand(buildTicketPlanCommand());
+ticketsCommand.addCommand(buildTicketPlanCommand({
+  beforeApply: projectDir => { for (const receipt of ticketOwnershipReceipts(projectDir, "plan", false)) prepareOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category); },
+  afterApply: projectDir => { for (const receipt of ticketOwnershipReceipts(projectDir, "plan", true)) finalizePreparedOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category); },
+}));
 program.addCommand(ticketsCommand);
 program.addCommand(buildStartCommand());
 program.addCommand(buildAttachCommand());
@@ -1057,6 +1079,12 @@ program.addCommand(buildManagerCommand({ resolveProject: (project) => {
   const discovered = project ? resolveExplicitRafiProject(project) : findNearestRafiProject(process.cwd());
   if (!discovered) {
     const where = project ? resolve(project) : process.cwd();
+    let candidate = where;
+    while (true) {
+      if ([".rafi", ".tickets", ".foreman"].some(path => existsSync(join(candidate, path)))) return candidate;
+      if (project || dirname(candidate) === candidate) break;
+      candidate = dirname(candidate);
+    }
     throw new Error(project
       ? `no ${RAFI_CONFIG_FILE} found in explicit project directory ${where}`
       : `no Rafi project found from ${where}; expected ${RAFI_CONFIG_FILE} in this directory or an ancestor`);

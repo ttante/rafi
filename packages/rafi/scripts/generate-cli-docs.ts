@@ -40,6 +40,7 @@ const cases: Array<[string, Command]> = [
   ...["graph", "graph status", "graph adopt", "graph refresh", "graph query", "graph node", "graph neighbors", "graph path", "graph impact", "graph enable", "graph disable", "graph prune"].map(path=>[`rafi ${path} --help`,commandByPath(path.split(" "))] as [string,Command]),
   ...["graph", "graph status", "graph adopt", "graph refresh"].map(path=>[`ai-foreman ${path} --help`,commandByPath(path.split(" "),foremanProgram)] as [string,Command]),
   ["rafi resume --help", commandByPath(["resume"])],
+  ["rafi plan:doctor --help", commandByPath(["plan:doctor"])],
   ["rafi create --help", commandByPath(["create"])],
   ["rafi compile --help", commandByPath(["compile"])],
   ["rafi discover --help", commandByPath(["discover"])],

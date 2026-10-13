@@ -20,9 +20,17 @@ export function migrateBuildWork(db: Database.Database, projectDir: string, faul
     return;
   }
   const lease = db.prepare("SELECT pid,process_start,host FROM project_lease").get() as {pid: number; process_start: string; host: string} | undefined;
-  if (lease && classifyProcess(lease.pid, lease.process_start, lease.host).state !== "dead") throw new Error("Work admission upgrade requires stopped, verified writers and a consistent backup");
+  if (lease && classifyProcess(lease.pid, lease.process_start, lease.host).state !== "dead") throw new Error(`Rafi cannot upgrade build storage while its writer may still be running (PID ${lease.pid}, host ${lease.host}). Run \`rafi status .\` and \`rafi doctor .\` to inspect it. Stop the build on its owning host before retrying; ticket show, validate, and queue remain available.`);
   const owner = db.prepare("SELECT record_json FROM build_admission").get() as {record_json:string}|undefined;
-  if (owner) {const identity=JSON.parse(owner.record_json);if(classifyProcess(identity.pid,identity.processStart,identity.host).state!=="dead")throw new Error("Work admission upgrade requires a stopped, verified build owner");}
+  if (owner) {
+    let identity: { pid: number; processStart: string; host: string };
+    try {
+      identity = JSON.parse(owner.record_json);
+      if (!identity || !Number.isSafeInteger(identity.pid) || identity.pid <= 1 || typeof identity.host !== "string" || typeof identity.processStart !== "string") throw new Error("invalid owner fields");
+    } catch { throw new Error("Rafi cannot verify the saved build owner because its record is damaged. Run `rafi doctor .` to inspect recovery state; preserve the database before repairing it. Ticket inspection remains available."); }
+    const state = classifyProcess(identity.pid, identity.processStart, identity.host).state;
+    if (state !== "dead") throw new Error(`Rafi cannot upgrade build storage: the saved build owner is ${state} (PID ${identity.pid}, host ${identity.host}). Run \`rafi status .\` and \`rafi doctor .\`. Verify and stop the build on its owning host before retrying. Ticket show, validate, and queue remain available; Rafi has not taken over the build.`);
+  }
   const backup = db.serialize();
   // The coherent WAL-visible backup survives even a rolled-back upgrade.
   // Publish the packet copy and manifest before enabling any new writer.

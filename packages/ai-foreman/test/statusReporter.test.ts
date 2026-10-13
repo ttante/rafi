@@ -2,6 +2,38 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { BuilderAdapter, BuilderEvent, ContextUsage, ProviderSessionUsage, TurnResult } from "../src/adapters/types.js";
 import { AgentStatusReporter, type AgentStatusSnapshot, type StatusClock } from "../src/statusReporter.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { runStatus } from "../src/cli/status.js";
+
+test("status uses durable completion when a branch log lacks batch-end", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-completed-status-"));
+  const original = console.log; const lines: string[] = [];
+  try {
+    mkdirSync(join(root, ".foreman/runs"), { recursive: true });
+    writeFileSync(join(root, ".foreman/runs/done.json"), JSON.stringify({ version: 1, runId: "done", status: "completed", branchMode: "branch-per-ticket", tickets: ["T1"], checkpoint: "completed", repository: { root, worktree: root }, receipts: {}, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z" }));
+    writeFileSync(join(root, ".foreman/2026-01-01.jsonl"), JSON.stringify({ event: "audit", runId: "non-build-audit" }) + "\n" + JSON.stringify({ event: "branch-complete", runId: "done", ticket: "T1" }) + "\n");
+    console.log = (...args) => { lines.push(args.join(" ")); };
+    runStatus(root);
+    assert.match(lines.join("\n"), /outcome.*completed/);
+    assert.doesNotMatch(lines.join("\n"), /still in progress/);
+  } finally { console.log = original; rmSync(root, { recursive: true, force: true }); }
+});
+
+test("status does not borrow completion from an unrelated retained run", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-unmatched-status-"));
+  const original = console.log; const lines: string[] = [];
+  try {
+    mkdirSync(join(root, ".foreman/runs"), { recursive: true });
+    writeFileSync(join(root, ".foreman/runs/done.json"), JSON.stringify({ version: 1, runId: "old-done", status: "completed", branchMode: "branch-per-ticket", tickets: ["T1"], checkpoint: "completed", repository: { root, worktree: root }, receipts: {}, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z" }));
+    writeFileSync(join(root, ".foreman/2026-02-01.jsonl"), JSON.stringify({ event: "branch-complete", runId: "old-done" }) + "\n" + JSON.stringify({ event: "step", runId: "new-not-retained" }) + "\n");
+    console.log = (...args) => { lines.push(args.join(" ")); };
+    runStatus(root);
+    assert.doesNotMatch(lines.join("\n"), /outcome.*completed/);
+    assert.match(lines.join("\n"), /in progress or did not finish/);
+  } finally { console.log = original; rmSync(root, { recursive: true, force: true }); }
+});
 
 class StatusAdapter implements BuilderAdapter {
   readonly agent = "codex" as const;

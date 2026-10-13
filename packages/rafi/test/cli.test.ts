@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { stringify } from "yaml";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 import { program } from "../src/index.js";
+import { checkpointInterview, createInterviewRecord, readInterviewRecords } from "ai-foreman/interviews.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -49,6 +50,20 @@ function installReadyClaude(binDir: string): void {
   writeFileSync(claudePath, "#!/bin/sh\necho OK\nexit 0\n", "utf8");
   chmodSync(claudePath, 0o755);
 }
+
+test("create recovery completes the selected interview without creating another", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-create-exact-recovery-"));
+  const bin = join(root, "fixture-bin");
+  installReadyClaude(bin);
+  const saved = checkpointInterview(root, createInterviewRecord({ workflow: "create", invocation: { projectDir: root }, checkpoint: "app-name", answers: { appName: "Recovered app" } }), {});
+  const result = spawnSync(process.execPath, ["--import", "tsx", join(HERE, "../src/index.ts"), "create", root, "--defaults", "--no-graph", "--runtime", "claude", "--root-file-mode", "append", "--interview-id", saved.id], { cwd: join(HERE, ".."), env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` }, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const records = readInterviewRecords(root).records;
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.id, saved.id);
+  assert.equal(records[0]?.status, "completed");
+  assert.equal(records[0]?.answers.appName, "Recovered app");
+});
 
 test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
   const docs = readFileSync(join(HERE, "..", "..", "..", "docs", "cli.md"), "utf8");

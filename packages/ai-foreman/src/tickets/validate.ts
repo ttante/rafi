@@ -75,7 +75,9 @@ export function runAllValidation(
   }
   const blockedWithNone = queueRows.filter((r) => r.status === "blocked" && r.blockedBy === "None");
   for (const r of blockedWithNone) {
-    issues.push({ pass: 3, severity: "error", message: `[queue] ${r.ticket} is blocked but Blocked By is None` });
+    const state = states.get(r.ticket);
+    if (state?.blocker_notes?.trim()) continue;
+    issues.push({ pass: 3, severity: "error", message: `[queue] ${r.ticket} is blocked but no blocker or reason was saved. Inspect \`rafi status .\` for interrupted builds; recover with \`rafi build:resume .\` when appropriate, or record the prerequisite with \`rafi tickets block ${r.ticket} --summary "reason"\`.` });
   }
 
   // Pass 4: generated Markdown doc

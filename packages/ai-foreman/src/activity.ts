@@ -313,8 +313,11 @@ export function reportBuilderEvent(event: BuilderEvent): void {
         reporter.pulse();
         break;
       case "completed":
-        reporter.completedWork();
-        if (isFailedToolCompletion(event)) reporter.update("tool failed", event.name);
+        if (event.completionKnown !== false) reporter.completedWork();
+        if (event.status === "unknown") reporter.update("tool outcome unknown", event.name, { immediate: false });
+        else if (event.status === "timed_out") reporter.update("tool timed out", event.name);
+        else if (event.status === "cancelled") reporter.update("tool cancelled", event.name);
+        else if (isFailedToolCompletion(event)) reporter.update("tool failed", event.name);
         else reporter.pulse();
         break;
       case "started":

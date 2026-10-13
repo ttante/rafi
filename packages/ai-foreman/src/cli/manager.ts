@@ -29,7 +29,7 @@ export interface ManagerCommandOptions {
 
 export function buildManagerCommand(options: ManagerCommandOptions = {}): Command {
   return new Command("manager")
-    .description("Inspect retained builds and enqueue explicitly scoped Builder/QA guidance.")
+    .description("Consult on setup, planning, tickets, builds, and QA, including before the first build.")
     .argument(options.requireProject ? "<project>" : "[project]", "project directory")
     .option("--run <run-id>", "set the initial focused build run")
     .option("--ask <question>", "ask one question and exit")
@@ -59,11 +59,11 @@ export async function runManager(projectDir: string, options: { runId?: string; 
   const initialCollection = collectManagerProjectDiagnostics(projectDir, { initialFocusRunId: options.runId, question: options.ask, external: "off" });
   const initialReport = initialCollection.report;
   let currentFocusRunId = initialReport.initialFocusRunId;
-  let referencedRunIds: string[] = [currentFocusRunId];
+  let referencedRunIds: string[] = currentFocusRunId ? [currentFocusRunId] : [];
   const managerLabel = (text: string) => accent(text, { stream: output, env: process.env, machineReadable: Boolean(options.ask) });
   output.write(`${managerLabel("rafi manager")}: ${initialReport.totalRunCount} retained build run${initialReport.totalRunCount === 1 ? "" : "s"}\n`);
   output.write(`${managerLabel("rafi manager")}: verified active run ${sanitizeTerminalText(initialReport.verifiedActiveRunId ?? "none")}\n`);
-  output.write(`${managerLabel("rafi manager")}: initial focus ${sanitizeTerminalText(currentFocusRunId)}\n`);
+  output.write(`${managerLabel("rafi manager")}: initial focus ${sanitizeTerminalText(currentFocusRunId || "project setup and planning")}\n`);
   if (initialReport.staleRecoveryRunIds.length) output.write(`${managerLabel("rafi manager")}: stale recovery state ${initialReport.staleRecoveryRunIds.map(sanitizeTerminalText).join(", ")}\n`);
   const metadata = new ManagerSessionRecorder(projectDir);
   const managerSessionId = randomUUID();

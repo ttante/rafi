@@ -111,6 +111,8 @@ Commands:
                                                       and compile the target repo.
   resume [options] [project]                          Select an unfinished build or saved create,
                                                       plan, or ticket-setup interview to resume.
+  plan:doctor [project]                               Recover saved create, plan, and
+                                                      ticket-planning sessions; no flags required.
   plan [options] [project]                            Create a ticket-maker-ready implementation
                                                       plan from a brief and repo inspection.
   tickets                                             Manage the structured ticket tracker for a
@@ -135,8 +137,8 @@ Commands:
                                                       Rafi roles.
   state                                               Export, inspect, and import portable Rafi
                                                       local state bundles.
-  manager [options] [project]                         Inspect retained builds and enqueue
-                                                      explicitly scoped Builder/QA guidance.
+  manager [options] [project]                         Consult on setup, planning, tickets, builds,
+                                                      and QA, including before the first build.
   uninstall [options] [project]                       Preview and safely remove selected
                                                       project-local Rafi material.
   uninstall:restore [options] <recoveryId> [project]  Restore files from an indefinite
@@ -220,8 +222,11 @@ Arguments:
   project                  path to the target repo
 
 Options:
+  --interview-id <id>      recover an exact saved create interview (normally selected by
+                           plan:doctor)
   --defaults               accept disclosed setup defaults, including scoped Graphify adoption
   --no-graph               opt out of Graphify for new setup
+  --dirty-work <mode>      preserve: record exact preimages and continue with uncommitted work
   --force                  overwrite existing doc files
   --docs-root <dir>        repo-relative directory for Rafi starter and tracker docs
   --runtime <runtime>      agent runtime targets to configure (both | claude | codex)
@@ -268,6 +273,7 @@ Options:
   --effort <level>         reasoning effort level (low|medium|high|xhigh)
   --fast                   fast mode - lower latency
   --resume-session <id>    resume a saved planner agent session
+  --interview-id <id>      recover an exact saved interview (normally selected by plan:doctor)
   --revise [plan-id]       revise the latest or named approved plan lineage
   --validate               validate the latest Markdown/structured plan pair without running an
                            agent
@@ -341,6 +347,7 @@ Options:
   -m, --model <model>      session-only model override
   --effort <level>         session-only reasoning override (low|medium|high|xhigh)
   --resume-session <id>    resume the planning agent session
+  --interview-id <id>      recover an exact saved interview (normally selected by plan:doctor)
   --source-storage <mode>  storage for newly captured source versions (local | tracked)
   --grill-me               start in exhaustive one-question-at-a-time mode
   --no-grill-me            start in standard focused mode (default)
@@ -356,6 +363,8 @@ Usage: rafi tickets setup:init [options]
 Configure ticket population, supporting context, and build defaults in rafi-config.yaml.
 
 Options:
+  --interview-id <id>               recover an exact saved setup interview (normally selected by
+                                    plan:doctor)
   -p, --project <dir>               project directory (default: cwd)
   --defaults                        skip prompts and use recommended ticket setup defaults
   -y, --yes                         skip prompts where possible
@@ -395,6 +404,8 @@ Usage: rafi tickets setup:update [options]
 Update ticket population, supporting context, and build settings in rafi-config.yaml.
 
 Options:
+  --interview-id <id>               recover an exact saved setup interview (normally selected by
+                                    plan:doctor)
   -p, --project <dir>               project directory (default: cwd)
   --defaults                        skip prompts and keep existing values unless explicit options
                                     are provided
@@ -460,6 +471,10 @@ Options:
   --effort <level>             reasoning effort level (low|medium|high|xhigh)
   --sources <paths...>         supporting files, folders, URLs, or globs to check first
   --fast                       fast mode - lower latency
+  --resume-session <id>        resume a saved Ticket Maker session (normally selected by
+                               plan:doctor)
+  --interview-id <id>          recover an exact saved population interview (normally selected by
+                               plan:doctor)
   --authorize-retire <ids...>  exact ticket IDs authorized to become obsolete in computer-run mode
   -y, --yes                    computer-run approval; retirements still require --authorize-retire
                                exact IDs
@@ -752,6 +767,8 @@ Options:
   --builder-approvals                  allow the builder to request explicit per-operation sandbox
                                        approvals; QA stays restricted
   --keep-worktrees                     keep successful ticket worktrees for inspection
+  --dirty-work <mode>                  preserve | include: continue in isolated branches without
+                                       merging into the dirty checkout
   --ticket <id>                        select one new ticket, or identify recovery tickets with
                                        --resume/--continue/--recover-run (default: [])
   --skip-delivery-unit <id>            skip one unfinished delivery unit for this run (default: [])
@@ -815,8 +832,8 @@ Commands:
                                project.
   doctor [options] [project]   Check Foreman, agent CLIs, config, and optional
                                ticket tracker readiness.
-  manager [options] <project>  Inspect retained builds and enqueue explicitly
-                               scoped Builder/QA guidance.
+  manager [options] <project>  Consult on setup, planning, tickets, builds, and
+                               QA, including before the first build.
   state                        Export, inspect, and import portable Rafi local
                                state bundles.
   help [command]               display help for command
@@ -948,6 +965,9 @@ Options:
                                        stays restricted
   --keep-worktrees                     keep successful ticket worktrees for
                                        inspection
+  --dirty-work <mode>                  preserve | include: continue in isolated
+                                       branches without merging into the dirty
+                                       checkout
   --ticket <id>                        select one new ticket, or identify
                                        recovery tickets with
                                        --resume/--continue/--recover-run
@@ -1260,7 +1280,7 @@ Options:
 ```text
 Usage: rafi manager [options] [project]
 
-Inspect retained builds and enqueue explicitly scoped Builder/QA guidance.
+Consult on setup, planning, tickets, builds, and QA, including before the first build.
 
 Arguments:
   project            project directory
@@ -1281,7 +1301,8 @@ Options:
 ```text
 Usage: ai-foreman manager [options] <project>
 
-Inspect retained builds and enqueue explicitly scoped Builder/QA guidance.
+Consult on setup, planning, tickets, builds, and QA, including before the first
+build.
 
 Arguments:
   project            project directory
@@ -1712,4 +1733,18 @@ Options:
                              --task)
   --semantic-result <file>   consume exact host result (requires --task)
   -h, --help                 display help for command
+```
+
+### `rafi plan:doctor --help`
+
+```text
+Usage: rafi plan:doctor [options] [project]
+
+Recover saved create, plan, and ticket-planning sessions; no flags required.
+
+Arguments:
+  project     project directory (default: discover from cwd)
+
+Options:
+  -h, --help  display help for command
 ```

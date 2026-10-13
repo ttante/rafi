@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import type { SavedTicketDefinitionSnapshot, TicketGroup, TicketGroupId, TicketGroupOrigin } from "rafi-spec";
@@ -286,8 +286,16 @@ CREATE INDEX IF NOT EXISTS idx_ticket_group_members_group ON ticket_group_member
 
 export class StateDb {
   private db: Database.Database;
+  readonly readOnly: boolean;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: { readOnly?: boolean } = {}) {
+    this.readOnly = Boolean(options.readOnly);
+    if (this.readOnly) {
+      this.db = existsSync(dbPath) ? new Database(dbPath, { readonly: true, fileMustExist: true }) : new Database(":memory:");
+      if (!existsSync(dbPath)) this.db.exec(INIT_SQL);
+      this.db.pragma("query_only = ON");
+      return;
+    }
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
@@ -630,12 +638,14 @@ export class StateDb {
   }
 
   listTicketGroups(): TicketGroup[] {
+    if (this.readOnly && !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='ticket_groups'").get()) return [];
     const rows = this.db.prepare("SELECT sequence FROM ticket_groups ORDER BY sequence DESC").all() as Array<{ sequence: number }>;
     return rows.map((row) => this.getTicketGroupBySequence(row.sequence)!);
   }
 
   /** One-time migration for repositories whose complete ticket set predates groups. */
   ensureSyntheticLegacyGroup(definitions: Array<{ id: string } & Record<string, unknown>>, now = new Date()): TicketGroup | undefined {
+    if (this.readOnly) return undefined;
     if (definitions.length === 0 || this.listTicketGroups().length > 0) return undefined;
     return this.createTicketGroup({
       origin: "legacy",
@@ -663,6 +673,8 @@ export class StateDb {
   validateTicketGroups(knownTicketIds: readonly string[] = []): TicketGroupValidationIssue[] {
     const issues: TicketGroupValidationIssue[] = [];
     const groups = this.listTicketGroups();
+    // Ungrouped legacy trackers are inspected without publishing a synthetic group.
+    if (this.readOnly && groups.length === 0 && (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='ticket_group_sequence_ledger'").get() || !(this.db.prepare("SELECT 1 FROM ticket_group_sequence_ledger LIMIT 1").get()))) return issues;
     const known = new Set(knownTicketIds);
     for (const group of groups) {
       if (group.members.length === 0) issues.push({ code: "empty-group", groupId: group.id, message: `${group.id} has no members` });

@@ -97,7 +97,7 @@ export function findResumableBranchSessions(foremanDir: string): BranchResumeSes
 
 export function formatBranchContinueCommand(projectDir: string, session: BranchResumeSession): string {
   const args = [
-    "ai-foreman",
+    "rafi",
     "start",
     shellQuote(projectDir),
     "--steps",
@@ -112,7 +112,7 @@ export function formatBranchContinueCommand(projectDir: string, session: BranchR
   if (session.agent && session.agent !== "claude") args.push("--agent", shellQuote(session.agent));
   if (session.model) args.push("--model", shellQuote(session.model));
   if (session.effort) args.push("--effort", shellQuote(session.effort));
-  if (session.reviewProvider) args.push("--provider", shellQuote(session.reviewProvider));
+  if (session.reviewProvider && session.completionMode !== "none" && (session.completionMode || session.createPr)) args.push("--provider", shellQuote(session.reviewProvider));
   if (session.fast) args.push("--fast");
   if (session.qaEnabled === false) args.push("--no-qa");
   if (session.prReady) args.push("--pr-ready");

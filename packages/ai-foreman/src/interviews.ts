@@ -21,7 +21,7 @@ export const INTERVIEW_DIRECTORY = ".rafi/interviews";
 const MAX_FAILURE_LENGTH = 1_000;
 const COMPLETE_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
-export type InterviewWorkflow = "create" | "plan" | "tickets-plan" | "tickets-setup-init" | "tickets-setup-update";
+export type InterviewWorkflow = "create" | "plan" | "tickets-plan" | "tickets-populate" | "tickets-setup-init" | "tickets-setup-update";
 export type InterviewStatus = "in_progress" | "paused" | "needs_review" | "completed" | "incompatible";
 export type InterviewStageStatus = "not_offered" | "offered" | "accepted" | "running" | "completed" | "skipped" | "paused" | "failed" | "cancelled";
 
@@ -83,6 +83,13 @@ export interface InterviewReadResult {
 
 export function interviewDirectory(projectDir: string): string {
   return join(resolve(projectDir), INTERVIEW_DIRECTORY);
+}
+
+/** Select only an exact compatible unfinished interview; never create a replacement on a typo. */
+export function resumeInterviewRecord(projectDir: string, id: string, workflow: InterviewWorkflow): InterviewRecord {
+  const record = readInterviewRecords(projectDir).records.find(item => item.id === id && item.workflow === workflow && item.status !== "completed" && item.status !== "incompatible");
+  if (!record) throw new Error(`Saved ${workflow} interview not found; run \`rafi plan:doctor\` to select another`);
+  return record;
 }
 
 export function createInterviewRecord(input: {

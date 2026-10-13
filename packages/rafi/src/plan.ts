@@ -399,6 +399,7 @@ export interface PlanWorkflowOptions {
   effort?: string;
   fast?: boolean;
   resumeSession?: string;
+  interviewId?: string;
   revise?: string | boolean;
   validate?: boolean;
   render?: boolean;
@@ -436,6 +437,7 @@ export function buildPlanCommand(): Command {
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--fast", "fast mode - lower latency")
     .option("--resume-session <id>", "resume a saved planner agent session")
+    .option("--interview-id <id>", "recover an exact saved interview (normally selected by plan:doctor)")
     .option("--revise [plan-id]", "revise the latest or named approved plan lineage")
     .option("--validate", "validate the latest Markdown/structured plan pair without running an agent")
     .option("--render", "regenerate latest Markdown from validated structured data")
@@ -464,6 +466,7 @@ export function buildPlanCommand(): Command {
       if (outcome.status === "completed" || outcome.status === "cancelled") return;
       if (outcome.diagnostic) console.error(`rafi plan: ${outcome.diagnostic}`);
       if (outcome.resumeCommand) console.error(`rafi plan: resume with: ${outcome.resumeCommand}`);
+      console.error("rafi plan: recover saved planning sessions with `rafi plan:doctor`.");
       process.exit(outcome.status === "blocked" ? 2 : 1);
     });
 }
@@ -491,10 +494,12 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
     const argv = opts.rawArgs ?? [];
     if (argv.includes("--grill-me") && argv.includes("--no-grill-me")) throw new Error("choose either --grill-me or --no-grill-me, not both");
     const interactiveInterview = !opts.yes && process.stdin.isTTY && process.stdout.isTTY;
-    const resumedInterview = opts.resumeSession
-      ? readInterviewRecords(projectDir).records.find((record) => record.workflow === "plan" && record.status !== "completed" && (record.runtime.sessionId === opts.resumeSession || Object.values(record.sessionIds).includes(opts.resumeSession!)))
+    const resumedInterview = opts.resumeSession || opts.interviewId
+      ? readInterviewRecords(projectDir).records.find((record) => record.workflow === "plan" && record.status !== "completed" && (opts.interviewId ? record.id === opts.interviewId : record.runtime.sessionId === opts.resumeSession || Object.values(record.sessionIds).includes(opts.resumeSession!)))
       : undefined;
+    if (opts.interviewId && !resumedInterview) throw new Error("Saved planning interview not found; run `rafi plan:doctor` to select another");
     if (resumedInterview) {
+      opts.resumeSession ??= resumedInterview.runtime.sessionId;
       opts.brief ??= typeof resumedInterview.answers.brief === "string" ? resumedInterview.answers.brief : undefined;
       opts.agent ??= resumedInterview.runtime.runtime;
       opts.model ??= resumedInterview.runtime.model;
@@ -516,7 +521,7 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
     currentPlanningMode = planningMode;
     if (resumedInterview) {
       interview = resumedInterview;
-    } else if (!opts.resumeSession && (interactiveInterview || planningMode === "exhaustive")) {
+    } else if (!opts.resumeSession) {
       interview = createInterviewRecord({
         workflow: "plan",
         invocation: { projectDir, agent: opts.agent, model: opts.model, effort: opts.effort, fast: Boolean(opts.fast), label: opts.invocationLabel },

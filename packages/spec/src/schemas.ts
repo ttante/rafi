@@ -381,7 +381,7 @@ const autonomyConfig = {
   properties: {
     profile: { enum: ["supervised", "balanced", "unattended"] },
     continue_independent_tickets: { type: "boolean" },
-    runtime_deadlines: { type: "object", additionalProperties: false, properties: Object.fromEntries(["preparation_ms", "rpc_ms", "compaction_ms", "shutdown_ms", "turn_ms"].map(key => [key, { type: "integer", minimum: 1, maximum: key === "compaction_ms" ? 180000 : 86400000 }])) },
+    runtime_deadlines: { type: "object", additionalProperties: false, properties: Object.fromEntries(["preparation_ms", "rpc_ms", "compaction_ms", "shutdown_ms", "turn_ms", "heartbeat_ms"].map(key => [key, { type: "integer", minimum: 1, maximum: key === "compaction_ms" ? 180000 : 86400000 }])) },
     rules: {
       type: "object",
       additionalProperties: false,

@@ -34,7 +34,7 @@ export function getTicketDetails(projectDir: string, ticketId: string, now = new
   const tickets = loadTickets(paths.tickets);
   const definition = tickets.find((ticket) => ticket.id === ticketId) as TicketDetails["definition"] | undefined;
   if (!definition) throw new Error(`Ticket ${ticketId} not found. Run \`rafi tickets queue\` to list tickets.`);
-  const db = new StateDb(paths.stateDb);
+  const db = new StateDb(paths.stateDb, { readOnly: true });
   try {
     const states = db.getAllStates();
     const state = states.get(ticketId) ?? pristineTicketState(ticketId, now.toISOString());
@@ -59,7 +59,7 @@ export function getAllTicketDetails(projectDir: string, now = new Date()): AllTi
   const definitions = (loadTickets(paths.tickets) as TicketDetails["definition"][])
     .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
   const generatedAt = now.toISOString();
-  const db = new StateDb(paths.stateDb);
+  const db = new StateDb(paths.stateDb, { readOnly: true });
   try {
     const states = db.getAllStates();
     const validations = groupByTicketId(db.getValidationSnapshots(), (snapshot) => snapshot.scope);

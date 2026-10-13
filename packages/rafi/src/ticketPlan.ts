@@ -149,7 +149,7 @@ export function applyTicketPlanWorkModeDefault(
   };
 }
 
-export function buildTicketPlanCommand(): Command {
+export function buildTicketPlanCommand(ownership: Pick<TicketPlanOptions, "beforeApply" | "afterApply"> = {}): Command {
   return new Command("plan")
     .description("Plan and approve ticket work through a guided, project-aware conversation.")
     .option("-p, --project <dir>", "exact project directory (default: discover from cwd)")
@@ -158,17 +158,21 @@ export function buildTicketPlanCommand(): Command {
     .option("-m, --model <model>", "session-only model override")
     .option("--effort <level>", "session-only reasoning override (low|medium|high|xhigh)")
     .option("--resume-session <id>", "resume the planning agent session")
+    .option("--interview-id <id>", "recover an exact saved interview (normally selected by plan:doctor)")
     .option("--source-storage <mode>", "storage for newly captured source versions (local | tracked)")
     .option("--grill-me", "start in exhaustive one-question-at-a-time mode")
     .option("--no-grill-me", "start in standard focused mode (default)")
     .option("-y, --yes", "non-interactive mode; requires --brief and approves a valid proposal")
     .action(async (opts, command: Command) => {
       const parent = command.parent as (Command & { rawArgs?: string[] }) | null;
-      return runTicketPlan(opts, parent?.rawArgs ?? (command as Command & { rawArgs?: string[] }).rawArgs);
+      return runTicketPlan({ ...opts, ...ownership }, parent?.rawArgs ?? (command as Command & { rawArgs?: string[] }).rawArgs);
     });
 }
 
 export interface TicketPlanOptions {
+  beforeApply?: (projectDir: string) => void;
+  afterApply?: (projectDir: string) => void;
+  interviewId?: string;
   project?: string; brief?: string; agent?: string; model?: string; effort?: string; resumeSession?: string;
   sourceStorage?: string; yes?: boolean; grillMe?: boolean;
   createPlanner?: typeof createRoleBuilder;
@@ -210,11 +214,12 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
   ensureTracker(projectDir, interactive);
 
   let interview = await chooseInterview(projectDir, interactive, opts);
+  let activeRole: RoleBuilder | undefined;
   if (opts.resumeSession && !interview) {
     console.warn("rafi tickets plan: no durable interview record matched this session; continuing without creating a duplicate resume record");
   }
   try {
-    const resumingInterview = Boolean(interview && opts.resumeSession);
+    const resumingInterview = Boolean(interview && (opts.resumeSession || opts.interviewId));
     const context = readTicketPlanningContext(projectDir);
     let config = readProjectConfig(projectDir);
     const docsRoot = String((config.docs as Record<string, unknown> | undefined)?.root ?? "docs");
@@ -337,6 +342,7 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
       },
     });
     roleRef = role;
+    activeRole = role;
     const sendPlanningTurn = (instruction: string) => sendRoleGraphTurn(role, instruction, "planning");
     console.log(`rafi tickets plan: project ${String(config.appName ?? "unnamed")} at ${projectDir}`);
     console.log(`rafi tickets plan: runtime=${role.runtime} model=${role.model ?? role.roleBundle.model ?? "runtime default"} effort=${role.effort ?? "runtime default"}`);
@@ -344,10 +350,16 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
     if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() } });
 
     const baseInstruction = buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" });
-    let result = await sendPlanningTurn(rebuildingLostContinuity && grillState.answers.length
+    let correctionAttempts = 0;
+    const savedProposal = resumingInterview && typeof interview?.decisions.proposalResponse === "string" ? interview.decisions.proposalResponse : undefined;
+    const savedIssues = interview?.decisions.validationIssues;
+    let result = savedProposal && !rebuildingLostContinuity
+      ? await sendRoleGraphTurn(role, `${baseInstruction}\n\nRecover this saved invalid proposal. Revalidate against the current context above and return the complete corrected proposal with the plan_complete marker. Retain agreed decisions.\nValidation errors: ${JSON.stringify(savedIssues)}\nSaved proposal:\n${savedProposal}`, "planning", { responseOnly: true })
+      : await sendPlanningTurn(rebuildingLostContinuity && grillState.answers.length
       ? `${baseInstruction}\n\n${buildAuditAnswersContinuation(grillState)}`
       : baseInstruction);
     while (true) {
+      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: { ...interview.decisions, proposalResponse: result.text, correctionAttempts } });
       if (result.isError) throw new Error(`planning agent failed: ${result.text.slice(0, 300)}`);
       const marker = parseConversationMarker(result.text);
       if (marker.kind === "needs_input") {
@@ -367,10 +379,22 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
         result = await sendPlanningTurn(input.continuation!);
         continue;
       }
-      if (marker.kind !== "plan_complete") throw new Error("planning agent did not return proposal_ready or a valid question");
-      let proposal = extractTicketPlanProposal(result.text, context.tickets);
-      const issues = [...validateTicketPlanProposal(proposal, context.tickets), ...validateProposalSourceRefs(proposal, stagedSources, projectDir)];
-      if (issues.length) { result = await sendRoleGraphTurn(role, `Your proposal failed validation. Correct it without changing agreed decisions:\n${issues.join("\n")}`, "planning", {responseOnly:true}); continue; }
+      let proposal: TicketPlanProposal;
+      let issues: string[];
+      try {
+        if (marker.kind !== "plan_complete") throw new Error("planning agent did not return a plan_complete/proposal_ready marker or a valid question");
+        proposal = extractTicketPlanProposal(result.text, context.tickets);
+        issues = validateProposalSourceRefs(proposal, stagedSources, projectDir);
+      } catch (error) {
+        issues = [error instanceof Error ? error.message : String(error)];
+      }
+      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: { ...interview.decisions, proposalResponse: result.text, validationIssues: issues!, correctionAttempts } });
+      if (issues!.length) {
+        if (correctionAttempts++ >= 3) throw new Error(`Ticket planning could not correct its proposal after 3 attempts:\n${issues!.join("\n")}\nRun \`rafi plan:doctor\` to recover this saved session.`);
+        result = await sendRoleGraphTurn(role, `Your proposal failed validation. Return the complete corrected proposal and proposal_ready marker without changing agreed decisions. Do not inspect the repository again:\n${issues!.join("\n")}`, "planning", { responseOnly: true });
+        continue;
+      }
+      proposal = proposal!;
       let retryInterruptedAudit = false;
       if (grillState.auditStatus === "interrupted") {
         if (grillState.recoveryRetryUsed) {
@@ -455,6 +479,7 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
       const drift = planningFingerprintChanges(projectDir, fingerprint);
       if (drift.length) { result = await sendPlanningTurn(`The tracker/config changed during review (${drift.join(", ")}). Re-read current state, refresh the exact proposal, and request approval again.`); continue; }
       await role.builder.close();
+      opts.beforeApply?.(projectDir);
       const applied = applyApprovedTicketPlan(projectDir, proposal, { expectedFingerprint: fingerprint, docsRoot });
       const publishedConfig = readProjectConfig(projectDir);
       const nextConfig: ProjectConfig = { ...publishedConfig, ...(pendingAgentDefaults ? { agent_defaults: pendingAgentDefaults } : {}), tickets: { ...publishedConfig.tickets, build: { ...publishedConfig.tickets?.build, branch_strategy: workMode ?? publishedConfig.tickets?.build?.branch_strategy, branch_prefix: publishedConfig.tickets?.build?.branch_prefix ?? "feature", ...(workMode === "current" ? { completion: "none" as const, provider: "local" as const, cleanup: false } : {}) } } };
@@ -464,6 +489,7 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
       if (workMode && readback.tickets?.build?.branch_strategy !== workMode) throw new Error("approved ticket work mode failed config readback verification");
       if ((readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent ?? 65) !== (pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65)) throw new Error("approved compaction threshold failed config readback verification");
       saveSourceRegistry(projectDir, stagedSources);
+      opts.afterApply?.(projectDir);
       if (interview) completeInterview(projectDir, interview);
       console.log(`rafi tickets plan: created ${applied.added.length}, edited ${applied.edited.length}; validation passed`);
       console.log(`rafi tickets plan: wrote ${applied.artifacts.join(" and ")}`);
@@ -478,8 +504,9 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
       return;
     }
   } catch (err) {
+    await activeRole?.builder.close().catch(() => {});
     if (interview) failInterview(projectDir, interview, interview.checkpoint, err);
-    throw err;
+    throw new Error(`${err instanceof Error ? err.message : String(err)}\nRecover the saved planning session with \`rafi plan:doctor\`.`, { cause: err });
   }
 }
 
@@ -521,10 +548,16 @@ async function chooseSessionOverrides(opts: TicketPlanOptions, interactive: bool
 
 async function chooseInterview(projectDir: string, interactive: boolean, opts: TicketPlanOptions): Promise<InterviewRecord | undefined> {
   const unfinished = readInterviewRecords(projectDir).records.filter((record) => record.workflow === "tickets-plan" && record.status !== "completed");
+  if (opts.interviewId) {
+    const record = unfinished.find(record => record.id === opts.interviewId);
+    if (!record) throw new Error("Saved ticket-planning interview not found; run `rafi plan:doctor` to select another");
+    opts.resumeSession ??= record.runtime.sessionId;
+    return record;
+  }
   if (opts.resumeSession) {
     return unfinished.find((record) => record.runtime.sessionId === opts.resumeSession || Object.values(record.sessionIds).includes(opts.resumeSession!));
   }
-  if (!interactive) return undefined;
+  if (!interactive) return createInterviewRecord({ workflow: "tickets-plan", invocation: { projectDir, agent: opts.agent, model: opts.model, effort: opts.effort }, checkpoint: "brief", outputs: ["rafi-config.yaml", ".tickets/tickets.yaml", ".tickets/ticket-state.sqlite", ".tickets/delivery.yaml"] });
   if (unfinished.length) {
     const { select, isCancel } = await import("@clack/prompts");
     const record = unfinished[0]!;

@@ -33,16 +33,16 @@ export interface TicketContext {
   db: StateDb;
 }
 
-export function openContext(projectDir: string): TicketContext {
+export function openContext(projectDir: string, readOnly = false): TicketContext {
   const config = loadTicketsConfig(projectDir);
   const paths = resolveTicketPaths(config, projectDir);
   const tickets = loadTickets(paths.tickets);
-  const db = new StateDb(paths.stateDb);
+  const db = new StateDb(paths.stateDb, { readOnly });
   return { config, projectDir, paths, tickets, db };
 }
 
-function withContext<T>(projectDir: string, fn: (ctx: TicketContext) => T): T {
-  const ctx = openContext(projectDir);
+function withContext<T>(projectDir: string, fn: (ctx: TicketContext) => T, readOnly = false): T {
+  const ctx = openContext(projectDir, readOnly);
   try {
     return fn(ctx);
   } finally {
@@ -616,8 +616,9 @@ export function cmdValidate(projectDir: string): ValidateResult {
   return withContext(projectDir, (ctx) => {
     const states = ctx.db.getAllStates();
     const issues = runAllValidation(ctx.config, projectDir, ctx.tickets, states, ctx.db);
+    if (ctx.tickets.length && !existsSync(ctx.paths.stateDb)) issues.push({ pass: 2, severity: "error", message: `[state] ticket history database is missing: ${ctx.config.paths.stateDb}. Restore it before building; inspection has not recreated history or assumed completed work is new.` });
     return { issues, clean: issues.filter((i) => i.severity === "error").length === 0 };
-  });
+  }, true);
 }
 
 // ── queue ─────────────────────────────────────────────────────────────────────
@@ -626,7 +627,7 @@ export function cmdQueue(projectDir: string, limit?: number) {
   return withContext(projectDir, (ctx) => {
     const states = ctx.db.getAllStates();
     return buildNextQueue(ctx.tickets, states, limit ?? ctx.config.viewLimit);
-  });
+  }, true);
 }
 
 export function cmdStackQueue(projectDir: string, refresh = false): string[] {
@@ -651,14 +652,14 @@ export function cmdStackQueue(projectDir: string, refresh = false): string[] {
       saveDeliveryConfig(projectDir, delivery);
     }
     return formatStackAwareQueue(ctx.tickets, ctx.db.getAllStates(), delivery);
-  });
+  }, !refresh);
 }
 
 export function cmdImplementationQueue(projectDir: string) {
   return withContext(projectDir, (ctx) => {
     const states = ctx.db.getAllStates();
     return buildNextQueue(ctx.tickets, states, ctx.config.implementationLimit);
-  });
+  }, true);
 }
 
 // ── archive ───────────────────────────────────────────────────────────────────

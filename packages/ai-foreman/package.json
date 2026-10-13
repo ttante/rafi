@@ -1,6 +1,6 @@
 {
   "name": "ai-foreman",
-  "version": "1.7.21",
+  "version": "1.7.22",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
   "license": "Apache-2.0",
   "type": "module",
@@ -275,7 +275,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-graph-assets.mjs",
     "dev": "tsx src/index.ts",
-    "test": "tsx --test --test-concurrency=1 test/*.test.ts test/*.test.mjs",
+    "test": "node scripts/test-offline.mjs",
     "typecheck": "tsc --noEmit",
     "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 tsx --test test/providerSmoke.test.ts",
     "prepublishOnly": "tsc -p ../spec/tsconfig.build.json && pnpm build && pnpm --filter ai-foreman test && tsc --noEmit"
@@ -307,8 +307,8 @@
     "luxon": "^3.7.2",
     "parse5": "7.2.1",
     "pdfjs-dist": "4.10.38",
-    "rafi-spec": "0.8.14",
-    "special-agents": "0.8.13",
+    "rafi-spec": "0.8.15",
+    "special-agents": "0.8.14",
     "yaml": "^2.5.1"
   },
   "devDependencies": {

@@ -41,11 +41,15 @@ rafi status
 rafi tickets queue
 rafi resume
 rafi tickets plan
+rafi plan:doctor
+rafi manager
 rafi build:resume
 rafi start . --steps <n>
 ```
 
 Use `rafi tickets plan` for a new feature, milestone, audit, or backlog update. It gathers context and produces the exact ticket set you approve. `rafi resume` selects unfinished builds and interviews in the current project, newest first; `rafi build:resume` lists builds only. Pass a project path to resume elsewhere. Failed preparation can retry its existing successor after launch ownership is reconciled, without copying internal recovery flags.
+
+`rafi plan:doctor` recovers saved planning failures with an age-labeled session picker. Manager can help with setup, plans, and tickets before any build exists. To start with uncommitted work, use `--dirty-work preserve` or `--dirty-work include`; results stay in isolated branches and worktrees. See [reliability workflows](docs/reliability-workflows.md) for preservation boundaries and recovery details.
 
 ## Helpful features
 

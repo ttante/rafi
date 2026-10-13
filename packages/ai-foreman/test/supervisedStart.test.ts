@@ -9,25 +9,38 @@ import { readBuildRuns } from "../src/buildRuns.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { WorkflowReader } from "../src/workflowReader.js";
 import { processStartIdentity } from "../src/processIdentity.js";
+import { DEFAULT_AUTONOMY_CONFIG } from "../src/recoveryPolicy.js";
 
-for (const mode of ["current", "question", "branch", "crash", "preparation-crash", "detached", "parent-death", "cancel", "competing", "hung-worker"] as const) test(`actual supervised CLI ${mode}`, { timeout: mode === "hung-worker" ? 160000 : 30000 }, async t => {
+for (const mode of ["current", "question", "branch", "dirty-preserve", "dirty-include", "crash", "preparation-crash", "detached", "parent-death", "cancel", "competing", "hung-worker"] as const) test(`actual supervised CLI ${mode}`, { timeout: 30000 }, async t => {
   const crash = mode === "crash";
   const root = mkdtempSync(join(tmpdir(), "rafi-supervised-cli-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   execFileSync("git", ["init", "-q", root]);
+  if (mode === "hung-worker") writeFileSync(join(root, "rafi-config.yaml"), JSON.stringify({ autonomy: { ...DEFAULT_AUTONOMY_CONFIG, runtime_deadlines: { heartbeat_ms: 5000, shutdown_ms: 1000 } } }));
   const bin = join(root, "bin"); mkdirSync(bin);
   const provider = join(bin, "codex");
   copyFileSync(fileURLToPath(new URL("fixtures/build-stall-codex.cjs", import.meta.url)), provider); chmodSync(provider, 0o755);
-  if (mode === "branch") {
+  const dirtyMode = mode === "dirty-preserve" ? "preserve" : mode === "dirty-include" ? "include" : undefined;
+  const branchFixture = mode === "branch" || Boolean(dirtyMode);
+  let preservedIndex: Buffer | undefined;
+  if (branchFixture) {
     const { cmdInit, cmdUpdate } = await import("../src/tickets/commands.js");
     const { stringify } = await import("yaml");
     cmdInit(root, { appName: "test", timezone: "UTC" });
     writeFileSync(join(root, ".tickets/tickets.yaml"), stringify({ tickets: [{ id: "T001", order: 1, title: "Implement", area: "test", priority: "P1", size: "S", risk: "Low", summary: "work", acceptance: ["works"], required_tests: ["tests"], likely_files: [], depends_on: [] }] }));
     cmdUpdate(root, "T001", { status: "next", actor: "test" });
+    if (dirtyMode) writeFileSync(join(root, "sentinel.txt"), "committed\n");
     execFileSync("git", ["-C", root, "add", "."]);
     execFileSync("git", ["-C", root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
+    if (dirtyMode) {
+      writeFileSync(join(root, "sentinel.txt"), "staged\n");
+      execFileSync("git", ["-C", root, "add", "sentinel.txt"]);
+      writeFileSync(join(root, "sentinel.txt"), "unstaged\n");
+      writeFileSync(join(root, "untracked.txt"), "untracked\n");
+      preservedIndex = readFileSync(join(root, ".git/index"));
+    }
   }
-  const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/index.ts", import.meta.url)), "start", root, "--steps", "1", "--no-qa", "--yes", "--agent", "codex", ...(mode === "branch" ? ["--branch-per-ticket", "--completion", "none"] : []), ...(mode === "detached" ? ["--detach"] : [])], {
+  const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/index.ts", import.meta.url)), "start", root, "--steps", "1", "--no-qa", "--yes", "--agent", "codex", ...(branchFixture ? ["--branch-per-ticket", "--completion", "none"] : []), ...(dirtyMode ? ["--dirty-work", dirtyMode] : []), ...(mode === "detached" ? ["--detach"] : [])], {
     env: { ...process.env, RAFI_BUILD_WORKER_RUN: "", RAFI_DETACHED_SUPERVISOR_RUN: "", RAFI_FIXTURE_QUESTION: mode === "question" ? "1" : "0", RAFI_FIXTURE_CRASH_PREPARATION: mode === "preparation-crash" ? "1" : "0", RAFI_FIXTURE_CRASH_ON_WORK: crash ? "1" : "0", RAFI_FIXTURE_HANG_WORKER: mode === "hung-worker" ? "1" : "0", RAFI_FIXTURE_WAIT_ON_WORK: ["parent-death", "cancel", "competing"].includes(mode) ? "1" : "0", PATH: `${bin}:${process.env.PATH}` }, stdio: ["ignore", "pipe", "pipe"],
   });
   t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
@@ -88,6 +101,12 @@ for (const mode of ["current", "question", "branch", "crash", "preparation-crash
   const recoveryEvidence = reader.buildRuns().map(run => ({ checkpoint: run.checkpoint, events: reader.events(run.runId).filter(event => event.type === "worker_reconciliation_required") }));
   reader.close();
   assert.equal(code, crash ? 2 : 0, output + JSON.stringify(recoveryEvidence));
+  if (dirtyMode) {
+    assert.equal(readFileSync(join(root, "sentinel.txt"), "utf8"), "unstaged\n");
+    assert.equal(readFileSync(join(root, "untracked.txt"), "utf8"), "untracked\n");
+    assert.deepEqual(readFileSync(join(root, ".git/index")), preservedIndex);
+    assert.equal(readBuildRuns(root)[0]?.runDecisions?.dirtyWork?.mode, dirtyMode);
+  }
   if (mode === "detached") {
     const until = Date.now() + 20000;
     while (Date.now() < until) {

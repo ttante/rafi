@@ -4,6 +4,27 @@ All notable user-facing, API, migration, security, AI/model, and operational cha
 
 This project follows semantic versioning for published npm packages where practical. Entries before formal GitHub Releases are reconstructed from git history because the repository has no release tags yet.
 
+## Unreleased
+
+## @rafi-ai/cli 0.9.22 / ai-foreman 1.7.22 / special-agents 0.8.14 / rafi-spec 0.8.15 - 2026-10-13
+
+- Add flagless `rafi plan:doctor`, durable ticket-planning/population recovery, and bounded correction of invalid ticket proposals.
+- Support Manager consultation before the first build, with project setup and ticket evidence.
+- Keep ticket show/validate/queue free of workflow migration and publication recovery writes; clarify writer-owner recovery guidance.
+- Add explicit preserved-work installation and isolated build baselines for dirty checkouts.
+- Correlate Claude tool results and distinguish unknown, timed-out, cancelled, and failed outcomes.
+- Use durable completion in build status and public Rafi branch recovery commands.
+- Run the complete offline Foreman test gate in isolated parallel jobs with timing evidence; shorten the watchdog fixture through a configured deadline.
+
+See [reliability workflows](docs/reliability-workflows.md).
+
+### Packages
+
+- Bumped `rafi-spec` to `0.8.15` for updated shared contracts and schemas.
+- Bumped `special-agents` to `0.8.14` for its exact `rafi-spec@0.8.15` dependency.
+- Bumped `ai-foreman` to `1.7.22` for runtime reliability fixes and its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.9.22` for planning, recovery, and Manager changes and its exact internal dependencies.
+
 ## @rafi-ai/cli 0.9.21 / ai-foreman 1.7.21 / special-agents 0.8.13 / rafi-spec 0.8.14 - 2026-10-10
 
 ### Added

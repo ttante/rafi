@@ -143,7 +143,8 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
         killTimer.unref();
         try { process.kill(process.platform === "win32" ? child.pid! : -child.pid!, "SIGTERM"); } catch { /* exited */ }
       };
-      const watchdog = setInterval(() => { if (Date.now() - lastHeartbeat > 120_000) { stopRequestSource = "heartbeat-timeout"; stop(); } }, 5_000);
+      const heartbeatTimeout = policy.runtimeDeadlines?.heartbeat_ms ?? 120_000;
+      const watchdog = setInterval(() => { if (Date.now() - lastHeartbeat > heartbeatTimeout) { stopRequestSource = "heartbeat-timeout"; stop(); } }, Math.min(5_000, Math.max(25, heartbeatTimeout / 4)));
       watchdog.unref();
       child.on("message", message => { if (message && typeof message === "object" && "kind" in message && message.kind === "rafi-worker-heartbeat") lastHeartbeat = Date.now(); });
       child.on("message", message => {

@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { buildTicketsCommand } from "../src/cli/tickets.js";
 import {
   checkpointInterview,
   completeInterview,
@@ -15,11 +16,41 @@ import {
   readInterviewRecords,
   outputsChanged,
   unfinishedInterviews,
+  resumeInterviewRecord,
 } from "../src/interviews.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "rafi-interview-test-"));
 }
+
+for (const command of ["setup:init", "setup:update"] as const) test(`${command} CLI completes the selected recovery record without a replacement`, async () => {
+  const dir = tempDir();
+  try {
+    const workflow = command === "setup:init" ? "tickets-setup-init" : "tickets-setup-update";
+    const record = checkpointInterview(dir, createInterviewRecord({ workflow, invocation: { projectDir: dir }, checkpoint: "setup-section" }), {});
+    await buildTicketsCommand().parseAsync(["node", "test", command, "--project", dir, "--defaults", "--population-mode", "approved_plan", "--skip-access-check", "--interview-id", record.id]);
+    const records = readInterviewRecords(dir).records;
+    assert.equal(records.length, 1);
+    assert.equal(records[0]?.id, record.id);
+    assert.equal(records[0]?.status, "completed");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const workflow of ["create", "tickets-setup-init", "tickets-setup-update"] as const) test(`${workflow} recovery retains exact interview identity and cancellation remains unfinished`, () => {
+  const dir = tempDir();
+  try {
+    const original = checkpointInterview(dir, createInterviewRecord({ workflow, invocation: { projectDir: dir }, checkpoint: "start", answers: { saved: "answer" } }), {});
+    failInterview(dir, original, "start", new Error("fixture interruption"));
+    const resumed = checkpointInterview(dir, resumeInterviewRecord(dir, original.id, workflow), {});
+    assert.equal(resumed.id, original.id);
+    assert.equal(resumed.answers.saved, "answer");
+    assert.equal(readInterviewRecords(dir).records.length, 1);
+    assert.notEqual(readInterviewRecords(dir).records[0]?.status, "completed");
+    completeInterview(dir, resumed);
+    assert.equal(readInterviewRecords(dir).records[0]?.status, "completed");
+    assert.throws(() => resumeInterviewRecord(dir, original.id, workflow), /not found/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("interview records persist atomically, are ignored, and retain only redacted failure context", () => {
   const dir = tempDir();

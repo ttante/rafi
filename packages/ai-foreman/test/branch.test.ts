@@ -1221,7 +1221,7 @@ test("findResumableBranchSessions returns unfinished ticket sessions and command
     assert.equal(sessions[0]?.deliveryUnitId, "shared-unit");
     assert.equal(sessions[0]?.deliveryUnitFinal, false);
     const command = formatBranchContinueCommand(dir, sessions[0]!);
-    assert.match(command, /ai-foreman start .* --steps 1 --create-pr --continue --ticket T001/);
+    assert.match(command, /rafi start .* --steps 1 --create-pr --continue --ticket T001/);
     assert.match(command, /--agent codex/);
     assert.match(command, /--model gpt-5\.5/);
     assert.match(command, /--effort xhigh/);
@@ -1340,7 +1340,7 @@ test("status prints latest GitHub failure repair guidance and retry command", as
 
     assert.match(output, /latest GitHub failure — push_failed/);
     assert.match(output, /git push -u origin rafi\/t001-ticket/);
-    assert.match(output, /ai-foreman start .* --create-pr --continue --ticket T001/);
+    assert.match(output, /rafi start .* --create-pr --continue --ticket T001/);
     assert.match(output, /permission denied/);
   } finally {
     console.log = oldLog;
@@ -1395,7 +1395,7 @@ test("status keeps rich PR failure guidance when branch issue follows", async ()
 
     assert.match(output, /latest GitHub failure — pr_create_failed/);
     assert.match(output, /gh pr list --head rafi\/t001-ticket --state open/);
-    assert.match(output, /ai-foreman start .* --create-pr --continue --ticket T001/);
+    assert.match(output, /rafi start .* --create-pr --continue --ticket T001/);
     assert.match(output, /PR failed/);
   } finally {
     console.log = oldLog;
