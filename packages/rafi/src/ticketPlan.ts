@@ -82,6 +82,7 @@ export interface TicketPlanInstructionOptions {
   autoCompactThresholdPercent?: number;
   compactMaximum?: number;
   branchPrefix?: string;
+  unattended?: boolean;
 }
 
 export function buildTicketPlanInstruction(opts: TicketPlanInstructionOptions): string {
@@ -108,6 +109,7 @@ Host-owned decisions (planner prose and contradictory fields cannot override the
 Conversation rules:
 - Inspect the repository read-only. Do not edit files, configuration, YAML, SQLite, git, branches, or docs.
 - Questions must be focused and include a recommended answer first plus alternatives, but the human may answer with any free text.
+${opts.unattended ? "- This is an unattended approved run. Do not ask questions or emit needs_input. Make the safest reasonable recommendation, record it in the proposal, and return a complete proposal." : ""}
 - In exhaustive mode every grill-me question must be machine-recognizable: ask exactly one single-select question, put a first choice ending in \`(Recommended)\`, include at least one meaningful alternative, and include the exact \`Stop questions and make the plan now\` choice. Native questions use a header beginning with \`Grill-me\`.
 - If your runtime provides a native AskUserQuestion-style question tool, you may use it; Rafi will collect the user's structured choice or custom response and return it to this same session. If no useful user-judgment question exists, return the candidate and Rafi will independently verify it.
 - Session choices may cover inspection depth, ticket size, estimates, source treatment, delivery grouping, branch mode, PRs, merge behavior, and next work.
@@ -349,7 +351,7 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
     console.log(`rafi tickets plan: interview=${grill}; agent changes are disabled\n`);
     if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() } });
 
-    const baseInstruction = buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature" });
+    const baseInstruction = buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature", unattended: !interactive });
     let correctionAttempts = 0;
     const savedProposal = resumingInterview && typeof interview?.decisions.proposalResponse === "string" ? interview.decisions.proposalResponse : undefined;
     const savedIssues = interview?.decisions.validationIssues;
@@ -363,6 +365,13 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
       if (result.isError) throw new Error(`planning agent failed: ${result.text.slice(0, 300)}`);
       const marker = parseConversationMarker(result.text);
       if (marker.kind === "needs_input") {
+        if (!interactive) {
+          const issue = `unattended ticket planning cannot accept a needs_input question: ${marker.question?.trim() || "planner omitted its question"}`;
+          if (interview) interview = checkpointInterview(projectDir, interview, { decisions: { ...interview.decisions, proposalResponse: result.text, validationIssues: [issue], correctionAttempts } });
+          if (correctionAttempts++ >= 3) throw new Error(`Ticket planning could not produce an unattended proposal after 3 attempts:\n${issue}\nRun \`rafi plan:doctor\` to recover this saved session.`);
+          result = await sendRoleGraphTurn(role, `${issue}. Use the safest reasonable recommendation and return the complete corrected proposal with the plan_complete marker. Do not ask a question, inspect the repository again, or emit needs_input.`, "planning", { responseOnly: true });
+          continue;
+        }
         if (!marker.question?.trim()) {
           result = await sendPlanningTurn(grill === "exhaustive"
             ? `Your needs_input marker omitted its question. Return the same single user-judgment question again using exactly: STEP_STATUS: needs_input | question="..." choices="recommended option (Recommended)|meaningful alternative|Stop questions and make the plan now". Do not inspect the repository again and do not return a proposal yet.`
@@ -383,7 +392,9 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
       let issues: string[];
       try {
         if (marker.kind !== "plan_complete") throw new Error("planning agent did not return a plan_complete/proposal_ready marker or a valid question");
-        proposal = extractTicketPlanProposal(result.text, context.tickets);
+        proposal = extractTicketPlanProposal(result.text, context.tickets, {
+          futureWorkIds: context.futureWork.flatMap((item) => typeof item.id === "number" ? [item.id] : []),
+        });
         issues = validateProposalSourceRefs(proposal, stagedSources, projectDir);
       } catch (error) {
         issues = [error instanceof Error ? error.message : String(error)];

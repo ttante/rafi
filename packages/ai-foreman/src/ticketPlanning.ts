@@ -61,6 +61,15 @@ export interface TicketPlanningContext {
   existingNext: string[];
 }
 
+/** The tracker facts needed to validate a proposal before it is approved. */
+export interface TicketPlanValidationContext {
+  futureWorkIds?: Iterable<number>;
+}
+
+const TICKET_STATUSES = new Set<TicketStatus>([
+  "planned", "next", "in_progress", "blocked", "done", "canceled", "obsolete",
+]);
+
 export function readTicketPlanningContext(projectDir: string): TicketPlanningContext {
   const config = loadTicketsConfig(projectDir);
   const paths = resolveTicketPaths(config, projectDir);
@@ -89,19 +98,19 @@ export function planningFingerprintChanges(projectDir: string, expected: Plannin
   return expected.filter((item) => fileHash(join(projectDir, item.path)) !== item.sha256).map((item) => item.path);
 }
 
-export function extractTicketPlanProposal(output: string, existingTickets: TicketDef[] = []): TicketPlanProposal {
+export function extractTicketPlanProposal(output: string, existingTickets: TicketDef[] = [], context: TicketPlanValidationContext = {}): TicketPlanProposal {
   const start = output.lastIndexOf(PROPOSAL_START);
   const end = output.lastIndexOf(PROPOSAL_END);
   if (start < 0 || end <= start) throw new Error(`planner output is missing ${PROPOSAL_START}/${PROPOSAL_END}`);
   const raw = output.slice(start + PROPOSAL_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch (err) { throw new Error(`planner proposal is not valid JSON: ${err instanceof Error ? err.message : String(err)}`); }
-  const issues = validateTicketPlanProposal(parsed, existingTickets);
+  const issues = validateTicketPlanProposal(parsed, existingTickets, context);
   if (issues.length) throw new Error(`invalid planner proposal:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
   return parsed as TicketPlanProposal;
 }
 
-export function validateTicketPlanProposal(value: unknown, existingTickets: TicketDef[] = []): string[] {
+export function validateTicketPlanProposal(value: unknown, existingTickets: TicketDef[] = [], context: TicketPlanValidationContext = {}): string[] {
   const issues: string[] = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) return ["proposal must be an object"];
   const proposal = value as Record<string, unknown>;
@@ -131,7 +140,24 @@ export function validateTicketPlanProposal(value: unknown, existingTickets: Tick
     if (!link.reason?.trim() || !link.replaced?.length || !link.replacements?.length) issues.push("each supersession needs replaced, replacements, and reason");
     for (const id of [...(link.replaced ?? []), ...(link.replacements ?? [])]) if (!ids.has(id)) issues.push(`supersession references unknown ticket ${id}`);
   }
-  for (const change of p.state_changes) if (!ids.has(change.id) || !change.reason?.trim()) issues.push(`invalid state change for ${change.id}`);
+  for (const change of p.state_changes) {
+    if (!change || typeof change !== "object" || !ids.has(change.id) || !change.reason?.trim()) {
+      issues.push(`invalid state change for ${String(change && typeof change === "object" ? change.id : undefined)}`);
+      continue;
+    }
+    if (!TICKET_STATUSES.has(change.status)) issues.push(`state change for ${change.id} has invalid status ${String(change.status)}`);
+  }
+  const futureWorkIds = context.futureWorkIds ? new Set(context.futureWorkIds) : undefined;
+  for (const disposition of p.future_work) {
+    if (!disposition || typeof disposition !== "object" || !Number.isInteger(disposition.id)) {
+      issues.push(`future work disposition has invalid id ${String(disposition && typeof disposition === "object" ? disposition.id : undefined)}`);
+      continue;
+    }
+    if (!(["accepted", "rejected", "merged", "queued"] as const).includes(disposition.disposition)) {
+      issues.push(`future work item ${disposition.id} has invalid disposition ${String(disposition.disposition)}`);
+    }
+    if (futureWorkIds && !futureWorkIds.has(disposition.id)) issues.push(`future work item ${disposition.id} does not exist`);
+  }
   for (const item of p.source_reconciliation) {
     if (!item.source?.trim() || !item.item?.trim()) issues.push("source reconciliation needs source and item");
     if ((item.disposition === "deferred" || item.disposition === "excluded") && !item.reason?.trim()) issues.push(`${item.source}:${item.item} ${item.disposition} needs a reason`);
@@ -174,7 +200,8 @@ export function applyApprovedTicketPlan(projectDir: string, proposal: TicketPlan
   const paths = resolveTicketPaths(config, root);
   const existing = loadTickets(paths.tickets);
   if (existing.length > 0 && !existsSync(paths.stateDb)) throw new Error("tickets exist but the ignored ticket-state database is missing; restore it before planning so completed work is not treated as new");
-  const proposalIssues = validateTicketPlanProposal(proposal, existing);
+  const currentContext = readTicketPlanningContext(root);
+  const proposalIssues = validateTicketPlanProposal(proposal, existing, { futureWorkIds: currentContext.futureWork.flatMap((item) => typeof item.id === "number" ? [item.id] : []) });
   if (proposalIssues.length) throw new Error(`approved proposal is invalid:\n${proposalIssues.map((issue) => `- ${issue}`).join("\n")}`);
 
   const lockPath = join(root, ".tickets", "planning.lock");

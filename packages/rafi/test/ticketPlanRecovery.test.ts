@@ -49,3 +49,21 @@ for (const scenario of ["tests", "rollback", "priority", "combined", "exhausted"
 test("planning doctor labels session age", () => {
   assert.equal(planningSessionAge("2026-10-12T10:00:00Z", Date.parse("2026-10-12T12:00:00Z")), "2h ago");
 });
+
+test("unattended ticket planning corrects an unexpected provider question", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-unattended-ticket-plan-"));
+  let turns = 0;
+  try {
+    writeFileSync(join(root, "rafi-config.yaml"), stringify(buildProjectConfig(defaultAnswers())));
+    await buildTicketsCommand().parseAsync(["node", "test", "init", "--project", root, "--app-name", "Unattended"]);
+    await runTicketPlan({ project: root, brief: "Plan work", agent: "codex", yes: true, createPlanner: async () => ({ runtime: "codex", roleBundle: {} as never, skills: [], log: { write() {} } as never, graphRoot: root,
+      builder: { agent: "codex", sessionId: () => "unattended-session", events: async function* () {}, close: async () => {}, sendTurn: async instruction => {
+        turns++;
+        if (turns === 1) return { text: 'STEP_STATUS: needs_input | question="Should I proceed?" choices="Yes (Recommended)|No"', isError: false, numTurns: 1, costUsd: 0 };
+        assert.match(instruction, /unattended ticket planning cannot accept/);
+        return { text: output(proposal()), isError: false, numTurns: 1, costUsd: 0 };
+      } },
+    }) }, ["--no-grill-me"]);
+    assert.equal(turns, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

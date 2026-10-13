@@ -49,6 +49,19 @@ test("proposal envelope validates edits against existing tracker tickets", () =>
   assert.throws(() => extractTicketPlanProposal(output), /unknown ticket T001/);
 });
 
+test("proposal validation rejects unsupported state and future-work changes before publication", () => {
+  const value = proposal();
+  value.state_changes = [{ id: "T001", status: "Ready" as never, reason: "Start now" }];
+  value.future_work = [{ id: undefined as never, disposition: "queued" }];
+  const issues = validateTicketPlanProposal(value, [], { futureWorkIds: [7] });
+  assert.match(issues.join("\n"), /state change for T001 has invalid status Ready/);
+  assert.match(issues.join("\n"), /future work disposition has invalid id undefined/);
+
+  value.state_changes = [];
+  value.future_work = [{ id: 8, disposition: "queued" }];
+  assert.match(validateTicketPlanProposal(value, [], { futureWorkIds: [7] }).join("\n"), /future work item 8 does not exist/);
+});
+
 test("approved proposal applies exact tickets, next state, artifacts, and validation", () => {
   const project = dir();
   cmdInit(project, { appName: "Plan Test", docsRoot: "docs" });
@@ -77,7 +90,7 @@ test("approved proposal saves ticket build defaults", () => {
   assert.equal(loadTicketSetupConfig(project)?.build.branch_strategy, "current");
 });
 
-test("apply detects drift and rolls back YAML when a SQLite disposition fails", () => {
+test("apply detects drift and rejects invalid future work before mutating YAML", () => {
   const project = dir();
   cmdInit(project, { appName: "Rollback", docsRoot: "docs" });
   const driftFingerprint = ticketPlanningFingerprint(project);
@@ -87,7 +100,7 @@ test("apply detects drift and rolls back YAML when a SQLite disposition fails", 
   const expected = ticketPlanningFingerprint(project);
   const bad = proposal();
   bad.future_work = [{ id: 999, disposition: "rejected" }];
-  assert.throws(() => applyApprovedTicketPlan(project, bad, { expectedFingerprint: expected, docsRoot: "docs" }), /does not exist/);
+  assert.throws(() => applyApprovedTicketPlan(project, bad, { expectedFingerprint: expected, docsRoot: "docs" }), /approved proposal is invalid:[\s\S]*future work item 999 does not exist/);
   const raw = parse(readFileSync(join(project, ".tickets", "tickets.yaml"), "utf8")) as { tickets: unknown[] };
   assert.equal(raw.tickets.length, 0);
 });
