@@ -20,6 +20,7 @@ import {
   resolvePlanSources,
   resolvablePendingLocalSourceRequests,
   runPlanWorkflow,
+  ticketSetupAction,
   stripFinalStepStatusMarker,
   validatePlanMarkdown,
   writePlanArtifacts,
@@ -93,6 +94,12 @@ function fakePlanRun(text: string, sessionId: string): Awaited<ReturnType<NonNul
     skills: [],
   };
 }
+
+test("--yes keeps post-plan ticket setup non-interactive", () => {
+  assert.equal(ticketSetupAction(true, true, true), "next");
+  assert.equal(ticketSetupAction(false, true, true), "prompt");
+  assert.equal(ticketSetupAction(false, false, true), "next");
+});
 
 test("standard plan instruction excludes grill-me and keeps the output contract", () => {
   const instruction = buildPlanInstruction({

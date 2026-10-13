@@ -75,7 +75,24 @@ export function runStatus(project: string): void {
       const batchEnd = [...records].reverse().find((r) => r.event === "batch-end");
       const retainedRuns = readBuildRuns(projectDir).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
       const byId = new Map(retainedRuns.map(run => [run.runId, run]));
-      const recordRunId = [...records].reverse().find(record => typeof record.runId === "string" && (byId.has(record.runId) || record.event === "step" || record.event === "batch-end" || String(record.event).startsWith("branch-")))?.runId;
+      // Branch completion is the terminal fact for branch-per-ticket runs. Prefer
+      // its durable run identity over later bookkeeping/audit records in the same
+      // daily log, which may not themselves have a retained build record.
+      const lastProgressIndex = records.reduce((last, record, index) => (
+        record.event === "step" || record.event === "batch-end" || String(record.event).startsWith("branch-") ? index : last
+      ), -1);
+      const completedBranchRunId = lastProgressIndex >= 0
+        && records[lastProgressIndex]?.event === "branch-complete"
+        && typeof records[lastProgressIndex]?.runId === "string"
+        && byId.has(records[lastProgressIndex].runId as string)
+        ? records[lastProgressIndex].runId as string
+        : undefined;
+      // Older branch logs omitted runId. Infer only when the last meaningful
+      // record is a completion and exactly one durable completed run owns that
+      // ticket; ambiguity remains deliberately unresolved rather than borrowing
+      // an unrelated historical result.
+      const legacyCompletedBranchRunId = completedBranchRunId ? undefined : legacyCompletedRunId(records, lastProgressIndex, retainedRuns);
+      const recordRunId = completedBranchRunId ?? legacyCompletedBranchRunId ?? [...records].reverse().find(record => typeof record.runId === "string" && (byId.has(record.runId) || record.event === "step" || record.event === "batch-end" || String(record.event).startsWith("branch-")))?.runId;
       const retainedRun = typeof recordRunId === "string" ? byId.get(recordRunId) : undefined;
 
       console.log(`${accent("foreman:")} latest run ${sanitizeTerminalText(logs[logs.length - 1] ?? "")}`);
@@ -122,6 +139,13 @@ export function runStatus(project: string): void {
       if (recoverable.length > 0) printRecoverable(projectDir, recoverable);
       printWorkflowIssues(workflow, activeWorkflows);
       workflow?.close();
+}
+
+function legacyCompletedRunId(records: Record<string, unknown>[], lastProgressIndex: number, retainedRuns: ReturnType<typeof readBuildRuns>): string | undefined {
+  const terminal = lastProgressIndex >= 0 ? records[lastProgressIndex] : undefined;
+  if (terminal?.event !== "branch-complete" || typeof terminal.runId === "string" || typeof terminal.ticket !== "string") return undefined;
+  const candidates = retainedRuns.filter(run => run.status === "completed" && run.tickets.includes(terminal.ticket as string));
+  return candidates.length === 1 ? candidates[0]!.runId : undefined;
 }
 
 function printWorkflowIssues(workflow: Pick<WorkflowDb, "issues"> | undefined, runs: ReturnType<WorkflowReader["activeRuns"]>): void {

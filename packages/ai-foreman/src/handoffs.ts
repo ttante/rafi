@@ -381,25 +381,28 @@ export class HandoffService {
         return response;
       };
       const acceptancePrompt = [
+        handoffAcceptanceInstruction(),
         "Accept this validated Rafi handoff. Do not repeat completed work and reconcile host receipts before side effects.",
         staged.markdown,
         `Manifest JSON: ${JSON.stringify(staged.manifest)}`,
         ...(options.guidance ? [`Human recovery guidance: ${options.guidance}`] : []),
-        `Reply with ${HANDOFF_ACCEPTED} on the first line, then ${continuityInstruction()}`,
+        handoffAcceptanceInstruction(),
       ].join("\n\n");
       let response = await sendAcceptance(acceptancePrompt);
-      let validation = validateHandoffAcceptance(staged, successor, response.text);
+      let acceptanceText = response.rawResponse ?? response.text;
+      let validation = validateHandoffAcceptance(staged, successor, acceptanceText);
       if (validation && (validation.code === "missing-acknowledgement" || validation.code === "invalid-continuity-delta")) {
         const repairPrompt = [
           `Your handoff acknowledgement was rejected: ${validation.message}.`,
           "Correction only: do not use tools, repeat completed work, or perform implementation.",
-          `Reply with ${HANDOFF_ACCEPTED} on the first line, then ${continuityInstruction()}`,
+          handoffAcceptanceInstruction(),
         ].join("\n\n");
         response = await sendAcceptance(repairPrompt);
-        validation = validateHandoffAcceptance(staged, successor, response.text);
+        acceptanceText = response.rawResponse ?? response.text;
+        validation = validateHandoffAcceptance(staged, successor, acceptanceText);
       }
       if (validation) throw new HandoffAcceptanceError(validation.code, staged.manifest.runId, staged.manifest.generation, validation.message);
-      const parsed = parseContinuityDelta(response.text);
+      const parsed = parseContinuityDelta(acceptanceText);
       const sessionId = successor.sessionId();
       const observedSuccessorRef = successor.sessionRef?.();
       const successorRef = observedSuccessorRef ? { ...observedSuccessorRef, generation: staged.manifest.generation, validatedAt: new Date().toISOString() } : undefined;
@@ -550,6 +553,16 @@ function validateHandoffAcceptance(
     return { code: "reused-predecessor-session", message: `successor reused predecessor session ${sessionId}; a genuinely fresh session is required` };
   }
   return undefined;
+}
+
+/** Keep the small acknowledgement protocol visible above and after a large handoff packet. */
+function handoffAcceptanceInstruction(): string {
+  return [
+    "Mandatory response protocol: do not call tools or add a preface, explanation, or Markdown fence.",
+    `Your first non-whitespace line must be exactly ${HANDOFF_ACCEPTED}.`,
+    "After it, emit exactly one RAFI_CONTINUITY_DELTA record as instructed below.",
+    continuityInstruction(),
+  ].join("\n");
 }
 
 async function promptHandoffRecovery(

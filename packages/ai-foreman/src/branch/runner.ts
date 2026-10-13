@@ -153,7 +153,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         });
       } finally { recoveryDb.close(); }
       if (exactInterruptedMerge) {
-        opts.log.write("branch-resume", { detail: "Base contains exactly the staged tree of its durable interrupted merge" });
+        opts.log.write("branch-resume", { runId: opts.runId, detail: "Base contains exactly the staged tree of its durable interrupted merge" });
       } else if (baseWorktreePolicy === "warn") {
         console.warn(`foreman: warning: ${error instanceof Error ? error.message : String(error)}`);
       } else {
@@ -174,7 +174,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
   const qaStream: QaStreamState = { reviews: 0, modificationViolations: 0 };
 
   for (const issue of opts.plan.issues) {
-    opts.log.write("branch-issue", { ...issue });
+    opts.log.write("branch-issue", { runId: opts.runId, ...issue });
     notifyIssue(opts.notificationsEnabled, issue.message);
     if (issue.blocking) {
       summaries.push({
@@ -278,6 +278,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       const detail = `dependency ${missingDependency} did not complete`;
       summaries.push(summaryFor(node, "skipped", detail));
       opts.log.write("branch-issue", {
+        runId: opts.runId,
         ticket: node.ticket.id,
         code: "dependency_unavailable",
         message: detail,
@@ -296,6 +297,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         const detail = `dependency ${missingPush} branch was not pushed`;
         summaries.push(summaryFor(node, "skipped", detail, "skipped"));
         opts.log.write("branch-issue", {
+        runId: opts.runId,
           ticket: node.ticket.id,
           code: "dependency_unavailable",
           message: detail,
@@ -311,6 +313,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       if (!mergeReadiness.ok) {
         summaries.push(summaryFor(node, "skipped", mergeReadiness.message, "skipped"));
         opts.log.write("branch-issue", {
+          runId: opts.runId,
           ticket: node.ticket.id,
           code: mergeReadiness.code,
           message: mergeReadiness.message,
@@ -327,6 +330,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
     const admissionDb = new WorkflowDb(opts.projectDir);
     try { admissionDb.assertAdmittedWork(opts.runId, node.ticket.id); } finally { admissionDb.close(); }
     opts.log.write("branch-start", {
+      runId: opts.runId,
       ticket: node.ticket.id,
       branch: node.branch,
       base: node.baseBranch,
@@ -348,6 +352,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
     try {
       if (resumeSession) {
         opts.log.write("branch-resume", {
+          runId: opts.runId,
           ticket: node.ticket.id,
           branch: node.branch,
           base: node.baseBranch,
@@ -653,7 +658,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         }));
         if (push.ok) {
           confirmJournal(opts.projectDir, pushOperation, node.branch, { sha: commit });
-          opts.log.write("branch-push", { ticket: node.ticket.id, branch: node.branch, status: "pushed" });
+          opts.log.write("branch-push", { runId: opts.runId, ticket: node.ticket.id, branch: node.branch, status: "pushed" });
           summary.pushStatus = "pushed";
           workflowCheckpoint(opts.projectDir, opts.runId, "push-after", node.ticket.id, { branch: node.branch, sha: commit });
         } else {
@@ -669,6 +674,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
             output: push.output,
           };
           opts.log.write("branch-push", {
+            runId: opts.runId,
             ticket: node.ticket.id,
             branch: node.branch,
             status: "failed",
@@ -782,6 +788,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         catch (error) { throw invalidateUnpublishedMergeDrift(opts.projectDir, opts.runId, node.ticket.id, directMergeOperation, error); }
         summary.pr = { status: "merged", url: mergeCommit };
         opts.log.write("branch-direct-merge", {
+          runId: opts.runId,
           ticket: node.ticket.id,
           branch: node.branch,
           base: node.baseBranch,
@@ -814,6 +821,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       successfulBranches.add(node.ticket.id);
       summaries.push(summary);
       opts.log.write("branch-complete", {
+        runId: opts.runId,
         ticket: node.ticket.id,
         branch: node.branch,
         commit,
@@ -832,7 +840,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       }
       if (err instanceof SessionUnavailableError || err instanceof SessionUnavailableContinuityError) {
         const message = err.message;
-        opts.log.write("branch-issue", { ticket: node.ticket.id, code: "session_unavailable", message, blocking: true });
+        opts.log.write("branch-issue", { runId: opts.runId, ticket: node.ticket.id, code: "session_unavailable", message, blocking: true });
         notifyIssue(opts.notificationsEnabled, `${node.ticket.id}: ${message}`);
         summaries.push(summaryFor(node, "blocked", message));
         opts.onSessionUnavailable?.(err);
@@ -844,7 +852,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         : message.includes("tracker/control")
         ? "tracker_touched"
         : "builder_error";
-      opts.log.write("branch-issue", { ticket: node.ticket.id, code, message, blocking: false });
+      opts.log.write("branch-issue", { runId: opts.runId, ticket: node.ticket.id, code, message, blocking: false });
       notifyIssue(opts.notificationsEnabled, `${node.ticket.id}: ${message}`);
       journalTracker(opts.projectDir, opts.runId, `${opts.runId}:tracker-update:${node.ticket.id}:runtime-block${continuationSuffix}`, { ticket: node.ticket.id, status: "blocked", detail: message }, () => cmdBlock(opts.projectDir, node.ticket.id, { summary: message, actor: "foreman" }));
       summaries.push(summaryFor(node, "blocked", message));
@@ -982,6 +990,7 @@ async function waitForAutoMergeDependenciesInternal(
     }
     if (!waitLogged) {
       opts.log.write("branch-auto-merge-wait", {
+        runId: opts.runId,
         ticket: node.ticket.id,
         pending,
         timeoutMinutes: opts.autoMergeTimeoutMinutes ?? null,
@@ -1000,7 +1009,7 @@ async function waitForAutoMergeDependenciesInternal(
     await sleep(autoMergePollMs());
   } } finally {
     if (waitSpanId && opts.observer) opts.observer.store.finishSpan(waitSpanId, { outcome: waitOutcome });
-    if (waitLogged) opts.log.write("branch-auto-merge-wait", { ticket: node.ticket.id, outcome: waitOutcome, terminal: true });
+    if (waitLogged) opts.log.write("branch-auto-merge-wait", { runId: opts.runId, ticket: node.ticket.id, outcome: waitOutcome, terminal: true });
   }
 }
 
@@ -1040,6 +1049,7 @@ function blockBranchIssue(
   summary.buildStatus = "blocked";
   summary.detail = message;
   opts.log.write("branch-issue", {
+    runId: opts.runId,
     ticket: node.ticket.id,
     code,
     message,

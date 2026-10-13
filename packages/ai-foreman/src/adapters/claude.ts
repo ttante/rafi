@@ -676,13 +676,29 @@ export class ClaudeAdapter implements BuilderAdapter {
       const failed = block.is_error === true;
       // TIME_ELAPSED alone does not establish success or failure. Preserve it as unknown.
       const elapsedOnly = /^\s*TIME_ELAPSED\s*$/.test(text);
-      const status = failed && /timed?\s*out|timeout/i.test(text) ? "timed_out" : failed && /cancel(?:led|ed)/i.test(text) ? "cancelled" : elapsedOnly ? "unknown" : failed ? "failed" : "completed";
+      // An SDK `is_error` bit without a terminal reason is not enough to call
+      // the tool failed: enterprise gateways can emit provisional errors and
+      // continue the same turn. Preserve that state as unknown until a
+      // correlated, explicit terminal result arrives.
+      const resultReason = elapsedOnly ? "elapsed_placeholder"
+        : failed && /timed?\s*out|timeout/i.test(text) ? "timeout"
+          : failed && /cancel(?:led|ed)/i.test(text) ? "cancelled"
+            : failed && /permission denied/i.test(text) ? "permission_denied"
+              : failed && /not found/i.test(text) ? "not_found"
+                : failed && /\b(?:exit(?:ed)?|status)\s+[1-9]\d*\b/i.test(text) ? "nonzero_exit"
+                  : failed && /\b(?:failed|error|exception)\b/i.test(text) ? "explicit_error"
+                    : failed ? "unexplained_error"
+                      : "completed";
+      const status = resultReason === "timeout" ? "timed_out" : resultReason === "cancelled" ? "cancelled" : ["permission_denied", "not_found", "nonzero_exit", "explicit_error"].includes(resultReason) ? "failed" : resultReason === "completed" ? "completed" : "unknown";
       if (status !== "unknown") {
         this.completedToolCalls.add(callId);
         if (this.completedToolCalls.size > 1000) this.completedToolCalls.delete(this.completedToolCalls.values().next().value!);
         this.toolCalls.delete(callId);
       }
       const outputDigest = createHash("sha256").update(text).digest("hex");
+      // Persist only correlation metadata. The result text can contain source
+      // paths, command output, or credentials and must not enter lifecycle logs.
+      this.opts.onLifecycleTrace?.({ phase: "provider-tool-result", at: new Date().toISOString(), sessionId: this._sessionId, providerTurnId: this.activeProviderTurnId, toolCallId: callId, toolName: call?.name ?? "unidentified tool", classification: status, resultReason, isError: failed, outputDigest, rawOutputBytes: Buffer.byteLength(text) });
       if (status === "unknown") {
         if (this.unknownToolResults.get(callId) === outputDigest) continue;
         this.unknownToolResults.set(callId, outputDigest);

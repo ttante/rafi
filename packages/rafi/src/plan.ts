@@ -453,7 +453,7 @@ export function buildPlanCommand(): Command {
         const projectDir = resolve(project);
         if (!existsSync(join(projectDir, ".tickets", "config.yaml"))) {
           console.log("rafi plan: ticket infrastructure is required before implementation/building.");
-          if (process.stdin.isTTY && process.stdout.isTTY) {
+          if (ticketSetupAction(Boolean(opts.yes), Boolean(process.stdin.isTTY), Boolean(process.stdout.isTTY)) === "prompt") {
             const { select, isCancel } = await import("@clack/prompts");
             const answer = await select({ message: "Set up tickets now?", options: [
               { value: "setup", label: "Set up now (Recommended)" }, { value: "later", label: "Skip for now" },
@@ -469,6 +469,11 @@ export function buildPlanCommand(): Command {
       console.error("rafi plan: recover saved planning sessions with `rafi plan:doctor`.");
       process.exit(outcome.status === "blocked" ? 2 : 1);
     });
+}
+
+/** `--yes` must remain fully non-interactive after a successful plan. */
+export function ticketSetupAction(yes: boolean, stdinIsTTY: boolean, stdoutIsTTY: boolean): "prompt" | "next" {
+  return !yes && stdinIsTTY && stdoutIsTTY ? "prompt" : "next";
 }
 
 export async function runPlanWorkflow(opts: PlanWorkflowOptions): Promise<WorkflowOutcome<PlanResult>> {

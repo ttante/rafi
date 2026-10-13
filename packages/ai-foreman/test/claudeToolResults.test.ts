@@ -7,12 +7,13 @@ import type { BuilderAdapterOptions, BuilderEvent } from "../src/adapters/types.
 test("Claude results retain tool identity, classify uncertainty, and coalesce duplicate results", async () => {
   const stream = new AsyncQueue<unknown>();
   const Constructor = ClaudeAdapter as unknown as new (opts: BuilderAdapterOptions, query: () => unknown) => ClaudeAdapter;
-  const adapter = new Constructor({ cwd: "/tmp/rafi-scripted-tools", permission: async () => ({ behavior: "deny", message: "fixture" }) }, () => ({ [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](), interrupt: async () => stream.close() }));
+  const traces: Array<Record<string, unknown>> = [];
+  const adapter = new Constructor({ cwd: "/tmp/rafi-scripted-tools", permission: async () => ({ behavior: "deny", message: "fixture" }), onLifecycleTrace: trace => traces.push(trace) }, () => ({ [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](), interrupt: async () => stream.close() }));
   const events: BuilderEvent[] = [];
   const consume = (async () => { for await (const event of adapter.events()) events.push(event); })();
   try {
     const turn = adapter.sendTurn("Scripted fixture");
-    for (const [id, text, failed] of [["elapsed", "TIME_ELAPSED", true], ["timeout", "command timed out", true], ["failure", "command exited 1", true], ["ok", "done", false], ["mixed", "TIME_ELAPSED: command exited 1", true], ["elapsed", "command exited 1", true]] as const) {
+    for (const [id, text, failed] of [["elapsed", "TIME_ELAPSED", true], ["timeout", "command timed out", true], ["failure", "command exited 1", true], ["ok", "done", false], ["mixed", "TIME_ELAPSED: command exited 1", true], ["provisional", "gateway result pending", true], ["elapsed", "command exited 1", true]] as const) {
       if (id !== "elapsed" || text === "TIME_ELAPSED") stream.push({ type: "assistant", message: { content: [{ type: "tool_use", id, name: "Bash", input: { command: "test" } }] } });
       const result = { type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: text, is_error: failed }] } };
       stream.push(result); stream.push(result);
@@ -21,8 +22,14 @@ test("Claude results retain tool identity, classify uncertainty, and coalesce du
     await turn;
   } finally { await adapter.close(); await consume; }
   const results = events.filter((event): event is Extract<BuilderEvent, { kind: "tool" }> => event.kind === "tool" && event.lifecycle === "completed");
-  assert.equal(results.length, 6);
-  assert.deepEqual(results.map(event => event.name), ["Bash", "Bash", "Bash", "Bash", "Bash", "Bash"]);
-  assert.deepEqual(results.map(event => event.status), ["unknown", "timed_out", "failed", "completed", "failed", "failed"]);
+  assert.equal(results.length, 7);
+  assert.deepEqual(results.map(event => event.name), ["Bash", "Bash", "Bash", "Bash", "Bash", "Bash", "Bash"]);
+  assert.deepEqual(results.map(event => event.status), ["unknown", "timed_out", "failed", "completed", "failed", "unknown", "failed"]);
   assert.equal(results[0]?.completionKnown, false);
+  const diagnostic = traces.find(trace => trace.phase === "provider-tool-result" && trace.toolCallId === "provisional");
+  assert.equal(diagnostic?.classification, "unknown");
+  assert.equal(diagnostic?.resultReason, "unexplained_error");
+  assert.equal(diagnostic?.isError, true);
+  assert.equal(typeof diagnostic?.outputDigest, "string");
+  assert.equal("outputSummary" in (diagnostic ?? {}), false);
 });

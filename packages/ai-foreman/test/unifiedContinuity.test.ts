@@ -435,6 +435,27 @@ test("handoff acceptance gives a malformed acknowledgement one bounded correctio
   assert.equal(successor.closed, false);
 });
 
+test("handoff acceptance validates the raw provider reply when a wrapper cleaned the continuity record", async () => {
+  const projectDir = root("rafi-handoff-raw-response-");
+  const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1");
+  db.appendContinuityEvent({ runId: "run-1", role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+  db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 });
+  db.claimInitialRoleLease("run-1", "builder", "session-1");
+  db.close();
+  const raw = `${HANDOFF_ACCEPTED}\n${MARKER}`;
+  const successor = new FakeAdapter("session-2", [
+    { text: HANDOFF_ACCEPTED, rawResponse: raw, cleanedResponse: HANDOFF_ACCEPTED, isError: false, numTurns: 1, costUsd: 0 },
+  ]);
+
+  const transfer = await new HandoffService(projectDir).transfer({
+    runId: "run-1", role: "builder", reason: "wrapped response", predecessorSessionId: "session-1", compactionCount: 0, compactMaximum: 10,
+  }, async () => successor);
+
+  assert.equal(transfer.successorSessionId, "session-2");
+  assert.equal(successor.closed, false);
+});
+
 test("handoff rejection reports the precise typed cause and retains the predecessor lease", async () => {
   const projectDir = root("rafi-handoff-rejection-");
   const db = new WorkflowDb(projectDir);

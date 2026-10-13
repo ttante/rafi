@@ -226,7 +226,8 @@ export interface BuilderAdapterOptions {
   turnDeadlineMs?: number;
   shutdownTimeoutMs?: number;
   /** Metadata-only lifecycle trace; no prompts, responses, credentials, or tool inputs. */
-  onLifecycleTrace?: (event: { phase: string; at: string; elapsedMs?: number; sessionId?: string; method?: string; timeoutMs?: number }) => void;
+  /** Bounded, redacted provider lifecycle diagnostics; never include raw tool output. */
+  onLifecycleTrace?: (event: { phase: string; at: string; elapsedMs?: number; sessionId?: string; method?: string; timeoutMs?: number; providerTurnId?: string; toolCallId?: string; toolName?: string; classification?: string; resultReason?: string; isError?: boolean; outputDigest?: string; rawOutputBytes?: number }) => void;
 }
 
 export interface BuilderAdapter {

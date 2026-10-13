@@ -57,6 +57,7 @@ export class ActivityReporter {
   private lastSemanticKey?: string;
   private paused = 0;
   private agentStatusLine?: string;
+  private readonly reportedToolIssues = new Set<string>();
 
   constructor(readonly command: string, options: ActivityReporterOptions = {}) {
     this.output = options.output ?? {
@@ -118,6 +119,14 @@ export class ActivityReporter {
   completedWork(): void {
     this.lastUsefulProgressAt = this.now();
     this.usefulProgressWarningPrinted = false;
+  }
+
+  /** One tool may fail recoverably many times while the agent continues. */
+  reportToolIssue(name: string): void {
+    const key = clean(name, 100).toLowerCase();
+    if (this.reportedToolIssues.has(key)) { this.pulse(); return; }
+    this.reportedToolIssues.add(key);
+    this.update("tool reported a failure; agent continuing", name);
   }
 
   note(message: string): void {
@@ -317,7 +326,7 @@ export function reportBuilderEvent(event: BuilderEvent): void {
         if (event.status === "unknown") reporter.update("tool outcome unknown", event.name, { immediate: false });
         else if (event.status === "timed_out") reporter.update("tool timed out", event.name);
         else if (event.status === "cancelled") reporter.update("tool cancelled", event.name);
-        else if (isFailedToolCompletion(event)) reporter.update("tool failed", event.name);
+        else if (isFailedToolCompletion(event)) reporter.reportToolIssue(event.name);
         else reporter.pulse();
         break;
       case "started":

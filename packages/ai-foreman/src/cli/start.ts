@@ -53,7 +53,7 @@ import {
 import type { BranchResumeSession } from "../branch/resume.js";
 import type { BranchPlan, BranchPlanNode, BranchRunSummary, CompletionMode, MergeMethod, ReviewProvider } from "../branch/types.js";
 import { detectGitProvider, loadTicketSetupConfig } from "../tickets/setupConfig.js";
-import { loadDeliveryConfig, selectDeliveryUnitForRun, selectStacksForRun, updateStackDeliveryState, type DeliveryConfig, type DeliveryStack, type DeliveryUnitProgress } from "../tickets/delivery.js";
+import { loadDeliveryConfig, selectDeliveryTicketsForRun, selectDeliveryUnitForRun, selectStacksForRun, updateStackDeliveryState, type DeliveryConfig, type DeliveryStack, type DeliveryUnitProgress } from "../tickets/delivery.js";
 import { AgentStatusReporter, RoleStatusAdapter } from "../statusReporter.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
 import { fireTerminalBell } from "../notify.js";
@@ -607,6 +607,7 @@ export function buildStartCommand(): Command {
       let deliveryConfig: DeliveryConfig | undefined;
       let selectedStacks: DeliveryStack[] = [];
       let selectedStackTickets: string[] | undefined;
+      let selectedDeliveryTickets: string[] | undefined;
       if (isTicketsInitialized(cwd)) {
         const delivery = loadDeliveryConfig(cwd); deliveryConfig = delivery;
         if (delivery) {
@@ -615,6 +616,7 @@ export function buildStartCommand(): Command {
           const earlyDb = new StateDb(earlyPaths.stateDb);
           const earlyStates = earlyDb.getAllStates();
           earlyDb.close();
+          let skippedDeliveryUnits = (opts.skipDeliveryUnit as string[] | undefined) ?? [];
           if (stackCount !== undefined) {
             const earlyTickets = loadTickets(earlyPaths.tickets);
             const selection = selectStacksForRun(delivery, earlyTickets, earlyStates, stackCount);
@@ -624,13 +626,22 @@ export function buildStartCommand(): Command {
             const providers = new Set(selection.stacks.flatMap((stack) => stack.units.map((id) => delivery.units.find((unit) => unit.id === id)?.provider)).filter((provider) => provider === "github" || provider === "gitlab"));
             if (providers.size !== 1) fail("selected stacks must use one explicit GitHub or GitLab provider per run");
             opts.provider = [...providers][0];
-          } else deliveryRun = selectDeliveryUnitForRun(delivery, earlyStates, (opts.skipDeliveryUnit as string[] | undefined) ?? []);
+          } else deliveryRun = selectDeliveryUnitForRun(delivery, earlyStates, skippedDeliveryUnits);
           if (deliveryRun?.state === "resume" && !opts.yes && process.stdin.isTTY && process.stdout.isTTY) {
             const answer = await select({ message: `Resume unfinished delivery unit ${deliveryRun.unit.id} (${deliveryRun.remaining.length} remaining)?`, options: [
               { value: "resume", label: "Resume (Recommended)" }, { value: "skip", label: "Skip for this run" },
             ] });
             if (isCancel(answer)) process.exit(0);
-            if (answer === "skip") deliveryRun = selectDeliveryUnitForRun(delivery, earlyStates, [deliveryRun.unit.id, ...((opts.skipDeliveryUnit as string[] | undefined) ?? [])]);
+            if (answer === "skip") {
+              skippedDeliveryUnits = [deliveryRun.unit.id, ...skippedDeliveryUnits];
+              deliveryRun = selectDeliveryUnitForRun(delivery, earlyStates, skippedDeliveryUnits);
+            }
+          }
+          if (stackCount === undefined) {
+            selectedDeliveryTickets = selectDeliveryTicketsForRun(delivery, earlyStates, steps, skippedDeliveryUnits);
+            if (selectedDeliveryTickets.length < steps) {
+              console.log(`foreman: requested --steps ${steps}; admitting ${selectedDeliveryTickets.length} ticket(s). The next delivery unit uses shared/current branch semantics or is not yet eligible, so it will run separately.`);
+            }
           }
         }
       }
@@ -1763,7 +1774,7 @@ export function buildStartCommand(): Command {
             branchPrefix,
             maxBranchDepth,
             rootBaseBranches: branchDefaults.rootBaseBranches,
-            ticketIds: selectedNewTicket ? [selectedNewTicket] : selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
+            ticketIds: selectedNewTicket ? [selectedNewTicket] : selectedStackTickets ?? selectedDeliveryTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
           });
 
           let auditBuilder: BuilderAdapter | undefined;
@@ -1783,7 +1794,7 @@ export function buildStartCommand(): Command {
               maxBranchDepth,
               auditDependencies,
               rootBaseBranches: branchDefaults.rootBaseBranches,
-              ticketIds: selectedNewTicket ? [selectedNewTicket] : selectedStackTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
+              ticketIds: selectedNewTicket ? [selectedNewTicket] : selectedStackTickets ?? selectedDeliveryTickets ?? deliveryRun?.remaining.slice(0, steps) ?? recoveryRecord?.tickets,
             });
             auditDependencyCount = auditDependencies.length;
           } finally {

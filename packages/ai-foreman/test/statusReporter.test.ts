@@ -21,6 +21,35 @@ test("status uses durable completion when a branch log lacks batch-end", () => {
   } finally { console.log = original; rmSync(root, { recursive: true, force: true }); }
 });
 
+test("status recognizes an unambiguous legacy branch completion without runId", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-legacy-completed-status-"));
+  const original = console.log; const lines: string[] = [];
+  try {
+    mkdirSync(join(root, ".foreman/runs"), { recursive: true });
+    writeFileSync(join(root, ".foreman/runs/done.json"), JSON.stringify({ version: 1, runId: "done", status: "completed", branchMode: "branch-per-ticket", tickets: ["T1"], checkpoint: "completed", repository: { root, worktree: root }, receipts: {}, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z" }));
+    // This is the shape produced by released branch runners before runId was
+    // added to branch events.
+    writeFileSync(join(root, ".foreman/2026-01-01.jsonl"), JSON.stringify({ ts: "2026-01-01T00:00:01Z", event: "branch-complete", ticket: "T1", branch: "rafi/T1", status: "done" }) + "\n");
+    console.log = (...args) => { lines.push(args.join(" ")); };
+    runStatus(root);
+    assert.match(lines.join("\n"), /outcome.*completed/);
+    assert.doesNotMatch(lines.join("\n"), /still in progress/);
+  } finally { console.log = original; rmSync(root, { recursive: true, force: true }); }
+});
+
+test("status refuses ambiguous legacy branch completion", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-ambiguous-legacy-status-"));
+  const original = console.log; const lines: string[] = [];
+  try {
+    mkdirSync(join(root, ".foreman/runs"), { recursive: true });
+    for (const runId of ["one", "two"]) writeFileSync(join(root, `.foreman/runs/${runId}.json`), JSON.stringify({ version: 1, runId, status: "completed", branchMode: "branch-per-ticket", tickets: ["T1"], checkpoint: "completed", repository: { root, worktree: root }, receipts: {}, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z" }));
+    writeFileSync(join(root, ".foreman/2026-01-01.jsonl"), JSON.stringify({ event: "branch-complete", ticket: "T1" }) + "\n");
+    console.log = (...args) => { lines.push(args.join(" ")); };
+    runStatus(root);
+    assert.match(lines.join("\n"), /in progress or did not finish/);
+  } finally { console.log = original; rmSync(root, { recursive: true, force: true }); }
+});
+
 test("status does not borrow completion from an unrelated retained run", () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-unmatched-status-"));
   const original = console.log; const lines: string[] = [];
@@ -32,6 +61,20 @@ test("status does not borrow completion from an unrelated retained run", () => {
     runStatus(root);
     assert.doesNotMatch(lines.join("\n"), /outcome.*completed/);
     assert.match(lines.join("\n"), /in progress or did not finish/);
+  } finally { console.log = original; rmSync(root, { recursive: true, force: true }); }
+});
+
+test("status retains completed branch outcome when later audit records have another run ID", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-branch-completed-status-"));
+  const original = console.log; const lines: string[] = [];
+  try {
+    mkdirSync(join(root, ".foreman/runs"), { recursive: true });
+    writeFileSync(join(root, ".foreman/runs/done.json"), JSON.stringify({ version: 1, runId: "done", status: "completed", branchMode: "branch-per-ticket", tickets: ["T1"], checkpoint: "completed", repository: { root, worktree: root }, receipts: {}, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z" }));
+    writeFileSync(join(root, ".foreman/2026-01-01.jsonl"), JSON.stringify({ event: "branch-complete", runId: "done", ticket: "T1" }) + "\n" + JSON.stringify({ event: "audit-complete", runId: "audit-after-build" }) + "\n");
+    console.log = (...args) => { lines.push(args.join(" ")); };
+    runStatus(root);
+    assert.match(lines.join("\n"), /outcome.*completed/);
+    assert.doesNotMatch(lines.join("\n"), /still in progress/);
   } finally { console.log = original; rmSync(root, { recursive: true, force: true }); }
 });
 

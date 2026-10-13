@@ -291,6 +291,36 @@ export function selectDeliveryUnitForRun(
   return progress.find((item) => item.state === "resume") ?? progress.find((item) => item.state === "ready");
 }
 
+/**
+ * Select the tickets a normal `--steps N` run may admit from delivery units.
+ *
+ * A delivery unit remains the unit of resume/branch semantics. A multi-unit
+ * normal run may contain only per-ticket units: shared and current-branch
+ * units have unit-level branch semantics, so they are hard boundaries.
+ */
+export function selectDeliveryTicketsForRun(
+  config: DeliveryConfig,
+  states: Map<string, TicketState>,
+  steps: number,
+  skipUnitIds: readonly string[] = [],
+): string[] {
+  const skipped = new Set(skipUnitIds);
+  const eligible = deliveryProgress(config, states).filter((item) => !skipped.has(item.unit.id));
+  const ordered = [...eligible.filter((item) => item.state === "resume"), ...eligible.filter((item) => item.state === "ready")];
+  const selected: string[] = [];
+  for (const item of ordered) {
+    if (selected.length >= steps) break;
+    // Do not add a unit with different branch semantics to an existing batch.
+    // If it is the first eligible unit, it is still valid to select work from
+    // that one unit; the caller preserves its unit semantics.
+    if (selected.length > 0 && item.unit.branch_mode !== "per-ticket") break;
+    const available = item.remaining.slice(0, steps - selected.length);
+    selected.push(...available);
+    if (item.unit.branch_mode !== "per-ticket") break;
+  }
+  return selected;
+}
+
 export interface StackBatchSelection { stacks: DeliveryStack[]; tickets: string[]; error?: string }
 
 /** Complete preflight simulation for exact `--stacks N` selection. */

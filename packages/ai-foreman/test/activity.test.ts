@@ -120,6 +120,19 @@ test("retry notes are permanent lines", () => {
   assert.match(sink.chunks.join(""), /connection closed mid-response; retrying\n/);
 });
 
+test("recoverable failures from the same tool are reported once while activity continues", () => {
+  const sink = output(false);
+  const reporter = new ActivityReporter("build", { output: sink.target, displayDelayMs: 0 });
+  const end = reporter.begin("Claude building");
+  reporter.reportToolIssue("Bash");
+  reporter.reportToolIssue("Bash");
+  reporter.reportToolIssue("Read");
+  const rendered = sink.chunks.join("");
+  assert.equal(rendered.match(/tool reported a failure; agent continuing — Bash/g)?.length, 1);
+  assert.equal(rendered.match(/tool reported a failure; agent continuing — Read/g)?.length, 1);
+  end(); reporter.dispose();
+});
+
 test("paused activity does not redraw over an interactive prompt", async () => {
   const sink = output(true);
   const reporter = new ActivityReporter("test", { output: sink.target, displayDelayMs: 0, tickMs: 5, quietWarningMs: 10_000, ttyMode: "cursor" });
@@ -341,13 +354,13 @@ test("tool lifecycle presentation preserves useful status and liveness", async (
 
       reportBuilderEvent({ kind: "tool", name: "Write", input: {}, lifecycle: "completed", status: "ERROR" });
       assert.equal(sink.chunks.length, 1);
-      assert.match(sink.chunks[0]!, /tool failed.*Write/);
+      assert.match(sink.chunks[0]!, /tool reported a failure; agent continuing.*Write/);
 
       sink.chunks.length = 0;
       now = 20_000;
       reportBuilderEvent({ kind: "tool", name: "Bash", input: {}, lifecycle: "completed", exitCode: 1 });
       assert.equal(sink.chunks.length, 1);
-      assert.match(sink.chunks[0]!, /tool failed.*Bash/);
+      assert.match(sink.chunks[0]!, /tool reported a failure; agent continuing.*Bash/);
 
       now = 30_000;
       await new Promise((resolve) => setTimeout(resolve, 8));

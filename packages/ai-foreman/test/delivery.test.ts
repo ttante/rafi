@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applySharedDeliveryBranch, buildBranchPlan } from "../src/branch/planner.js";
-import { deliveryProgress, selectDeliveryUnitForRun, validateDeliveryConfig, type DeliveryConfig } from "../src/tickets/delivery.js";
+import { deliveryProgress, selectDeliveryTicketsForRun, selectDeliveryUnitForRun, validateDeliveryConfig, type DeliveryConfig } from "../src/tickets/delivery.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import type { TicketState } from "../src/tickets/stateDb.js";
 
@@ -27,6 +27,30 @@ test("delivery progress resumes unfinished groups and waits on dependencies", ()
   states.set("A", { ticket_id: "A", status: "done" } as TicketState);
   assert.equal(selectDeliveryUnitForRun(config, states)?.unit.id, "group-one");
   assert.equal(selectDeliveryUnitForRun(config, states)?.state, "resume");
+});
+
+test("--steps admits tickets across independent per-ticket delivery units", () => {
+  const independent: DeliveryConfig = { version: 1, units: [
+    { id: "first", tickets: ["A"], branch_mode: "per-ticket" },
+    { id: "second", tickets: ["B"], branch_mode: "per-ticket" },
+    { id: "blocked", tickets: ["C"], branch_mode: "per-ticket", depends_on: ["first"] },
+  ] };
+  const states = new Map<string, TicketState>();
+  assert.deepEqual(selectDeliveryTicketsForRun(independent, states, 2), ["A", "B"]);
+});
+
+test("--steps does not cross from per-ticket work into shared or current units", () => {
+  const mixed: DeliveryConfig = { version: 1, units: [
+    { id: "per-ticket", tickets: ["A"], branch_mode: "per-ticket" },
+    { id: "shared", tickets: ["B"], branch_mode: "shared" },
+    { id: "current", tickets: ["C"], branch_mode: "current" },
+  ] };
+  const states = new Map<string, TicketState>();
+  assert.deepEqual(selectDeliveryTicketsForRun(mixed, states, 3), ["A"]);
+  states.set("A", { ticket_id: "A", status: "done" } as TicketState);
+  assert.deepEqual(selectDeliveryTicketsForRun(mixed, states, 2), ["B"]);
+  states.set("B", { ticket_id: "B", status: "done" } as TicketState);
+  assert.deepEqual(selectDeliveryTicketsForRun(mixed, states, 2), ["C"]);
 });
 
 test("partial shared delivery uses one branch and defers final completion", () => {
