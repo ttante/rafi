@@ -6,6 +6,12 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+## @rafi-ai/cli 0.9.23 / ai-foreman 1.7.23 - 2026-10-13
+
+- Validate planner ticket status changes, future-work dispositions, and referenced future-work IDs before approval.
+- Correct unattended planner questions into complete proposals with bounded retries, and load tracker context after population recovery.
+- Bumped `ai-foreman` to `1.7.23` and `@rafi-ai/cli` to `0.9.23`, with the CLI pinned to `ai-foreman@1.7.23`.
+
 ## @rafi-ai/cli 0.9.22 / ai-foreman 1.7.22 / special-agents 0.8.14 / rafi-spec 0.8.15 - 2026-10-13
 
 - Add flagless `rafi plan:doctor`, durable ticket-planning/population recovery, and bounded correction of invalid ticket proposals.
