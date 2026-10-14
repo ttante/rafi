@@ -18,7 +18,7 @@ import type { BuildOwnershipRepairV1 } from "../src/buildWorkReconciliation.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 
 const ticket:TicketDef={id:"T1",order:1,title:"Guard",area:"core",priority:"P2",size:"S",risk:"Low",depends_on:[],summary:"Add a guard",acceptance:["guard"],required_tests:["inspect"],likely_files:["source.txt"]};
-function fixture(proven=false,returnedTicket="T1",qaState?:"passed"|"completed"|"waived") {
+function fixture(proven=false,returnedTicket="T1",qaState?:"passed"|"completed"|"waived",legacy=true) {
   const root=mkdtempSync(join(tmpdir(),"ownership-repair-"));
   execFileSync("git",["init","-q",root]);cmdInit(root,{});saveTickets(join(root,".tickets/tickets.yaml"),[ticket]);writeFileSync(join(root,"source.txt"),"base\n");
   execFileSync("git",["add","."],{cwd:root});execFileSync("git",["-c","user.name=Test","-c","user.email=test@example.test","commit","-qm","base"],{cwd:root});
@@ -50,7 +50,7 @@ function fixture(proven=false,returnedTicket="T1",qaState?:"passed"|"completed"|
       }
     }
   }
-  const path=db.path;db.close();releaseBuildLease(root,run,"recoverable");makeLegacyWorkFixture(path);db=new WorkflowDb(root);db.close();
+  const path=db.path;db.close();releaseBuildLease(root,run,"recoverable");if(legacy)makeLegacyWorkFixture(path);db=new WorkflowDb(root);db.close();
   return {root,certificateId,decisionId:decision.decisionId,close:()=>rmSync(root,{recursive:true,force:true})};
 }
 
@@ -104,16 +104,21 @@ for(const choice of ["link_provenance","authorize_mapped_work","quarantine"] as 
 });
 
 test("resume reconciliation repairs only an interrupted response for already-admitted in-scope work",()=>{
-  const f=fixture(false,"T2");try {
-    const before=new WorkflowDb(f.root);try { assert.equal(before.operations("run").filter(item=>item.kind==="build-assignment").length,1); } finally { before.close(); }
+  const f=fixture(false,"T2",undefined,false);try {
+    const before=new WorkflowDb(f.root);try { assert.equal(before.assertAdmittedWork("run","T1").workId,"T1"); assert.equal(before.operations("run").filter(item=>item.kind==="build-assignment").length,1); } finally { before.close(); }
     const receipt=reconcileInterruptedInScopeWork(f.root,"run","T1");
     assert.equal(receipt.providerReplayAuthorized,false);
     assert.equal(receipt.requiresFreshQa,true);
     assert.equal(assessBuildOwnership(f.root,"run").conflicts.length,0);
     const db=new WorkflowDb(f.root);try {
       assert.equal(db.operations("run").filter(item=>item.kind==="build-assignment").length,1,"recovery must not repeat the Builder turn");
-      assert.equal(db.qaTicketHead("run","T1").state,"operator-menu","fresh QA is required before completion");
+      assert.equal(db.qaTicketHead("run","T1").state,"idle","unreviewed admitted work still requires fresh QA before completion");
     } finally { db.close(); }
+  }finally{f.close();}
+});
+test("resume reconciliation rejects legacy work without established admission",()=>{
+  const f=fixture(false,"T2");try {
+    assert.throws(()=>reconcileInterruptedInScopeWork(f.root,"run","T1"),/Interrupted work is not a single in-scope assignment response conflict/);
   }finally{f.close();}
 });
 test("stale source and incomplete historical provenance cannot authorize repaired membership",()=>{
