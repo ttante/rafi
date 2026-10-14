@@ -274,6 +274,7 @@ test("buildQaInstruction includes the QA marker spec", () => {
   assert.ok(text.includes("STEP_STATUS: qa_pass"));
   assert.ok(text.includes("STEP_STATUS: qa_fail"));
   assert.ok(text.includes("Triple-check"));
+  assert.ok(text.includes("retry the exact required-test command without that extra shell syntax"));
 });
 
 test("buildQaFixInstruction embeds the reported issues", () => {
@@ -286,6 +287,7 @@ test("buildQaFixInstruction embeds the reported issues", () => {
 test("buildPrimer anchors turn 1 explicitly to fix off-by-one counting", () => {
   const text = buildPrimer(5);
   assert.ok(text.includes("This is step 1 of 5"));
+  assert.ok(text.includes("retry the exact required-test command without that extra shell syntax"));
 });
 
 test("recovery instructions pin planning and implementation to one ticket", () => {

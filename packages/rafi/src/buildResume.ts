@@ -7,6 +7,8 @@ import { existsSync, realpathSync } from "node:fs";
 import { validatePreparationArguments, validateRecoveryArguments } from "ai-foreman/cli/start.js";
 import { WorkflowReader } from "ai-foreman/workflow-reader.js";
 import { assessBuildOwnership } from "ai-foreman/build-ownership-reconciliation.js";
+import { reconcileInterruptedInScopeWork } from "ai-foreman/build-ownership-repair.js";
+import { prepareExactSessionBuilderContinuation } from "ai-foreman/build-assignment.js";
 import { readQaEvidenceSnapshot } from "ai-foreman/qa-evidence-reader.js";
 import { renderEvidenceText } from "ai-foreman/manager-evidence-artifacts.js";
 import { createHash } from "node:crypto";
@@ -86,13 +88,27 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       if (!selected) selected = await (commandOpts.selectRun ?? promptRun)(runs);
       if (!selected) return;
       if(!admittedSyntheticRecovery(root,selected.runId))assertLifecycleForCommand(root,"build-resume");
-      const ownershipAssessment = assessBuildOwnership(root, selected.runId);
+      let ownershipAssessment = assessBuildOwnership(root, selected.runId);
       if (ownershipAssessment.conflicts.length > 0) {
-        console.log(`rafi resume: build ${selected.runId} requires assignment/source reconciliation before choosing a recovery mode.`);
-        console.log(renderEvidenceText(JSON.stringify(ownershipAssessment)).text);
-        console.log(`Inspect retained evidence: rafi manager ${JSON.stringify(root)} --ask '/qa-conflicts ${selected.runId}'`);
-        if (!opts.inspect) process.exitCode = 2;
-        return;
+        const inScopeInterrupted = ownershipAssessment.conflicts.length > 0
+          && ownershipAssessment.conflicts.every(conflict => conflict.classification === "assignment_response_conflict" && typeof conflict.workId === "string" && selected!.tickets.includes(conflict.workId));
+        const exactBuilderContinuation = inScopeInterrupted && hasExactBuilderContinuationCandidate(root, selected.runId, ownershipAssessment.conflicts);
+        if (!opts.inspect && inScopeInterrupted && !exactBuilderContinuation) {
+          try {
+            for (const workId of [...new Set(ownershipAssessment.conflicts.map(conflict => String(conflict.workId)))]) reconcileInterruptedInScopeWork(root, selected.runId, workId);
+            ownershipAssessment = assessBuildOwnership(root, selected.runId);
+            if (!ownershipAssessment.conflicts.length) console.log(`rafi resume: reconciled interrupted in-scope work for ${selected.runId}; preserved source will receive fresh QA and no provider turn was replayed.`);
+          } catch (error) {
+            console.log(`rafi resume: could not safely reconcile interrupted in-scope work: ${(error as Error).message}`);
+          }
+        }
+        if (ownershipAssessment.conflicts.length > 0 && !exactBuilderContinuation) {
+          console.log(`rafi resume: build ${selected.runId} needs a source/work decision before it can continue.`);
+          console.log(renderEvidenceText(JSON.stringify(ownershipAssessment)).text);
+          console.log(`Use Rafi Manager to inspect or repair it: rafi manager ${JSON.stringify(root)} --ask '/qa-conflicts ${selected.runId}'`);
+          if (!opts.inspect) process.exitCode = 2;
+          return;
+        }
       }
       const cleanupPreview = new WorkflowReader(root);
       const blockers = cleanupPreview.readinessProcesses();
@@ -318,6 +334,13 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       let receipt!: BuildRecoveryDecisionReceipt;
       try {
       if (recoveryStateVersion(db, selected.runId) !== recoveryVersion) throw new Error("Recovery state changed while the resume decision was being prepared; inspect and retry the current revision");
+      if (hasExactBuilderContinuationCandidate(root, selected.runId, ownershipAssessment.conflicts)) {
+        if (mode !== "exact-session" || !projection.exactSessionRef) {
+          throw new Error("the interrupted Builder work can continue only in its validated exact session; inspect that session or choose guided recovery after it becomes unavailable");
+        }
+        const continuation = prepareExactSessionBuilderContinuation(root, selected.runId, projection.exactSessionRef);
+        console.log(`rafi resume: continuing interrupted Builder work for ${continuation.ticketIds.join(", ")} in its validated exact session; QA will wait for the Builder's resumed result.`);
+      }
       const currentRun = readBuildRuns(root).find((run) => run.runId === selected!.runId);
       if (!currentRun) throw new Error("Selected recovery run disappeared before its decision could be committed");
       selected = { ...currentRun, active: false };
@@ -622,6 +645,25 @@ function selectByFlags(projectDir:string,runs: RecoverableRun[], opts: Record<st
 }
 
 function digest(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+
+/**
+ * A crashed host may leave both an unfinished assignment and an unfinished
+ * provider-dispatch journal entry.  That is not evidence that the Builder
+ * completed: it is evidence that the host lost the result.  Defer ownership
+ * repair until the exact-session recovery decision is made.
+ */
+function hasExactBuilderContinuationCandidate(projectDir: string, runId: string, conflicts: Array<Record<string, unknown>>): boolean {
+  if (!conflicts.length || conflicts.some(conflict => conflict.classification !== "assignment_response_conflict" || typeof conflict.operationId !== "string")) return false;
+  const db = new WorkflowDb(projectDir);
+  try {
+    const dispatches = db.unresolvedRoleDispatches(runId, "builder");
+    if (!dispatches.length) return false;
+    const unresolvedAssignments = new Set(db.operations(runId)
+      .filter(operation => operation.kind === "build-assignment" && ["in_progress", "uncertain"].includes(operation.status))
+      .map(operation => operation.idempotencyKey));
+    return conflicts.every(conflict => unresolvedAssignments.has(String(conflict.operationId)));
+  } finally { db.close(); }
+}
 
 async function promptQaTicket(tickets: string[]): Promise<string | undefined> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("multiple QA tickets require --ticket <id> when not running in a TTY");

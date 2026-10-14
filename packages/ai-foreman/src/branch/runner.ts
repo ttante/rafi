@@ -1103,6 +1103,7 @@ Branch-mode rules:
 - Do not switch branches.
 - Do not push, create PRs, or run git commit.
 - Do not edit .tickets/, ${progressDoc}, or other tracker state.
+- If a required test is denied only because you added a pipe, redirection, substitution, or wrapper, retry the exact required-test command without that extra shell syntax. Do not retry other denied actions.
 - If another selected ticket is required before this one can be completed, stop and end with STEP_STATUS: blocked | ticket="${node.ticket.id}" branch_dependency="<ticket-id>" reason="<why>".
 - End with STEP_STATUS: done | ticket="${node.ticket.id}" summary="<what changed>" when the ticket is implemented.
 

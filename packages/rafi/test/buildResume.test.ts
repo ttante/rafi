@@ -11,6 +11,7 @@ import { stringify } from "yaml";
 import { createBuildRun as createUnadmittedBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease } from "ai-foreman/build-runs.js";
 import { createProviderSessionRef } from "ai-foreman/session-identity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
+import { assertBuildAssignmentReconciled } from "ai-foreman/build-assignment.js";
 import { createQaRecoveryPacket } from "ai-foreman/qa-recovery.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
 import { buildBuildResumeCommand } from "../src/buildResume.js";
@@ -136,6 +137,72 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("build:resume continues an interrupted Builder in its validated exact session before QA", async () => {
+  const dir = initializedProject();
+  try {
+    const settings = {
+      role: "builder" as const, source: "project" as const, make: "codex" as const,
+      model: "gpt-test", reasoning: "high", fast: false,
+    };
+    const session = scopedSession(dir, "interrupted-builder");
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"], builder: settings });
+    run = persistBuildSession(dir, run, "builder", session);
+    const db = new WorkflowDb(dir);
+    try {
+      db.planOperation({ runId: run.runId, idempotencyKey: "interrupted-assignment", kind: "build-assignment", intent: { ticketId: "T001", worktree: dir } });
+      db.updateOperation("interrupted-assignment", "in_progress");
+      db.planOperation({ runId: run.runId, idempotencyKey: "interrupted-dispatch", kind: "provider-dispatch", intent: { role: "builder", sessionRef: session } });
+      db.updateOperation("interrupted-dispatch", "in_progress");
+    } finally { db.close(); }
+    run = releaseBuildLease(dir, run, "recoverable");
+    let invoked: string[] | undefined;
+    await buildBuildResumeCommand({
+      executeStart: args => { invoked = args; return 0; },
+      resolveProjection: availableProjection,
+    }).parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" });
+
+    assert.ok(withoutLaunchToken(invoked).includes("--resume"));
+    assert.ok(withoutLaunchToken(invoked).includes("interrupted-builder"));
+    const after = new WorkflowDb(dir);
+    try {
+      assert.equal(after.operation("interrupted-dispatch")?.status, "failed");
+      assert.equal(after.operation("interrupted-assignment")?.status, "failed");
+      assert.equal(after.unresolvedRoleDispatches(run.runId, "builder").length, 0);
+      assert.doesNotThrow(() => assertBuildAssignmentReconciled(dir, run.runId));
+    } finally { after.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("build:resume never continues an interrupted Builder through a different provider session", async () => {
+  const dir = initializedProject();
+  try {
+    const settings = {
+      role: "builder" as const, source: "project" as const, make: "codex" as const,
+      model: "gpt-test", reasoning: "high", fast: false,
+    };
+    const savedSession = scopedSession(dir, "saved-builder");
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"], builder: settings });
+    run = persistBuildSession(dir, run, "builder", savedSession);
+    const db = new WorkflowDb(dir);
+    try {
+      db.planOperation({ runId: run.runId, idempotencyKey: "mismatched-assignment", kind: "build-assignment", intent: { ticketId: "T001", worktree: dir } });
+      db.updateOperation("mismatched-assignment", "in_progress");
+      db.planOperation({ runId: run.runId, idempotencyKey: "mismatched-dispatch", kind: "provider-dispatch", intent: { role: "builder", sessionRef: scopedSession(dir, "other-builder") } });
+      db.updateOperation("mismatched-dispatch", "in_progress");
+    } finally { db.close(); }
+    run = releaseBuildLease(dir, run, "recoverable");
+    await assert.rejects(buildBuildResumeCommand({
+      executeStart: () => { throw new Error("must not launch a different session"); },
+      resolveProjection: availableProjection,
+    }).parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" }), /not bound to the validated exact provider session/);
+    const after = new WorkflowDb(dir);
+    try {
+      assert.equal(after.operation("mismatched-dispatch")?.status, "in_progress");
+      assert.equal(after.operation("mismatched-assignment")?.status, "in_progress");
+    } finally { after.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("build:resume selects a recoverable run directly by ticket", async () => {

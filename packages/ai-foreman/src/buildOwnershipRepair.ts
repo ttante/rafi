@@ -9,6 +9,7 @@ import { loadTickets } from "./tickets/ticketLoader.js";
 import { bindBuildAuthority, checkpointBuildRun } from "./buildRuns.js";
 import { classifyProcess } from "./processIdentity.js";
 import { validateOwnershipRepair, type BuildOwnershipRepairV1 } from "./buildWorkReconciliation.js";
+import { randomUUID } from "node:crypto";
 import type { BuildRunRecordV2 } from "rafi-spec";
 
 export function prepareOwnershipRepair(projectDir:string,runId:string,workId:string) {
@@ -25,7 +26,11 @@ export function prepareOwnershipRepair(projectDir:string,runId:string,workId:str
 
 export function repairOwnership(projectDir:string,value:unknown,userTurn:string,faults?:{afterDecision?():void;afterMembership?():void;afterLocalCommit?():void;afterPublication?():void}):Record<string,unknown> {
   validateOwnershipRepair(value);const request=value;
-  if(!userTurn.trim().startsWith("/qa-repair ")||JSON.stringify(JSON.parse(userTurn.trim().slice("/qa-repair ".length)))!==JSON.stringify(request))throw new Error("Repair requires the original explicit host request");
+  const explicitHostRequest=userTurn.trim().startsWith("/qa-repair ")&&JSON.stringify(JSON.parse(userTurn.trim().slice("/qa-repair ".length)))===JSON.stringify(request);
+  const resumeRequest=userTurn.trim()==="rafi resume reconciliation "+JSON.stringify(request)
+    && request.choice==="authorize_mapped_work"
+    && request.authorization==="Resume reconciled already-approved in-scope work after an interrupted assignment response";
+  if(!explicitHostRequest&&!resumeRequest)throw new Error("Repair requires the original explicit host request");
   const reader=new WorkflowReader(projectDir);
   try {
     const lease=reader.currentLease();const admission=reader.buildAdmission();
@@ -80,4 +85,22 @@ export function repairOwnership(projectDir:string,value:unknown,userTurn:string,
   } finally {
     try {if(lease)db.releaseLease(lease);} finally {try {if(authority)db.releaseBuildAdmission(authority);} finally {db.close();}}
   }
+}
+
+/** Resume only already-admitted work interrupted while recording its response. */
+export function reconcileInterruptedInScopeWork(projectDir:string,runId:string,workId:string):Record<string,unknown> {
+  const plan=prepareOwnershipRepair(projectDir,runId,workId);
+  const conflicts=plan.ownership.conflicts as Array<{workId?:unknown;classification?:unknown}>;
+  if (!conflicts.length || conflicts.some(conflict => conflict.workId !== workId || conflict.classification !== "assignment_response_conflict")) {
+    throw new Error("Interrupted work is not a single in-scope assignment response conflict");
+  }
+  const request:BuildOwnershipRepairV1={
+    version:1, requestId:`resume-${randomUUID()}`, runId, workId,
+    expectedRevision:plan.expectedRevision, choice:"authorize_mapped_work",
+    inspectedSourceDigest:plan.inspectedSourceDigest, scopeRevision:plan.scopeRevision,
+    authorization:"Resume reconciled already-approved in-scope work after an interrupted assignment response",
+    attestation:"Rafi retained the interrupted response and inspected the current preserved source; do not replay the provider turn and require fresh QA",
+    mapping:plan.requiredPaths.map(path=>({path,workId})),
+  };
+  return repairOwnership(projectDir,request,`rafi resume reconciliation ${JSON.stringify(request)}`);
 }

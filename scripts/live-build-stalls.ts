@@ -18,12 +18,27 @@ const samples = Number(process.env.RAFI_LIVE_SAMPLES ?? "5");
 if (!Number.isInteger(samples) || samples < 1 || samples > 20) throw new Error("RAFI_LIVE_SAMPLES must be between 1 and 20");
 const scenarios = (process.env.RAFI_LIVE_SCENARIOS ?? "current,branch-qa").split(",");
 if (scenarios.some(value => !["current", "branch-qa"].includes(value))) throw new Error("unknown scenario");
+const providers = (process.env.RAFI_LIVE_PROVIDERS ?? "claude,codex").split(",") as Array<"claude" | "codex">;
+if (!providers.length || providers.some(value => value !== "claude" && value !== "codex") || new Set(providers).size !== providers.length) {
+  throw new Error("RAFI_LIVE_PROVIDERS must be a comma-separated, non-repeating list of claude and/or codex");
+}
 const root = mkdtempSync(join(tmpdir(), "rafi-live-build-stalls-"));
 const workspace = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const results: unknown[] = [];
 const versions: Record<string, unknown> = { hostDigest: createHash("sha256").update(["cli/start.js", "supervisedStart.js", "adapters/codex.js", "adapters/claude.js", "foreman.js"].map(path => readFileSync(join(workspace, "packages/ai-foreman/dist", path), "utf8")).join("\n")).digest("hex") };
 const save = () => writeFileSync(join(root, "results.json"), JSON.stringify({ node: process.version, versions, samples, scenarios, results }, null, 2));
 console.log(JSON.stringify({ kind: "canary-root", root }));
+let activeChild: ReturnType<typeof spawn> | undefined;
+let shutdownSignal: NodeJS.Signals | undefined;
+const requestShutdown = (signal: NodeJS.Signals) => {
+  if (shutdownSignal) return;
+  shutdownSignal = signal;
+  // The child owns only this disposable fixture. Let run() await its close so
+  // the result and cleanup evidence remain durable instead of orphaning it.
+  activeChild?.kill("SIGTERM");
+};
+process.on("SIGINT", () => requestShutdown("SIGINT"));
+process.on("SIGTERM", () => requestShutdown("SIGTERM"));
 
 async function run(provider: "codex" | "claude", scenario: string, sample: number) {
   const dir = join(root, `${provider}-${scenario}-${sample}`); mkdirSync(dir);
@@ -47,7 +62,7 @@ async function run(provider: "codex" | "claude", scenario: string, sample: numbe
   const fd = openSync(logPath, "w", 0o600);
   const args = [join(workspace, "packages/ai-foreman/dist/index.js"), "start", dir, "--steps", "1", "--yes", "--agent", provider,
     ...(scenario === "current" ? ["--no-qa"] : ["--branch-per-ticket", "--completion", "none", "--keep-worktrees"])];
-  const child = spawn(process.execPath, args, { cwd: workspace, env: { ...process.env, RAFI_BUILD_WORKER_RUN: "", RAFI_DETACHED_SUPERVISOR_RUN: "" }, stdio: ["ignore", fd, fd] });
+  const child = activeChild = spawn(process.execPath, args, { cwd: workspace, env: { ...process.env, RAFI_BUILD_WORKER_RUN: "", RAFI_DETACHED_SUPERVISOR_RUN: "" }, stdio: ["ignore", fd, fd] });
   closeSync(fd);
   const checkSource = () => {
     if (firstImplementationMs !== undefined) return;
@@ -68,6 +83,7 @@ async function run(provider: "codex" | "claude", scenario: string, sample: numbe
   let timedOut = false;
   const deadline = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, 600000);
   const code = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+  if (activeChild === child) activeChild = undefined;
   clearInterval(timer); clearTimeout(deadline);
   try { checkSource(); } catch { /* keep incomplete evidence explicit */ }
   const record = readBuildRuns(dir)[0];
@@ -88,21 +104,32 @@ async function run(provider: "codex" | "claude", scenario: string, sample: numbe
       }
     } finally { reader.close(); }
   }
-  const result = { provider, scenario, sample, dir, logPath, code, timedOut, independentlyVerified, elapsedMs: Date.now() - started, firstImplementationMs, firstImplementationMeasurement: "100ms source polling including authoritative worktree pointers", status: record?.status, handoffs, dispatches, diagnostics };
+  const result = { provider, scenario, sample, dir, logPath, code, timedOut, shutdownSignal, independentlyVerified, elapsedMs: Date.now() - started, firstImplementationMs, firstImplementationMeasurement: "100ms source polling including authoritative worktree pointers", status: record?.status, handoffs, dispatches, diagnostics };
   results.push(result); save();
   console.log(JSON.stringify({ ...result, diagnostics: undefined }));
-  return code === 0 && record?.status === "completed" && independentlyVerified;
+  return !shutdownSignal && code === 0 && record?.status === "completed" && independentlyVerified;
 }
 
-await Promise.all((["codex", "claude"] as const).map(async provider => {
+// Keep live runs sequential. This preserves provider-specific evidence and avoids
+// turning local contention into a provider-stall false positive.
+for (const provider of providers) {
   const version = spawnSync(provider, ["--version"], { encoding: "utf8", timeout: 10000 });
   const auth = spawnSync(provider, provider === "codex" ? ["login", "status"] : ["auth", "status"], { encoding: "utf8", timeout: 10000 });
   versions[provider] = { version: version.stdout.trim(), authenticated: auth.status === 0 };
   save();
-  if (auth.status !== 0) { console.log(JSON.stringify({ provider, skipped: "not authenticated" })); return; }
-  for (const scenario of scenarios) for (let sample = 1; sample <= samples; sample++) {
-    if (!await run(provider, scenario, sample)) { console.log(JSON.stringify({ provider, stopped: "canary failed; inspect before spending further quota" })); return; }
+  if (auth.status !== 0) { console.log(JSON.stringify({ provider, skipped: "not authenticated" })); continue; }
+  let providerPassed = true;
+  for (const scenario of scenarios) {
+    for (let sample = 1; sample <= samples; sample++) {
+      if (shutdownSignal) { providerPassed = false; break; }
+      if (await run(provider, scenario, sample)) continue;
+      providerPassed = false;
+      break;
+    }
+    if (!providerPassed) break;
   }
-}));
+  if (!providerPassed) console.log(JSON.stringify({ provider, stopped: "canary failed; inspect before spending further quota" }));
+}
 save();
 console.log(JSON.stringify({ kind: "canary-finished", results: join(root, "results.json") }));
+if (shutdownSignal) process.exitCode = 130;

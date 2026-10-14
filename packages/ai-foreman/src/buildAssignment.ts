@@ -13,6 +13,7 @@ import type { TurnResult } from "./adapters/types.js";
 import { captureFrozenQaSource, type FrozenQaSourceState } from "./qaSnapshot.js";
 import { WorkflowDb } from "./workflowDb.js";
 import { WorkflowReader } from "./workflowReader.js";
+import type { ProviderSessionRefV1 } from "rafi-spec";
 
 /** Work responses confirm an assignment; they never select the next ticket. */
 export function validateBuildAssignment(ticketId: string, status: StepStatus, responseText = ""): string | undefined {
@@ -40,6 +41,68 @@ export interface BuildAssignmentCapture {
 type BuildSourceState = Pick<FrozenQaSourceState, "digest" | "head" | "contentDigest" | "capturedAt" | "pathInventory" | "stagedDiff" | "unstagedDiff" | "untracked"> & { captureMode: "git" | "filesystem"; omissions?: string[] };
 
 export class BuildAssignmentRejected extends Error {}
+
+/**
+ * Retire only the host-side records for a Builder turn that was interrupted
+ * before Rafi received a durable response.  The next turn is sent to the
+ * *same validated provider session*, so it continues the outstanding work
+ * rather than treating unknown work as complete or replaying it in a new
+ * conversation.
+ */
+export function prepareExactSessionBuilderContinuation(
+  projectDir: string,
+  runId: string,
+  session: ProviderSessionRefV1,
+): { ticketIds: string[]; dispatchIds: string[]; assignmentIds: string[] } {
+  const db = new WorkflowDb(projectDir);
+  try {
+    const dispatches = db.unresolvedRoleDispatches(runId, "builder");
+    if (!dispatches.length) throw new BuildAssignmentRejected("No interrupted Builder dispatch is awaiting exact-session continuation");
+    if (dispatches.some(dispatch => !sameSession((dispatch.intent as { sessionRef?: unknown }).sessionRef, session))) {
+      throw new BuildAssignmentRejected("Interrupted Builder dispatch is not bound to the validated exact provider session");
+    }
+    const assignments = db.operations(runId).filter(operation => operation.kind === "build-assignment" && ["in_progress", "uncertain"].includes(operation.status));
+    if (!assignments.length) throw new BuildAssignmentRejected("Interrupted Builder dispatch has no durable in-progress assignment");
+    const ticketIds = assignments.map(operation => (operation.intent as { ticketId?: unknown }).ticketId)
+      .filter((ticketId): ticketId is string => typeof ticketId === "string");
+    if (ticketIds.length !== assignments.length) throw new BuildAssignmentRejected("Interrupted Builder assignment is missing its ticket identity");
+
+    db.atomic(() => {
+      const resumedAt = new Date().toISOString();
+      for (const dispatch of dispatches) {
+        db.updateOperation(dispatch.idempotencyKey, "failed", {
+          result: { recovery: "exact-session-continuation", resumedAt, sessionRef: session },
+          error: "Host interruption: the same validated Builder session will reconcile and continue this turn",
+        });
+      }
+      for (const assignment of assignments) {
+        db.updateOperation(assignment.idempotencyKey, "failed", {
+          result: { recovery: "exact-session-continuation", resumedAt, sessionRef: session },
+          error: "Host interruption: work remains assigned to the validated Builder session; do not send it to QA yet",
+        });
+      }
+      const run = db.getRun(runId);
+      if (run) db.transition(runId, {
+        checkpoint: "builder-exact-session-continuation",
+        state: { ...run.state, interruptedBuilderContinuation: { ticketIds, sessionRef: session, resumedAt } },
+        event: "builder_exact_session_continuation_authorized",
+        payload: { ticketIds, sessionRef: session },
+      });
+    });
+    return { ticketIds: [...new Set(ticketIds)], dispatchIds: dispatches.map(item => item.idempotencyKey), assignmentIds: assignments.map(item => item.idempotencyKey) };
+  } finally { db.close(); }
+}
+
+function sameSession(value: unknown, session: ProviderSessionRefV1): boolean {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ProviderSessionRefV1>;
+  return candidate.provider === session.provider
+    && candidate.sessionId === session.sessionId
+    && candidate.role === "builder"
+    && candidate.stream === "builder"
+    && candidate.cwd === session.cwd
+    && candidate.configRoot === session.configRoot;
+}
 
 export interface BuilderGuidanceFollowup {
   reviewAttemptId: string;

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createBuildRun, releaseBuildLease, readBuildRuns } from "../src/buildRuns.js";
 import { WorkflowDb } from "../src/workflowDb.js";
-import { prepareOwnershipRepair, repairOwnership } from "../src/buildOwnershipRepair.js";
+import { prepareOwnershipRepair, reconcileInterruptedInScopeWork, repairOwnership } from "../src/buildOwnershipRepair.js";
 import { assessBuildOwnership } from "../src/buildOwnershipReconciliation.js";
 import { buildScopeRevision } from "../src/buildApproval.js";
 import { beginBuildAssignment, finishBuildAssignment } from "../src/buildAssignment.js";
@@ -100,6 +100,20 @@ for(const choice of ["link_provenance","authorize_mapped_work","quarantine"] as 
     const db=new WorkflowDb(f.root);
     try {assert.equal(db.qaReviewAttempts("run","T1").length,1);assert.equal(db.operations("run").filter(op=>op.kind==="build-assignment").length,1);assert.equal(receipt.providerReplayAuthorized,false);if(choice==="quarantine")assert.throws(()=>db.assertAdmittedWork("run","T1"),/not admitted/);else assert.equal(db.assertAdmittedWork("run","T1").workId,"T1");}finally{db.close();}
     if(choice!=="quarantine")assert.equal(assessBuildOwnership(f.root,"run").conflicts.length,0);
+  }finally{f.close();}
+});
+
+test("resume reconciliation repairs only an interrupted response for already-admitted in-scope work",()=>{
+  const f=fixture(false,"T2");try {
+    const before=new WorkflowDb(f.root);try { assert.equal(before.operations("run").filter(item=>item.kind==="build-assignment").length,1); } finally { before.close(); }
+    const receipt=reconcileInterruptedInScopeWork(f.root,"run","T1");
+    assert.equal(receipt.providerReplayAuthorized,false);
+    assert.equal(receipt.requiresFreshQa,true);
+    assert.equal(assessBuildOwnership(f.root,"run").conflicts.length,0);
+    const db=new WorkflowDb(f.root);try {
+      assert.equal(db.operations("run").filter(item=>item.kind==="build-assignment").length,1,"recovery must not repeat the Builder turn");
+      assert.equal(db.qaTicketHead("run","T1").state,"operator-menu","fresh QA is required before completion");
+    } finally { db.close(); }
   }finally{f.close();}
 });
 test("stale source and incomplete historical provenance cannot authorize repaired membership",()=>{

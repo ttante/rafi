@@ -1,12 +1,17 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { WorkflowDb } from "../../src/workflowDb.js";
 import { HandoffService } from "../../src/handoffs.js";
 import { ContinuityAdapter, baselineContinuityDelta } from "../../src/continuity.js";
 import type { ProviderSessionRefV1, ResolvedAgentSettings } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent } from "../../src/adapters/types.js";
 const [root, phase] = process.argv.slice(2) as [string, string];
-const kill = (): never => { process.kill(process.pid, "SIGKILL"); throw new Error("SIGKILL did not terminate fixture"); };
+// `process.kill(process.pid)` is delivered only after this synchronous SQLite
+// frame returns, which can accidentally commit the exact boundary this fixture
+// intends to crash before. A child `kill -9` makes the fault injection
+// process-visible before the surrounding method can return.
+const kill = (): never => { spawnSync("/bin/kill", ["-9", String(process.pid)]); throw new Error("SIGKILL did not terminate fixture"); };
 const delta = baselineContinuityDelta("Implement T001");
 const settings: ResolvedAgentSettings = { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false, session_strategy: "compact", settings_revision: 1, display_session_cost: false, auto_compact_threshold_percent: 65, compact_maximum: 10 };
 class Adapter implements BuilderAdapter {
@@ -17,7 +22,9 @@ class Adapter implements BuilderAdapter {
   sessionRef() { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1) { this.ref = ref; }
   async sendTurn(instruction: string) {
-    if (!instruction.startsWith("Accept this validated")) {
+    // The strict acceptance protocol deliberately precedes the handoff packet,
+    // so acceptance is no longer the first text in the host instruction.
+    if (!instruction.includes("Accept this validated Rafi handoff")) {
       writeFileSync(join(root, "mutation-observed.txt"), "one dispatch\n");
       if (phase === "dispatched") kill();
     }

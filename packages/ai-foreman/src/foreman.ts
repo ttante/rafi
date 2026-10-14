@@ -191,7 +191,7 @@ export function buildPrimer(n: number, trackerPath?: string, ticketsEnabled = fa
 Rules:
 - Do exactly ONE ticket or step this turn, then stop.
 - ${MARKER_SPEC}
-- If a tool action is denied by foreman policy, do not retry it; report it via the blocked marker.${trackerRule}${preferredTicketRule}
+- If a tool action is denied by foreman policy, do not retry the denied form; report it via the blocked marker. The one exception is a required test that you changed by adding a pipe, redirection, substitution, or wrapper: retry the exact required-test command without that extra shell syntax before reporting it blocked.${trackerRule}${preferredTicketRule}
 
 This is step 1 of ${n}. Implement the next ticket or step now.`;
 }
@@ -211,6 +211,8 @@ export function buildQaInstruction(): string {
 - Confidence — would you bet money this works as described in production?
 
 Triple-check. Do not rubber-stamp your own work. Be skeptical.
+
+If an otherwise required test is denied only because you added a pipe, redirection, substitution, or wrapper, retry the exact required-test command without that extra shell syntax. Do not retry other denied actions.
 
 If everything is solid, end with STEP_STATUS: qa_pass.
 If anything is off, return the required RAFI_QA_FAILURE_REPORT_START/RAFI_QA_FAILURE_REPORT_END JSON envelope immediately before STEP_STATUS: qa_fail. The report must contain every check, every blocking finding, and all nonblocking observations. Do NOT fix issues on this turn — just report them. Foreman will instruct the Builder to fix them next.

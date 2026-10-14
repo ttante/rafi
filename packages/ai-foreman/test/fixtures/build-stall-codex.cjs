@@ -42,7 +42,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
     send({ id: request.id, result: { turn: { id: 'turn' } } });
     send({ method: 'thread/tokenUsage/updated', params: { threadId: thread, tokenUsage: { total: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, last: { totalTokens: 20 }, modelContextWindow: 1000 } } });
-    send({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text: (instruction.includes('Reply with HANDOFF_ACCEPTED') ? 'HANDOFF_ACCEPTED\n' : 'STEP_STATUS: done | ' + ticketMarker + 'summary="scripted work complete"\n') + 'RAFI_CONTINUITY_DELTA: ' + JSON.stringify(delta) } } });
+    // Production accepts the marker only as the first non-whitespace line.
+    // Detect the protocol token rather than a particular wording so this
+    // fixture remains compatible with clarified host instructions.
+    send({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text: (instruction.includes('HANDOFF_ACCEPTED') ? 'HANDOFF_ACCEPTED\n' : 'STEP_STATUS: done | ' + ticketMarker + 'summary="scripted work complete"\n') + 'RAFI_CONTINUITY_DELTA: ' + JSON.stringify(delta) } } });
     send({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'turn', status: 'completed' } } });
   } else send({ id: request.id, result: {} });
 });
