@@ -1,7 +1,8 @@
 name: Build recovery
 on:
-  pull_request:
   push:
+    tags:
+      - 'rafi-cli-v*'
   workflow_dispatch:
 permissions:
   contents: read
@@ -34,7 +35,7 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
       - name: Shared storage, recovery selectors and launch contracts
-        run: node --import tsx --test --test-concurrency=1 packages/ai-foreman/test/readinessRecovery.test.ts packages/ai-foreman/test/buildRuns081.test.ts packages/ai-foreman/test/processIdentity.test.ts packages/ai-foreman/test/startArguments.test.ts packages/rafi/test/buildResume.test.ts packages/rafi/test/resume.test.ts packages/rafi/test/resumeLauncher.test.ts
+        run: node --import tsx --test --test-concurrency=1 packages/ai-foreman/test/readinessRecovery.test.ts packages/ai-foreman/test/buildRuns081.test.ts packages/ai-foreman/test/processIdentity.test.ts packages/ai-foreman/test/startArguments.test.ts packages/rafi/test/buildResume.test.ts packages/rafi/test/buildStartOver.test.ts packages/ai-foreman/test/buildOwnershipReconciliation.test.ts packages/rafi/test/resume.test.ts packages/rafi/test/resumeLauncher.test.ts
       - name: Packaged readiness faults and actual short-command recovery
         if: runner.os != 'Windows'
         run: node --test --test-concurrency=1 packages/ai-foreman/test/readinessFaultsPackaged.test.mjs packages/rafi/test/resumePackaged.test.mjs packages/rafi/test/establishedPackaged.test.mjs packages/rafi/test/interruptedPackaged.test.mjs

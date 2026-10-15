@@ -36,3 +36,20 @@ Use `/qa-instruction <run> <work> <instruction>` for persisted recipient receipt
 `/qa-work <run>` returns pending question IDs and revisions. An explicit `/answer-question <run> <work> <decision> <revision> <choice-or-answer>` targets that exact pending decision. Stale or foreign questions are rejected; the original owner consumes the response and releases its terminal prompt.
 
 Ownership repair requires stopped, verified writers. `/qa-repair-plan <run> <work>` provides a read-only source inventory and expected revision. The operator inspects and maps preserved changes, then supplies the exact structured `/qa-repair <JSON>` request. Repair retains original evidence and publishes an immutable audit outcome. Eligible nonterminal work requires fresh QA and invalidates old unconsumed certificates. Completed work stays terminal; waived work remains governed by its existing waiver policy. Report the execution disposition separately from metadata repair. Repair never silently restores files, discards foreign edits, broadens a waiver, or authorizes replay.
+
+
+
+after resetting all tickets and restarting the build and doing a hard reset on the branch, i 
+
+I hit another issue in the same rafi project that had the broken build that we just did tickets for.
+workflow was:
+$ rafi tickets reset --all
+$ rafi build:start-over
+rafi asked which build, i select the current one (the broken one)
+rafi asks how to preserve and restart the run - select archive-restart
+rafi throws error "rafi: unexpected/pre-run changes must be preserved or moved first..."
+$ git reset --hard
+$ rafi start . --steps 8
+rafi error: "rafi: Build <RUN_ID> has unresolved provider dispatch; reconcile before another launch"
+
+This last error is the issue. resetting tickets and the build should let me have a clean fresh start. The unresolved provider dispatch is antithical to rafi's function, it feels like a gap that should be handled on any build start over or reset tasks - or maybe there's a better solution, i'm not sure. investigate thoroughly and identify the issue and the best resolution. remember the goal of rafi is to facilitate builds, not stifle them (or rafi itself). 

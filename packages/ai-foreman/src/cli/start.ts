@@ -8,7 +8,7 @@ import { formatRecoveryCommand, formatDecisionCommands, formatExactRunRecovery }
 import { durableReadOnlyProposal } from "../readOnlyProposal.js";
 import { captureFrozenQaSource } from "../qaSnapshot.js";
 import { finishStartAdmission, superviseStart, supervisedRunId } from "../supervisedStart.js";
-import { assertBuildAssignmentReconciled } from "../buildAssignment.js";
+import { assertBuildAssignmentReconciled, isInterruptedBuilderRecovery } from "../buildAssignment.js";
 import { durableHumanDecision, HumanDecisionRequired, HumanDecisionCancelled, servicePendingHumanDecisions } from "../humanDecision.js";
 import { requiresBuildApproval, buildScopeRevision, createBuildApprovalGate } from "../buildApproval.js";
 import { Command, Option } from "commander";
@@ -469,7 +469,7 @@ export function validatePreparationArguments(args: readonly string[], projectDir
   return savedStartArguments(command, projectDir, options);
 }
 
-export function buildStartCommand(): Command {
+export function buildStartCommand(options: { beforeFreshStart?: (projectDir: string) => Promise<boolean> } = {}): Command {
   return new Command("start")
     .description("Enlist a builder and drive it through a batch of N steps.")
     .argument("<project>", "path to the project directory the builder works in")
@@ -552,6 +552,9 @@ export function buildStartCommand(): Command {
 
       const cwd = resolve(project);
       if (!existsSync(cwd)) fail(`project directory not found: ${cwd}`);
+      // Recovery commands launch a frozen continuation and must not recursively
+      // offer a different recovery path. Fresh launches may be redirected first.
+      if (!recoveryIntent && options.beforeFreshStart && !await options.beforeFreshStart(cwd)) return;
       const recoveryRecord = opts.recoverRun ? readBuildRuns(cwd).find((run) => run.runId === opts.recoverRun) : undefined;
       let dirtyWork = recoveryRecord?.runDecisions?.dirtyWork;
       if (opts.recoverRun && !recoveryRecord) fail(`recoverable build run not found: ${opts.recoverRun}`);
@@ -1920,9 +1923,9 @@ export function buildStartCommand(): Command {
 
         for (const node of plan.nodes) admitApprovedTicket(cwd, masterRun.runId, node.ticket.id, buildScopeRevision(cwd), `build invocation ${invocationRunId}: approved branch plan`);
         masterRun = checkpointBuildRun(cwd, masterRun, "capabilities-resolved", { builderCapabilities });
-        const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, masterRun.runId, requestedTicketIds[0]) : undefined;
+        const qaResumedRecovery = recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord) ? pendingQaRecoveryPacket(cwd, masterRun.runId, requestedTicketIds[0]) : undefined;
         let qaProtocolResumeTicket: string | undefined;
-        if (recoveryRecord && !qaResumedRecovery) {
+        if (recoveryRecord && !qaResumedRecovery && !isInterruptedBuilderRecovery(recoveryRecord)) {
           const protocolDb = new WorkflowDb(cwd);
           try {
             const pendingHeads = protocolDb.pendingQaTicketHeads(masterRun.runId);
@@ -2198,10 +2201,10 @@ export function buildStartCommand(): Command {
       buildRun = checkpointBuildRun(cwd, buildRun, "capabilities-resolved", { builderCapabilities });
       activeObserver?.store.attachExecutionLease(activeObserver.executionId, readCurrentWorkflowLease(cwd)?.generation);
       activeContinuityRunId = buildRun.runId;
-      const qaResumedRecovery = recoveryRecord ? pendingQaRecoveryPacket(cwd, buildRun.runId, requestedTicketIds[0]) : undefined;
+      const qaResumedRecovery = recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord) ? pendingQaRecoveryPacket(cwd, buildRun.runId, requestedTicketIds[0]) : undefined;
       let qaFinalizationTicket: string | undefined;
       let qaProtocolResumeTicket: string | undefined;
-      if (recoveryRecord && !qaResumedRecovery) {
+      if (recoveryRecord && !qaResumedRecovery && !isInterruptedBuilderRecovery(recoveryRecord)) {
         const finalizationDb = new WorkflowDb(cwd);
         try {
           const pendingHeads = finalizationDb.pendingQaTicketHeads(buildRun.runId);

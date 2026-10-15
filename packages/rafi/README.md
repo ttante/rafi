@@ -47,6 +47,13 @@ Run `rafi tickets plan` for new work and approve the proposed ticket set before 
 
 Both resume commands accept the same explicit build recovery options, including `--inspect`, `--fresh-session`, `--fresh-with-handoff`, `--yes`, and `--no`. Build recovery options cannot be used for interviews. Current-branch Builder recovery starts with the interrupted ticket and continues eligible work within the saved scope. Explicit ticket selection and QA-only recovery remain scoped to that ticket. Successful recovery completes the run when all its saved tickets are done; other unfinished tickets remain available through the resume picker.
 
+If a Builder turn was interrupted while an earlier ticket was awaiting QA, `rafi resume` continues the interrupted Builder first and then resumes queued QA. Each ticket keeps its own recovery evidence. If that Builder session is unavailable, the recovery menu offers a fresh restart from your current files.
+
+Use `rafi build:start-over --run <id> --action restart-current` to retire a broken execution without resetting Git or discarding implementation files. Choose the unfinished tickets to reset; completed tickets stay completed. For scripts, use `--tickets DOC-001,DOC-007 --yes`. Rafi prints an explicit start command for each selected ticket. `rafi tickets reset` resets tracker state only; when related builds exist, its interactive menu also offers this execution restart.
+
+Git rollback actions remain available. If unrelated working-tree changes prevent a rollback, Rafi offers to stash implementation changes, discard tracked changes with a separate confirmation, or wait while you handle the files in another terminal. Untracked files are never deleted automatically. Rafi keeps its tracker and configuration. Outside a terminal, handle the files yourself and retry with `--cleanup handled`; `--yes` does not authorize additional destructive cleanup.
+
+
 ## Helpful features
 
 If preparation stopped before work began, the picker reconciles a registered launch before retrying its existing successor. Invalid saved start options can be corrected interactively before a retry is reserved; corrections go through normal approval. A live child or unresolved execution remains visible and cannot be bypassed by retrying. Readiness checks in worktrees remain owned by the main project's build, including their cleanup records.

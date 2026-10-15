@@ -11,7 +11,7 @@ import { stringify } from "yaml";
 import { createBuildRun as createUnadmittedBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease } from "ai-foreman/build-runs.js";
 import { createProviderSessionRef } from "ai-foreman/session-identity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
-import { assertBuildAssignmentReconciled } from "ai-foreman/build-assignment.js";
+import { assertBuildAssignmentReconciled, isInterruptedBuilderRecovery } from "ai-foreman/build-assignment.js";
 import { createQaRecoveryPacket } from "ai-foreman/qa-recovery.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
 import { buildBuildResumeCommand } from "../src/buildResume.js";
@@ -802,5 +802,99 @@ test("safe pause at a pending question performs zero projection or launch calls"
     const command = buildBuildResumeCommand({ resolveHumanDecision: async () => undefined, resolveProjection: async () => { throw new Error("projection must not launch"); }, executeStart: () => { throw new Error("provider must not launch"); } });
     await command.parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" });
     const read = new WorkflowDb(dir); try { assert.equal(read.pendingHumanDecisions(run.runId).length, 1); assert.equal(read.buildAdmission(), undefined); } finally { read.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const automaticQa of [false, true]) test(`mixed recovery continues interrupted Builder before older QA${automaticQa ? " and automatically launches queued QA after completion" : " and preserves its packet"}`, async () => {
+  const dir = initializedProject();
+  try {
+    initializeGit(dir);
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T031", "T032"], branchMode: "shared", builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false }, qa: { role: "qa", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
+    const builderSession = scopedSession(dir, "interrupted-builder");
+    run = persistBuildSession(dir, run, "builder", builderSession);
+    const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: run.runId, ticketId: "T032", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", pendingAction: "operator-menu", resources: { prompt: { value: "review", purpose: "Exact review prompt", exactText: true } } });
+    const db = new WorkflowDb(dir);
+    db.beginQaReviewAttempt({ attemptId: packet.manifest.reviewAttemptId, runId: run.runId, ticketId: "T032", reviewNumber: 1, cycle: 1, remediationGeneration: 0, sourceDigest: packet.manifest.reviewedStateDigest });
+    let protocolHead = db.qaTicketHead(run.runId, "T032");
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "source-frozen", sourceStateDigest: packet.manifest.reviewedStateDigest });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "review-ready", reviewBasisDigest: "b".repeat(64), sessionGeneration: 1 });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "turn-intended", slot: "initial" });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "operator-menu" });
+    db.finishQaReviewAttempt(packet.manifest.reviewAttemptId, { status: "interrupted", detail: "simulated crash before packet review identity publication" });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "source-frozen", sourceStateDigest: packet.manifest.reviewedStateDigest });
+    protocolHead = db.transitionQa(run.runId, "T032", protocolHead.revision, { type: "review-ready", reviewBasisDigest: "c".repeat(64), sessionGeneration: 2 });
+    db.beginQaReviewAttempt({ attemptId: "undispatched-successor", runId: run.runId, ticketId: "T032", reviewNumber: 2, cycle: 1, remediationGeneration: 0, sourceDigest: packet.manifest.reviewedStateDigest });
+    db.appendContinuityEvent({ runId: run.runId, role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+    db.publishContinuityCheckpoint({ runId: run.runId, role: "qa", authoritativeStateRevision: 1, delta: { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: ["recover QA report"], nextAction: "resume QA recovery" } });
+    db.planOperation({ runId: run.runId, idempotencyKey: "mixed-assignment", kind: "build-assignment", intent: { ticketId: "T031", worktree: dir } });
+    db.updateOperation("mixed-assignment", "in_progress");
+    db.planOperation({ runId: run.runId, idempotencyKey: "mixed-dispatch", kind: "provider-dispatch", intent: { role: "builder", sessionRef: builderSession } });
+    db.updateOperation("mixed-dispatch", "in_progress");
+    db.close();
+    run = releaseBuildLease(dir, run, "recoverable");
+    let invoked: string[] | undefined;
+    const launches: string[][] = [];
+    const command = buildBuildResumeCommand({ executeStart: (args, context) => {
+      launches.push(args);
+      invoked ??= args;
+      if (automaticQa) {
+        const execution = new WorkflowDb(dir);
+        const held = execution.acquireLease(run.runId);
+        try {
+          if (launches.length === 1) {
+            const current = execution.getRun(run.runId)!;
+            execution.transition(run.runId, { status: "paused", checkpoint: "builder-recovered", state: { ...current.state, progress: { ...current.state.progress as object, completedTickets: ["T031"], remainingTickets: ["T032"] } } });
+          }
+          execution.failBuildLaunch(context!.authority, args[args.indexOf("--launch-token") + 1]);
+        } finally { execution.releaseLease(held); execution.close(); }
+      }
+      return 0;
+    }, resolveProjection: availableProjection });
+    await command.parseAsync([dir, "--run", run.runId, "--yes", "--ticket", "T032", "--fresh-with-handoff"], { from: "user" });
+    assert.ok(invoked);
+    assert.equal(invoked[invoked.indexOf("--ticket") + 1], "T031");
+    assert.equal(invoked[invoked.indexOf("--recovery-mode") + 1], "exact-session");
+    assert.equal(invoked[invoked.indexOf("--resume") + 1], "interrupted-builder");
+    const after = new WorkflowDb(dir);
+    try {
+      assert.equal(after.qaRecoveryHead(run.runId, "T032")?.packetDigest, packet.manifest.packetDigest);
+      assert.equal(after.qaRecoveryHead(run.runId, "T032")?.pendingAction, "operator-menu");
+      assert.equal(after.unresolvedRoleDispatches(run.runId, "builder").length, 0);
+      assert.equal(isInterruptedBuilderRecovery(readBuildRuns(dir).find(item => item.runId === run.runId)), !automaticQa);
+      assert.equal(launches.length, automaticQa ? 2 : 1);
+      if (automaticQa) {
+        assert.equal(launches[1][launches[1].indexOf("--ticket") + 1], "T032");
+        assert.equal(launches[1][launches[1].indexOf("--recovery-mode") + 1], "fresh-with-handoff");
+        assert.equal(launches[1][launches[1].indexOf("--accept-handoff-role") + 1], "qa");
+      }
+    } finally { after.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("unavailable interrupted Builder session offers a file-preserving restart without retiring the dispatch", async () => {
+  const dir = initializedProject();
+  try {
+    const settings = { role: "builder" as const, source: "project" as const, make: "codex" as const, model: "default", reasoning: "default", fast: false };
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T007"], builder: settings });
+    const session = scopedSession(dir, "unavailable-builder");
+    run = persistBuildSession(dir, run, "builder", session);
+    const db = new WorkflowDb(dir);
+    db.planOperation({ runId: run.runId, idempotencyKey: "unavailable-assignment", kind: "build-assignment", intent: { ticketId: "T007", worktree: dir } });
+    db.updateOperation("unavailable-assignment", "in_progress");
+    db.planOperation({ runId: run.runId, idempotencyKey: "unavailable-dispatch", kind: "provider-dispatch", intent: { role: "builder", sessionRef: session } });
+    db.updateOperation("unavailable-dispatch", "in_progress");
+    db.close();
+    run = releaseBuildLease(dir, run, "recoverable");
+    await assert.rejects(buildBuildResumeCommand({
+      executeStart: () => { throw new Error("must not launch an unverified session"); },
+      resolveProjection: async (root, current, now, ticket) => projectBuildRecovery(root, current, now, ticket),
+    }).parseAsync([dir, "--run", run.runId, "--yes"], { from: "user" }), /restart-current.*does not reset Git/);
+    const after = new WorkflowDb(dir);
+    try {
+      assert.equal(after.operation("unavailable-dispatch")?.status, "in_progress");
+      assert.equal(after.operation("unavailable-assignment")?.status, "in_progress");
+      assert.equal(readBuildRuns(dir).find(item => item.runId === run.runId)?.recoveryDecision, undefined);
+    } finally { after.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

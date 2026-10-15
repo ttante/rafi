@@ -41,7 +41,7 @@ importers:
         specifier: 0.8.15
         version: link:../spec
       special-agents:
-        specifier: 0.8.14
+        specifier: 0.8.15
         version: link:../special-agents
       yaml:
         specifier: ^2.5.1
@@ -73,7 +73,7 @@ importers:
         specifier: ^1.4.0
         version: 1.5.0
       ai-foreman:
-        specifier: 1.7.24
+        specifier: 1.7.25
         version: link:../ai-foreman
       ajv:
         specifier: ^8.20.0
@@ -85,7 +85,7 @@ importers:
         specifier: 0.8.15
         version: link:../spec
       special-agents:
-        specifier: 0.8.14
+        specifier: 0.8.15
         version: link:../special-agents
       yaml:
         specifier: ^2.5.1

@@ -13,7 +13,7 @@ import type { TurnResult } from "./adapters/types.js";
 import { captureFrozenQaSource, type FrozenQaSourceState } from "./qaSnapshot.js";
 import { WorkflowDb } from "./workflowDb.js";
 import { WorkflowReader } from "./workflowReader.js";
-import type { ProviderSessionRefV1 } from "rafi-spec";
+import type { BuildRunRecordV2, ProviderSessionRefV1 } from "rafi-spec";
 
 /** Work responses confirm an assignment; they never select the next ticket. */
 export function validateBuildAssignment(ticketId: string, status: StepStatus, responseText = ""): string | undefined {
@@ -41,6 +41,18 @@ export interface BuildAssignmentCapture {
 type BuildSourceState = Pick<FrozenQaSourceState, "digest" | "head" | "contentDigest" | "capturedAt" | "pathInventory" | "stagedDiff" | "unstagedDiff" | "untracked"> & { captureMode: "git" | "filesystem"; omissions?: string[] };
 
 export class BuildAssignmentRejected extends Error {}
+
+/** A frozen exact-session Builder decision may defer unrelated pending QA. */
+export function isInterruptedBuilderRecovery(run: BuildRunRecordV2 | undefined): boolean {
+  if (!run) return false;
+  const decision = run.recoveryDecision;
+  const continuation = (run as BuildRunRecordV2 & { interruptedBuilderContinuation?: { ticketIds?: string[]; sessionRef?: ProviderSessionRefV1 } }).interruptedBuilderContinuation;
+  return decision?.runId === run.runId && decision.role === "builder" && decision.mode === "exact-session"
+    && decision.executionTickets?.length === 1
+    && run.tickets.includes(decision.executionTickets[0])
+    && Boolean(continuation?.ticketIds?.includes(decision.executionTickets[0]))
+    && Boolean(continuation?.sessionRef && decision.predecessorSessionRef && sameSession(continuation.sessionRef, decision.predecessorSessionRef));
+}
 
 /**
  * Retire only the host-side records for a Builder turn that was interrupted
@@ -93,11 +105,44 @@ export function prepareExactSessionBuilderContinuation(
   } finally { db.close(); }
 }
 
+/** Retire uncertain execution for an explicitly selected start-over, never claim
+ * that a provider did not run or that its preserved implementation passed QA. */
+export function retireBuildExecutionForStartOver(projectDir: string, runId: string, operationId: string): void {
+  const db = new WorkflowDb(projectDir);
+  let admission: ReturnType<WorkflowDb["acquireBuildRecoveryAdmission"]> | undefined;
+  let lease: ReturnType<WorkflowDb["acquireLease"]> | undefined;
+  try {
+    const operation = db.getRun(operationId);
+    const original = operation?.originalWork as { run?: { runId?: string } } | undefined;
+    if (operation?.kind !== "recovery" || operation.state.operation !== "build-start-over" || original?.run?.runId !== runId) throw new Error("Execution retirement requires a recorded start-over intent for this run");
+    admission = db.acquireBuildRecoveryAdmission(runId);
+    lease = db.acquireLease(runId);
+    if (db.readinessProcesses().length) throw new Error("Owned process cleanup must be verified before starting over");
+    if (db.incompletePublications().some(item => {
+      if (item.runId !== runId) return false;
+      const intent = item.intent as { operation?: string; target?: string };
+      return intent.operation !== "build-run-projection" || intent.target !== join(resolve(projectDir), ".foreman", "runs", `${runId}.json`);
+    })) throw new Error("Finish pending publication recovery before starting over; preserved files may still be awaiting publication");
+    db.atomic(() => {
+      for (const dispatch of [...db.unresolvedRoleDispatches(runId, "builder"), ...db.unresolvedRoleDispatches(runId, "qa")]) {
+        db.updateOperation(dispatch.idempotencyKey, "failed", { result: { recovery: "start-over", operationId, outcomeUnknown: true, providerReplayAuthorized: false }, error: "Operator chose a fresh run from preserved source; historical execution outcome remains unknown" });
+      }
+      const run = db.getRun(runId);
+      if (!run) throw new Error("Original run disappeared before start-over");
+      db.transition(runId, { checkpoint: "execution-retired-for-start-over", state: { ...run.state, executionRetiredForStartOver: operationId }, event: "execution_retired_for_start_over", payload: { operationId, providerReplayAuthorized: false } });
+    });
+  } finally {
+    try { if (lease) db.releaseLease(lease); } finally { try { if (admission) db.releaseBuildAdmission(admission); } finally { db.close(); } }
+  }
+}
+
 function sameSession(value: unknown, session: ProviderSessionRefV1): boolean {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<ProviderSessionRefV1>;
   return candidate.provider === session.provider
     && candidate.sessionId === session.sessionId
+    && candidate.generation === session.generation
+    && session.role === "builder" && session.stream === "builder"
     && candidate.role === "builder"
     && candidate.stream === "builder"
     && candidate.cwd === session.cwd
@@ -115,8 +160,21 @@ export function assertBuildAssignmentReconciled(projectDir: string, runId: strin
   const reader = new WorkflowReader(projectDir);
   try {
     const runs = [...new Set([runId,...reader.buildRuns(true).map(run=>run.runId)])];
+    const retiredRuns = new Set<string>();
     for (const operation of runs.flatMap(id=>reader.operations(id,true))) {
       if (operation.kind !== "build-assignment") continue;
+      if (retiredRuns.has(operation.runId)) continue;
+      const owner = reader.getRun(operation.runId);
+      // An explicit start-over retires execution, while retaining assignments
+      // as historical evidence. It never authorizes their provider replay.
+      const retirement = typeof owner?.state.supersededBy === "string" ? reader.getRun(owner.state.supersededBy) : undefined;
+      if (owner?.status === "superseded" && retirement?.kind === "recovery" && retirement.state.operation === "build-start-over"
+        && retirement.state.gitPreserved === true && typeof retirement.state.resetId === "string"
+        && (retirement.originalWork as { run?: { runId?: string } }).run?.runId === operation.runId
+        && reader.events(operation.runId).some(event => event.type === "execution_retired_for_start_over" && (event.payload as { operationId?: string }).operationId === retirement.runId)) {
+        retiredRuns.add(operation.runId);
+        continue;
+      }
       const result = operation.result as { rejection?: string; sourceError?: string } | undefined;
       if ((result as {reconciliationId?:string}|undefined)?.reconciliationId) continue;
       if(!result?.rejection&&!result?.sourceError&&operation.status!=="in_progress"&&operation.status!=="uncertain")continue;

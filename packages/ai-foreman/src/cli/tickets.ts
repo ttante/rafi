@@ -1653,6 +1653,7 @@ async function runGroupResetCli(projectDir: string, opts: Record<string, unknown
 export function buildTicketsCommand(options: {
   prepareOwnership?: (projectDir: string, receipts: TicketOwnershipReceipt[]) => void;
   recordOwnership?: (projectDir: string, receipts: TicketOwnershipReceipt[]) => void;
+  restartBuild?: (projectDir: string, runId: string, tickets: string[]) => Promise<void>;
 } = {}): Command {
   const tickets = new Command("tickets").description(
     "Manage the structured ticket tracker for a project.",
@@ -1893,7 +1894,7 @@ export function buildTicketsCommand(options: {
 
   tickets
     .command("reset [ticketId]")
-    .description("Reset one ticket or an explicit ticket scope to pristine active state while retaining history.")
+    .description("Reset tracker state while retaining history; use build:start-over to restart interrupted execution.")
     .option("-p, --project <dir>", "project directory (default: cwd)")
     .option("--all", "open the interactive bulk reset scope chooser")
     .option("--scope <scope>", "bulk scope (all | completed-and-unfinished | unfinished)")
@@ -1936,8 +1937,24 @@ export function buildTicketsCommand(options: {
         if (!preview.tickets.length) console.log("  (no matching tickets)");
         for (const row of preview.tickets) console.log(`  ${row.id}: ${row.title} [${row.status}] — clears ${row.cleared.join(", ")}`);
         if (preview.relatedRuns.length) {
-          console.log("  ! Matching build/recovery metadata is not deleted. Use `rafi build:start-over` for a coherent whole-run restart.");
+          console.log("  ! Ticket reset clears tracker state only. It cannot resume a Builder session or resolve pending QA/process recovery.");
           for (const run of preview.relatedRuns) console.log(`    ${run.runId.slice(0, 8)} [${run.status}] ${run.tickets.join(", ")}`);
+        }
+        if (preview.relatedRuns.length) {
+          for (const run of preview.relatedRuns) console.log(`    Keep files and restart execution: rafi build:start-over --run ${run.runId} --action restart-current`);
+          if (options.restartBuild && process.stdin.isTTY && process.stdout.isTTY && !opts.yes) {
+            const answer = await select({ message: "These tickets belong to interrupted builds. What should Rafi do?", options: [
+              ...preview.relatedRuns.map(run => ({ value: run.runId, label: `Restart execution from current files for build ${run.runId.slice(0, 8)} (keep implementation)` })),
+              { value: "tracker-only", label: "Reset tracker state only; leave build recovery unchanged" },
+              { value: "cancel", label: "Cancel" },
+            ] });
+            if (isCancel(answer) || answer === "cancel") return;
+            if (answer !== "tracker-only") {
+              const run = preview.relatedRuns.find(item => item.runId === answer)!;
+              await options.restartBuild(cwd(opts), run.runId, preview.tickets.map(item => item.id).filter(id => run.tickets.includes(id)));
+              return;
+            }
+          }
         }
         if (!preview.tickets.length) return;
         const explicitlyConfirmed = Boolean(opts.yes && (ticketId || opts.scope));

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beginBuildAssignment, finishBuildAssignment, assertBuildAssignmentReconciled } from "../src/buildAssignment.js";
+import { beginBuildAssignment, finishBuildAssignment, assertBuildAssignmentReconciled, isInterruptedBuilderRecovery, retireBuildExecutionForStartOver } from "../src/buildAssignment.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { BuildInterventionControl, parseManagerAction } from "../src/buildInterventions.js";
 import { qaDigest } from "../src/qaProtocolV2.js";
@@ -93,4 +93,55 @@ for (const boundary of ["budget", "requirements", "withdraw", "rollback"] as con
       check.consumeQaPassCertificate("run","T1",certificateId!,"unchanged-pass");
     }finally{check.close();}
   }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+
+import type { BuildRunRecordV2 } from "rafi-spec";
+
+test("only a frozen decision for the same interrupted Builder ticket and session can defer unrelated QA", () => {
+  const ref = { version: 1, provider: "codex", sessionId: "session", generation: 1, role: "builder", stream: "builder", cwd: "/workspace", configRoot: "/workspace" };
+  const run = {
+    runId: "run", tickets: ["T007"], interruptedBuilderContinuation: { ticketIds: ["T007"], sessionRef: ref },
+    recoveryDecision: { runId: "run", mode: "exact-session", role: "builder", executionTickets: ["T007"], predecessorSessionRef: ref },
+  } as unknown as BuildRunRecordV2;
+  assert.equal(isInterruptedBuilderRecovery(run), true);
+  assert.equal(isInterruptedBuilderRecovery(undefined), false);
+  for (const patch of [
+    { role: "qa" }, { mode: "fresh-with-handoff" }, { runId: "another-run" }, { executionTickets: ["T001"] }, { executionTickets: ["T007", "T001"] },
+    { predecessorSessionRef: { ...ref, sessionId: "another-session" } }, { predecessorSessionRef: { ...ref, generation: 2 } },
+    { predecessorSessionRef: { ...ref, role: "qa", stream: "qa" } }, { predecessorSessionRef: { ...ref, cwd: "/other-worktree" } },
+  ]) assert.equal(isInterruptedBuilderRecovery({ ...run, recoveryDecision: { ...run.recoveryDecision, ...patch } } as BuildRunRecordV2), false, JSON.stringify(patch));
+});
+
+test("start-over retirement requires a recorded intent and refuses unfinished publications", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-retire-guards-"));
+  try {
+    const db = new WorkflowDb(root);
+    db.ensureRun("old", "build");
+    db.planOperation({ runId: "old", idempotencyKey: "dispatch", kind: "provider-dispatch", intent: { role: "builder" } });
+    db.updateOperation("dispatch", "in_progress");
+    const unrelated = db.createRun({ kind: "recovery", originalWork: { run: { runId: "other" } }, state: { operation: "build-start-over" } });
+    const proper = db.createRun({ kind: "recovery", originalWork: { run: { runId: "old" } }, remainingWork: { action: "restart-current", tickets: ["T007"] }, state: { operation: "build-start-over" } });
+    db.beginPublication("old", { operation: "ticket-complete" }, {});
+    db.close();
+    assert.throws(() => retireBuildExecutionForStartOver(root, "old", unrelated.runId), /recorded start-over intent/);
+    assert.throws(() => retireBuildExecutionForStartOver(root, "old", proper.runId), /pending publication/);
+    const after = new WorkflowDb(root);
+    try { assert.equal(after.operation("dispatch")?.status, "in_progress"); } finally { after.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("a superseded label alone cannot bypass unresolved assignment reconciliation", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-retire-evidence-"));
+  try {
+    const db = new WorkflowDb(root);
+    admitFixtureWork(db, "old", "T007");
+    db.planOperation({ runId: "old", idempotencyKey: "assignment", kind: "build-assignment", intent: { ticketId: "T007", worktree: root } });
+    db.updateOperation("assignment", "in_progress");
+    const operation = db.createRun({ kind: "recovery", originalWork: { run: { runId: "old" } }, state: { operation: "build-start-over", gitPreserved: true, resetId: "claimed-reset" } });
+    db.transition("old", { status: "superseded", checkpoint: "unproven-retirement", state: { supersededBy: operation.runId } });
+    db.close();
+    assert.throws(() => assertBuildAssignmentReconciled(root, "old"), /requires assignment reconciliation/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

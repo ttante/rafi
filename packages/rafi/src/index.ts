@@ -65,6 +65,7 @@ import { buildResumeCommand } from "./resume.js";
 import { buildPlanDoctorCommand } from "./planDoctor.js";
 import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
+import { offerStartRecovery } from "./startRecovery.js";
 import { buildUninstallCleanupCommand, buildUninstallCommand, buildUninstallRestoreCommand, interpretUninstallInstruction } from "./uninstall.js";
 import { createGitignoreModeFromSelection, updateCreateGitignore, type CreateGitignoreMode } from "./gitignore.js";
 import { CURRENT_BRANCH_WORK_MODE_LABEL, workModeConsequences, workModeLabel } from "./workMode.js";
@@ -1045,6 +1046,9 @@ function gitDirtyPaths(projectDir: string): string[] {
 
 program.addCommand(buildPlanCommand());
 const ticketsCommand = buildTicketsCommand({
+  restartBuild: async (projectDir, runId, tickets) => {
+    await buildBuildStartOverCommand().parseAsync([projectDir, "--run", runId, "--action", "restart-current", "--tickets", tickets.join(",")], { from: "user" });
+  },
   prepareOwnership: (projectDir, receipts) => {
     for (const receipt of receipts) prepareOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category);
   },
@@ -1057,7 +1061,10 @@ ticketsCommand.addCommand(buildTicketPlanCommand({
   afterApply: projectDir => { for (const receipt of ticketOwnershipReceipts(projectDir, "plan", true)) finalizePreparedOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category); },
 }));
 program.addCommand(ticketsCommand);
-program.addCommand(buildStartCommand());
+program.addCommand(buildStartCommand({ beforeFreshStart: project => offerStartRecovery(project, {
+  resume: async (root, runId) => { await buildBuildResumeCommand({ executeStart: (args, context) => launchResumeStart(fileURLToPath(import.meta.url), args, context) }).parseAsync([root, "--run", runId], { from: "user" }); },
+  restart: async (root, runId, action) => { await buildBuildStartOverCommand().parseAsync([root, "--run", runId, ...(action ? ["--action", action] : [])], { from: "user" }); },
+}) }));
 program.addCommand(buildAttachCommand());
 program.addCommand(buildDecideCommand());
 program.addCommand(buildStopCommand());
