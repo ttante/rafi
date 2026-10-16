@@ -249,7 +249,11 @@ export function buildAgentsCommand(): Command {
       console.log(`rafi agents: saved revision ${defaults.revision} for ${selected.join(", ")}`);
       const liveReport = await waitForLiveSettingsAcknowledgments(root, defaults.revision ?? 0, selected);
       for (const row of liveReport) {
-        console.log(`rafi agents: run ${row.runId} ${row.role}${row.providerSessionId ? ` session ${row.providerSessionId}` : ""} — ${row.acknowledged ? `acknowledged revision ${row.revision}` : `did not acknowledge revision ${row.revision} within one heartbeat plus grace`}`);
+        const detail = row.acknowledged ? `acknowledged revision ${row.revision}` : row.adoption === "unknown"
+          ? "saved; owner visibility is unavailable, so live adoption could not be checked"
+          : row.adoption === "active" ? "saved; adoption is pending the next safe agent boundary"
+          : "saved for the next active agent boundary or session";
+        console.log(`rafi agents: run ${row.runId} ${row.role}${row.providerSessionId ? ` session ${row.providerSessionId}` : ""} — ${detail}`);
       }
       if (settings.make && lifecycle.state !== "initialized") {
         console.log("rafi agents: runtime changes are saved but pending until initialization completes; explicit --agent flags still apply immediately.");
@@ -263,6 +267,7 @@ export interface LiveSettingsReportRow {
   providerSessionId?: string;
   revision: number;
   acknowledged: boolean;
+  adoption?: "active" | "deferred" | "unknown";
 }
 
 /** Wait at most one 10-second build heartbeat plus five seconds of grace. */
@@ -280,17 +285,19 @@ export async function waitForLiveSettingsAcknowledgments(
   if (!active.length) return [];
   const deadline = Date.now() + (options.waitMs ?? 15_000);
   let acknowledgments = new Map<string, ReturnType<WorkflowDb["settingsAcknowledgments"]>[number]>();
-  while (Date.now() < deadline) {
+  let adoption = new Map<string, "active" | "deferred" | "unknown">();
+  do {
     const db = new WorkflowDb(root);
-    const current = db.settingsAcknowledgments(revision);
-    db.close();
-    acknowledgments = new Map(current.map((ack) => [`${ack.runId}:${ack.role}`, ack]));
-    if (active.every((run) => roles.every((role) => acknowledgments.has(`${run.runId}:${role}`)))) break;
+    try {
+      acknowledgments = new Map(db.settingsAcknowledgments(revision).map((ack) => [`${ack.runId}:${ack.role}`, ack]));
+      adoption = new Map(active.flatMap(run => roles.map(role => [`${run.runId}:${role}`, db.settingsAdoptionState(run.runId, role)] as const)));
+    } finally { db.close(); }
+    if (active.every((run) => roles.every((role) => acknowledgments.has(`${run.runId}:${role}`) || adoption.get(`${run.runId}:${role}`) !== "active"))) break;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(options.pollMs ?? 250, Math.max(0, deadline - Date.now()))));
-  }
+  } while (Date.now() < deadline);
   return active.flatMap((run) => roles.map((role): LiveSettingsReportRow => {
     const ack = acknowledgments.get(`${run.runId}:${role}`);
-    return { runId: run.runId, role, ...(ack?.providerSessionId ? { providerSessionId: ack.providerSessionId } : {}), revision, acknowledged: Boolean(ack) };
+    return { runId: run.runId, role, ...(ack?.providerSessionId ? { providerSessionId: ack.providerSessionId } : {}), revision, acknowledged: Boolean(ack), adoption: adoption.get(`${run.runId}:${role}`) };
   }));
 }
 export interface AgentSettingsPrompts {

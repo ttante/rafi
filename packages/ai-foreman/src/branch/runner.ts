@@ -336,7 +336,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
       base: node.baseBranch,
       dependencies: node.dependencies,
     });
-    workflowCheckpoint(opts.projectDir, opts.runId, "builder-before", node.ticket.id, { branch: node.branch, worktree: node.worktreePath });
+    workflowCheckpoint(opts.projectDir, opts.runId, qaOnlyRecovery ? "qa-recovery-before" : "builder-before", node.ticket.id, { branch: node.branch, worktree: node.worktreePath });
 
     const continuationDb = new WorkflowDb(opts.projectDir);
     const continuationSession = continuations.length ? continuationDb.branchResumeSession(opts.runId, node.ticket.id) : undefined;
@@ -432,43 +432,45 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           ? await opts.observer.withContext({ role: "builder", stream: "builder", ticketId: node.ticket.id, deliveryUnitId: node.deliveryUnitId }, turn)
           : await turn();
       builder = foreman.builderAdapter();
-      workflowCheckpoint(opts.projectDir, opts.runId, "builder-after", node.ticket.id, { status: status.kind, sessionId: builder.sessionId(), worktree: worktreePath });
-      const sessionId = builder.sessionId();
-      const sessionRef = builder.sessionRef?.();
-      if (sessionId) builderStream = { sessionId, ...(sessionRef ? { sessionRef } : {}), worktreePath };
-      if (sessionId) {
-        opts.recordBuilderSession?.(sessionRef ?? sessionId, node.ticket.id, worktreePath);
-        workflowCheckpoint(opts.projectDir, opts.runId, "builder-session-scoped", node.ticket.id, { sessionId, sessionRef, worktree: worktreePath, branch: node.branch });
-      }
-      if (sessionId) {
-        const resumeSession = {
-          ticket: node.ticket.id,
-          branch: node.branch,
-          base: node.baseBranch,
-          worktreePath,
-          sessionId,
-          sessionRef: builder.sessionRef?.(),
-          agent: opts.agent,
-          model: opts.model,
-          effort: opts.effort,
-          fast: opts.fast,
-          qaEnabled: opts.qaEnabled,
-          createPr: createsReview,
-          completionMode,
-          reviewProvider,
-          prReady: opts.prReady,
-          keepWorktrees: opts.keepWorktrees,
-          deliveryUnitId: node.deliveryUnitId,
-          deliveryUnitFinal: node.deliveryUnitFinal,
-          logPath: "structured-recovery",
-          ts: new Date().toISOString(),
-        };
-        opts.log.write("branch-session", resumeSession);
-        const resumeDb = new WorkflowDb(opts.projectDir); try { resumeDb.recordBranchResumeSession(opts.runId, resumeSession); } finally { resumeDb.close(); }
-        if (node.deliveryUnitId) {
-          const path = deliverySessionPath(opts.projectDir, node.deliveryUnitId);
-          mkdirSync(join(opts.projectDir, ".foreman", "delivery-sessions"), { recursive: true });
-          writeFileSync(path, `${JSON.stringify({ runId: opts.runId, unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, sessionRef: builder.sessionRef?.(), ticket: node.ticket.id }, null, 2)}\n`, "utf8");
+      if (!qaOnlyRecovery) {
+        workflowCheckpoint(opts.projectDir, opts.runId, "builder-after", node.ticket.id, { status: status.kind, sessionId: builder.sessionId(), worktree: worktreePath });
+        const sessionId = builder.sessionId();
+        const sessionRef = builder.sessionRef?.();
+        if (sessionId) builderStream = { sessionId, ...(sessionRef ? { sessionRef } : {}), worktreePath };
+        if (sessionId) {
+          opts.recordBuilderSession?.(sessionRef ?? sessionId, node.ticket.id, worktreePath);
+          workflowCheckpoint(opts.projectDir, opts.runId, "builder-session-scoped", node.ticket.id, { sessionId, sessionRef, worktree: worktreePath, branch: node.branch });
+        }
+        if (sessionId) {
+          const resumeSession = {
+            ticket: node.ticket.id,
+            branch: node.branch,
+            base: node.baseBranch,
+            worktreePath,
+            sessionId,
+            sessionRef: builder.sessionRef?.(),
+            agent: opts.agent,
+            model: opts.model,
+            effort: opts.effort,
+            fast: opts.fast,
+            qaEnabled: opts.qaEnabled,
+            createPr: createsReview,
+            completionMode,
+            reviewProvider,
+            prReady: opts.prReady,
+            keepWorktrees: opts.keepWorktrees,
+            deliveryUnitId: node.deliveryUnitId,
+            deliveryUnitFinal: node.deliveryUnitFinal,
+            logPath: "structured-recovery",
+            ts: new Date().toISOString(),
+          };
+          opts.log.write("branch-session", resumeSession);
+          const resumeDb = new WorkflowDb(opts.projectDir); try { resumeDb.recordBranchResumeSession(opts.runId, resumeSession); } finally { resumeDb.close(); }
+          if (node.deliveryUnitId) {
+            const path = deliverySessionPath(opts.projectDir, node.deliveryUnitId);
+            mkdirSync(join(opts.projectDir, ".foreman", "delivery-sessions"), { recursive: true });
+            writeFileSync(path, `${JSON.stringify({ runId: opts.runId, unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, sessionRef: builder.sessionRef?.(), ticket: node.ticket.id }, null, 2)}\n`, "utf8");
+          }
         }
       }
       opts.log.write("step", {

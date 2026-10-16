@@ -14,6 +14,8 @@ import type { ProviderSessionRefV1 } from "rafi-spec";
 import { appendQaRecoveryResource, compareQaRecoveryReviewedState, LegacyQaRecoveryPacketError, loadQaRecoveryPacket, materializeQaRecoveryContext, recoverPendingQaRecoveryPublications, updateQaRecoveryPosition, validateManualQaReport } from "../src/qaRecovery.js";
 import { createDisposableQaSnapshot } from "../src/qaSnapshot.js";
 import { WorkflowDb } from "../src/workflowDb.js";
+import { PermissionPolicy } from "../src/permissions/policy.js";
+import { readOnlyPermissionConfig } from "../src/agentRun.js";
 import { qaDigest, type HandoffAcceptanceReceiptV2, type ProviderSessionRefV2 } from "../src/qaProtocolV2.js";
 
 // These raw connections deliberately construct crash states in isolated,
@@ -356,6 +358,31 @@ test("correction turns retain their identity after same-session compaction reval
     const db = new WorkflowDb(dir);
     try { assert.equal(db.qaReviewAttempts("session-revalidation", "T1")[0]?.status, "failed"); }
     finally { db.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("synthetic terminal event with unknown provider dispatch remains uncertain and cannot pass QA", async () => {
+  const dir = repository();
+  try {
+    await assert.rejects(runIsolatedQa({
+      ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
+      builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0,
+      recovery: { projectDir: dir, runId: "synthetic-terminal" }, sessionBoundary: unavailableBoundary,
+      createQa: async (cwd) => {
+        const adapter = new Adapter("interrupted-session", () => 'STEP_STATUS: qa_pass | summary="synthetic untrusted pass"');
+        const send = adapter.sendTurn.bind(adapter);
+        adapter.sendTurn = async instruction => ({ ...await send(instruction), isError: true, failure: { runtime: "claude", phase: "qa", category: "agent-stream", executable: "fixture", cwd, diagnostics: "submitted turn interrupted", dispatchState: "unknown" } });
+        return qaHandle(adapter, cwd);
+      }, fix: async () => ({ ok: false }),
+    }));
+    const rawDb = new Database(join(dir, ".rafi/recovery.sqlite3"), { readonly: true });
+    try {
+      const row = rawDb.prepare("SELECT status,receipt_json FROM qa_turns WHERE run_id=?").get("synthetic-terminal") as { status: string; receipt_json: string };
+      assert.equal(row.status, "uncertain");
+      assert.equal(JSON.parse(row.receipt_json).terminalEventObserved, false);
+    } finally { rawDb.close(); }
+    const db = new WorkflowDb(dir);
+    try { assert.notEqual(db.qaTicketHead("synthetic-terminal", "T1").state, "completed"); } finally { db.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1071,12 +1098,48 @@ test("review and Builder remediation history survives a fresh host process state
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("first sealed-packet acknowledgement can read exact local resources without permitting local or foreign writes", async () => {
+  const dir = repository();
+  try {
+    const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "confined-packet-read", ticketId: "T1", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", resources: { source: { value: "current source", purpose: "current review evidence" } } });
+    let reads = 0;
+    const adapter = new Adapter("packet-reader", (instruction, turn) => turn === 0
+      ? `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"`
+      : 'STEP_STATUS: qa_pass | summary="fresh full review"');
+    const send = adapter.sendTurn.bind(adapter);
+    const result = await runIsolatedQa({ ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
+      builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", recovery: { projectDir: dir, runId: "confined-packet-read" }, state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0, resumedRecovery: packet, continuityManaged: true,
+      createQa: async cwd => {
+        const policy = new PermissionPolicy(readOnlyPermissionConfig(), cwd);
+        adapter.sendTurn = async (instruction, turnPolicy?: Parameters<BuilderAdapter["sendTurn"]>[1]) => {
+          if (instruction.includes("Required resources:")) {
+            assert.notEqual(turnPolicy?.responseOnly, true, "resource inspection must not prohibit reads");
+            for (const match of instruction.matchAll(/read_path=([^\s]+)/g)) {
+              const file = join(cwd, match[1]!);
+              assert.equal(policy.classify({ toolName: "Read", input: { file_path: file } }).decision, "allow");
+              readFileSync(file); reads++;
+            }
+            assert.notEqual(policy.classify({ toolName: "Write", input: { file_path: join(cwd,"tracked.txt"), content: "mutation" } }).decision, "allow");
+            assert.notEqual(policy.classify({ toolName: "Write", input: { file_path: join(dir,"tracked.txt"), content: "foreign mutation" } }).decision, "allow");
+          }
+          return send(instruction);
+        };
+        return qaHandleForPacket(adapter, cwd, packet);
+      }, sessionBoundary: unavailableBoundary, fix: async () => ({ ok: false }),
+    });
+    assert.equal(result.outcome, "passed", JSON.stringify(result)); assert.ok(reads > 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a malformed resumed acknowledgement recovers with a fresh full review", async () => {
   const dir = repository();
   try {
     const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "resumed-seal", ticketId: "T1", cycle: 1,
       reviewAttempt: 1, recoveryStage: "operator-menu", resources: { prompt: { value: "prior review", purpose: "original review", exactText: true } } });
     const original = new Adapter("resumed-bad-ack", () => "invalid acknowledgement");
+    const inspectionPolicies: Array<Parameters<BuilderAdapter["sendTurn"]>[1]> = [];
+    const originalSend = original.sendTurn.bind(original);
+    original.sendTurn = async (instruction, turnPolicy?: Parameters<BuilderAdapter["sendTurn"]>[1]) => { inspectionPolicies.push(turnPolicy); return originalSend(instruction); };
     let originalCwd = "";
     let successorCwd = "";
     let menuCalls = 0;
@@ -1092,12 +1155,48 @@ test("a malformed resumed acknowledgement recovers with a fresh full review", as
     assert.equal(result.outcome, "passed");
     assert.equal(menuCalls, 0);
     assert.equal(original.instructions.length, 2);
+    assert.notEqual(inspectionPolicies[0]?.responseOnly, true);
+    assert.equal(inspectionPolicies[1]?.responseOnly, true, "acknowledgement formatting repair must remain tool-free");
     assert.equal(successor.instructions.length, 1);
     assert.match(successor.instructions[0], /QA handoff:/);
     assert.equal(existsSync(originalCwd), false);
     assert.notEqual(successorCwd, originalCwd);
     assert.equal(existsSync(successorCwd), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const succeeds of [true, false]) test(`resumed validated report consumes its packet only after confirmed Builder repair: ${succeeds}`, async () => {
+  const dir = repository();
+  const originalCommit = WorkflowDb.prototype.commitQaFailureAttempt;
+  const runId = `owned-packet-fix-${succeeds}`;
+  const ticket = { id: "T1", order: 1, title: "QA", area: "test", priority: "P1" as const, size: "S" as const, risk: "Low" as const, depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] };
+  try {
+    WorkflowDb.prototype.commitQaFailureAttempt = function (...args: Parameters<WorkflowDb["commitQaFailureAttempt"]>) {
+      originalCommit.apply(this, args);
+      throw new Error("fixture crash after validated failed report");
+    };
+    await assert.rejects(runIsolatedQa({ ticket, builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", recovery: { projectDir: dir, runId }, state: { reviews: 0, modificationViolations: 0 }, maxCycles: 1,
+      createQa: async cwd => qaHandle(new Adapter("failed-review", (_instruction, turn) => turn === 0 ? 'STEP_STATUS: qa_fail | issues="missing report"' : validReport), cwd), sessionBoundary: unavailableBoundary,
+      fix: async () => { throw new Error("fixture must stop before remediation"); },
+    }), /fixture crash after validated failed report/);
+    WorkflowDb.prototype.commitQaFailureAttempt = originalCommit;
+    const before = new WorkflowDb(dir);
+    const packet = loadQaRecoveryPacket(before.qaRecoveryHead(runId, ticket.id)!.packetPath);
+    assert.equal(before.qaTicketHead(runId, ticket.id).state, "review-failed");
+    before.close();
+    let fixes = 0, reviews = 0;
+    const resumed = await runIsolatedQa({ ticket, builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", recovery: { projectDir: dir, runId }, resumedRecovery: packet,
+      state: { reviews: 0, modificationViolations: 0 }, maxCycles: 1,
+      createQa: async cwd => { reviews++; assert.equal(fixes, 1); assert.equal(succeeds, true, "unconfirmed fix must not start another review"); return qaHandle(new Adapter("fresh-after-fix", () => 'STEP_STATUS: qa_pass | summary="new full review"'), cwd); },
+      sessionBoundary: unavailableBoundary,
+      fix: async () => { fixes++; if (!succeeds) return { ok: false, detail: "unconfirmed fixture fix" }; writeFileSync(join(dir, "tracked.txt"), "confirmed remediated source\n"); return { ok: true, response: 'STEP_STATUS: done | summary="fixed"', summary: "fixed", providerTurnId: "owned-fix-turn" }; },
+    });
+    assert.equal(fixes, 1); assert.equal(reviews, succeeds ? 1 : 0);
+    assert.equal(resumed.outcome, succeeds ? "passed" : "blocked", JSON.stringify(resumed));
+    const after = new WorkflowDb(dir);
+    try { assert.equal(after.qaRemediationAttempts(runId,ticket.id).at(-1)?.status, succeeds ? "succeeded" : "failed"); if(!succeeds)assert.notEqual(after.qaRecoveryHead(runId,ticket.id)?.pendingAction,"resolved"); }
+    finally { after.close(); }
+  } finally { WorkflowDb.prototype.commitQaFailureAttempt = originalCommit; rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("an existing unresolved packet follows a changed-source recheck and remains resumable after a blocker", async () => {

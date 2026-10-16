@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createBuildRun, releaseBuildLease } from "ai-foreman/build-runs.js";
@@ -9,6 +9,9 @@ import { createInterviewRecord, saveInterviewRecord } from "ai-foreman/interview
 import { buildResumeCommand, resumeChoices } from "../src/resume.js";
 import { addBuildRecoveryOptions } from "../src/buildRecoveryOptions.js";
 import { Command } from "commander";
+import { stringify } from "yaml";
+import { buildProjectConfig, defaultAnswers } from "../src/project.js";
+import { cmdInit } from "../../ai-foreman/dist/tickets/commands.js";
 
 for (const kind of ["build", "interview"] as const) {
   test(`rafi resume lists both kinds newest first and routes selected ${kind}`, async () => {
@@ -30,6 +33,20 @@ for (const kind of ["build", "interview"] as const) {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }
+
+for (const checkpoint of ["ticket-setup-prompt", "child-plan-paused"]) test(`initialized project resumes saved create checkpoint ${checkpoint} accurately`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-satisfied-setup-"));
+  try {
+    writeFileSync(join(dir, "rafi-config.yaml"), stringify(buildProjectConfig(defaultAnswers())));
+    cmdInit(dir, { appName: "Already initialized", timezone: "UTC" });
+    const record = saveInterviewRecord(dir, { ...createInterviewRecord({ workflow: "create", invocation: {}, checkpoint }), status: "paused" });
+    let calls = 0;
+    assert.ok(resumeChoices(dir).find(choice => choice.id === record.id)?.label.includes("paused"));
+    await buildResumeCommand({ resumeBuild: async () => { throw new Error("unexpected build"); }, resumeInterview: async () => { calls++; } }).parseAsync([dir, "--id", record.id], { from: "user" });
+    assert.equal(calls, checkpoint === "ticket-setup-prompt" ? 0 : 1);
+    assert.equal(resumeChoices(dir).some(choice => choice.id === record.id), checkpoint !== "ticket-setup-prompt");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("resume picker cancellation and completed/superseded filtering", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rafi-resume-filter-"));

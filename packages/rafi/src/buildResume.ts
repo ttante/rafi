@@ -4,11 +4,11 @@ import { HumanDecisionCancelled, servicePendingHumanDecisions } from "ai-foreman
 import { addBuildRecoveryOptions } from "./buildRecoveryOptions.js";
 import { ResumeSpawnError, resumeExitCode, type ResumeLaunchResult, type ResumeLaunchContext } from "./resumeLauncher.js";
 import { existsSync, realpathSync } from "node:fs";
-import { validatePreparationArguments, validateRecoveryArguments } from "ai-foreman/cli/start.js";
+import { validatePreparationArguments, validateRecoveryArguments, recoveryCompactionHistoryUncertain } from "ai-foreman/cli/start.js";
 import { WorkflowReader } from "ai-foreman/workflow-reader.js";
 import { assessBuildOwnership } from "ai-foreman/build-ownership-reconciliation.js";
 import { reconcileInterruptedInScopeWork } from "ai-foreman/build-ownership-repair.js";
-import { prepareExactSessionBuilderContinuation } from "ai-foreman/build-assignment.js";
+import { prepareExactSessionBuilderContinuation, canReconcileInterruptedBuilderSource, prepareInterruptedBuilderSourceContinuation } from "ai-foreman/build-assignment.js";
 import { readQaEvidenceSnapshot } from "ai-foreman/qa-evidence-reader.js";
 import { renderEvidenceText } from "ai-foreman/manager-evidence-artifacts.js";
 import { createHash } from "node:crypto";
@@ -23,6 +23,7 @@ import {
   currentBranchRecoveryTicket,
   readBuildRuns,
   recoverableBuildRuns,
+  hasRunnableBuildRemainder,
   legacyTrackerWorkHints,
   resolveBuildRecoveryProjection,
   saveBuildRun,
@@ -31,14 +32,17 @@ import { HandoffService } from "ai-foreman/handoffs.js";
 import { createRoleBuilder, readOnlyPermissionConfig } from "ai-foreman/agent-run.js";
 import { continuityInstruction, parseContinuityDelta } from "ai-foreman/continuity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
-import { loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "ai-foreman/qa-recovery.js";
+import { createQaRecoveryPacket, loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "ai-foreman/qa-recovery.js";
 import type { BuildRecoveryDecisionReceipt, BuildRecoveryMode, BuildRunRecordV2, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
 import { assertLifecycleForCommand, detectProjectLifecycle } from "./lifecycle.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
+import type { RecoveryOutcome } from "./startRecovery.js";
 
 export type RecoverableRun = BuildRunRecordV2 & { active: boolean; ownership?: "live" | "dead" | "unknown"; ownershipReason?: string; cleanupOnly?: boolean };
 
 export interface BuildResumeCommandOptions {
+  onOutcome?: (outcome: RecoveryOutcome) => void;
+  chooseInterruptedRecovery?: (reason: string) => Promise<"restart-current" | "cancel">;
   executeStart: (args: string[], context?: ResumeLaunchContext) => Promise<number | ResumeLaunchResult> | number | ResumeLaunchResult;
   correctPreparationArguments?: (saved: string[], error: Error) => Promise<string[] | undefined>;
   selectRun?: (runs: RecoverableRun[]) => Promise<RecoverableRun | undefined>;
@@ -56,6 +60,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
     .argument("[project]", "project directory", ".")
     .option("--run <id>", "run ID or unique prefix"))
     .action(async (project: string, opts: Record<string, unknown>) => withBuildRecoveryInvocation(async () => {
+      commandOpts.onOutcome?.("cancelled");
       const root = resolve(project);
       let recoveryAuthority: ReturnType<WorkflowDb["acquireBuildRecoveryAdmission"]> | undefined;
       let continueQueuedQa: string[] | undefined;
@@ -76,7 +81,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
             if (successor !== matches[0].runId) console.log(`rafi resume: ${matches[0].runId} was superseded by ${successor}`);
             opts.run = successor;
             const state = reader.getRun(successor);
-            if (state && ["completed", "cancelled"].includes(state.status) && !reader.readinessProcesses().some(row => row.run_id === successor)) { console.log(`rafi resume: build ${successor} is ${state.status}`); return; }
+            if (state && ["completed", "cancelled"].includes(state.status) && !reader.readinessProcesses().some(row => row.run_id === successor)) { commandOpts.onOutcome?.(state.status === "completed" ? "completed" : "cancelled"); console.log(`rafi resume: build ${successor} is ${state.status}`); return; }
           }
         } finally { reader.close(); }
       }
@@ -117,11 +122,11 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
               { value: "cancel", label: "Stop and inspect the saved recovery evidence" },
             ] });
             if (!isCancel(answer) && answer === "restart-current") {
-              await buildBuildStartOverCommand().parseAsync([root, "--run", selected.runId, "--action", "restart-current"], { from: "user" });
+              await buildBuildStartOverCommand({ onOutcome: commandOpts.onOutcome }).parseAsync([root, "--run", selected.runId, "--action", "restart-current"], { from: "user" });
               return;
             }
           }
-          if (!opts.inspect) process.exitCode = 2;
+          if (!opts.inspect) { commandOpts.onOutcome?.("paused"); process.exitCode = 2; }
           return;
         }
       }
@@ -135,8 +140,8 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         let unresolved: string[];
         let details: string[] = [];
         try { unresolved = await cleanup.reconcileReadiness(selected.runId); details = cleanup.readinessCleanupDetails(selected.runId); } finally { cleanup.close(); }
-        if (unresolved.length) { console.log(`rafi resume: readiness ownership or cleanup remains unverified for ${selected.runId}; ${details.join("; ")}`); process.exitCode = 2; return; }
-        if (selected.cleanupOnly) { console.log(`rafi resume: readiness cleanup complete for ${selected.runId}; build status unchanged`); return; }
+        if (unresolved.length) { commandOpts.onOutcome?.("paused"); console.log(`rafi resume: readiness ownership or cleanup remains unverified for ${selected.runId}; ${details.join("; ")}`); process.exitCode = 2; return; }
+        if (selected.cleanupOnly) { commandOpts.onOutcome?.("completed"); console.log(`rafi resume: readiness cleanup complete for ${selected.runId}; build status unchanged`); return; }
         selected = recoverableBuildRuns(root).find(run => run.runId === selected!.runId) ?? selected;
       }
       if (!opts.inspect && !selected.active) {
@@ -153,6 +158,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       // particular, do not reconcile filesystem projections while another
       // supervisor may still be publishing them.
       if (selected.active || selected.ownership === "unknown" || opts.inspect) {
+        commandOpts.onOutcome?.("paused");
         const previewDb = new WorkflowReader(root);
         let previewTicket = opts.ticket ? String(opts.ticket) : undefined;
         try {
@@ -324,20 +330,35 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       let projection = await (commandOpts.resolveProjection ?? resolveBuildRecoveryProjection)(root, selected, new Date(), effectiveTicket);
       console.log("rafi build:resume preview:");
       for (const line of formatBuildRecoveryProjection(projection)) console.log(`  ${line}`);
-      if (interruptedBuilderTicket && !projection.exactSessionRef) {
-        const guidance = `The interrupted Builder session is unavailable or unverified. Keep your implementation with rafi build:start-over --run ${selected.runId} --action restart-current. This retires the interrupted execution and lets you select unfinished tickets; it does not reset Git.`;
+      const continuityCheck = new WorkflowDb(root);
+      let interruptedRecoveryReason: string | undefined;
+      const sourceContinuationAvailable = Boolean(interruptedBuilderTicket && !opts.guidedRecovery && canReconcileInterruptedBuilderSource(root, selected.runId));
+      try {
+        const builderHead = continuityCheck.continuityHead(selected.runId, "builder");
+        if (interruptedBuilderTicket && !projection.exactSessionRef) interruptedRecoveryReason = "The interrupted Builder session is unavailable or unverified.";
+        else if (interruptedBuilderTicket && builderHead && builderHead.state !== "current") interruptedRecoveryReason = "The interrupted Builder checkpoint needs reconstruction; exact-session continuation cannot safely repair it.";
+        else if (interruptedBuilderTicket && recoveryCompactionHistoryUncertain(root, selected, selected.runId, "builder")) interruptedRecoveryReason = "The interrupted turn has unconfirmed session history; an exact-session launch would require a fresh handoff at its first boundary.";
+      } finally { continuityCheck.close(); }
+      if (interruptedRecoveryReason && !sourceContinuationAvailable) {
+        const guidance = `${interruptedRecoveryReason} Keep your implementation with rafi build:start-over --run ${selected.runId} --action restart-current. This retires the interrupted execution and lets you select unfinished tickets while preserving completed tickets; it does not reset Git.`;
         console.log(`rafi resume: ${guidance}`);
-        if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(guidance);
-        const { select, isCancel } = await import("@clack/prompts");
-        const answer = await select({ message: "How should Rafi recover the unavailable Builder session?", options: [
-          { value: "restart-current", label: "Keep current files and select unfinished tickets for a fresh run" },
-          { value: "cancel", label: "Keep everything and stop recovery" },
-        ] });
-        if (isCancel(answer) || answer === "cancel") return;
+        let answer: "restart-current" | "cancel";
+        if (commandOpts.chooseInterruptedRecovery) answer = await commandOpts.chooseInterruptedRecovery(interruptedRecoveryReason);
+        else {
+          if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(guidance);
+          const { select, isCancel } = await import("@clack/prompts");
+          const selection = await select({ message: "Continue from your preserved files with a fresh Builder?", options: [
+            { value: "restart-current", label: "Keep files and select unfinished tickets (Recommended)" },
+            { value: "cancel", label: "Keep everything and stop recovery" },
+          ] });
+          if (isCancel(selection)) return;
+          answer = selection as "restart-current" | "cancel";
+        }
+        if (answer === "cancel") return;
         const release = new WorkflowDb(root);
         try { if (recoveryAuthority) release.releaseBuildAdmission(recoveryAuthority); recoveryAuthority = undefined; }
         finally { release.close(); }
-        await buildBuildStartOverCommand().parseAsync([root, "--run", selected.runId, "--action", "restart-current"], { from: "user" });
+        await buildBuildStartOverCommand({ onOutcome: commandOpts.onOutcome }).parseAsync([root, "--run", selected.runId, "--action", "restart-current"], { from: "user" });
         return;
       }
       const db = new WorkflowDb(root);
@@ -346,27 +367,38 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       let head = db.continuityHead(selected.runId, "builder");
       const qaHead = db.continuityHead(selected.runId, "qa");
       if (!interruptedBuilderTicket && qaHead && ["degraded", "invalid"].includes(qaHead.state) && (!head || head.state === "current")) { role = "qa"; head = qaHead; }
-      if (qaRecoveryPacket) { role = "qa"; head = qaHead; }
+      if (qaRecoveryPacket || pendingQaProtocolTicket && !interruptedBuilderTicket) { role = "qa"; head = qaHead; }
       let reconstructable = Boolean(head && head.state === "current" && db.latestContinuityCheckpoint(selected.runId, role));
       const guidedAvailable = Boolean(head && ["degraded", "invalid"].includes(head.state));
       let mode = explicitMode(opts);
-      if (interruptedBuilderTicket && projection.exactSessionRef) {
+      const persistedSourceContinuation = (selected as unknown as { interruptedBuilderContinuation?: { recovery?: string; ticketIds?: string[] } }).interruptedBuilderContinuation;
+      const sourceContinuation = Boolean((interruptedRecoveryReason && sourceContinuationAvailable)
+        || (persistedSourceContinuation?.recovery === "source-reconciled" && persistedSourceContinuation.ticketIds?.some(id => !selected!.progress.completedTickets.includes(id))));
+      if (sourceContinuation) {
+        if (mode && mode !== "fresh-with-handoff") { db.close(); throw new Error("Interrupted source recovery requires a validated fresh handoff; use rafi resume without a recovery-mode override or --fresh-with-handoff"); }
+        mode = "fresh-with-handoff";
+        console.log("rafi resume: preserving completed tickets and continuing this build from inspected current files in a fresh Builder; the interrupted provider result remains unknown and will not be replayed.");
+      }
+      if (!sourceContinuation && interruptedBuilderTicket && projection.exactSessionRef && (!mode || (mode === "fresh-with-handoff" && requestedRecoveryTicket && requestedRecoveryTicket !== interruptedBuilderTicket))) {
         // A QA handoff flag cannot apply to the outstanding Builder turn.
+        if (mode) console.log(`rafi resume: the requested fresh QA handoff stays queued; recovering Builder ticket ${interruptedBuilderTicket} first in its validated session.`);
         mode = "exact-session";
       }
-      if (!mode && qaRecoveryPacket && reconstructable) mode = "fresh-with-handoff";
+      const interruptedQaBoundary = role === "qa" && Boolean(pendingQaProtocolTicket) && ["turn-intended", "turn-uncertain", "operator-menu"].includes(db.qaTicketHead(selected.runId, pendingQaProtocolTicket!).state);
+      if (!mode && (qaRecoveryPacket || interruptedQaBoundary) && reconstructable) mode = "fresh-with-handoff";
       if (!mode && !qaRecoveryPacket && !guidedAvailable) mode = projection.exactSessionId ? "exact-session" : reconstructable ? "fresh-with-handoff" : "fresh-recovery-only";
       if (!mode && process.stdin.isTTY && process.stdout.isTTY) {
-        mode = await promptMode(!qaRecoveryPacket && Boolean(projection.exactSessionId), reconstructable, guidedAvailable, Boolean(qaRecoveryPacket));
+        mode = await promptMode(!qaRecoveryPacket && !guidedAvailable && Boolean(projection.exactSessionId), reconstructable, guidedAvailable, Boolean(qaRecoveryPacket));
         if (!mode) { db.close(); return; }
       }
-      if (!mode && !qaRecoveryPacket) mode = projection.exactSessionId ? "exact-session" : undefined;
+      if (!mode && !qaRecoveryPacket && !guidedAvailable) mode = projection.exactSessionId ? "exact-session" : undefined;
       if (!mode) { db.close(); throw new Error(`this run has no compatible exact session; choose ${reconstructable ? "--fresh-with-handoff or " : ""}--fresh-session`); }
       if (qaRecoveryPacket && mode !== "fresh-with-handoff" && mode !== "guided-recovery") {
         db.close();
         throw new Error("a pending QA report recovery requires --fresh-with-handoff so the packet can be materialized and acknowledged in a new disposable QA snapshot");
       }
       if (mode === "exact-session" && !projection.exactSessionId) { db.close(); throw new Error("exact-session was selected, but the frozen projection has no compatible provider session"); }
+      if (mode === "exact-session" && guidedAvailable) { db.close(); throw new Error("This continuity checkpoint needs guided reconstruction before a fresh Builder can continue. Run rafi resume interactively to choose guided recovery, or keep files with rafi build:start-over --action restart-current."); }
       if ((opts.agent || opts.model) && mode === "exact-session") { db.close(); throw new Error("--agent and --model are accepted only for fresh recovery modes"); }
       let planUpdateApproval: "auto" | "review";
       try {
@@ -386,12 +418,43 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       let receipt!: BuildRecoveryDecisionReceipt;
       try {
       if (recoveryStateVersion(db, selected.runId) !== recoveryVersion) throw new Error("Recovery state changed while the resume decision was being prepared; inspect and retry the current revision");
+      if (role === "qa" && pendingQaProtocolTicket && db.unresolvedRoleDispatches(selected.runId, "qa").length) {
+        if (mode !== "fresh-with-handoff") throw new Error("An interrupted QA review requires a fresh immutable review and validated handoff");
+        try { db.reconcileInterruptedQaDispatch(selected.runId, pendingQaProtocolTicket); }
+        catch (error) {
+          commandOpts.onOutcome?.("paused"); process.exitCode = 2;
+          console.log(`rafi resume: QA recovery is paused: ${(error as Error).message}. Work and unknown receipts are preserved; restore process visibility or inspect this build, then retry. No new provider work started.`);
+          return;
+        }
+      }
+      if (interruptedQaBoundary && pendingQaProtocolTicket && !qaRecoveryPacket
+        && db.continuityEvents(selected.runId).some(event => event.kind === "interrupted_qa_reconciled" && (event.payload as {ticketId?:string}).ticketId === pendingQaProtocolTicket)) {
+        const protocol = db.qaTicketHead(selected.runId, pendingQaProtocolTicket);
+        const attempt = db.qaReviewAttempts(selected.runId, pendingQaProtocolTicket).find(attempt => attempt.reviewNumber === protocol.reviewNumber && attempt.sourceDigest === protocol.sourceStateDigest);
+        if (!attempt) throw new Error("Interrupted QA recovery has no bound review attempt; inspect this build before continuing");
+        qaRecoveryPacket = createQaRecoveryPacket({ projectDir: root, reviewedWorktree: projection.worktree, runId: selected.runId, ticketId: pendingQaProtocolTicket,
+          cycle: attempt.cycle, reviewAttempt: protocol.reviewNumber, reviewAttemptId: attempt.attemptId, recoveryStage: "interrupted-read-only-qa", pendingAction: "qa-full-review",
+          resources: { "protocol-state": { value: protocol, purpose: "Exact interrupted QA reducer boundary" }, "unknown-outcome": { value: "The prior read-only review outcome remains unknown. Inspect the current immutable source in a fresh independent full review; no prior pass or provider replay is authorized.", purpose: "Truthful host reconciliation of a stopped read-only review", exactText: true } } });
+      }
       if (hasExactBuilderContinuationCandidate(root, selected.runId, ownershipAssessment.conflicts)) {
+        if (sourceContinuation) {
+          let continuation: ReturnType<typeof prepareInterruptedBuilderSourceContinuation>;
+          try { continuation = prepareInterruptedBuilderSourceContinuation(root, selected.runId); }
+          catch (error) {
+            commandOpts.onOutcome?.("paused"); process.exitCode = 2;
+            console.log(`rafi resume: source recovery is paused: ${(error as Error).message}. Current work and unknown receipts are preserved. Restore the owning branch/process visibility or inspect with rafi resume --run ${selected.runId} --inspect, then retry; no new provider work started.`);
+            return;
+          }
+          interruptedBuilderTicket = continuation.ticketIds[0];
+          head = db.continuityHead(selected.runId, "builder");
+          reconstructable = true;
+        } else {
         if (mode !== "exact-session" || !projection.exactSessionRef) {
           throw new Error(`The interrupted Builder session is unavailable or unverified. Preserve your work with rafi build:start-over --run ${selected.runId} --action restart-current; select the unfinished tickets to restart. No files or recovery records were changed.`);
         }
         const continuation = prepareExactSessionBuilderContinuation(root, selected.runId, projection.exactSessionRef);
         console.log(`rafi resume: continuing interrupted Builder work for ${continuation.ticketIds.join(", ")} in its validated exact session; QA will wait for the Builder's resumed result.`);
+        }
       }
       const currentRun = readBuildRuns(root).find((run) => run.runId === selected!.runId);
       if (!currentRun) throw new Error("Selected recovery run disappeared before its decision could be committed");
@@ -422,6 +485,11 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       let handoffDigest: string | undefined;
       if (mode === "fresh-with-handoff" || mode === "guided-recovery") {
         const sessionId = role === "builder" ? selected.builder?.sessionId : selected.qa?.sessionId;
+        const frozenQaAction = role === "qa" ? JSON.stringify({
+          action: "Perform a fresh independent full QA review of the current immutable approved ticket source. Preserve completed tickets and accepted QA. The previous interrupted review outcome remains unknown; no previous pass, provider replay or repeated implementation is authorized.",
+          runId: selected.runId, ticketId: effectiveTicket,
+          ...(qaRecoveryPacket ? { packetDigest: qaRecoveryPacket.manifest.packetDigest, reviewedStateDigest: qaRecoveryPacket.manifest.reviewedStateDigest } : {}),
+        }) : undefined;
         const staged = new HandoffService(root).stage({
           runId: selected.runId,
           role,
@@ -429,10 +497,15 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
           predecessorSessionId: sessionId,
           predecessorSessionRef: role === "builder" ? projection.sessionCandidateRef : selected.sessionBindings?.filter((ref) => ref.role === "qa").at(-1),
           roleState: { projection, mutationScope: effectiveTicket ? [effectiveTicket] : selected.tickets, runWideTickets: selected.tickets,
+            ...(frozenQaAction ? { frozenQaAction } : {}),
             ...(qaRecoveryPacket ? { recoveryPacketDigest: qaRecoveryPacket.manifest.packetDigest, reviewedStateDigest: qaRecoveryPacket.manifest.reviewedStateDigest } : {}) },
           compactionCount: sessionId ? db.successfulCompactionCount(selected.runId, role, role === "builder" ? projection.sessionCandidateRef ?? sessionId : selected.sessionBindings?.filter((ref) => ref.role === "qa" && ref.sessionId === sessionId).at(-1) ?? sessionId) : 0,
           compactMaximum: settings.compact_maximum ?? 10,
-          resources: [{ label: "frozen-recovery-projection", content: JSON.stringify(projection), authoritative: true, purpose: "Frozen build recovery projection" }, ...(qaRecoveryPacket ? qaRecoveryPacket.manifest.resources.map((resource) => ({
+          resources: [{ label: "frozen-recovery-projection", content: JSON.stringify(projection), authoritative: true, purpose: "Frozen build recovery projection" }, ...(role === "qa" ? [{
+            label: "frozen-qa-action", authoritative: true, requiredForRecovery: true,
+            purpose: "Frozen fresh QA action across the recovery session boundary",
+            content: frozenQaAction,
+          }] : []), ...(qaRecoveryPacket ? qaRecoveryPacket.manifest.resources.map((resource) => ({
             label: resource.path, digest: resource.digest, authoritative: true, requiredForRecovery: resource.requiredForRecovery,
             mediaType: resource.mediaType, path: resource.path, purpose: resource.purpose, bytes: resource.bytes,
           })) : [])],
@@ -446,7 +519,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         mode,
         runId: selected.runId,
         tickets: [...selected.tickets],
-        executionTickets: opts.ticket ? [String(opts.ticket)] : [...selected.tickets],
+        executionTickets: requestedRecoveryTicket || pendingQaProtocolTicket ? [String(opts.ticket)] : [...selected.progress.remainingTickets.length ? selected.progress.remainingTickets : selected.tickets],
         role,
         ...(head ? { checkpointDigest: head.digest } : {}),
         ...(handoffDigest ? { handoffDigest } : {}),
@@ -473,7 +546,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       // Inferring the interrupted ticket selects the first work item; only an
       // explicit ticket or QA boundary narrows the requested recovery to one.
       const remainingSteps = selected.branchMode === "current" ? Math.min(selected.progress.remainingTickets.length || selected.tickets.length, selected.authorizedBatch ? Math.max(0, selected.authorizedBatch.requestedSteps - selected.progress.completedTickets.length) : selected.tickets.length) : selected.tickets.length;
-      const recoverySteps = pendingQaProtocolTicket || opts.ticket ? 1 : Math.max(1, remainingSteps);
+      const recoverySteps = pendingQaProtocolTicket || requestedRecoveryTicket ? 1 : Math.max(1, remainingSteps);
       const args = ["start", root, "--steps", String(recoverySteps), "--recover-run", selected.runId, "--recovery-mode", mode];
       args.push("--recovery-decision-digest", digest(receipt));
       if (effectiveTicket) args.push("--ticket", effectiveTicket);
@@ -496,9 +569,13 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         const launch = launchDb.reserveBuildLaunch(launchAuthority, "coordinator", launchArgumentDigest(args), "registered-v2");
         launchDb.dispatchBuildLaunch(launchAuthority, launch.token);
         try {
+          commandOpts.onOutcome?.("paused");
           const code = resumeExitCode(await commandOpts.executeStart([...args, "--launch-token", launch.token], { authority: launchAuthority }));
+          if (code === 0 && readBuildRuns(root).find(run => run.runId === selected!.runId)?.status === "completed") commandOpts.onOutcome?.("completed");
           launchDb.reconcileBuildLaunches(selected.runId, launchAuthority);
-          if (code !== 0) process.exitCode = code;
+          const partialQaSucceeded = code === 2 && Boolean(pendingQaProtocolTicket)
+            && await launchDb.waitForSuccessfulPartialQaRecovery(selected.runId, pendingQaProtocolTicket!, launch.token);
+          if (code !== 0 && !partialQaSucceeded) process.exitCode = code;
           else if (interruptedBuilderTicket || pendingQaProtocolTicket) {
             const current = readBuildRuns(root).find(run => run.runId === selected!.runId);
             const pending = [...new Set([...launchDb.pendingQaTicketHeads(selected.runId).map(item => item.ticketId), ...launchDb.pendingQaRecoveryHeads(selected.runId).map(item => item.ticketId)])];
@@ -511,6 +588,15 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
               const next = requestedRecoveryTicket && pending.includes(requestedRecoveryTicket) ? requestedRecoveryTicket : pending[0];
               console.log(`rafi resume: recovery boundary completed; continuing queued QA for ${next}.`);
               continueQueuedQa = [root, "--run", selected.runId, "--ticket", next, ...(opts.yes ? ["--yes"] : opts.no ? ["--no"] : [])];
+            } else if (completedBoundary && !requestedRecoveryTicket && current?.status !== "completed"
+              && current && current.progress.completedTickets.length > selected.progress.completedTickets.length
+              && current.progress.remainingTickets.length && hasRunnableBuildRemainder(root, current) && !launchDb.unresolvedRoleDispatches(selected.runId, "builder").length
+              && !launchDb.unresolvedRoleDispatches(selected.runId, "qa").length) {
+              console.log("rafi resume: recovered the interrupted boundary; continuing the remaining approved tickets in this build.");
+              continueQueuedQa = [root, "--run", selected.runId, ...(opts.yes ? ["--yes"] : opts.no ? ["--no"] : [])];
+            } else if (partialQaSucceeded) {
+              process.exitCode = 2;
+              console.log("rafi resume: QA recovery completed; remaining tickets are outside the current step allowance or need prerequisite/question recovery before further Builder work.");
             }
           }
         } catch (error) {

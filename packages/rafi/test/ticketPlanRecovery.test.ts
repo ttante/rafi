@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
@@ -9,6 +9,7 @@ import { readInterviewRecords } from "ai-foreman/interviews.js";
 import { runTicketPlan } from "../src/ticketPlan.js";
 import { buildPlanDoctorCommand, planningSessionAge } from "../src/planDoctor.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
+import { prepareOwnedWrite, finalizePreparedOwnedWrite, readInstallManifest } from "../src/ownership.js";
 
 const proposal = () => ({ version: 1, title: "Plan", markdown: "# Plan", additions: [{ id: "T1", order: 1000, title: "Work", area: "Core", priority: "P1", size: "S", risk: "Medium", summary: "Work", acceptance: ["Works"], required_tests: ["Unit"], likely_files: [], depends_on: [], rollback: "Revert the change" }], edits: [], supersessions: [], state_changes: [], source_reconciliation: [], future_work: [], next: { ticket_ids: [], replace_existing: false } });
 const output = (value: unknown) => `RAFI_PROPOSAL_START\n${JSON.stringify(value)}\nRAFI_PROPOSAL_END\nSTEP_STATUS: plan_complete | summary="proposal_ready"`;
@@ -16,14 +17,30 @@ const output = (value: unknown) => `RAFI_PROPOSAL_START\n${JSON.stringify(value)
 for (const scenario of ["tests", "rollback", "priority", "combined", "exhausted", "valid"] as const) test(`ticket planner ${scenario} uses bounded response correction and durable recovery`, async () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-plan-repair-"));
   let turns = 0; let closed = false; let recovering = false; let ownedWrites = 0;
+  let plannedArtifacts: string[] = [];
   try {
-    writeFileSync(join(root, "rafi-config.yaml"), stringify(buildProjectConfig(defaultAnswers())));
+    const config = buildProjectConfig(defaultAnswers());
+    const docsRoot = config.docs?.root ?? "docs";
+    writeFileSync(join(root, "rafi-config.yaml"), stringify(config));
+    if (scenario === "valid") {
+      mkdirSync(join(root, docsRoot), { recursive: true });
+      writeFileSync(join(root, docsRoot, "rafi-ticket-plan.md"), "valuable preexisting plan\n");
+    }
     await buildTicketsCommand().parseAsync(["node", "test", "init", "--project", root, "--app-name", "Repair"]);
     const invalid = proposal();
     if (["tests", "combined", "exhausted"].includes(scenario)) invalid.additions[0]!.required_tests = [];
     if (["rollback", "combined", "exhausted"].includes(scenario)) invalid.additions[0]!.rollback = "";
     if (["priority", "combined", "exhausted"].includes(scenario)) invalid.additions[0]!.priority = "Medium";
-    const run = (resumeSession?: string) => runTicketPlan({ project: root, brief: "Plan work", agent: "codex", resumeSession, yes: true, beforeApply: () => { ownedWrites++; }, createPlanner: async () => ({ runtime: "codex", roleBundle: {} as never, skills: [], log: { write() {} } as never, graphRoot: root,
+    const run = (resumeSession?: string) => runTicketPlan({ project: root, brief: "Plan work", agent: "codex", resumeSession, yes: true,
+      beforeApply: (_root, artifacts = []) => {
+        ownedWrites++; plannedArtifacts = artifacts;
+        assert.equal(artifacts.length, 2);
+        for (const path of artifacts) { assert.equal(existsSync(join(root, path)), scenario === "valid" && path.endsWith("/rafi-ticket-plan.md")); prepareOwnedWrite(root, path, "tickets:plan", "plans"); }
+      },
+      afterApply: (_root, artifacts = []) => {
+        assert.deepEqual(artifacts, plannedArtifacts);
+        for (const path of artifacts) { assert.equal(existsSync(join(root, path)), true); finalizePreparedOwnedWrite(root, path, "tickets:plan", "plans"); }
+      }, createPlanner: async () => ({ runtime: "codex", roleBundle: {} as never, skills: [], log: { write() {} } as never, graphRoot: root,
       builder: { agent: "codex", sessionId: () => "repair-session", events: async function* () {}, close: async () => { closed = true; }, sendTurn: async instruction => {
         turns++;
         if (turns > 1) assert.match(instruction, /Correct|corrected/);
@@ -43,6 +60,12 @@ for (const scenario of ["tests", "rollback", "priority", "combined", "exhausted"
       assert.equal(readInterviewRecords(root).records[0]?.status, "completed");
     } else { await run(); assert.equal(turns, scenario === "valid" ? 1 : 2); assert.equal(closed, true); }
     assert.equal(ownedWrites, 1, "preimages are captured exactly once at approved publication");
+    assert.deepEqual(readInstallManifest(root)?.files.filter(file => file.category === "plans").map(file => file.path).sort(), [...plannedArtifacts].sort());
+    if (scenario === "valid") {
+      const latest = readInstallManifest(root)!.files.find(file => file.path.endsWith("/rafi-ticket-plan.md"))!;
+      assert.equal(latest.mode, "modified");
+      assert.equal(readFileSync(join(root, latest.backup!), "utf8"), "valuable preexisting plan\n");
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

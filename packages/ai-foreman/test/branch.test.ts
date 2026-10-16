@@ -185,6 +185,38 @@ function makeNode(ticket: TicketDef): BranchPlanNode {
   };
 }
 
+test("QA-only branch recovery preserves the Builder and branch session without dispatching Builder work", async () => {
+  const { root, project, ticket, allowedBaseDirtyPaths } = initTicketGitRepo("branch-qa-only-session-");
+  try {
+    const node = makeNode(ticket), worktreePath = join(root, "preserved-worktree");
+    git(project, ["worktree", "add", "-b", node.branch, worktreePath, "main"]);
+    const saved = { ticket: ticket.id, branch: node.branch, base: "main", worktreePath, sessionId: "preserved-builder", logPath: "fixture" };
+    const db = new WorkflowDb(project);
+    try {
+      db.ensureRun("qa-only");
+      db.admitWork({runId:"qa-only",kind:"ticket",ticketId:ticket.id,definition:ticket,approvalId:"fixture",scopeRevision:"fixture",provenance:{userTurn:"Resume this approved ticket QA only",reason:"Explicit QA-only branch fixture"}});
+      db.recordBranchResumeSession("qa-only", saved);
+    }
+    finally { db.close(); }
+    let builderTurns = 0, recordedBuilders = 0, createdBuilders = 0;
+    await runBranchPlan({ projectDir: project, runId: "qa-only", plan: { baseRef: "main", nodes: [node], issues: [] },
+      log: new Log(join(project, ".foreman/qa-only.jsonl")), notificationsEnabled: false, qaEnabled: true,
+      createPr: false, prReady: false, keepWorktrees: true, allowedBaseDirtyPaths,
+      qaProtocolResumeTicket: ticket.id, resumeSessions: new Map([[ticket.id, saved]]),
+      recordBuilderSession: () => { recordedBuilders++; },
+      createBuilder: async cwd => { createdBuilders++; const adapter = new FakeBuilder(cwd, "unused-new-builder"); adapter.sendTurn = async () => { builderTurns++; throw new Error("QA-only recovery cannot dispatch Builder implementation"); }; return adapter; },
+      createQa: async () => { throw new Error("Intentional independent QA boundary failure after Builder creation"); },
+    });
+    assert.equal(createdBuilders, 1, "Exercise the actual branch recovery path with an unused replacement adapter");
+    assert.equal(builderTurns, 0); assert.equal(recordedBuilders, 0);
+    const after = new WorkflowDb(project);
+    try {
+      assert.equal(after.branchResumeSession("qa-only", ticket.id)?.sessionId, saved.sessionId);
+      assert.equal(after.events("qa-only").some(event => event.type === "builder-session-scoped"), false);
+    } finally { after.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 for (const qaEnabled of [true, false]) for (const kind of ["done", "plan_complete", "blocked", "needs_input"]) for (const identity of ["T002", "UNKNOWN", undefined]) {
   test(`branch assignment rejects ${kind}/${identity ?? "missing"} with QA ${qaEnabled}`, async () => {
     const { root, project, ticket, allowedBaseDirtyPaths } = initTicketGitRepo("branch-assignment-");

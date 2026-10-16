@@ -65,6 +65,7 @@ class FakeBuilder implements BuilderAdapter {
   observeEvents(listener: (event: BuilderEvent) => void): () => void { this.observers.add(listener); return () => { this.observers.delete(listener); }; }
   private closed = false;
   response = "";
+  correctionItemType = "text";
   ref: ProviderSessionRefV1;
 
   constructor(cwd: string, private readonly graphEnabled = false) {
@@ -125,6 +126,8 @@ class FakeBuilder implements BuilderAdapter {
       cleanedResponse: wire,
       providerMetadata: { provider: "codex", sessionId: this.ref.sessionId, sessionRef: this.ref },
     };
+    const item: BuilderEvent = { kind: "provider-item", provider: "claude", payloadCompleteness: "complete", itemType: this.instructions.length > 1 ? this.correctionItemType : "text", lifecycle: "completed", payload: { text: wire } };
+    for (const listener of this.observers) listener(item);
     const event: BuilderEvent = { kind: "turn-complete", result, turnId: result.turnId };
     this.queue.push(event);
     for (const listener of this.observers) listener(event);
@@ -137,9 +140,10 @@ class FakeBuilder implements BuilderAdapter {
   async close(): Promise<void> { this.closed = true; }
 }
 
-for (const scenario of [false, true, "retained-repair", "revoked-repair", "inherited-report"] as const) test(`QA failure delivery preserves its binding across graph exchange: ${scenario}`, async () => {
+for (const scenario of [false, true, "retained-repair", "revoked-repair", "inherited-report", "tool-repair", "unknown-repair"] as const) test(`QA failure delivery preserves its binding across graph exchange: ${scenario}`, async () => {
   const graphEnabled = scenario === true;
-  const repair = scenario === "retained-repair" || scenario === "revoked-repair";
+  const unsafeRepair = scenario === "tool-repair" || scenario === "unknown-repair";
+  const repair = scenario === "retained-repair" || scenario === "revoked-repair" || unsafeRepair;
   const root = mkdtempSync(join(tmpdir(), "rafi-qa-delivery-"));
   try {
     execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
@@ -181,6 +185,7 @@ for (const scenario of [false, true, "retained-repair", "revoked-repair", "inher
     } finally { db.close(); }
 
     const builder = new FakeBuilder(root,graphEnabled);
+    if (unsafeRepair) builder.correctionItemType = scenario === "tool-repair" ? "commandExecution" : "unknown-provider-action";
     if (repair) {
       const db = new WorkflowDb(root);
       const access = { policyDigest: loadGraphConfig(root).policyDigest, workspace: root, paths: ["input.ts"], exclusionsDigest: digest("exclusions", graphExclusions(root, ["input.ts"]).text), sourceVersions: {} };
@@ -217,6 +222,17 @@ for (const scenario of [false, true, "retained-repair", "revoked-repair", "inher
       return;
     }
     const result = await delivery;
+    if (unsafeRepair) {
+      assert.equal(result.ok, false);
+      assert.match(result.detail ?? "", /used tools during response correction/);
+      const observed = new WorkflowDb(root);
+      try {
+        const turns = observed.qaDeliveryTurns(result.operationId!);
+        assert.equal(turns.at(-1)?.toolCount, 1);
+        assert.equal(observed.qaRemediationAttempts("run", ticket.id).at(-1)?.status === "succeeded", false);
+      } finally { observed.close(); }
+      return;
+    }
     assert.equal(result.ok, true, result.detail);
     assert.equal(builder.instructions.length,graphEnabled || repair?2:1);
     assert.match(builder.instructions[0] ?? "", /Current validated QA failure report/);
@@ -231,6 +247,7 @@ for (const scenario of [false, true, "retained-repair", "revoked-repair", "inher
       const turns=finalDb.qaDeliveryTurns(result.operationId!);
       assert.deepEqual(turns.map(t=>t.kind),graphEnabled?["remediation","graph-continuation"]:repair?["remediation","response-repair"]:["remediation"]);
       assert.equal(finalDb.qaRemediationAttempts("run",ticket.id).length,1);
+      assert.ok(turns.every(turn => turn.toolCount === 0), "Native text provider-items are response content, not tools");
       assert.equal(handoff?.reportDigest, reportDigest);
       assert.equal(handoff?.responseDigest, finalDb.qaRemediationAttempts("run", ticket.id).at(-1)?.responseDigest);
       assert.equal(handoff?.builderSession?.sessionId, "builder-session-1");

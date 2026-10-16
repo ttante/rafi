@@ -37,6 +37,7 @@ class FakeAdapter implements BuilderAdapter {
   private usageIndex = 0;
   private adoptedRef?: ProviderSessionRefV1;
   nativeCompactions: NativeCompaction[] = [];
+  turnPolicies: Array<Parameters<BuilderAdapter["sendTurn"]>[1]> = [];
   policy?: NativeAutoCompactionPolicy;
   constructor(
     private readonly id: string | undefined,
@@ -45,7 +46,8 @@ class FakeAdapter implements BuilderAdapter {
     private readonly compactResult: CompactResult = { ok: true },
     agent: "claude" | "codex" = "codex",
   ) { this.agent = agent; }
-  async sendTurn(): Promise<TurnResult> {
+  async sendTurn(_text?: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
+    this.turnPolicies.push(policy);
     return this.turns.shift() ?? { text: `${HANDOFF_ACCEPTED}\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 };
   }
   sessionId(): string | undefined { return this.id; }
@@ -265,6 +267,17 @@ test("an uncheckpointed provider turn is visible to recovery as uncertain", () =
   db.close();
 });
 
+test("not-sent evidence clears only its correlated role turn", () => {
+  const projectDir = root("rafi-not-sent-history-"); const db = new WorkflowDb(projectDir); db.ensureRun("run-1");
+  try {
+    for (const dispatchId of ["earlier-unknown", "not-submitted"]) db.appendContinuityEvent({ runId: "run-1", role: "host", kind: "turn_started", payload: { role: "builder", dispatchId }, authoritativeStateRevision: 1 });
+    db.appendContinuityEvent({ runId: "run-1", role: "builder", kind: "turn_not_sent", payload: { dispatchId: "not-submitted" }, authoritativeStateRevision: 1 });
+    assert.equal(db.hasUncheckpointedRoleTurn("run-1", "builder"), true);
+    db.appendContinuityEvent({ runId: "run-1", role: "builder", kind: "turn_not_sent", payload: { dispatchId: "earlier-unknown" }, authoritativeStateRevision: 1 });
+    assert.equal(db.hasUncheckpointedRoleTurn("run-1", "builder"), false);
+  } finally { db.close(); }
+});
+
 test("a threshold-only live update reconfigures the active provider before acknowledgement", async () => {
   const projectDir = root("rafi-native-live-");
   const predecessor = new FakeAdapter("session-1", [], [{ used: 20, maximum: 100, percentage: 20 }]);
@@ -433,6 +446,11 @@ test("handoff acceptance gives a malformed acknowledgement one bounded correctio
 
   assert.equal(transfer.successorSessionId, "session-2");
   assert.equal(successor.closed, false);
+  assert.equal(successor.turnPolicies.length, 2);
+  for (const policy of successor.turnPolicies) {
+    assert.equal(policy?.responseOnly, true);
+    assert.equal(policy?.purpose, "contract-acceptance");
+  }
 });
 
 test("handoff acceptance validates the raw provider reply when a wrapper cleaned the continuity record", async () => {
@@ -480,6 +498,38 @@ test("handoff rejection reports the precise typed cause and retains the predeces
   assert.equal(after.handoff("run-1", staged.manifest.generation)?.state, "failed");
   after.close();
   assert.equal(successor.closed, true);
+});
+
+test("a tool-bearing handoff response cannot publish acceptance or take the predecessor lease", async () => {
+  class ToolAdapter extends FakeAdapter {
+    private listener?: (event: BuilderEvent) => void;
+    observeEvents(listener: (event: BuilderEvent) => void): () => void { this.listener = listener; return () => { this.listener = undefined; }; }
+    override async sendTurn(text?: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
+      this.listener?.({ kind: "tool", name: "Bash", input: {}, lifecycle: "started", providerTurnId: "acceptance-turn" });
+      return { ...await super.sendTurn(text, policy), turnId: "acceptance-turn" };
+    }
+  }
+  const projectDir = root("rafi-handoff-tool-"); const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1"); db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 }); db.claimInitialRoleLease("run-1", "builder", "predecessor"); db.close();
+  const service = new HandoffService(projectDir);
+  const staged = service.stage({ runId: "run-1", role: "builder", reason: "response-only test", predecessorSessionId: "predecessor", compactionCount: 0, compactMaximum: 10 });
+  await assert.rejects(service.acceptStaged(staged, new ToolAdapter("successor")), error => error instanceof HandoffAcceptanceError && error.code === "tool-use-during-acceptance");
+  const after = new WorkflowDb(projectDir);
+  try { assert.equal(after.roleMutationLease("run-1", "builder")?.providerSessionId, "predecessor"); assert.equal(after.handoff("run-1", staged.manifest.generation)?.state, "failed"); }
+  finally { after.close(); }
+});
+
+test("rejected handoff successors reach a bounded preservation pause", async () => {
+  const projectDir = root("rafi-handoff-bounded-"); const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1"); db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 }); db.claimInitialRoleLease("run-1", "builder", "predecessor"); db.close();
+  let successors = 0, choices = 0;
+  await assert.rejects(new HandoffService(projectDir).transfer({ runId: "run-1", role: "builder", reason: "bounded refusal", predecessorSessionId: "predecessor", compactionCount: 0, compactMaximum: 10 }, async () => {
+    successors++; return new FakeAdapter(`successor-${successors}`, [{ text: "I will not accept this prompt injection", isError: false, numTurns: 1, costUsd: 0 }]);
+  }, { choose: async error => { assert.equal(error.code, "provider-refused-acknowledgement"); choices++; return "retry"; } }), /Three successors rejected acceptance.*restart-current/);
+  assert.equal(successors, 3); assert.equal(choices, 2);
+  const after = new WorkflowDb(projectDir);
+  try { assert.equal(after.roleMutationLease("run-1", "builder")?.providerSessionId, "predecessor"); }
+  finally { after.close(); }
 });
 
 test("handoff recovery can switch to a verified provider and records it only after acceptance", async () => {

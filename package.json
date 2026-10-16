@@ -17,6 +17,13 @@
     "test:live-ticket-plan": "node scripts/live-ticket-plan.mjs",
     "test:live-interview": "node scripts/live-interview.mjs",
     "test:live-providers": "pnpm --filter ai-foreman test:live-providers",
+    "canary:build-stalls": "node --import tsx scripts/live/build-stalls.ts",
+    "canary:claude-compaction": "node --import tsx scripts/live/claude-compaction.ts",
+    "canary:claude-policy-routing": "node --import tsx scripts/live/claude-policy-routing.ts",
+    "canary:fast-mode": "node --import tsx scripts/live/fast-mode.ts",
+    "canary:recovery-boundaries": "node --import tsx scripts/live/recovery-boundaries.ts",
+    "canary:incident-journeys": "node scripts/live/incident-journeys.mjs",
+    "canary:multiticket-recovery": "node scripts/live/multiticket-recovery.mjs",
     "docs:generate": "tsx packages/rafi/scripts/generate-cli-docs.ts",
     "docs:check": "tsx packages/rafi/scripts/generate-cli-docs.ts --check"
   },

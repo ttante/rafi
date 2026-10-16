@@ -82,11 +82,9 @@ test("buildArgs: effort flag", () => {
   assert.equal(args[idx + 1], "model_reasoning_effort=high");
 });
 
-test("buildArgs: fast flag maps to effort=low", () => {
+test("buildArgs: fast preference never lowers reasoning effort", () => {
   const args = adapter({ fast: true }).buildArgs("x");
-  const idx = args.indexOf("-c");
-  assert.ok(idx !== -1, "missing -c");
-  assert.equal(args[idx + 1], "model_reasoning_effort=low");
+  assert.ok(!args.includes("model_reasoning_effort=low"));
 });
 
 test("buildArgs: effort takes precedence over fast", () => {

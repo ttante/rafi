@@ -452,9 +452,10 @@ export function materializeQaRecoveryContext(packet: QaRecoveryPacket, qaWorktre
 
 export function renderQaRecoveryAcknowledgementInstruction(packet: QaRecoveryPacket, relativePath: string): string {
   const required = packet.manifest.resources.filter((resource) => resource.requiredForRecovery).map((resource) =>
-    `- path=${resource.path} purpose=${JSON.stringify(resource.purpose)} media_type=${resource.mediaType} bytes=${resource.bytes} digest=${resource.digest}`).join("\n");
+    `- read_path=${join(relativePath, resource.path)} packet_path=${resource.path} purpose=${JSON.stringify(resource.purpose)} media_type=${resource.mediaType} bytes=${resource.bytes} digest=${resource.digest}`).join("\n");
   return [
     "Read and verify every required recovery resource in this exact sealed packet revision before replying.",
+    "Use each exact read_path below within the current QA working directory. The normal read-only QA permissions apply; preserve the sealed packet and source.",
     `Recovery context directory: ${relativePath}`,
     `Packet ID: ${packet.manifest.packetId}`,
     `Packet revision: ${packet.manifest.revision}`,

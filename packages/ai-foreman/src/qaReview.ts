@@ -272,8 +272,9 @@ async function runIsolatedQaOwned(opts: IsolatedQaOptions): Promise<IsolatedQaRe
     if (protocolHead.state === "source-frozen" || protocolHead.state === "review-ready") {
       protocolHead = scopeDb.transitionQa(opts.recovery.runId, opts.ticket.id, protocolHead.revision, { type: "operator-menu" });
     }
-    if (opts.resumedRecovery && protocolHead.state === "recheck-required" && opts.resumedRecovery.manifest.pendingAction !== "qa-full-review") {
+    if (opts.resumedRecovery && protocolHead.state === "recheck-required") {
       opts.resumedRecovery = updateQaRecoveryPosition(opts.resumedRecovery, "qa-full-review", opts.resumedRecovery.manifest.correctionTurns, "qa-full-review");
+      if (scopeDb.hasConfirmedQaRemediationForRecheck(opts.recovery.runId, opts.ticket.id)) opts.resumedRecovery = undefined;
     }
     durableReviews = scopeDb.qaReviewAttempts(opts.recovery.runId, opts.ticket.id);
     for (const interrupted of durableReviews.filter((item) => item.status === "started")) scopeDb.finishQaReviewAttempt(interrupted.attemptId, { status: "interrupted", detail: "host restarted before the QA attempt reached a durable outcome" });
@@ -369,6 +370,7 @@ async function runIsolatedQaOwned(opts: IsolatedQaOptions): Promise<IsolatedQaRe
     const fix = await observedQaFix(opts, "resuming pending QA remediation", request, causing, Boolean(opts.qaRemediationAuthorization));
     opts.qaRemediationAuthorization = undefined;
     if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA remediation failed during restart recovery", fix.outcome === "needs-input" ? "needs-human" : "blocked");
+    if (!consumeRecoveryAfterOwnedFix(opts)) return pauseQaProtocol(opts, "builder-remediation-unconfirmed", "Builder remediation needs durable reconciliation before a fresh review", "needs-human");
     const fixSummary = boundedBuilderSummary(fix.summary ?? fix.response ?? "Builder reported remediation complete");
     opts.state.builderResponseHistory.push({ ticketId: opts.ticket.id, cycle: durableReport.reviewNumber, kind: "remediation", response: fix.response!, summary: fixSummary });
     opts.builderSummary = fix.response!;
@@ -416,6 +418,7 @@ async function runIsolatedQaOwned(opts: IsolatedQaOptions): Promise<IsolatedQaRe
       const fix = await observedQaFix(opts, "applying QA fixes", request, review.reviewAttemptId, Boolean(opts.qaRemediationAuthorization));
       opts.qaRemediationAuthorization = undefined;
       if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA fix failed", fix.outcome === "needs-input" ? "needs-human" : "blocked");
+      if (!consumeRecoveryAfterOwnedFix(opts)) return pauseQaProtocol(opts, "builder-remediation-unconfirmed", "Builder remediation needs durable reconciliation before a fresh review", "needs-human");
       const fixSummary = boundedBuilderSummary(fix.summary ?? fix.response ?? fix.detail ?? "Builder reported remediation complete");
       opts.state.builderResponseHistory.push({
         ticketId: opts.ticket.id,
@@ -1247,6 +1250,18 @@ function markQaRecoveryResolved(opts: IsolatedQaOptions): void {
   } finally { db.close(); }
 }
 
+function consumeRecoveryAfterOwnedFix(opts: IsolatedQaOptions): boolean {
+  if (!opts.resumedRecovery) return true;
+  const db = new WorkflowDb(opts.recovery.projectDir);
+  try {
+    if (!db.hasConfirmedQaRemediationForRecheck(opts.recovery.runId, opts.ticket.id)) return false;
+    // The validated report led to confirmed source-changing implementation.
+    // Its recovery packet remains durable history, not the next review basis.
+    opts.resumedRecovery = undefined;
+    return true;
+  } finally { db.close(); }
+}
+
 function markQaRecoveryPendingBuilder(opts: IsolatedQaOptions): void {
   markQaRecoveryAction(opts, "builder-remediation-pending");
 }
@@ -1392,9 +1407,7 @@ function validateBoundaryReceipt(receipt: HandoffAcceptanceReceiptV2, packet: Qa
     || resource.authoritative !== true || typeof resource.requiredForRecovery !== "boolean")) {
     throw new Error("QA recovery acceptance receipt contains invalid resource metadata");
   }
-  for (const required of ["continuity-checkpoint", "authoritative-run-state", "frozen-qa-action"]) {
-    if (!receipt.resources.some((resource) => resource.label === required)) throw new Error(`QA recovery acceptance receipt is missing ${required}`);
-  }
+  assertQaRecoveryHandoffInventory(receipt.resources);
   if (receipt.inventoryDigest !== qaDigest("handoff-inventory", receipt.resources)) throw new Error("QA recovery acceptance receipt inventory digest mismatch");
   const receiptDb = new WorkflowDb(packet.projectDir);
   try {
@@ -1408,6 +1421,13 @@ function validateBoundaryReceipt(receipt: HandoffAcceptanceReceiptV2, packet: Qa
       || actual.bytes !== expected.bytes || actual.mediaType !== expected.mediaType || actual.requiredForRecovery !== expected.requiredForRecovery) {
       throw new Error(`QA recovery acceptance receipt did not validate resource ${expected.path}`);
     }
+  }
+}
+
+/** Shared invariant for host staging and the actual QA boundary receipt. */
+export function assertQaRecoveryHandoffInventory(resources: ReadonlyArray<{label: string}>): void {
+  for (const required of ["continuity-checkpoint", "authoritative-run-state", "frozen-qa-action"]) {
+    if (!resources.some(resource => resource.label === required)) throw new Error(`QA recovery acceptance receipt is missing ${required}`);
   }
 }
 
@@ -1631,7 +1651,11 @@ async function sendDurableQaTurnOwned(adapter: BuilderAdapter, instruction: stri
   } finally { db.close(); }
   let result: TurnResult;
   const providerStartedAt = Date.now();
-  try { result = await adapter.sendTurn(instruction, slot === "session-initialization" ? { purpose: "initialization", responseOnly: true } : slot?.includes("acknowledgement") || slot?.includes("correction") ? { purpose: "response-repair", responseOnly: true } : undefined); }
+  // Reading the sealed QA packet is ordinary confined read-only QA work.
+  // Only formatting repair and ownership acceptance are response-only; the
+  // first resource-inspection turn cannot truthfully read with tools disabled.
+  const responseRepair = slot?.includes("correction") || (slot?.includes("acknowledgement") && slot.includes("repair"));
+  try { result = await adapter.sendTurn(instruction, slot === "session-initialization" ? { purpose: "initialization", responseOnly: true } : responseRepair ? { purpose: "response-repair", responseOnly: true } : undefined); }
   catch (error) {
     const failedDb = new WorkflowDb(binding.projectDir);
     try {
@@ -1679,7 +1703,7 @@ async function sendDurableQaTurnOwned(adapter: BuilderAdapter, instruction: stri
     throw new Error(detail);
   }
   const completedAt = new Date().toISOString();
-  const terminalEventObserved = Boolean(result.turnId
+  const terminalEventObserved = Boolean(result.turnId && result.failure?.dispatchState !== "unknown"
     && events.some((event) => event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === result.turnId));
   const receiptDb = new WorkflowDb(binding.projectDir);
   try {

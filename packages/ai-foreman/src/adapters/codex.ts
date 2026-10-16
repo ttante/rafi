@@ -12,6 +12,8 @@ import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, CompactResult
 import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
 import { canonicalSessionPath, createProviderSessionRef, validateProviderSessionScope } from "../sessionIdentity.js";
 import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
+import { isFastModeUnavailable, reportFastModeUnavailable } from "./fastMode.js";
+import { handoffSystemInstructions } from "../handoffProtocol.js";
 
 export interface CodexLineResult { events: BuilderEvent[]; sessionId?: string; text?: string }
 
@@ -48,6 +50,7 @@ export class CodexAdapter implements BuilderAdapter {
   private sessionAvailability?: SessionAvailabilityV1;
   private initialized = false;
   private closed = false;
+  private closePromise?: Promise<void>;
   private activeText: string[] = [];
   private usage?: ContextUsage;
   private usageRevision = 0;
@@ -73,6 +76,40 @@ export class CodexAdapter implements BuilderAdapter {
   private readonly answeredApprovalRequests = new Set<string>();
   private activeProviderTurnSpanId?: string;
   private readonly toolSpans = new Map<string, string>();
+  private effectiveModel?: string;
+  private fastPreparedModel?: string;
+  private fastTier?: string;
+  private readonly fastUnavailableModels = new Set<string>();
+  private turnSawTool = false;
+
+  private disableFastMode(): void {
+    const model = this.opts.model ?? this.effectiveModel ?? "default";
+    if (!this.fastUnavailableModels.has(model)) reportFastModeUnavailable(model);
+    this.fastUnavailableModels.add(model); this.fastTier = undefined;
+  }
+
+  private async prepareFastMode(): Promise<void> {
+    const model = this.opts.model ?? this.effectiveModel ?? "default";
+    if (!this.opts.fast || this.fastPreparedModel === model) return;
+    this.fastPreparedModel = model; this.fastTier = undefined;
+    if (this.fastUnavailableModels.has(model)) return;
+    try {
+      let cursor: string | undefined;
+      for (let page = 0; page < 20; page++) {
+        const result = await this.request("model/list", { includeHidden: true, ...(cursor ? { cursor } : {}) }) as { data?: Array<{ model: string; id?: string; serviceTiers?: Array<{ id: string; name?: string }>; additionalSpeedTiers?: string[] }>; nextCursor?: string };
+        const entry = result.data?.find(item => item.model === model || item.id === model);
+        if (entry) {
+          this.fastTier = entry.serviceTiers?.find(tier => tier.name?.toLowerCase() === "fast" || ["fast", "priority"].includes(tier.id))?.id;
+          // Older app-server versions publish only the legacy speed list.
+          if (entry.serviceTiers === undefined && entry.additionalSpeedTiers?.includes("fast")) this.fastTier = "fast";
+          break;
+        }
+        if (!result.nextCursor || result.nextCursor === cursor) break;
+        cursor = result.nextCursor;
+      }
+    } catch { /* Optional capability discovery never blocks a standard turn. */ }
+    if (!this.fastTier) this.disableFastMode();
+  }
 
   constructor(private readonly opts: BuilderAdapterOptions) {
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
@@ -103,7 +140,7 @@ export class CodexAdapter implements BuilderAdapter {
   buildArgs(instruction: string): string[] {
     const args = ["exec", "--json", "--skip-git-repo-check", "--sandbox", this.opts.sandboxMode ?? "workspace-write", "-C", this.opts.cwd];
     if (this.opts.model) args.push("-m", this.opts.model);
-    if (this.opts.effort) args.push("-c", `model_reasoning_effort=${this.opts.effort}`); else if (this.opts.fast) args.push("-c", "model_reasoning_effort=low");
+    if (this.opts.effort) args.push("-c", `model_reasoning_effort=${this.opts.effort}`);
     if (this._sessionId) args.push("resume", this._sessionId);
     args.push(instruction); return args;
   }
@@ -140,23 +177,34 @@ export class CodexAdapter implements BuilderAdapter {
     const providerInstruction = this.buildInstruction(instruction);
     try {
       await this.ensureThread();
+      if (this.opts.fast) await this.prepareFastMode();
       const toolsBefore = this.observedToolCalls;
+      this.turnSawTool = false;
       this.activeText = [];
       this.lastTurnTokens = undefined;
       this.turnUsageBaseline = this.providerSessionUsage ? { ...this.providerSessionUsage } : undefined;
       const completion = this.waitFor("turn/completed", (params) => params.threadId === this._sessionId, this.providerIdleTimeoutMs(), true);
+      void completion.catch(() => {});
       turnStartDispatched = true;
-      const started = await this.request("turn/start", {
+      const startParams = {
         threadId: this._sessionId,
         input: [{ type: "text", text: providerInstruction, text_elements: [] }],
         cwd: this.opts.cwd,
-        model: this.opts.model ?? null,
-        effort: this.opts.effort ?? (this.opts.fast ? "low" : null),
+        model: this.opts.model ?? this.effectiveModel ?? null,
+        effort: this.opts.effort ?? null,
+        ...(this.opts.fast ? { serviceTier: this.fastTier ?? "default" } : {}),
         approvalPolicy: policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" ? "never" : this.effectiveApprovalPolicy(),
         sandboxPolicy: policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" || this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa"
           ? { type: "readOnly", networkAccess: false }
           : { type: "workspaceWrite", writableRoots: [this.opts.cwd], networkAccess: this.effectiveNetworkAccess() },
-      });
+      };
+      let started: unknown;
+      try { started = await this.request("turn/start", startParams); }
+      catch (error) {
+        if (!this.fastTier || !isFastModeUnavailable(String(error)) || this.turnSawTool || this.activeText.length) throw error;
+        this.disableFastMode();
+        started = await this.request("turn/start", { ...startParams, serviceTier: "default" });
+      }
       this.activeNativeTurnId = String((started as { turn?: { id?: string } }).turn?.id ?? "") || undefined;
       const params = await new OperationDeadline("Codex active turn", this.opts.turnDeadlineMs ?? 3_600_000).run(() => completion);
       const turn = params.turn as Record<string, unknown> | undefined;
@@ -164,6 +212,10 @@ export class CodexAdapter implements BuilderAdapter {
       const failed = turn?.status === "failed" || responseOnlyViolation;
       const error = turn?.error as Record<string, unknown> | null | undefined;
       const text = this.activeText.join("\n");
+      if (failed && !responseOnlyViolation && this.fastTier && !this.turnSawTool && !text && isFastModeUnavailable(String(error?.message ?? ""))) {
+        this.disableFastMode();
+        return this.sendTurnInternal(instruction, policy);
+      }
       const result: TurnResult = {
         text: failed ? normalizeRuntimeErrorText("codex", String(responseOnlyViolation ? "Response-only correction used tools; its result cannot authorize completion" : error?.message ?? text), null, "app-server turn") : text,
         isError: failed, numTurns: 1, costUsd: 0, costAuthoritative: false,
@@ -352,6 +404,7 @@ export class CodexAdapter implements BuilderAdapter {
   }
   async sessionUsage(): Promise<ProviderSessionUsage | undefined> { return this.providerSessionUsage ? { ...this.providerSessionUsage } : undefined; }
   async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
+    if (settings.model !== this.opts.model || settings.fast !== this.opts.fast) this.fastPreparedModel = undefined;
     this.opts.model = settings.model; this.opts.effort = settings.effort; this.opts.fast = settings.fast;
     return { ok: true };
   }
@@ -382,7 +435,8 @@ export class CodexAdapter implements BuilderAdapter {
 
   events(): AsyncIterable<BuilderEvent> { return this.eventQueue; }
 
-  async close(): Promise<void> {
+  close(): Promise<void> { return this.closePromise ??= this.closeInternal(); }
+  private async closeInternal(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     const child = this.process;
@@ -435,7 +489,7 @@ export class CodexAdapter implements BuilderAdapter {
         model: this.opts.model ?? null, approvalPolicy: this.effectiveApprovalPolicy(),
         config: { sandbox_workspace_write: { network_access: this.effectiveNetworkAccess() } },
         sandbox: this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa" ? "read-only" : "workspace-write",
-        developerInstructions: this.opts.systemPromptAppend ?? null,
+        developerInstructions: handoffSystemInstructions(this.opts.sessionRole, this.opts.systemPromptAppend) ?? null,
       }) as Record<string, unknown>;
     } catch (error) {
       if (this._sessionRef) {
@@ -499,6 +553,7 @@ export class CodexAdapter implements BuilderAdapter {
     }
     this.sessionAvailability = { version: 1, status: "available", checkedAt: new Date().toISOString(), observedCwd: providerCwd ?? canonicalSessionPath(this.opts.cwd), sessionRef: this._sessionRef };
     this.threadAttached = true;
+    this.effectiveModel = typeof result.model === "string" ? result.model : this.opts.model;
     this.eventQueue.push({ kind: "session-transition", transition: method === "thread/resume" ? "resumed" : "started" });
   }
 
@@ -553,6 +608,7 @@ export class CodexAdapter implements BuilderAdapter {
       const item = params.item as Record<string, unknown> | undefined;
       if (item) this.eventQueue.push({ kind: "provider-item", provider: "codex", lifecycle: "started", itemType: String(item.type ?? "unknown"), payload: exactProviderItem(item), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
       if (isCodexToolItem(item)) {
+        this.turnSawTool = true;
         this.observedToolCalls += 1;
         const callId = codexItemId(item) ?? randomUUID();
         const name = codexToolName(item);
@@ -569,6 +625,7 @@ export class CodexAdapter implements BuilderAdapter {
       const item = params.item as Record<string, unknown> | undefined;
       if (item) this.eventQueue.push({ kind: "provider-item", provider: "codex", lifecycle: "completed", itemType: String(item.type ?? "unknown"), payload: exactProviderItem(item), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
       if (isCodexToolItem(item)) {
+        this.turnSawTool = true;
         const callId = codexItemId(item);
         const spanId = callId ? this.toolSpans.get(callId) : undefined;
         const status = typeof item?.status === "string" ? item.status : undefined;
@@ -635,6 +692,7 @@ export class CodexAdapter implements BuilderAdapter {
     } else if (message.method === "error") {
       const error = params.error as Record<string, unknown> | undefined;
       const reason = String(error?.message ?? params.message ?? "Codex app-server error");
+      if (this.fastTier && isFastModeUnavailable(reason) && !this.activeText.length && !this.turnSawTool) return;
       if (params.willRetry === true) {
         const retryId = randomUUID();
         this.eventQueue.push(this.opts.observer

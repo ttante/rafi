@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify } from "yaml";
-import { cmdInit, cmdUpdate } from "../packages/ai-foreman/src/tickets/commands.js";
-import { readBuildRuns } from "../packages/ai-foreman/src/buildRuns.js";
-import { DEFAULT_AUTONOMY_CONFIG, validateAutonomyConfig } from "../packages/ai-foreman/src/recoveryPolicy.js";
-import { WorkflowReader } from "../packages/ai-foreman/src/workflowReader.js";
-import { WorkflowDb } from "../packages/ai-foreman/src/workflowDb.js";
-import { collectManagerDiagnostics } from "../packages/ai-foreman/src/diagnostics.js";
+import { cmdInit, cmdUpdate } from "../../packages/ai-foreman/src/tickets/commands.js";
+import { readBuildRuns } from "../../packages/ai-foreman/src/buildRuns.js";
+import { DEFAULT_AUTONOMY_CONFIG, validateAutonomyConfig } from "../../packages/ai-foreman/src/recoveryPolicy.js";
+import { WorkflowReader } from "../../packages/ai-foreman/src/workflowReader.js";
+import { WorkflowDb } from "../../packages/ai-foreman/src/workflowDb.js";
+import { collectManagerDiagnostics } from "../../packages/ai-foreman/src/diagnostics.js";
 
 if (process.env.RAFI_LIVE_BUILD_STALLS !== "1") throw new Error("Set RAFI_LIVE_BUILD_STALLS=1 only after authorizing provider usage.");
 const samples = Number(process.env.RAFI_LIVE_SAMPLES ?? "5");

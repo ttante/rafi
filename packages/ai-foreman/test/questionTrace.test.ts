@@ -69,9 +69,12 @@ test("redacted traces work with standalone JSONL logs and survive failed sinks a
 function harness(permission: BuilderAdapterOptions["permission"], records: QuestionTrace[], idleMs = 1000) {
   const stream = new AsyncQueue<unknown>();
   let callback!: (name: string, input: Record<string, unknown>) => Promise<unknown>;
-  const Constructor = ClaudeAdapter as unknown as new (opts: BuilderAdapterOptions, query: (input: { options: { canUseTool: typeof callback } }) => unknown) => ClaudeAdapter;
-  const adapter = new Constructor({ cwd: "/tmp/test", runtimePhase: "planning", permission, providerIdleTimeoutMs: idleMs, onQuestionTrace: (event) => { records.push(event); } }, ({ options }) => {
+  const Constructor = ClaudeAdapter as unknown as new (opts: BuilderAdapterOptions, query: (input: { prompt: AsyncIterable<unknown>; options: { canUseTool: typeof callback } }) => unknown) => ClaudeAdapter;
+  const adapter = new Constructor({ cwd: "/tmp/test", runtimePhase: "planning", permission, providerIdleTimeoutMs: idleMs, onQuestionTrace: (event) => { records.push(event); } }, ({ options, prompt }) => {
     callback = options.canUseTool;
+    // A real SDK consumes host input before requesting a permission. Model
+    // that transport boundary so this timeout remains a submitted turn.
+    void (async () => { for await (const _message of prompt) { /* consumed */ } })();
     return { [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](), interrupt: async () => { stream.close(); } };
   });
   return { adapter, stream, ask: () => callback("AskUserQuestion", { questions: [{ question: "SECRET QUESTION", header: "SECRET HEADER" }], secret: "SECRET INPUT" }) };

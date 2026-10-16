@@ -175,8 +175,9 @@ export function buildPrimer(n: number, trackerPath?: string, ticketsEnabled = fa
   if (ticketsEnabled) {
     const progressDoc = trackerPath ?? "docs/ticket-progress.md";
     trackerRule = `\n- Ticket state is managed by foreman — you do NOT need to manually edit ${progressDoc}.` +
-      `\n- Use \`foreman tickets discover --summary "..." --rationale "..."\` to log newly discovered work.` +
-      `\n- Use \`foreman tickets update <id> --next-action "..."\` to record mid-turn notes.` +
+      `\n- Foreman records completion and regenerates the tracker after independent QA passes. Do not run ticket-complete commands or mark tracker records done yourself.` +
+      `\n- When available and permitted, \`foreman tickets discover --summary "..." --rationale "..."\` can log newly discovered work and \`foreman tickets update <id> --next-action "..."\` can record optional mid-turn notes.` +
+      `\n- If a ticket CLI is unavailable, include those notes in your response; it is not an implementation blocker.` +
       `\n- Always include ticket="<id>" in your STEP_STATUS marker so foreman can update the tracker.`;
   } else if (trackerPath) {
     trackerRule = `\n- After completing each ticket or step, update its status in the ticket progress tracker at \`${trackerPath}\`, following the Standard Update Workflow documented in that file.`;
@@ -304,7 +305,7 @@ export function createPermissionHandler(
       behavior: "deny",
       message:
         `Foreman policy: this action needs human approval (${verdict.reason}) ` +
-        `and was NOT performed. Do not retry it. If this step depends on it, ` +
+        `and was NOT performed. Do not retry this exact action. An allow-listed alternative is permitted; for project tests use a literal in-worktree cd, project-local PYTHONPATH, existing virtualenv Python, or uv run --offline --no-sync with an allowed test command. If no permitted alternative can complete the step, ` +
         `end your turn with: STEP_STATUS: blocked | reason="needs human approval: ${verdict.reason}".`,
     };
   };
@@ -323,7 +324,21 @@ export interface ForemanNotificationOptions {
 }
 
 /** Drives one builder through a batch of N steps via the STEP_STATUS protocol. */
+export class BuildInterruptedError extends Error {
+  constructor() { super("Build interrupted; current work is preserved for recovery"); this.name = "BuildInterruptedError"; }
+}
+
 export class Foreman {
+  private interruptionRequested = false;
+  private activeQaAdapter?: BuilderAdapter;
+  private assertNotInterrupted(): void { if (this.interruptionRequested) throw new BuildInterruptedError(); }
+  private async createOwnedQa(cwd: string, sessionId?: string): Promise<QaSessionHandle> {
+    this.assertNotInterrupted();
+    const handle = await this.qaFactory!(cwd, sessionId);
+    this.activeQaAdapter = handle.adapter;
+    if (this.interruptionRequested) { await handle.adapter.close(); throw new BuildInterruptedError(); }
+    return handle;
+  }
   private graphPurpose: GraphPurpose = "implementation";
   setGraphPurpose(purpose:GraphPurpose):void {this.graphPurpose=purpose;}
   private readonly ticketsEnabled: boolean;
@@ -454,8 +469,10 @@ export class Foreman {
       : `${text}\nTicket scope: ${ticket}. Do not substitute another ticket. Include ticket="${ticket}" in any STEP_STATUS marker.`;
     instruction = scopedInstruction(instruction);
     const send = async (text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> => {
+      this.assertNotInterrupted();
       const context = ticket && this.projectDir ? renderBuildWorkContext(this.ticketForQa(0, ticket), loadTicketSetupConfigWithDefaults(this.projectDir).build.validation_checklist) : "";
-      const contractContext = ticket && this.projectDir ? await ensureBuilderContract(this.projectDir, this.qaRunId, ticket, this.builderWorktree ?? this.projectDir, adapter, this.qaFactory) : "";
+      const contractContext = ticket && this.projectDir ? await ensureBuilderContract(this.projectDir, this.qaRunId, ticket, this.builderWorktree ?? this.projectDir, adapter, this.qaFactory ? (...args) => this.createOwnedQa(...args) : undefined) : "";
+      this.assertNotInterrupted();
       const finalInstruction = scopedInstruction([text, context, contractContext].filter(Boolean).join("\n\n"));
       const assignment = ticket && this.projectDir ? beginBuildAssignment(this.projectDir, this.qaRunId, ticket, this.builderWorktree ?? this.projectDir, finalInstruction, undefined, adapter) : undefined;
       const submitted=assignment?.instruction??finalInstruction;
@@ -464,8 +481,9 @@ export class Foreman {
         : await adapter.sendTurn(submitted, policy);
       const parsed = parseStepStatus(response.text);
       const applicable = parsed.kind === "unknown" && looksLikeQuestion(response.text) ? { kind: "needs_input" as const, question: lastLine(response.text) } : parsed;
-      if (assignment && !response.isError && !response.failure && ["done", "plan_complete"].includes(applicable.kind)) await collectBuilderContractCoverage(this.projectDir!, assignment.runId, assignment.ticketId, assignment.worktree, adapter, assignment.operationId, submitted, response);
+      if (!this.interruptionRequested && assignment && !response.isError && !response.failure && ["done", "plan_complete"].includes(applicable.kind)) await collectBuilderContractCoverage(this.projectDir!, assignment.runId, assignment.ticketId, assignment.worktree, adapter, assignment.operationId, submitted, response);
       const rejection = assignment ? finishBuildAssignment(this.projectDir!, assignment, response, applicable) : undefined;
+      this.assertNotInterrupted();
       if (rejection) throw new BuildAssignmentRejected(rejection);
       if(assignment&&!response.isError&&applicable.kind==="done"){try{const graphOutcome=await maintainGraphTask(this.projectDir!,assignment.worktree,assignment.operationId,adapter);if(graphOutcome)this.log.write("graph-maintenance",{outcome:graphOutcome});}catch(error){this.log.write("graph-maintenance",{state:"deferred",detail:String(error)});}}
       return response;
@@ -494,9 +512,19 @@ export class Foreman {
             if (!budget.reserveRecoveryAllowance(this.qaRunId, turnPolicy.logicalActionId, "protocol-correction", budget.autonomyPolicy(this.qaRunId)?.limits.protocolCorrections ?? 1)) return { result, status: { kind: "blocked", reason: "shared protocol correction budget exhausted" } };
           } finally { budget.close(); }
         }
-        result = await send(mode === "qa"
+        const correction = mode === "qa"
           ? "Protocol correction only: based on the review already completed, return exactly one final STEP_STATUS: qa_pass or STEP_STATUS: qa_fail marker. Do not repeat QA, tests, tools, or compaction."
-          : "Protocol correction only: based on the work already completed, return exactly one final STEP_STATUS: done, plan_complete, blocked, or needs_input marker. Do not repeat implementation, tools, or compaction.", { ...turnPolicy, responseOnly: true });
+          : "Protocol correction only: based on the work already completed, return exactly one final STEP_STATUS: done, plan_complete, blocked, or needs_input marker. Do not repeat implementation, tools, or compaction.";
+        result = await send([
+          correction,
+          `The previous marker was rejected: ${JSON.stringify(status.error ?? "missing final marker")}.`,
+          "STEP_STATUS is a separate plain-text line, not JSON. Do not append braces, commas, a code fence, or commentary after it. Keep the continuity JSON on its own preceding line.",
+          ...(mode === "builder" ? [
+            `Only if the assigned work is complete, the exact marker form is: STEP_STATUS: done${ticket ? ` | ticket="${ticket}"` : ""}`,
+            `If blocked, use: STEP_STATUS: blocked | ${ticket ? `ticket="${ticket}" ` : ""}reason="the actual blocker"`,
+            "Choose the status supported by the work already performed; do not invent completion.",
+          ] : ["If successful, use exactly: STEP_STATUS: qa_pass", "If failed, retain the required failure report and use exactly: STEP_STATUS: qa_fail"]),
+        ].join("\n"), { ...turnPolicy, responseOnly: true });
         await this.observeBuilderNative(adapter);
         if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
         status = parseStepStatus(result.text);
@@ -618,9 +646,12 @@ export class Foreman {
 
   /** Send a planning turn and return the builder's response text. Does not count toward steps. */
   async runPreflight(n: number, ticketsContent?: string, preferredTicketId?: string, executionTickets?: readonly string[]): Promise<string> {
+    this.assertNotInterrupted();
     const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId) + (executionTickets ? `\nAuthorized ticket scope: ${executionTickets.join(", ")}. Plan only these tickets. Tickets awaiting answers are not eligible for implementation.` : "");
     if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, instruction);
+    this.assertNotInterrupted();
     const result = this.projectDir ? await sendGraphTurn(this.builder,instruction,graphContext(this.projectDir,this.builderWorktree??this.projectDir,"build-preflight",instruction), { purpose: "planning" }) : await this.builder.sendTurn(instruction, { purpose: "planning" });
+    this.assertNotInterrupted();
     await this.observeBuilderNative(this.builder);
     this.log.write("preflight", {
       ticketsProvided: ticketsContent !== undefined,
@@ -634,8 +665,11 @@ export class Foreman {
 
   /** Send user feedback on the plan; builder responds with a revised list. Does not count toward steps. */
   async sendPreflightFeedback(feedback: string): Promise<void> {
+    this.assertNotInterrupted();
     if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, feedback);
+    this.assertNotInterrupted();
     const result = this.projectDir ? await sendGraphTurn(this.builder,feedback,graphContext(this.projectDir,this.builderWorktree??this.projectDir,"build-preflight",feedback), { purpose: "planning" }) : await this.builder.sendTurn(feedback, { purpose: "planning" });
+    this.assertNotInterrupted();
     await this.observeBuilderNative(this.builder);
     this.log.write("preflight", { feedback: true, costUsd: result.costUsd, isError: result.isError });
     if (result.isError) throw new Error(result.text);
@@ -674,6 +708,7 @@ export class Foreman {
     passCertificateId?: string;
     sourceStateDigest?: string;
   }> {
+    this.assertNotInterrupted();
     if (this.projectDir && this.qaFactory) {
       const resumedRecovery = this.qaResumedRecovery;
       const scopedTicket = this.ticketForQa(stepIndex, ticketId);
@@ -683,8 +718,15 @@ export class Foreman {
         builderSummary: builderResult ?? "Builder result unavailable at this explicit QA-only API boundary",
         qaStrategy: this.qaSessionStrategy,
         state: this.qaStream,
-        createQa: this.qaFactory,
-        sessionBoundary: this.qaSessionBoundary ?? (async () => { throw new Error("QA recovery requires a validated durable session boundary"); }),
+        createQa: (...args) => this.createOwnedQa(...args),
+        sessionBoundary: async (...args) => {
+          this.assertNotInterrupted();
+          if (!this.qaSessionBoundary) throw new Error("QA recovery requires a validated durable session boundary");
+          const boundary = await this.qaSessionBoundary(...args);
+          this.activeQaAdapter = boundary.handle.adapter;
+          if (this.interruptionRequested) { await boundary.handle.adapter.close(); throw new BuildInterruptedError(); }
+          return boundary;
+        },
         observeNativeCompactions: this.observeQaNativeCompactions,
         maxCycles: this.qaMaxCycles,
         recovery: { projectDir: this.projectDir, runId: this.qaRunId },
@@ -813,7 +855,15 @@ export class Foreman {
   qaSessionRef(): import("rafi-spec").ProviderSessionRefV1 | undefined { return this.qaStream.sessionRef; }
   builderSessionId(): string | undefined { return this.builder.sessionId(); }
   builderAdapter(): BuilderAdapter { return this.builder; }
-  async close(): Promise<void> { await this.builder.close(); }
+  async close(): Promise<void> {
+    const results = await Promise.allSettled([this.builder.close(), ...(this.activeQaAdapter ? [this.activeQaAdapter.close()] : [])]);
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
+  }
+  async requestStop(): Promise<void> {
+    this.interruptionRequested = true;
+    await Promise.allSettled([this.builder.close(), ...(this.activeQaAdapter ? [this.activeQaAdapter.close()] : [])]);
+  }
 
   private ticketForQa(stepIndex: number, ticketId?: string): TicketDef {
     if (this.projectDir && this.ticketsEnabled) {
@@ -855,6 +905,7 @@ export class Foreman {
       catch (error) { if (!(error instanceof HumanDecisionRequired)) throw error; detail = error.message; return false; }
     };
     for (let i = 1; completed < n; i++) {
+      this.assertNotInterrupted();
       if (this.projectDir) {
         try {
           assertBuildAssignmentReconciled(this.projectDir, this.qaRunId);

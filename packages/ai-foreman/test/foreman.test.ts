@@ -19,6 +19,18 @@ import { createBuildRun, releaseBuildLease } from "../src/buildRuns.js";
 import { readQaEvidenceSnapshot } from "../src/qaEvidenceReader.js";
 import { BUILDER_QA_REMEDIATION_END, BUILDER_QA_REMEDIATION_START, type ProviderSessionRefV1 } from "rafi-spec";
 
+test("intentional stop prevents any further planning or implementation dispatch", async () => {
+  const dir = makeTmpDir();
+  const builder = new FakeBuilder(["must not dispatch"]);
+  const foreman = new Foreman(builder, new Log(join(dir, "stop.jsonl")), false, false);
+  try {
+    await foreman.requestStop();
+    await assert.rejects(foreman.runPreflight(1), /Build interrupted/);
+    await assert.rejects(foreman.runBatch(1), /Build interrupted/);
+    assert.deepEqual(builder.instructions, []);
+  } finally { await foreman.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 function makeTmpDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "foreman-runner-test-"));
   execFileSync("git", ["init", "-q"], { cwd: dir });
@@ -619,13 +631,29 @@ test("explicit recovery never reopens a ticket whose dependency remains unfinish
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("interruption during an awaited session boundary prevents the next provider dispatch", async () => {
+  const dir = makeTmpDir();
+  try {
+    const predecessor = new FakeBuilder([]), successor = new FakeBuilder(["should never be sent"]);
+    let release!: () => void, entered!: () => void;
+    const boundary = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const foreman = new Foreman(predecessor, new Log(join(dir, "cancel-boundary.jsonl")), false, false, 3, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      async () => { entered(); await boundary; return successor; });
+    const turn = foreman.runPreflight(1);
+    const rejected = assert.rejects(turn, /Build interrupted/);
+    await ready; await foreman.requestStop(); release(); await rejected; await foreman.close();
+    assert.equal(predecessor.instructions.length, 0); assert.equal(successor.instructions.length, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("response-only protocol correction retains the assigned ticket across safe boundaries", async () => {
   const dir = makeTmpDir();
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
     cmdUpdate(dir, "T001", { status: "next", actor: "test" });
-    const builder = new FakeBuilder(['work finished without marker', 'STEP_STATUS: done | ticket="T001"']);
+    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"}', 'STEP_STATUS: done | ticket="T001"']);
     const boundaries: string[] = [];
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir, undefined, undefined, undefined, undefined, undefined, undefined,
       async (adapter, action) => { boundaries.push(action); return adapter; });
@@ -634,6 +662,9 @@ test("response-only protocol correction retains the assigned ticket across safe 
     assert.equal(builder.instructions.length, 2);
     assert.match(builder.instructions[1]!, /Protocol correction only/);
     assert.match(builder.instructions[1]!, /Do not repeat implementation/);
+    assert.match(builder.instructions[1]!, /malformed STEP_STATUS field/);
+    assert.match(builder.instructions[1]!, /Do not append braces/);
+    assert.match(builder.instructions[1]!, /exact marker form is: STEP_STATUS: done \| ticket="T001"/);
     assert.ok(builder.instructions.every(instruction => instruction.includes('Ticket scope: T001.') && instruction.includes('ticket="T001"')));
     assert.ok(boundaries.every(instruction => instruction.includes('Ticket scope: T001.')));
   } finally { rmSync(dir, { recursive: true, force: true }); }

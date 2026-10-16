@@ -17,6 +17,8 @@ import { loadTickets } from "./tickets/ticketLoader.js";
 import { loadProjectAutonomyConfig, resolveAutonomyPolicy } from "./recoveryPolicy.js";
 import { classifyProcess, isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
 import { assertBuildAssignmentReconciled } from "./buildAssignment.js";
+import { computeDisplayStatus, resolveBlockers } from "./tickets/blockers.js";
+import type { TicketState } from "./tickets/stateDb.js";
 
 export const BUILD_RUN_VERSION = 3;
 export const BUILD_RUN_DIRECTORY = ".foreman/runs";
@@ -192,6 +194,10 @@ export function saveBuildRun(projectDir: string, run: BuildRunRecordV2, now = ne
     const existing = workflow.getRun(next.runId);
     const priorProgress = existing?.state.progress as {completedTickets?: string[]}|undefined;
     next = {...next,progress:{...next.progress,completedTickets:[...new Set([...next.progress.completedTickets,...(priorProgress?.completedTickets??[])])]}};
+    const newlyCompleted = next.progress.completedTickets.filter(ticket => !priorProgress?.completedTickets?.includes(ticket));
+    if (newlyCompleted.length || next.status === "completed") next = { ...next, progress: { ...next.progress,
+      lastSuccessfulAction: next.status === "completed" ? "Build completed" : `Recorded completion of ${newlyCompleted.join(", ")}`,
+    } };
     if (existing && ["completed", "cancelled", "superseded"].includes(existing.status) && workflowStatus(next.status) !== existing.status) throw new Error(`cannot rewrite a ${existing.status} build run`);
     if (!existing) workflow.createRun({
       runId: next.runId, kind: "build", checkpoint: next.checkpoint,
@@ -237,6 +243,16 @@ export function checkpointBuildRun(
   patch: Partial<BuildRunRecordV2> = {},
 ): BuildRunRecordV2 {
   return saveBuildRun(projectDir, { ...run, ...patch, checkpoint, receipts: patch.receipts ?? run.receipts });
+}
+
+/** Refresh a publication from durable state while retaining only the caller's
+ * original execution authority. A read-only projection never grants authority. */
+export function persistCurrentBuildSession(projectDir: string, authorizedRun: BuildRunRecordV2, role: "builder" | "qa", session: ProviderSessionRefV1): BuildRunRecordV2 {
+  const db = new WorkflowDb(projectDir);
+  try { assertBuildAuthority(db, authorizedRun); } finally { db.close(); }
+  const latest = readBuildRuns(projectDir).find(run => run.runId === authorizedRun.runId);
+  if (!latest) throw new Error("The authorized build no longer exists; inspect recovery before publishing a session");
+  return persistBuildSession(projectDir, { ...authorizedRun, ...latest }, role, session);
 }
 
 export function persistBuildSession(
@@ -336,6 +352,23 @@ export function finishRecoveredTicketScope(projectDir: string, run: BuildRunReco
   }), "recoverable");
 }
 
+/** A recovered boundary cannot authorize work on a still-blocked remainder. */
+export function hasRunnableBuildRemainder(projectDir: string, run: BuildRunRecordV2): boolean {
+  if (run.authorizedBatch && run.progress.completedTickets.length >= run.authorizedBatch.requestedSteps) return false;
+  if (!isTicketsInitialized(projectDir)) return false;
+  const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);
+  const db = new Database(paths.stateDb, { readonly: true, fileMustExist: true });
+  try {
+    const states = new Map((db.prepare("SELECT * FROM ticket_state").all() as TicketState[]).map(state => [state.ticket_id, state]));
+    return loadTickets(paths.tickets).some(ticket => {
+      if (!run.progress.remainingTickets.includes(ticket.id)) return false;
+      const blockedBy = resolveBlockers(ticket, states);
+      const status = computeDisplayStatus(states.get(ticket.id)?.status ?? "planned", blockedBy);
+      return blockedBy.length === 0 && ["next", "in_progress"].includes(status);
+    });
+  } finally { db.close(); }
+}
+
 export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
   const directory = join(resolve(projectDir), BUILD_RUN_DIRECTORY);
   const workflow = new WorkflowReader(projectDir);
@@ -364,8 +397,12 @@ export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
       const authoritative = workflow?.getRun(projection.runId)?.state as unknown as BuildRunRecord | undefined;
       const run = authoritative?.runId ? authoritative : projection;
       let upgraded = upgradeBuildRun(run, projectDir);
-      const dbStatus = workflow.getRun(run.runId)?.status;
+      const storedRun = workflow.getRun(run.runId);
+      const dbStatus = storedRun?.status;
       if (dbStatus === "superseded" || dbStatus === "completed" || dbStatus === "cancelled") upgraded = { ...upgraded, status: dbStatus };
+      else if (storedRun && (dbStatus === "failed" || dbStatus === "paused" || dbStatus === "blocked")) {
+        upgraded = { ...upgraded, status: dbStatus === "failed" ? "failed" : "recoverable", checkpoint: storedRun.checkpoint, updatedAt: storedRun.updatedAt };
+      }
 
       if (!["completed", "superseded", "cancelled"].includes(workflow?.getRun(run.runId)?.status ?? "")) {
         for (const role of ["builder", "qa"] as const) {
@@ -462,6 +499,7 @@ export interface BuildRecoveryProjection {
   compactLabel: string;
   compactHint: string;
   completed: string[];
+  completedOperations?: string[];
   remaining: string[];
   lastSuccess: string;
   interruption: string;
@@ -560,7 +598,8 @@ export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, 
   const unexpectedChanges = baseChanges.map((path) => ({ path, risk: "base-worktree changes may conflict with recovery" }));
   if (identityChanged) unexpectedChanges.push({ path: recoveryWorktree, risk: "preserved worktree identity changed" });
   if (branchChanged) unexpectedChanges.push({ path: recoveryWorktree, risk: `branch changed from ${expectedBranch} to ${branchNow}` });
-  const completed = [...new Set([...(progress?.completed ?? run.progress.completedTickets), ...run.progress.completedOperations, ...operationNames])];
+  const completed = [...new Set(progress?.completed ?? run.progress.completedTickets)];
+  const completedOperations = [...new Set([...run.progress.completedOperations, ...operationNames])];
   const remaining = progress?.remaining ?? (run.progress.remainingTickets.length ? run.progress.remainingTickets : remainingTickets(run));
   const interruption = run.interruption?.lastError ?? run.interruption?.summary ?? run.failure?.summary ?? issues.at(-1) ?? run.status;
   const validation = run.progress.validation
@@ -577,8 +616,8 @@ export function projectBuildRecovery(projectDir: string, run: BuildRunRecordV2, 
     run, ticketId, ticketTitle,
     compactLabel: `${primary} — ${run.status}`,
     compactHint: `${run.builder?.settings.make ?? "runtime unavailable"}; ${stateBranch ?? branchNow ?? run.repository.branch ?? "current branch"}; updated ${relativeTime(run.updatedAt, now)}`,
-    completed, remaining,
-    lastSuccess: run.progress.lastSuccessfulAction ?? run.checkpoint,
+    completed, completedOperations, remaining,
+    lastSuccess: run.progress.lastSuccessfulAction ?? "none recorded",
     interruption,
     validation,
     expectedChanges,
@@ -623,6 +662,7 @@ export function formatBuildRecoveryProjection(projection: BuildRecoveryProjectio
     `ticket ${projection.ticketId ?? "unavailable"}${projection.ticketTitle ? `: ${projection.ticketTitle}` : ""}`,
     `status ${run.status}; checkpoint ${run.checkpoint}`,
     `completed ${projection.completed.join(", ") || "none recorded"}`,
+    ...(projection.completedOperations?.length ? [`verified operation receipts ${projection.completedOperations.join(", ")}`] : []),
     `current ${run.progress.currentStep ?? projection.ticketId ?? "not recorded"}`,
     `remaining ${projection.remaining.join(", ") || "none"}`,
     `last successful action ${projection.lastSuccess}`,
@@ -674,7 +714,7 @@ function captureGitSnapshot(worktree: string, input: CreateBuildRunInput): Build
   const git = (args: string[]): string | undefined => {
     try { return execFileSync("git", args, { cwd: worktree, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined; } catch { return undefined; }
   };
-  const statusPaths = (git(["status", "--porcelain=v1", "-z"]) ?? "").split("\0").filter(Boolean).map((line) => line.slice(3)).sort();
+  const statusPaths = gitStatusPaths(worktree);
   const head = input.startHead ?? git(["rev-parse", "HEAD"]);
   const branch = input.branch ?? git(["branch", "--show-current"]);
   return {
@@ -702,7 +742,18 @@ function gitValue(cwd: string, args: string[]): string | undefined {
 }
 
 function gitStatusPaths(cwd: string): string[] {
-  return (gitValue(cwd, ["status", "--porcelain=v1", "-z"]) ?? "").split("\0").filter(Boolean).map((line) => line.slice(3)).sort();
+  try {
+    // Porcelain status columns and pathname whitespace are significant. In -z
+    // mode a rename/copy has a second raw pathname, without status columns.
+    const records = execFileSync("git", ["status", "--porcelain=v1", "-z"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).split("\0");
+    const paths: string[] = [];
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i]; if (!record) continue;
+      paths.push(record.slice(3));
+      if (/[RC]/.test(record.slice(0, 2)) && records[i + 1]) paths.push(records[++i]!);
+    }
+    return [...new Set(paths.filter(Boolean))].sort();
+  } catch { return []; }
 }
 
 function relativeTime(value: string, now: Date): string {
@@ -741,7 +792,7 @@ function upgradeBuildRun(run: BuildRunRecord, projectDir = run.repository.root, 
       completedTickets: legacy.status === "completed" ? [...legacy.tickets] : [],
       completedOperations: Object.keys(legacy.receipts).sort(),
       remainingTickets: remaining,
-      lastSuccessfulAction: legacy.checkpoint,
+      ...(legacy.status === "completed" ? { lastSuccessfulAction: "build completed" } : {}),
       nextAction: remaining[0] ? `Resume ${remaining[0]}` : "Inspect legacy run",
     },
     frozenPolicy: policy,

@@ -1,4 +1,5 @@
 import { finalQaRoleInstructions, resolveEffectiveQaConfiguration } from "../qaEffectiveConfig.js";
+import { activateQaRecoveryBuilder } from "../qaBuilderActivation.js";
 import { graphContext, sendGraphTurn } from "../graph/turn.js";
 import { initializeSyntheticWork } from "../buildSyntheticWork.js";
 import { admitApprovedTicket } from "../buildWorkAuthorization.js";
@@ -8,7 +9,7 @@ import { formatRecoveryCommand, formatDecisionCommands, formatExactRunRecovery }
 import { durableReadOnlyProposal } from "../readOnlyProposal.js";
 import { captureFrozenQaSource } from "../qaSnapshot.js";
 import { finishStartAdmission, superviseStart, supervisedRunId } from "../supervisedStart.js";
-import { assertBuildAssignmentReconciled, isInterruptedBuilderRecovery } from "../buildAssignment.js";
+import { assertBuildAssignmentReconciled, isInterruptedBuilderRecovery, assertInterruptedSourceSnapshot } from "../buildAssignment.js";
 import { durableHumanDecision, HumanDecisionRequired, HumanDecisionCancelled, servicePendingHumanDecisions } from "../humanDecision.js";
 import { requiresBuildApproval, buildScopeRevision, createBuildApprovalGate } from "../buildApproval.js";
 import { Command, Option } from "commander";
@@ -24,7 +25,7 @@ import { PermissionPolicy } from "../permissions/policy.js";
 import { ClaudeAdapter } from "../adapters/claude.js";
 import { CodexAdapter } from "../adapters/codex.js";
 import { RecoveringAdapter } from "../adapters/recovering.js";
-import { Foreman, createPermissionHandler } from "../foreman.js";
+import { Foreman, BuildInterruptedError, createPermissionHandler } from "../foreman.js";
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
 import { printEvents } from "./events.js";
 import { loadRoleBundle } from "../roles.js";
@@ -41,7 +42,7 @@ import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
 import { branchPlanLogMetadata, presentBranchPlan } from "../branch/presentation.js";
-import { buildRunSessionBinding, checkpointBuildRun, completeBuildRun, createBuildRun, currentBranchRecoveryTicket, currentBranchTicketProgress, recoveryExecutionTickets, finishRecoveredTicketScope, heartbeatBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
+import { buildRunSessionBinding, checkpointBuildRun, completeBuildRun, createBuildRun, currentBranchRecoveryTicket, currentBranchTicketProgress, recoveryExecutionTickets, finishRecoveredTicketScope, heartbeatBuildRun, persistBuildSession, persistCurrentBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
 import type { AutonomyProfile, BuildRunRecordV2, BuildRunRecordV3, ProviderSessionRefV1, ResolvedAgentSettings, SessionStrategy } from "rafi-spec";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
 import { parse as parseYaml } from "yaml";
@@ -490,7 +491,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
     .option("-t, --tickets <path>", "path to ticket file (.md, .txt, .yaml, …) — passed to the builder as context")
     .option("-y, --yes", "skip pre-flight confirmation prompt")
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
-    .option("--fast", "fast mode — lower latency (maps to effort=low for codex)")
+    .option("--fast", "use native fast mode when available; keep the model and reasoning settings")
     .option("--no-qa", "disable per-ticket QA review (enabled by default)")
     .option("--autonomy <profile>", "autonomy profile (supervised | balanced | unattended)")
     .option("--detach", "return after launching the durable supervisor")
@@ -905,7 +906,10 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       let activeContinuityRunId: string | undefined;
       let liveStatusReporter: AgentStatusReporter | undefined;
       let activeBuilderForStatus: (() => BuilderAdapter) | undefined;
-      const resolvedContinuitySettings = (role: "builder" | "qa"): ResolvedAgentSettings => role === "builder" ? {
+      const qaBuilderRecoverySelected = recoveryRecord?.recoveryDecision?.role === "qa";
+      const savedQaBuilderSettings = qaBuilderRecoverySelected ? recoveryRecord.builder?.settings : undefined;
+      let publishActivatedBuilderSession: ((session: ProviderSessionRefV1) => void) | undefined;
+      const resolvedContinuitySettings = (role: "builder" | "qa"): ResolvedAgentSettings => role === "builder" && savedQaBuilderSettings ? { ...savedQaBuilderSettings } : role === "builder" ? {
         role, source: roleDefaults.builder ? "project" : "provider", make: agent, model: model ?? "default",
         reasoning: builderEffort ?? "default", fast: Boolean(builderFast), session_strategy: roleDefaults.builder?.session_strategy ?? "compact",
         settings_revision: settingsRevision, display_session_cost: sessionCostOverride ?? roleDefaults.builder?.display_session_cost ?? false,
@@ -1228,6 +1232,32 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         return continuous;
       };
 
+      // QA-only recovery leaves Builder ownership untouched until a real,
+      // approved remediation/guidance boundary needs Builder work. The unused
+      // adapter cannot bypass the old role owner or use QA's CLI model settings.
+      const activateBuilderForQaRecovery = async (adapter: BuilderAdapter, worktree: string, frozenAction: string): Promise<BuilderAdapter> => {
+        if (!qaBuilderRecoverySelected || !recoveryRecord) return adapter;
+        const currentRun = readBuildRuns(cwd).find(run => run.runId === recoveryRecord.runId);
+        // The saved recovery ticket is only the initial boundary. Later batch
+        // tickets must bind their own durable selection before Builder work.
+        const ticketId = currentRun?.currentTicket ?? recoveryRecord.recoveryDecision?.executionTickets?.[0] ?? requestedTicketIds[0];
+        if (!ticketId) throw new Error("QA recovery has no approved Builder follow-up ticket; inspect this build before dispatch");
+        const activated = await activateQaRecoveryBuilder({ projectDir: cwd, runId: recoveryRecord.runId, ticketId, worktree, adapter,
+          settings: savedQaBuilderSettings ?? resolvedContinuitySettings("builder"), expectedCapabilities: builderCapabilities, frozenAction,
+          createSuccessor: () => createBuilderForSettings(worktree, savedQaBuilderSettings ?? resolvedContinuitySettings("builder")),
+          wrap: successor => continuousBuilder(successor, worktree, recoveryRecord.runId, savedQaBuilderSettings ?? resolvedContinuitySettings("builder")),
+          recovery: { ...handoffRecoveryOptions("builder"), allowProviderSwitch: false },
+        });
+        if (activated !== adapter) {
+          const current = readBuildRuns(cwd).find(run => run.runId === recoveryRecord.runId);
+          const ref = activated.sessionRef?.();
+          if (!current || !ref?.validatedAt) throw new Error("Accepted Builder activation lacks a durable scoped session; recovery is paused before implementation");
+          if (!publishActivatedBuilderSession) throw new Error("Accepted Builder activation has no original execution authority; recovery is paused before implementation");
+          publishActivatedBuilderSession(ref);
+        }
+        return activated;
+      };
+
       const applyBuilderSettingsBoundary = async (
         runId: string,
         builderCwd: string,
@@ -1413,7 +1443,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           phase: "QA review session", sessionTransition: sessionId ? "resumed QA session" : "QA session", adapter: active,
           settingsRevision: qaSettings.settings_revision, displaySessionCost: qaSettings.display_session_cost,
           compactionCount: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.successfulCompactionCount(activeContinuityRunId, "qa", active.sessionRef?.() ?? active.sessionId()) : 0; } finally { db.close(); } },
-          handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.handoffs(activeContinuityRunId).at(-1)?.generation ?? 0 : 0; } finally { db.close(); } },
+          handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.roleMutationLease(activeContinuityRunId, "qa")?.generation ?? 0 : 0; } finally { db.close(); } },
         }), () => {
           const active = activeBuilderForStatus?.();
           if (active) liveStatusReporter?.updateState({
@@ -1421,7 +1451,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
             phase: "builder work session", sessionTransition: "builder session", adapter: active,
             settingsRevision, displaySessionCost: sessionCostOverride ?? roleDefaults.builder?.display_session_cost ?? false,
             compactionCount: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.successfulCompactionCount(activeContinuityRunId, "builder", active.sessionRef?.() ?? active.sessionId()) : 0; } finally { db.close(); } },
-            handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.handoffs(activeContinuityRunId).at(-1)?.generation ?? 0 : 0; } finally { db.close(); } },
+            handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return activeContinuityRunId ? db.roleMutationLease(activeContinuityRunId, "builder")?.generation ?? 0 : 0; } finally { db.close(); } },
           });
         });
         qaRuntimeMetadata.set(continuous, metadata!); qaRuntimeMetadata.set(decorated, metadata!);
@@ -1495,8 +1525,12 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           explicitRecoveryAccepted = true;
           const packet = pendingQaRecoveryPacket(cwd, recoveryRecord!.runId, requestedTicketIds[0]);
           if (!packet) throw new Error("accepted QA recovery handoff has no current durable packet");
+          const boundaryDb = new WorkflowDb(cwd);
+          let afterOwnedRemediation = false;
+          try { afterOwnedRemediation = boundaryDb.hasConfirmedQaRemediationForRecheck(packet.manifest.runId, packet.manifest.ticketId); }
+          finally { boundaryDb.close(); }
           const confinement = describeQaHandle(adapter, qaCwd, { kind: "initial" }).confinement;
-          handoffReceipt = { kind: "accepted", receipt: qaV2HandoffReceipt(accepted.acceptanceReceipt, {
+          handoffReceipt = afterOwnedRemediation ? { kind: "initial" } : { kind: "accepted", receipt: qaV2HandoffReceipt(accepted.acceptanceReceipt, {
             runId: packet.manifest.runId, ticketId: packet.manifest.ticketId, packetDigest: packet.manifest.packetDigest,
             reviewedStateDigest: packet.manifest.reviewedStateDigest,
           }, confinement.digest) };
@@ -1711,7 +1745,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           await ensureReviewProviderReady(cwd, branchDefaults.reviewProvider, log, Boolean(opts.yes));
         }
 
-        console.log(`foreman: builder capability request: workspace writes, shell network ${grantedNetwork ? "approved for this build" : "off"}, approvals ${opts.builderApprovals ? "per operation" : "never"}; effective policy requires provider confirmation. Use a provenance-verified local source/dependency bundle for offline acquisition.`);
+        if (grantedNetwork || opts.builderApprovals) console.log(`foreman: requested Builder shell capabilities: network ${grantedNetwork ? "approved for this build" : "off"}; approvals ${opts.builderApprovals ? "per operation" : "never"}. Effective permissions will be verified with the provider.`);
       const ready = await ensureBuildRuntimeReadyForCommand(cwd, agent, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
           label: "start",
           yes: Boolean(opts.yes),
@@ -1879,7 +1913,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           resumeSessionByTicket.set(ticketId, { ...session, sessionRef: availability.sessionRef });
         }
 
-        const capturedBranchBuilder: ResolvedAgentSettings = {
+        const capturedBranchBuilder: ResolvedAgentSettings = savedQaBuilderSettings ? { ...savedQaBuilderSettings } : {
           role: "builder", source: opts.agent || opts.model || opts.effort || opts.fast ? "cli" : roleDefaults.builder ? "project" : "provider",
           make: agent, model: model ?? "default", reasoning: builderEffort ?? "default", fast: Boolean(builderFast),
           session_strategy: roleDefaults.builder?.session_strategy ?? "compact", settings_revision: settingsRevision,
@@ -1895,7 +1929,9 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           compact_maximum: roleDefaults.qa?.compact_maximum ?? 10,
         };
         const firstResumeRef = plan.nodes[0] ? resumeSessionByTicket.get(plan.nodes[0].ticket.id)?.sessionRef : undefined;
-        let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBranchBuilder, qa: capturedBranchQa, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
+        const branchQaOnlyRecovery = Boolean(recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord)
+          && (opts.qaRevision !== undefined || pendingQaRecoveryPacket(cwd, recoveryRecord.runId, requestedTicketIds[0])));
+        let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { ...(branchQaOnlyRecovery ? {} : { builder: capturedBranchBuilder, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null }), qa: capturedBranchQa, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
           runId: invocationRunId,
           builderCapabilities, tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
           repositoryRoot: cwd, branchMode: branchPresentation.allocationMode, baseRef: plan.baseRef, builder: capturedBranchBuilder, qa: capturedBranchQa,
@@ -1903,6 +1939,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           runDecisions: { dirtyWork, workMode: "branch-per-ticket", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBranchBuilder.auto_compact_threshold_percent ?? 65, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
         });
         activeContinuityRunId = masterRun.runId;
+        publishActivatedBuilderSession = ref => { masterRun = persistCurrentBuildSession(cwd, masterRun, "builder", ref); };
         if (requiresBuildApproval(cwd, plan.nodes.map(node => node.ticket.id), autoApprovePlanUpdates, approvalConsequences) && plan.issues.every((issue) => !issue.blocking)) {
           const action = await durableHumanDecision({ projectDir: cwd, runId: invocationRunId, key: `branch-plan:${buildScopeRevision(cwd, approvalConsequences)}`, prompt: branchPresentation.prompt, choices: [{ id: "proceed", label: "Proceed" }, { id: "cancel", label: "Cancel" }], operation: () => select({
             message: branchPresentation.prompt,
@@ -2040,7 +2077,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
               phase: "builder ticket session", sessionTransition: builder.sessionId() ? "resumed session" : "initial session", adapter: builder,
               settingsRevision: capturedBranchBuilder.settings_revision, displaySessionCost: capturedBranchBuilder.display_session_cost ?? false,
               compactionCount: () => { const db = new WorkflowDb(cwd); try { return db.successfulCompactionCount(masterRun.runId, "builder", builder.sessionRef?.() ?? builder.sessionId()); } finally { db.close(); } },
-              handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.handoffs(masterRun.runId).at(-1)?.generation ?? 0; } finally { db.close(); } },
+              handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.roleMutationLease(masterRun.runId, "builder")?.generation ?? 0; } finally { db.close(); } },
             }, (line, snapshot) => {
               const activity = currentActivity();
               if (activity) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, "")); else console.log(line);
@@ -2051,9 +2088,12 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
             try { await printEvents(builder.events()); } finally { reporter.stop(); }
           },
           qaNonconvergence,
-          beforeBuilderTurn: async (adapter, frozenAction, worktreePath) => (await branchContextController(worktreePath).atSafeBoundary(adapter, frozenAction)).adapter,
+          beforeBuilderTurn: async (adapter, frozenAction, worktreePath) => (await branchContextController(worktreePath).atSafeBoundary(await activateBuilderForQaRecovery(adapter, worktreePath, frozenAction), frozenAction)).adapter,
           observeBuilderNativeCompactions: async (adapter, worktreePath) => { await branchContextController(worktreePath).observeNativeCompactions(adapter); },
-          builderSessionBoundary: async (adapter, frozenAction, strategy, worktreePath) => (await branchContextController(worktreePath).atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter,
+          builderSessionBoundary: async (adapter, frozenAction, strategy, worktreePath) => {
+            const activated = await activateBuilderForQaRecovery(adapter, worktreePath, frozenAction);
+            return activated !== adapter ? activated : (await branchContextController(worktreePath).atWorkSessionBoundary(activated, frozenAction, strategy)).adapter;
+          },
           qaSessionBoundary,
           observeQaNativeCompactions,
           });
@@ -2154,7 +2194,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           executionTickets = executionTickets ?? loadTickets(paths.tickets).filter(ticket => !["done", "canceled", "cancelled", "obsolete"].includes(state.getState(ticket.id)?.status ?? "planned")).sort((a, b) => a.order - b.order).slice(0, steps).map(ticket => ticket.id);
         } finally { state.close(); }
       }
-      console.log(`foreman: builder capability request: workspace writes, shell network ${grantedNetwork ? "approved for this build" : "off"}, approvals ${opts.builderApprovals ? "per operation" : "never"}; effective policy requires provider confirmation. Use a provenance-verified local source/dependency bundle for offline acquisition.`);
+      if (grantedNetwork || opts.builderApprovals) console.log(`foreman: requested Builder shell capabilities: network ${grantedNetwork ? "approved for this build" : "off"}; approvals ${opts.builderApprovals ? "per operation" : "never"}. Effective permissions will be verified with the provider.`);
       const ready = await ensureBuildRuntimeReadyForCommand(cwd, agent, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
         label: "start",
         yes: Boolean(opts.yes),
@@ -2183,7 +2223,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         qaModel = qaReady.model;
         qaExecutable = qaReady.executable;
       }
-      const capturedBuilder: ResolvedAgentSettings = {
+      const capturedBuilder: ResolvedAgentSettings = savedQaBuilderSettings ? { ...savedQaBuilderSettings } : {
         role: "builder", source: opts.agent || opts.model || opts.effort || opts.fast ? "cli" : roleDefaults.builder ? "project" : "provider",
         make: agent, model: model ?? "default", reasoning: builderEffort ?? "default", fast: Boolean(builderFast),
         session_strategy: roleDefaults.builder?.session_strategy ?? "compact", settings_revision: settingsRevision,
@@ -2192,7 +2232,11 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         compact_maximum: roleDefaults.builder?.compact_maximum ?? 10,
       };
       const capturedQa: ResolvedAgentSettings = { role: "qa", source: roleDefaults.qa ? "project" : "provider", make: qaAgent, model: qaModel ?? "default", reasoning: qaEffort ?? "default", fast: qaFast, session_strategy: roleDefaults.qa?.session_strategy ?? "compact", display_session_cost: sessionCostOverride ?? roleDefaults.qa?.display_session_cost ?? false, auto_compact_threshold_percent: roleDefaults.qa?.auto_compact_threshold_percent ?? 65, compact_maximum: roleDefaults.qa?.compact_maximum ?? 10, settings_revision: settingsRevision };
-      let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { builder: capturedBuilder, qa: capturedQa, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
+      // QA recovery owns the QA session only. Its CLI model overrides and unused
+      // Builder adapter must not replace the saved Builder that continues later.
+      const qaOnlyRecovery = Boolean(recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord)
+        && (opts.qaRevision !== undefined || pendingQaRecoveryPacket(cwd, recoveryRecord.runId, requestedTicketIds[0])));
+      let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { ...(qaOnlyRecovery ? {} : { builder: capturedBuilder, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null }), qa: capturedQa, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
         runId: invocationRunId,
         tickets: [...(executionTickets ?? [])], builderCapabilities, authorizedBatch: { tickets: [...(executionTickets ?? [])], requestedSteps: steps, scopeRevision: buildScopeRevision(cwd, approvalConsequences), startedTickets: [] }, repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
         frozenPolicy, autonomyProfile, qaEnabled,
@@ -2201,6 +2245,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       buildRun = checkpointBuildRun(cwd, buildRun, "capabilities-resolved", { builderCapabilities });
       activeObserver?.store.attachExecutionLease(activeObserver.executionId, readCurrentWorkflowLease(cwd)?.generation);
       activeContinuityRunId = buildRun.runId;
+      publishActivatedBuilderSession = ref => { buildRun = persistCurrentBuildSession(cwd, buildRun, "builder", ref); };
       const qaResumedRecovery = recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord) ? pendingQaRecoveryPacket(cwd, buildRun.runId, requestedTicketIds[0]) : undefined;
       let qaFinalizationTicket: string | undefined;
       let qaProtocolResumeTicket: string | undefined;
@@ -2232,15 +2277,31 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       }
       const heartbeat = setInterval(() => { buildRun = heartbeatBuildRun(cwd, buildRun); }, 10_000);
       heartbeat.unref();
+      let interruptionRequested = false;
+      let stopActiveBuild: (() => Promise<void>) | undefined;
       const checkpointSignal = (): void => {
-        try { buildRun = releaseBuildLease(cwd, buildRun, "interrupted"); } catch { /* best effort */ }
+        if (["completed", "cancelled", "superseded"].includes(buildRun.status)) return;
+        if (interruptionRequested) return;
+        interruptionRequested = true;
+        clearInterval(heartbeat);
+        // Hold the lease until the cancelled provider turn has published its
+        // outcome. Releasing here races with assignment and completion writes.
+        void stopActiveBuild?.().catch(error => log.write("error", { phase: "interruption-cleanup", message: String(error) }));
       };
       process.once("SIGINT", checkpointSignal);
       process.once("SIGTERM", checkpointSignal);
       let builder: BuilderAdapter;
       try {
+        if (recoveryRecord) assertInterruptedSourceSnapshot(cwd, recoveryRecord);
         builder = await createBuilder(cwd, resumeSessionId, resumeSessionRef);
+        stopActiveBuild = () => builder.close();
+        if (interruptionRequested) { await builder.close(); throw new BuildInterruptedError(); }
       } catch (error) {
+        if (error instanceof BuildInterruptedError) {
+          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "interrupted", { status: "recoverable" }), "recoverable");
+          console.error(`rafi: Build interrupted; current work is preserved. Continue with ${formatRecoveryCommand(cwd)}`);
+          process.exit(2);
+        }
         if (!(error instanceof SessionUnavailableError)) throw error;
         const summary = error.message.slice(0, 1000);
         buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "session-unavailable-before-dispatch", {
@@ -2302,8 +2363,11 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         qaEnabled ? createQa : undefined, capturedQa.session_strategy,
         createBuilder, capturedBuilder.session_strategy,
         qaNonconvergence,
-        async (adapter, frozenAction) => (await contextController.atSafeBoundary(adapter, frozenAction)).adapter,
-        async (adapter, frozenAction, strategy) => (await contextController.atWorkSessionBoundary(adapter, frozenAction, strategy)).adapter,
+        async (adapter, frozenAction) => (await contextController.atSafeBoundary(await activateBuilderForQaRecovery(adapter, cwd, frozenAction), frozenAction)).adapter,
+        async (adapter, frozenAction, strategy) => {
+          const activated = await activateBuilderForQaRecovery(adapter, cwd, frozenAction);
+          return activated !== adapter ? activated : (await contextController.atWorkSessionBoundary(activated, frozenAction, strategy)).adapter;
+        },
         qaSessionBoundary,
         observeQaNativeCompactions,
         async (adapter) => { await contextController.observeNativeCompactions(adapter); },
@@ -2315,6 +2379,8 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         buildRun.runId,
         frozenPolicy.continueIndependentTickets,
       );
+      stopActiveBuild = () => foreman.requestStop();
+      if (interruptionRequested) await foreman.requestStop();
       activeBuilderForStatus = () => foreman.builderAdapter();
       const statusReporter = liveStatusReporter = new AgentStatusReporter({
         runId: buildRun.runId,
@@ -2324,7 +2390,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         settingsRevision: capturedBuilder.settings_revision,
         displaySessionCost: capturedBuilder.display_session_cost ?? false,
         compactionCount: () => { const db = new WorkflowDb(cwd); try { return db.successfulCompactionCount(buildRun.runId, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()); } finally { db.close(); } },
-        handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.handoffs(buildRun.runId).at(-1)?.generation ?? 0; } finally { db.close(); } },
+        handoffGeneration: () => { const db = new WorkflowDb(cwd); try { return db.roleMutationLease(buildRun.runId, "builder")?.generation ?? 0; } finally { db.close(); } },
       }, (line, snapshot) => {
         const activity = currentActivity();
         if (activity) activity.setAgentStatus(line.replace(/^\[[^\]]+\]\s*/, ""));
@@ -2340,7 +2406,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         builderFast ? "fast" : null,
         qaEnabled ? null : "qa=off",
       ].filter(Boolean).join(" ");
-      console.log(`${accent("foreman:")} driving a ${sanitizeTerminalText(agent)} builder through ${steps} step(s)${modifiers ? ` [${sanitizeTerminalText(modifiers)}]` : ""}`);
+      console.log(`${accent("foreman:")} requested batch budget ${steps} step(s); current admitted scope ${buildRun.tickets.join(", ") || "awaiting a validated work plan"}; ${sanitizeTerminalText(agent)} Builder${modifiers ? ` [${sanitizeTerminalText(modifiers)}]` : ""}`);
       console.log(`${accent("foreman:")} project ${sanitizeTerminalText(cwd)}`);
       if (trackerRelPath) console.log(`${accent("foreman:")} tracker ${sanitizeTerminalText(trackerRelPath)}`);
       console.log(`${accent("foreman:")} log ${sanitizeTerminalText(logPath)}\n`);
@@ -2376,7 +2442,6 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
             ? activeObserver.span("qa_recovery", "Exact QA-only recovery", () => foreman.completePendingQaRecovery(ticketId))
             : foreman.completePendingQaRecovery(ticketId));
           if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted`);
-          if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
           if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
           buildRun = qa.outcome === "passed" || qa.outcome === "waived"
             ? finishRecoveredTicketScope(cwd, buildRun, "qa-recovery-complete")
@@ -2511,7 +2576,15 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         process.exit(result.outcome === "needs-human" || result.outcome === "blocked" ? 2 : 0);
       } catch (err) {
         clearInterval(heartbeat);
+        process.off("SIGINT", checkpointSignal); process.off("SIGTERM", checkpointSignal);
+        await foreman.close().catch(() => {});
         statusReporter.stop("interrupted");
+        if (interruptionRequested || err instanceof BuildInterruptedError) {
+          buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "interrupted", { status: "recoverable" }), "recoverable");
+          log.write("safe-boundary-paused", { runId: buildRun.runId, checkpoint: "interrupted", intentional: true });
+          console.error(`rafi: Build interrupted; current work is preserved. Continue with ${formatRecoveryCommand(cwd)}`);
+          process.exit(2);
+        }
         if (err instanceof ContextCapabilityError || err instanceof CurrentWorkflowChangedError) {
           const summary = err.message.slice(0, 1000);
           buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "safe-boundary-paused", {
@@ -2578,7 +2651,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         }
         buildRun = releaseBuildLease(cwd, checkpointBuildRun(cwd, buildRun, "failed", { status: "failed", failure: { category: "unknown", summary: err instanceof Error ? err.message.slice(0, 1000) : String(err).slice(0, 1000), at: new Date().toISOString() } }), "failed");
         await foreman.close().catch(() => {});
-        log.write("error", { message: String(err) });
+        log.write("error", { message: String(err), ...(err instanceof Error ? { stack: err.stack } : {}) });
         fail(`run failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       } catch (error) {
@@ -2640,6 +2713,7 @@ function pruneRecoveryTelemetryAtCompletion(projectDir: string, retentionDays: n
   catch (error) { console.error(`rafi: recovery telemetry maintenance skipped: ${String(error).replace(/\s+/g, " ").slice(0, 300)}`); }
 }
 
+const reportedCompactionPolicies = new WeakMap<BuilderAdapter, string>();
 async function prepareNativeAutoCompaction(adapter: BuilderAdapter): Promise<void> {
   if (!adapter.prepareAutoCompaction) {
     await adapter.close().catch(() => {});
@@ -2647,13 +2721,15 @@ async function prepareNativeAutoCompaction(adapter: BuilderAdapter): Promise<voi
   }
   try {
     const policy = await adapter.prepareAutoCompaction();
-    if (policy && policy.effectiveThresholdPercent !== policy.requestedThresholdPercent) {
+    const noticeKey = policy ? `${policy.requestedThresholdPercent}:${policy.effectiveThresholdPercent}` : undefined;
+    if (policy && policy.effectiveThresholdPercent !== policy.requestedThresholdPercent && reportedCompactionPolicies.get(adapter) !== noticeKey) {
       console.log(
-        `foreman: ${adapter.agent} applied automatic compaction at ${policy.effectiveThresholdPercent}% `
-        + `(configured ${policy.requestedThresholdPercent}%; provider minimum or clamp). `
-        + "Use `rafi agents .` to update the Builder or QA saved threshold interactively.",
+        `foreman: ${adapter.agent} reports a native automatic-compaction trigger of ${policy.effectiveThresholdPercent}% `
+        + `(requested ${policy.requestedThresholdPercent}%). Configuration does not mean that compaction occurred. `
+        + "The provider's effective trigger may differ from the saved preference.",
       );
     }
+    if (noticeKey) reportedCompactionPolicies.set(adapter, noticeKey);
   } catch (error) {
     await adapter.close().catch(() => {});
     throw error;
@@ -2796,14 +2872,14 @@ function explicitDefaultValue(value: string | undefined): string | undefined {
   return value && value !== "default" ? value : undefined;
 }
 
-function recoveryCompactionHistoryUncertain(
+export function recoveryCompactionHistoryUncertain(
   projectDir: string,
-  recovery: { legacy?: boolean; runDecisions?: unknown } | undefined,
+  recovery: { legacy?: boolean; version?: number; runDecisions?: unknown } | undefined,
   runId: string | undefined,
   role: "builder" | "qa",
 ): boolean {
   if (!recovery) return false;
-  if (recovery.legacy || !recovery.runDecisions || !runId) return true;
+  if (recovery.legacy || (!recovery.runDecisions && recovery.version !== 3) || !runId) return true;
   const db = new WorkflowDb(projectDir);
   try { return db.hasUncheckpointedRoleTurn(runId, role); }
   finally { db.close(); }

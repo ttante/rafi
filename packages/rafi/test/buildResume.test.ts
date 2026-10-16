@@ -13,6 +13,8 @@ import { createProviderSessionRef } from "ai-foreman/session-identity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import { assertBuildAssignmentReconciled, isInterruptedBuilderRecovery } from "ai-foreman/build-assignment.js";
 import { createQaRecoveryPacket } from "ai-foreman/qa-recovery.js";
+import { HandoffService } from "ai-foreman/handoffs.js";
+import { assertQaRecoveryHandoffInventory } from "../../ai-foreman/dist/qaReview.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
 import { buildBuildResumeCommand } from "../src/buildResume.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
@@ -205,6 +207,33 @@ test("build:resume never continues an interrupted Builder through a different pr
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+for (const degraded of [false, true]) test(`interrupted ${degraded ? "degraded" : "uncheckpointed"} Builder never retires dispatch for an incompatible exact or guided launch`, async () => {
+  const dir = initializedProject();
+  try {
+    const settings = { role: "builder" as const, source: "project" as const, make: "codex" as const, model: "default", reasoning: "default", fast: false };
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"], builder: settings });
+    const session = scopedSession(dir, "interrupted-real-boundary"); run = persistBuildSession(dir, run, "builder", session);
+    const db = new WorkflowDb(dir);
+    try {
+      db.publishContinuityCheckpoint({ runId: run.runId, role: "builder", delta: { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: ["Finish T001"], nextAction: "Inspect preserved implementation" }, authoritativeStateRevision: 1 });
+      db.appendContinuityEvent({ runId: run.runId, role: "host", kind: "turn_started", payload: { role: "builder" }, authoritativeStateRevision: 1 });
+      if (degraded) db.setContinuityHeadState(run.runId, "builder", "degraded");
+      db.planOperation({ runId: run.runId, idempotencyKey: "real-assignment", kind: "build-assignment", intent: { ticketId: "T001", worktree: dir } }); db.updateOperation("real-assignment", "in_progress");
+      db.planOperation({ runId: run.runId, idempotencyKey: "real-dispatch", kind: "provider-dispatch", intent: { role: "builder", sessionRef: session } }); db.updateOperation("real-dispatch", "in_progress");
+    } finally { db.close(); }
+    run = releaseBuildLease(dir, run, "recoverable");
+    let reason: string | undefined;
+    await buildBuildResumeCommand({ executeStart: () => { throw new Error("must not launch an incoherent recovery"); }, resolveProjection: availableProjection,
+      chooseInterruptedRecovery: async value => { reason = value; return "cancel"; },
+    }).parseAsync([dir, "--run", run.runId, "--yes", ...(degraded ? ["--guided-recovery"] : [])], { from: "user" });
+    assert.match(reason ?? "", degraded ? /checkpoint needs reconstruction/ : /unconfirmed session history/);
+    const after = new WorkflowDb(dir);
+    try { assert.equal(after.operation("real-dispatch")?.status, "in_progress"); assert.equal(after.operation("real-assignment")?.status, "in_progress"); assert.equal(after.hasUncheckpointedRoleTurn(run.runId, "builder"), true); }
+    finally { after.close(); }
+    assert.equal(readBuildRuns(dir).find(item => item.runId === run.runId)?.recoveryDecision, undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("build:resume selects a recoverable run directly by ticket", async () => {
   const dir = initializedProject();
   try {
@@ -327,6 +356,13 @@ test("build:resume scopes a pending V2 QA packet and accepts only one undispatch
     assert.equal(invoked[invoked.indexOf("--ticket") + 1], "T032");
     assert.equal(invoked[invoked.indexOf("--steps") + 1], "1");
     assert.equal(invoked.includes("--branch-per-ticket"), true);
+    const staged = new HandoffService(dir).loadStaged(run.runId, Number(invoked[invoked.indexOf("--accept-handoff") + 1]));
+    assertQaRecoveryHandoffInventory(staged.manifest.resources);
+    assert.throws(() => assertQaRecoveryHandoffInventory(staged.manifest.resources.filter(resource => resource.label !== "frozen-qa-action")), /missing frozen-qa-action/);
+    const action = staged.manifest.roleState.frozenQaAction;
+    assert.ok(typeof action === "string");
+    assert.match(action, /fresh independent full QA review/);
+    assert.equal(staged.manifest.resources.find(resource => resource.label === "frozen-qa-action")!.digest, createHash("sha256").update(action).digest("hex"));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

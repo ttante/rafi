@@ -14,6 +14,11 @@ import { captureFrozenQaSource, type FrozenQaSourceState } from "./qaSnapshot.js
 import { WorkflowDb } from "./workflowDb.js";
 import { WorkflowReader } from "./workflowReader.js";
 import type { BuildRunRecordV2, ProviderSessionRefV1 } from "rafi-spec";
+import { classifyProcess, processGroupQuiescent } from "./processIdentity.js";
+import { loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
+import { loadTickets } from "./tickets/ticketLoader.js";
+import { qaDigest } from "./qaProtocolV2.js";
+import { providerSessionKey } from "./sessionIdentity.js";
 
 /** Work responses confirm an assignment; they never select the next ticket. */
 export function validateBuildAssignment(ticketId: string, status: StepStatus, responseText = ""): string | undefined {
@@ -46,12 +51,114 @@ export class BuildAssignmentRejected extends Error {}
 export function isInterruptedBuilderRecovery(run: BuildRunRecordV2 | undefined): boolean {
   if (!run) return false;
   const decision = run.recoveryDecision;
-  const continuation = (run as BuildRunRecordV2 & { interruptedBuilderContinuation?: { ticketIds?: string[]; sessionRef?: ProviderSessionRefV1 } }).interruptedBuilderContinuation;
+  const continuation = (run as BuildRunRecordV2 & { interruptedBuilderContinuation?: { ticketIds?: string[]; sessionRef?: ProviderSessionRefV1; recovery?: string; reconciliationId?: string } }).interruptedBuilderContinuation;
+  if (continuation?.recovery === "source-reconciled" && continuation.reconciliationId) {
+    return decision?.runId === run.runId && decision.role === "builder" && decision.mode === "fresh-with-handoff"
+      && Boolean(continuation.ticketIds?.length === 1 && decision.executionTickets?.includes(continuation.ticketIds[0]!)
+        && run.tickets.includes(continuation.ticketIds[0]!));
+  }
   return decision?.runId === run.runId && decision.role === "builder" && decision.mode === "exact-session"
-    && decision.executionTickets?.length === 1
-    && run.tickets.includes(decision.executionTickets[0])
-    && Boolean(continuation?.ticketIds?.includes(decision.executionTickets[0]))
+    && Boolean(decision.executionTickets?.length && decision.executionTickets.every(id => run.tickets.includes(id)))
+    && Boolean(continuation?.ticketIds?.length === 1 && decision.executionTickets?.includes(continuation.ticketIds[0]!))
     && Boolean(continuation?.sessionRef && decision.predecessorSessionRef && sameSession(continuation.sessionRef, decision.predecessorSessionRef));
+}
+
+/** Recovery requires current source, assignment and admission proofs.
+ * A V3 or migrated record alone never grants continuation authority;
+ * full eligibility is verified before any unknown receipt is reconciled. */
+export function canReconcileInterruptedBuilderSource(projectDir: string, runId: string): boolean {
+  const db = new WorkflowReader(projectDir);
+  try {
+    const state = db.getRun(runId)?.state as unknown as BuildRunRecordV2 | undefined;
+    const assignments = db.operations(runId, true).filter(op => op.kind === "build-assignment" && ["in_progress", "uncertain"].includes(op.status));
+    if (state?.version !== 3 || state.branchMode !== "current" || assignments.length !== 1) return false;
+    const intent = assignments[0]!.intent as { ticketId?: string; before?: { digest?: string }; requirementsDigest?: string; instructionDigest?: string };
+    return Boolean(intent.ticketId && state.tickets.includes(intent.ticketId) && intent.before?.digest && intent.requirementsDigest && intent.instructionDigest
+      && db.events(runId).some(event => event.type === "worker_started"));
+  } finally { db.close(); }
+}
+
+/** Resume the existing approved build from observed local source, never replay
+ * the interrupted instruction or pretend its unknown outcome was successful.
+ * The caller must own recovery admission and the original run's workflow lease. */
+export function prepareInterruptedBuilderSourceContinuation(projectDir: string, runId: string): { ticketIds: string[]; reconciliationId: string; sourceDigest: string; contentDigest: string } {
+  const db = new WorkflowDb(projectDir);
+  try {
+    const lease = db.currentLease();
+    if (lease?.runId !== runId || lease.pid !== process.pid) throw new BuildAssignmentRejected("Source recovery requires the original run's current recovery lease");
+    if (!canReconcileInterruptedBuilderSource(projectDir, runId)) throw new BuildAssignmentRejected("Interrupted work lacks current source-bound assignment authority; use guided recovery or preserve files and restart");
+    const run = db.getRun(runId)!.state as unknown as BuildRunRecordV2;
+    if (run.builderCapabilities?.grantedNetwork) throw new BuildAssignmentRejected("Interrupted network-enabled work requires explicit side-effect reconciliation; source inspection cannot establish remote outcomes");
+    if (db.readinessProcesses().length || db.unresolvedRoleDispatches(runId, "qa").length) throw new BuildAssignmentRejected("Owned processes or a separate QA dispatch must be reconciled before Builder source recovery");
+    if (db.incompletePublications().some(item => item.runId === runId && (item.intent as {operation?:string}).operation !== "build-run-projection")) throw new BuildAssignmentRejected("A pending source/tracker publication must be reconciled before Builder source recovery");
+    const worker = db.events(runId).filter(event => event.type === "worker_started").at(-1)?.payload as { workerPid?: number; processStart?: string; host?: string } | undefined;
+    if (!worker?.workerPid || classifyProcess(worker.workerPid, worker.processStart, worker.host).state !== "dead" || !processGroupQuiescent(worker.workerPid)) {
+      throw new BuildAssignmentRejected("The interrupted worker and its owned process group must be verified stopped before source recovery");
+    }
+    const assignment = db.operations(runId).find(op => op.kind === "build-assignment" && ["in_progress", "uncertain"].includes(op.status))!;
+    const intent = assignment.intent as { ticketId: string; worktree: string; requirementsDigest: string; before: { digest: string } };
+    if (realpathSync(intent.worktree) !== realpathSync(projectDir) || realpathSync(run.repository.worktree) !== realpathSync(projectDir)) throw new BuildAssignmentRejected("Interrupted source belongs to another worktree");
+    if (run.progress.completedTickets.includes(intent.ticketId) || ["completed", "waived"].includes(db.qaTicketHead(runId, intent.ticketId).state)) throw new BuildAssignmentRejected("A completed ticket cannot be reopened by interrupted source recovery");
+    const admission = db.assertAdmittedWork(runId, intent.ticketId);
+    const definition = loadTickets(resolveTicketPaths(loadTicketsConfig(projectDir), projectDir).tickets).find(ticket => ticket.id === intent.ticketId);
+    if (!definition || admission.requirementsDigest !== intent.requirementsDigest || qaDigest("admitted-requirements", definition) !== intent.requirementsDigest) throw new BuildAssignmentRejected("Interrupted ticket requirements changed; current scope needs approval before recovery");
+    const dispatches = db.unresolvedRoleDispatches(runId, "builder");
+    const owner = db.roleMutationLease(runId, "builder");
+    if (!dispatches.length || !owner?.sessionRef || !owner.sessionKey || owner.sessionRef.source !== "observed" || !owner.sessionRef.validatedAt
+      || Number.isNaN(Date.parse(owner.sessionRef.validatedAt)) || dispatches.some(op => {
+        const ref=(op.intent as {sessionRef?:unknown}).sessionRef;
+        return !sameSession(ref,owner.sessionRef!) || providerSessionKey(ref as ProviderSessionRefV1)!==owner.sessionKey;
+      })) throw new BuildAssignmentRejected("Interrupted dispatch is not bound to the recorded Builder owner");
+    const source = captureBuildSource(projectDir);
+    if (run.repository.branch && sourceBranch(projectDir) !== run.repository.branch) throw new BuildAssignmentRejected("The current branch changed; return to the interrupted build's owning branch before source recovery");
+    const reconciliationId = `source-resume:${runId}:${randomUUID()}`;
+    db.atomic(() => {
+      if (captureBuildSource(projectDir).digest !== source.digest) throw new BuildAssignmentRejected("Preserved source changed during recovery inspection; retry from the current files");
+      const retained = retainSource(db, source);
+      const receipt = { recovery: "source-reconciled", reconciliationId, outcomeUnknown: true, providerReplayAuthorized: false, source: retained, ticketId: intent.ticketId, requirementsDigest: intent.requirementsDigest, worker, at: new Date().toISOString() };
+      for (const dispatch of dispatches) db.updateOperation(dispatch.idempotencyKey, "failed", { result: { ...receipt, priorResult: dispatch.result }, error: "Interrupted provider outcome remains unknown; verified stopped local execution is replaced by source inspection and fresh QA, without replay" });
+      db.updateOperation(assignment.idempotencyKey, "failed", { result: { ...receipt, priorResult: assignment.result }, error: "Interrupted assignment preserved for source-bound continuation; completion is not established" });
+      const event = db.appendContinuityEvent({ runId, role: "host", kind: "interrupted_source_reconciled", payload: { ...receipt, dispatchIds: dispatches.map(op => op.idempotencyKey), assignmentId: assignment.idempotencyKey }, authoritativeStateRevision: db.continuityHead(runId, "run")?.authoritativeStateRevision ?? 0 });
+      db.publishContinuityCheckpoint({ runId, role: "builder", state: "current", authoritativeStateRevision: event.authoritativeStateRevision, delta: {
+        version: 1, decisions: [`Continue already-approved ticket ${intent.ticketId} in the SAME build from preserved source; this host reconciliation is not a successful provider turn.`],
+        constraints: ["Never replay the interrupted provider instruction or assume its side effects did not happen. Inspect current files first, implement only missing approved work, and require independent QA. Preserve all completed tickets and accepted QA.", "The predecessor session's compaction history remains unknown; use a validated fresh handoff before any new implementation."],
+        discoveries: [], completedActions: [], evidence: [`Host-observed source digest ${source.digest}; interrupted assignment ${assignment.idempotencyKey}; reconciliation ${reconciliationId}`],
+        failures: ["The interrupted provider outcome is unknown and remains preserved in the historical receipt."], blockers: [], openWork: [`Inspect preserved implementation of ${intent.ticketId}; complete remaining criteria and obtain fresh QA.`], nextAction: `Accept a fresh source-bound handoff, inspect ${intent.ticketId}, then continue all remaining approved tickets.`,
+      } });
+      const current = db.getRun(runId)!;
+      db.transition(runId, { checkpoint: "builder-source-reconciled", state: { ...current.state, interruptedBuilderContinuation: { recovery: "source-reconciled", ticketIds: [intent.ticketId], reconciliationId, sourceDigest: source.digest, contentDigest: source.contentDigest, productDigest: interruptedProductDigest(projectDir, source) } }, event: "builder_source_continuation_authorized", payload: receipt });
+    });
+    return { ticketIds: [intent.ticketId], reconciliationId, sourceDigest: source.digest, contentDigest: source.contentDigest };
+  } finally { db.close(); }
+}
+
+/** A launch may not consume a recovery snapshot after product source changes. */
+export function assertInterruptedSourceSnapshot(projectDir: string, run: BuildRunRecordV2): void {
+  const continuation = (run as BuildRunRecordV2 & { interruptedBuilderContinuation?: { recovery?: string; contentDigest?: string; productDigest?: string; firstAssignmentId?: string; ticketIds?: string[] } }).interruptedBuilderContinuation;
+  if (continuation?.recovery !== "source-reconciled" || continuation.firstAssignmentId || !continuation.ticketIds?.some(id => !run.progress.completedTickets.includes(id))) return;
+  const reader = new WorkflowReader(projectDir);
+  try {
+    // A stale in-memory snapshot can lag the atomic consumption marker. The
+    // source-bound assignment journal is durable and cannot be overwritten by
+    // the next ordinary run projection.
+    const reconciliationId = (continuation as {reconciliationId?:string}).reconciliationId;
+    if (reconciliationId && reader.operations(run.runId, true).some(op => op.kind === "build-assignment" && (op.intent as {sourceRecoveryId?:string}).sourceRecoveryId === reconciliationId)) return;
+  } finally { reader.close(); }
+  const source = captureBuildSource(projectDir);
+  if (continuation.productDigest ? interruptedProductDigest(projectDir, source) !== continuation.productDigest : source.contentDigest !== continuation.contentDigest) throw new BuildAssignmentRejected("Preserved implementation changed after recovery preparation; inspect the current files with rafi resume before launching new work");
+}
+
+function interruptedProductDigest(projectDir: string, source: BuildSourceState): string {
+  const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);
+  // Ticket status/rendering is host bookkeeping, not product mutation. Ticket
+  // definitions and other documents remain bound, including unrelated docs.
+  const bookkeeping = new Set([paths.stateDb, `${paths.stateDb}-wal`, `${paths.stateDb}-shm`, paths.progressDoc, paths.archiveDoc].map(path => relative(projectDir, path).replace(/\\/g, "/")));
+  return createHash("sha256").update(JSON.stringify({ head: source.head, branch: sourceBranch(projectDir), paths: source.pathInventory.filter(path => !bookkeeping.has(path.path)) })).digest("hex");
+}
+
+function sourceBranch(projectDir: string): string | undefined {
+  const result=spawnSync("git",["branch","--show-current"],{cwd:projectDir,encoding:"utf8",stdio:["ignore","pipe","ignore"]});
+  return result.status===0 ? result.stdout.trim() : undefined;
 }
 
 /**
@@ -202,6 +309,12 @@ export function beginBuildAssignment(projectDir: string, runId: string, ticketId
     db.atomic(() => {
       db.ensureRun(runId);
       const admission = db.assertAdmittedWork(runId, ticketId);
+      const continuationState = db.getRun(runId)!;
+      const sourceContinuation = continuationState.state.interruptedBuilderContinuation as { recovery?: string; ticketIds?: string[]; firstAssignmentId?: string } | undefined;
+      if (sourceContinuation?.recovery === "source-reconciled" && sourceContinuation.ticketIds?.includes(ticketId) && !sourceContinuation.firstAssignmentId) {
+        assertInterruptedSourceSnapshot(projectDir, continuationState.state as unknown as BuildRunRecordV2);
+        db.transition(runId, { checkpoint: continuationState.checkpoint, state: { ...continuationState.state, interruptedBuilderContinuation: { ...sourceContinuation, firstAssignmentId: operationId } }, event: "builder_source_continuation_consumed", payload: { ticketId, operationId, sourceDigest: before.digest } });
+      }
       let contractBinding: { digest: string; revision: number; receiptOperationId: string; session: ReturnType<typeof actualContractSession> } | undefined;
       if (db.qaPreparationStore().policy(runId)?.mode === "enforce") {
         const contract = assertContractReceipt(db.qaPreparationStore(), runId, ticketId, admission.requirementsDigest, adapter ? actualContractSession(adapter, worktree, projectDir) : undefined, adapter);
@@ -212,7 +325,11 @@ export function beginBuildAssignment(projectDir: string, runId: string, ticketId
         const current = resolveEffectiveQaConfiguration(projectDir, { make: qaMake });
         if (contract.inputs.find(input => input.kind === "rules")?.digest !== current.digest || contract.inputs.find(input => input.kind === "checklist")?.digest !== contractDigest("input-checklist", current.checklist)) throw new BuildAssignmentRejected("Canonical QA rules, skills or checklist changed after delivery; reconcile the contract before implementation");
       }
-      guidance = db.reserveGuidance(runId, ticketId, "builder", operationId, before.digest, instruction);
+      const continuation = db.getRun(runId)?.state.interruptedBuilderContinuation as { recovery?: string; ticketIds?: string[]; reconciliationId?: string } | undefined;
+      const recoveredInstruction = continuation?.recovery === "source-reconciled" && continuation.ticketIds?.includes(ticketId)
+        ? `${instruction}\n\nHost recovery ${continuation.reconciliationId}: an earlier assignment was interrupted with an unknown result. Inspect the preserved files before acting. Do not replay the old instruction, repeat completed side effects, or redo completed tickets. Implement only missing acceptance criteria for this ticket, validate the current implementation and return truthful evidence for independent fresh QA.`
+        : instruction;
+      guidance = db.reserveGuidance(runId, ticketId, "builder", operationId, before.digest, recoveredInstruction);
       if (followup) {
         if (admission.requirementsDigest !== followup.requirementsDigest) throw new BuildAssignmentRejected("Ticket requirements changed; renewed scope approval is required before the Builder follow-up");
         if (!guidance.ids.length) throw new BuildAssignmentRejected("No eligible Builder guidance remains; no follow-up was dispatched");
@@ -224,7 +341,7 @@ export function beginBuildAssignment(projectDir: string, runId: string, ticketId
         db.transitionQa(runId, ticketId, head.revision, { type: "builder-guidance-followup-intended" });
       }
       const instructionDigest = db.putEvidence("qa", Buffer.from(guidance.text));
-      db.planOperation({ runId, idempotencyKey: operationId, kind: "build-assignment", intent: { ticketId, worktree, admissionId: admission.assignmentId, requirementsDigest: admission.requirementsDigest, instructionDigest, ...(contractBinding ? { contractBinding } : {}), before: retainSource(db, before), ...(followup ? { managerFollowup: followup } : {}) } });
+      db.planOperation({ runId, idempotencyKey: operationId, kind: "build-assignment", intent: { ticketId, worktree, admissionId: admission.assignmentId, requirementsDigest: admission.requirementsDigest, instructionDigest, ...(continuation?.recovery === "source-reconciled" && continuation.ticketIds?.includes(ticketId) ? { sourceRecoveryId: continuation.reconciliationId } : {}), ...(contractBinding ? { contractBinding } : {}), before: retainSource(db, before), ...(followup ? { managerFollowup: followup } : {}) } });
       db.recordWorkAssignment(runId,ticketId,operationId,{requirementsDigest:admission.requirementsDigest,worktree,sourceDigest:before.digest,ownerGeneration:db.currentLease()?.generation,instructionDigest});
       db.updateOperation(operationId, "in_progress");
     });

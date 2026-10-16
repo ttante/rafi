@@ -207,7 +207,7 @@ Separate fast deterministic checks, packaged integration, native platform checks
 
 ### E18 — Extend existing Rafi test infrastructure — MUST
 
-Reuse or adapt `live-build-stalls.ts`, live create/interview/ticket-plan/provider scripts, audit scripts, existing disposable app fixtures, and investigation test suites before creating a second framework.
+Reuse or adapt `scripts/live/build-stalls.ts`, live create/interview/ticket-plan/provider scripts, audit scripts, existing disposable app fixtures, and investigation test suites before creating a second framework.
 
 **Acceptance:** identify gaps rather than replacing working infrastructure wholesale. One documented command family produces consistent artifacts. The simple sum-task stall canary is retained as a control but does not stand in for a complete app benchmark.
 
@@ -771,7 +771,7 @@ Planning must explicitly resolve four cross-part dependencies: execution evidenc
 - [Build-stall investigation](../docs/build-stall-investigation.md) and [repair plan](../docs/build-stall-repair-plan.md): eight historical scenarios, W0–W10, current repair evidence, and rollout limits.
 - [QA handback investigation](../docs/qa-handback-investigation.md) and [implementation plan](../docs/qa-handback-implementation-plan.md): 26 diagnostics, P0–P13, wrapper/migration follow-up audits.
 - [Build-resume gap implementation plan](../docs/build-resume-gap-implementation-plan.md): launch/ownership/readiness, later superseding sections, execution scope, pending questions, repeated resume, and native verification limits.
-- [Live build-stall runner](../scripts/live-build-stalls.ts), [live ticket planning](../scripts/live-ticket-plan.mjs), [live create](../scripts/live-create.mjs), and [live interview](../scripts/live-interview.mjs): existing live foundations.
+- [Live build-stall runner](../scripts/live/build-stalls.ts), [live ticket planning](../scripts/live-ticket-plan.mjs), [live create](../scripts/live-create.mjs), and [live interview](../scripts/live-interview.mjs): existing live foundations.
 - [Build-stall audit](../scripts/audit-build-stalls.py) and [QA handback audit](../scripts/audit-qa-handback.mjs): existing read-only investigation tooling.
 
 ### 5.2 Primary external sources from the investigation

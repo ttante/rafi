@@ -105,87 +105,95 @@ export function applyResolvedTicketReset(
   hooks: { beforePublish?: () => void; resetId?: string } = {},
 ): { resetId: string; tickets: string[]; restored: string[]; ignoredMissing: string[] } {
   const opened = open(projectDir);
-  const { config, paths, definitions, db } = opened;
-  const workflow = new WorkflowDb(projectDir);
-  const resetId = hooks.resetId ?? randomUUID();
-  const current = new Map(definitions.map((definition) => [definition.id, definition]));
-  const groupCatalog = db.listTicketGroups();
-  const snapshots = new Map(groupCatalog.flatMap((group) => group.members.map((member) => [member.ticketId, member.snapshot] as const)));
-  const states = db.getAllStates();
-  const selectedIds = new Set(selection.ticketIds);
-  const currentRelatedRuns = recoverableBuildRuns(projectDir, now)
-    .filter((run) => run.tickets.some((ticketId) => selectedIds.has(ticketId)))
-    .map((run) => ({ runId: run.runId, status: run.status, tickets: [...run.tickets] }));
-  const comparable: Omit<ResolvedTicketResetSelection, "inputFingerprint"> = { ...selection, relatedRuns: currentRelatedRuns };
-  delete (comparable as Partial<ResolvedTicketResetSelection>).inputFingerprint;
-  const actualFingerprint = selectionFingerprint(comparable, current, states, snapshots, groupCatalog);
-  if (actualFingerprint !== selection.inputFingerprint) {
-    db.close(); workflow.close();
-    throw new Error("ticket/group/reset inputs changed after preview; no reset was applied—preview the exact selection again");
-  }
-  const restore = selection.definitionRestorations.filter((item) => item.restore);
-  const restored = restore.map((item) => item.ticketId);
-  const restoredSet = new Set(restored);
-  const restoredDefinitions = restore.map((item) => snapshots.get(item.ticketId)?.definition as TicketDef);
-  if (restoredDefinitions.some((item) => !item)) { db.close(); workflow.close(); throw new Error("a selected definition snapshot became unavailable"); }
-  const nextDefinitions = [...definitions, ...restoredDefinitions.filter((definition) => !current.has(definition.id))].sort((a, b) => a.order - b.order);
-  const definitionIssues = validateTicketDefs(nextDefinitions);
-  if (definitionIssues.length) { db.close(); workflow.close(); throw new Error(`restored ticket definitions are invalid: ${definitionIssues.map((issue) => `${issue.path}: ${issue.message}`).join("; ")}`); }
-  const resettable = selection.ticketIds.filter((ticketId) => current.has(ticketId) || restoredSet.has(ticketId));
-  const ignoredMissing = selection.ticketIds.filter((ticketId) => !current.has(ticketId) && !restoredSet.has(ticketId));
-  if (resettable.length === 0 && restored.length === 0) { db.close(); workflow.close(); return { resetId, tickets: [], restored: [], ignoredMissing }; }
-
-  const stageDir = join(projectDir, ".rafi", "reset-stage", resetId);
-  const stagedDefinitions = join(stageDir, "tickets.yaml");
-  const stagedProgress = join(stageDir, "progress.md");
-  const definitionsBefore = existsSync(paths.tickets) ? readFileSync(paths.tickets) : undefined;
-  const progressBefore = existsSync(paths.progressDoc) ? readFileSync(paths.progressDoc) : undefined;
-  const oldStates = new Map([...new Set([...resettable, ...restored])].map((ticketId) => [ticketId, db.getState(ticketId)]));
-  const oldRecent = db.getRecentCompleted().filter((row) => resettable.includes(row.ticket_id));
-  const eventIds: number[] = [];
-  const run = workflow.createRun({ kind: "recovery", checkpoint: "group-reset-intent", originalWork: selection, remainingWork: { tickets: resettable }, state: { resetId } }, now);
-  const publication = workflow.beginPublication(run.runId, { operation: "group-ticket-reset", resetId, selection, stagedDefinitions, stagedProgress, definitionsTarget: paths.tickets, progressTarget: paths.progressDoc }, { definitions: digest(definitionsBefore), progress: digest(progressBefore) }, now);
+  const { config, paths, db } = opened;
+  let workflowHandle: WorkflowDb | undefined;
   try {
-    const stamp = now.toISOString();
-    db.transaction(() => {
-      for (const definition of restoredDefinitions) if (!db.getState(definition.id)) db.upsertState(definition.id, pristineTicketState(definition.id, stamp, actor), stamp);
-      for (const row of selection.previewRows) {
-        if (!resettable.includes(row.ticketId)) {
-          eventIds.push(db.insertEvent({ timestamp: stamp, actor, ticket_id: row.ticketId, event_type: "ticket_reset_skipped_missing", old_status: row.status, new_status: row.status, summary: `Skipped missing definition ${row.ticketId}`, validation: null, evidence: null, payload_json: JSON.stringify({ reset_id: resetId, input_fingerprint: selection.inputFingerprint }) }));
-          continue;
-        }
-        const old = db.getState(row.ticketId)?.status ?? row.status;
-        db.upsertState(row.ticketId, pristineTicketState(row.ticketId, stamp, actor), stamp);
-        db.deleteRecentCompleted(row.ticketId);
-        eventIds.push(db.insertEvent({ timestamp: stamp, actor, ticket_id: row.ticketId, event_type: "ticket_reset", old_status: old, new_status: "planned", summary: `Reset ${row.ticketId} from approved immutable selection`, validation: null, evidence: null, payload_json: JSON.stringify({ reset_id: resetId, groups: selection.groups.map((group) => group.id), restored_definition: restoredSet.has(row.ticketId), input_fingerprint: selection.inputFingerprint }) }));
+    const workflow = workflowHandle = new WorkflowDb(projectDir);
+    const resetId = hooks.resetId ?? randomUUID();
+    return workflow.withTrackerMutationAuthority(() => {
+      const definitions = loadTickets(paths.tickets);
+      const current = new Map(definitions.map((definition) => [definition.id, definition]));
+      const groupCatalog = db.listTicketGroups();
+      const snapshots = new Map(groupCatalog.flatMap((group) => group.members.map((member) => [member.ticketId, member.snapshot] as const)));
+      const states = db.getAllStates();
+      const selectedIds = new Set(selection.ticketIds);
+      const currentRelatedRuns = recoverableBuildRuns(projectDir, now)
+        .filter((run) => run.tickets.some((ticketId) => selectedIds.has(ticketId)))
+        .map((run) => ({ runId: run.runId, status: run.status, tickets: [...run.tickets] }));
+      const comparable: Omit<ResolvedTicketResetSelection, "inputFingerprint"> = { ...selection, relatedRuns: currentRelatedRuns };
+      delete (comparable as Partial<ResolvedTicketResetSelection>).inputFingerprint;
+      const actualFingerprint = selectionFingerprint(comparable, current, states, snapshots, groupCatalog);
+      if (actualFingerprint !== selection.inputFingerprint) {
+        throw new Error("ticket/group/reset inputs changed after preview; no reset was applied—preview the exact selection again");
+      }
+      const restore = selection.definitionRestorations.filter((item) => item.restore);
+      const restored = restore.map((item) => item.ticketId);
+      const restoredSet = new Set(restored);
+      const restoredDefinitions = restore.map((item) => snapshots.get(item.ticketId)?.definition as TicketDef);
+      if (restoredDefinitions.some((item) => !item)) { throw new Error("a selected definition snapshot became unavailable"); }
+      const nextDefinitions = [...definitions, ...restoredDefinitions.filter((definition) => !current.has(definition.id))].sort((a, b) => a.order - b.order);
+      const definitionIssues = validateTicketDefs(nextDefinitions);
+      if (definitionIssues.length) { throw new Error(`restored ticket definitions are invalid: ${definitionIssues.map((issue) => `${issue.path}: ${issue.message}`).join("; ")}`); }
+      const resettable = selection.ticketIds.filter((ticketId) => current.has(ticketId) || restoredSet.has(ticketId));
+      const ignoredMissing = selection.ticketIds.filter((ticketId) => !current.has(ticketId) && !restoredSet.has(ticketId));
+      if (resettable.length === 0 && restored.length === 0) { return { resetId, tickets: [], restored: [], ignoredMissing }; }
+
+      const stageDir = join(projectDir, ".rafi", "reset-stage", resetId);
+      const stagedDefinitions = join(stageDir, "tickets.yaml");
+      const stagedProgress = join(stageDir, "progress.md");
+      const definitionsBefore = existsSync(paths.tickets) ? readFileSync(paths.tickets) : undefined;
+      const progressBefore = existsSync(paths.progressDoc) ? readFileSync(paths.progressDoc) : undefined;
+      const oldStates = new Map([...new Set([...resettable, ...restored])].map((ticketId) => [ticketId, db.getState(ticketId)]));
+      const oldRecent = db.getRecentCompleted().filter((row) => resettable.includes(row.ticket_id));
+      const eventIds: number[] = [];
+      const run = workflow.createRun({ kind: "recovery", checkpoint: "group-reset-intent", originalWork: selection, remainingWork: { tickets: resettable }, state: { resetId } }, now);
+      let publication: ReturnType<WorkflowDb["beginPublication"]> | undefined;
+      try {
+        publication = workflow.beginPublication(run.runId, { operation: "group-ticket-reset", resetId, selection, stagedDefinitions, stagedProgress, definitionsTarget: paths.tickets, progressTarget: paths.progressDoc }, { definitions: digest(definitionsBefore), progress: digest(progressBefore) }, now);
+        const stamp = now.toISOString();
+        db.transaction(() => {
+          for (const definition of restoredDefinitions) if (!db.getState(definition.id)) db.upsertState(definition.id, pristineTicketState(definition.id, stamp, actor), stamp);
+          for (const row of selection.previewRows) {
+            if (!resettable.includes(row.ticketId)) {
+              eventIds.push(db.insertEvent({ timestamp: stamp, actor, ticket_id: row.ticketId, event_type: "ticket_reset_skipped_missing", old_status: row.status, new_status: row.status, summary: `Skipped missing definition ${row.ticketId}`, validation: null, evidence: null, payload_json: JSON.stringify({ reset_id: resetId, input_fingerprint: selection.inputFingerprint }) }));
+              continue;
+            }
+            const old = db.getState(row.ticketId)?.status ?? row.status;
+            db.upsertState(row.ticketId, pristineTicketState(row.ticketId, stamp, actor), stamp);
+            db.deleteRecentCompleted(row.ticketId);
+            eventIds.push(db.insertEvent({ timestamp: stamp, actor, ticket_id: row.ticketId, event_type: "ticket_reset", old_status: old, new_status: "planned", summary: `Reset ${row.ticketId} from approved immutable selection`, validation: null, evidence: null, payload_json: JSON.stringify({ reset_id: resetId, groups: selection.groups.map((group) => group.id), restored_definition: restoredSet.has(row.ticketId), input_fingerprint: selection.inputFingerprint }) }));
+          }
+        });
+        mkdirSync(stageDir, { recursive: true });
+        writeFileSync(stagedDefinitions, stringify({ tickets: nextDefinitions }, { lineWidth: 120 }), "utf8");
+        writeFileSync(stagedProgress, renderProgressDoc({ config, projectDir, ticketDefs: nextDefinitions, states: db.getAllStates(), db, now: stamp }), "utf8");
+        workflow.updatePublication(publication.transactionId, "staged", now);
+        workflow.updatePublication(publication.transactionId, "tracker_committed", now);
+        hooks.beforePublish?.();
+        atomicCopy(stagedDefinitions, paths.tickets);
+        writeProgressDoc(paths.progressDoc, readFileSync(stagedProgress, "utf8"), true);
+        workflow.updatePublication(publication.transactionId, "published", now);
+        workflow.updatePublication(publication.transactionId, "committed", now);
+        workflow.transition(run.runId, { status: "completed", checkpoint: "group-reset-committed", remainingWork: {}, state: { resetId, tickets: resettable, restored, ignoredMissing } }, now);
+        rmSync(stageDir, { recursive: true, force: true });
+        return { resetId, tickets: resettable, restored, ignoredMissing };
+      } catch (error) {
+        db.transaction(() => {
+          db.deleteEvents(eventIds);
+          for (const [ticketId, state] of oldStates) state ? db.upsertState(ticketId, state, state.updated_at) : db.deleteState(ticketId);
+          for (const row of oldRecent) db.upsertRecentCompleted(row);
+        });
+        restoreFile(paths.tickets, definitionsBefore);
+        restoreFile(paths.progressDoc, progressBefore);
+        if (publication) workflow.updatePublication(publication.transactionId, "rolled_back", now);
+        workflow.transition(run.runId, { status: "failed", checkpoint: "group-reset-rolled-back", state: { resetId, error: error instanceof Error ? error.message : String(error) } }, now);
+        rmSync(stageDir, { recursive: true, force: true });
+        throw error;
       }
     });
-    mkdirSync(stageDir, { recursive: true });
-    writeFileSync(stagedDefinitions, stringify({ tickets: nextDefinitions }, { lineWidth: 120 }), "utf8");
-    writeFileSync(stagedProgress, renderProgressDoc({ config, projectDir, ticketDefs: nextDefinitions, states: db.getAllStates(), db, now: stamp }), "utf8");
-    workflow.updatePublication(publication.transactionId, "staged", now);
-    workflow.updatePublication(publication.transactionId, "tracker_committed", now);
-    hooks.beforePublish?.();
-    atomicCopy(stagedDefinitions, paths.tickets);
-    writeProgressDoc(paths.progressDoc, readFileSync(stagedProgress, "utf8"), true);
-    workflow.updatePublication(publication.transactionId, "published", now);
-    workflow.updatePublication(publication.transactionId, "committed", now);
-    workflow.transition(run.runId, { status: "completed", checkpoint: "group-reset-committed", remainingWork: {}, state: { resetId, tickets: resettable, restored, ignoredMissing } }, now);
-    rmSync(stageDir, { recursive: true, force: true });
-    return { resetId, tickets: resettable, restored, ignoredMissing };
-  } catch (error) {
-    db.transaction(() => {
-      db.deleteEvents(eventIds);
-      for (const [ticketId, state] of oldStates) state ? db.upsertState(ticketId, state, state.updated_at) : db.deleteState(ticketId);
-      for (const row of oldRecent) db.upsertRecentCompleted(row);
-    });
-    restoreFile(paths.tickets, definitionsBefore);
-    restoreFile(paths.progressDoc, progressBefore);
-    workflow.updatePublication(publication.transactionId, "rolled_back", now);
-    workflow.transition(run.runId, { status: "failed", checkpoint: "group-reset-rolled-back", state: { resetId, error: error instanceof Error ? error.message : String(error) } }, now);
-    rmSync(stageDir, { recursive: true, force: true });
-    throw error;
-  } finally { db.close(); workflow.close(); }
+  } finally {
+    try { workflowHandle?.close(); } finally { db.close(); }
+  }
 }
 
 function selectGroups(groups: TicketGroup[], requested: RequestedTicketResetTarget): TicketGroup[] {

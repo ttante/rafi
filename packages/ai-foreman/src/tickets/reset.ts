@@ -76,75 +76,79 @@ export function resetTickets(
   const ids = preview.tickets.map((ticket) => ticket.id);
   if (ids.length === 0) return { resetId: randomUUID(), tickets: [] };
   const { config, paths, tickets, db } = open(projectDir);
-  const workflow = new WorkflowDb(projectDir);
-  const resetId = hooks.resetId ?? randomUUID();
-  if (ids.every((id) => db.getTicketEvents(id).some((event) => event.event_type === "ticket_reset" && event.payload_json?.includes(resetId)))) {
-    workflow.close();
-    db.close();
-    return { resetId, tickets: ids };
-  }
-  const stagePath = join(projectDir, ".rafi", "reset-stage", resetId, "progress.md");
-  const oldStates = new Map(ids.map((id) => [id, db.getState(id)]));
-  const oldRecentCompleted = db.getRecentCompleted().filter((row) => ids.includes(row.ticket_id));
-  const insertedEventIds: number[] = [];
-  const progressBefore = existsSync(paths.progressDoc) ? readFileSync(paths.progressDoc) : undefined;
-  const run = workflow.createRun({
-    kind: "recovery",
-    checkpoint: "ticket-reset-intent",
-    originalWork: { resetId, scope: preview.scope, tickets: ids, states: Object.fromEntries(oldStates) },
-    remainingWork: { tickets: ids },
-    state: { operation: "ticket-reset", progressDigest: digest(progressBefore) },
-  }, now);
-  const publication = workflow.beginPublication(run.runId, { operation: "ticket-reset", resetId, tickets: ids, stagePath, targetPath: paths.progressDoc }, { progressDigest: digest(progressBefore) }, now);
+  let workflowHandle: WorkflowDb | undefined;
   try {
-    const stamp = now.toISOString();
-    db.transaction(() => {
-      for (const row of preview.tickets) {
-        db.upsertState(row.id, pristineTicketState(row.id, stamp, actor), stamp);
-        db.deleteRecentCompleted(row.id);
-        insertedEventIds.push(db.insertEvent({
-          timestamp: stamp,
-          actor,
-          ticket_id: row.id,
-          event_type: "ticket_reset",
-          old_status: row.status,
-          new_status: "planned",
-          summary: `Reset ${row.id} to pristine active state`,
-          validation: null,
-          evidence: null,
-          payload_json: JSON.stringify({ reset_id: resetId, scope: preview.scope, cleared: row.cleared }),
-        }));
+    const workflow = workflowHandle = new WorkflowDb(projectDir);
+    const resetId = hooks.resetId ?? randomUUID();
+    if (ids.every((id) => db.getTicketEvents(id).some((event) => event.event_type === "ticket_reset" && event.payload_json?.includes(resetId)))) {
+      return { resetId, tickets: ids };
+    }
+    return workflow.withTrackerMutationAuthority(() => {
+      if (JSON.stringify(loadTickets(paths.tickets)) !== JSON.stringify(tickets)) throw new Error("Ticket definitions changed before reset authority was acquired; preview again");
+      const stagePath = join(projectDir, ".rafi", "reset-stage", resetId, "progress.md");
+      const oldStates = new Map(ids.map((id) => [id, db.getState(id)]));
+      const oldRecentCompleted = db.getRecentCompleted().filter((row) => ids.includes(row.ticket_id));
+      const insertedEventIds: number[] = [];
+      const progressBefore = existsSync(paths.progressDoc) ? readFileSync(paths.progressDoc) : undefined;
+      const run = workflow.createRun({
+        kind: "recovery",
+        checkpoint: "ticket-reset-intent",
+        originalWork: { resetId, scope: preview.scope, tickets: ids, states: Object.fromEntries(oldStates) },
+        remainingWork: { tickets: ids },
+        state: { operation: "ticket-reset", progressDigest: digest(progressBefore) },
+      }, now);
+      let publication: ReturnType<WorkflowDb["beginPublication"]> | undefined;
+      try {
+        publication = workflow.beginPublication(run.runId, { operation: "ticket-reset", resetId, tickets: ids, stagePath, targetPath: paths.progressDoc }, { progressDigest: digest(progressBefore) }, now);
+        const stamp = now.toISOString();
+        db.transaction(() => {
+          for (const row of preview.tickets) {
+            db.upsertState(row.id, pristineTicketState(row.id, stamp, actor), stamp);
+            db.deleteRecentCompleted(row.id);
+            insertedEventIds.push(db.insertEvent({
+              timestamp: stamp,
+              actor,
+              ticket_id: row.id,
+              event_type: "ticket_reset",
+              old_status: oldStates.get(row.id)?.status ?? row.status,
+              new_status: "planned",
+              summary: `Reset ${row.id} to pristine active state`,
+              validation: null,
+              evidence: null,
+              payload_json: JSON.stringify({ reset_id: resetId, scope: preview.scope, cleared: row.cleared }),
+            }));
+          }
+        });
+        mkdirSync(dirname(stagePath), { recursive: true });
+        writeFileSync(stagePath, renderProgressDoc({ config, projectDir, ticketDefs: tickets, states: db.getAllStates(), db, now: stamp }), "utf8");
+        workflow.updatePublication(publication.transactionId, "staged", now);
+        workflow.updatePublication(publication.transactionId, "tracker_committed", now);
+        hooks.beforePublish?.();
+        writeProgressDoc(paths.progressDoc, readFileSync(stagePath, "utf8"), true);
+        workflow.updatePublication(publication.transactionId, "published", now);
+        workflow.updatePublication(publication.transactionId, "committed", now);
+        workflow.transition(run.runId, { status: "completed", checkpoint: "ticket-reset-committed", remainingWork: {}, state: { operation: "ticket-reset", resetId, tickets: ids } }, now);
+        rmSync(dirname(stagePath), { recursive: true, force: true });
+        return { resetId, tickets: ids };
+      } catch (error) {
+        db.transaction(() => {
+          db.deleteEvents(insertedEventIds);
+          for (const [id, state] of oldStates) {
+            if (state) db.upsertState(id, state, state.updated_at);
+            else db.deleteState(id);
+          }
+          for (const row of oldRecentCompleted) db.upsertRecentCompleted(row);
+        });
+        if (progressBefore) writeProgressDoc(paths.progressDoc, progressBefore.toString("utf8"), true);
+        else rmSync(paths.progressDoc, { force: true });
+        rmSync(dirname(stagePath), { recursive: true, force: true });
+        if (publication) workflow.updatePublication(publication.transactionId, "rolled_back", now);
+        workflow.transition(run.runId, { status: "failed", checkpoint: "ticket-reset-rolled-back", state: { operation: "ticket-reset", resetId, error: error instanceof Error ? error.message : String(error) } }, now);
+        throw error;
       }
     });
-    mkdirSync(dirname(stagePath), { recursive: true });
-    writeFileSync(stagePath, renderProgressDoc({ config, projectDir, ticketDefs: tickets, states: db.getAllStates(), db, now: stamp }), "utf8");
-    workflow.updatePublication(publication.transactionId, "staged", now);
-    workflow.updatePublication(publication.transactionId, "tracker_committed", now);
-    hooks.beforePublish?.();
-    writeProgressDoc(paths.progressDoc, readFileSync(stagePath, "utf8"), true);
-    workflow.updatePublication(publication.transactionId, "published", now);
-    workflow.updatePublication(publication.transactionId, "committed", now);
-    workflow.transition(run.runId, { status: "completed", checkpoint: "ticket-reset-committed", remainingWork: {}, state: { operation: "ticket-reset", resetId, tickets: ids } }, now);
-    rmSync(dirname(stagePath), { recursive: true, force: true });
-    return { resetId, tickets: ids };
-  } catch (error) {
-    db.transaction(() => {
-      db.deleteEvents(insertedEventIds);
-      for (const [id, state] of oldStates) {
-        if (state) db.upsertState(id, state, state.updated_at);
-        else db.deleteState(id);
-      }
-      for (const row of oldRecentCompleted) db.upsertRecentCompleted(row);
-    });
-    if (progressBefore) writeProgressDoc(paths.progressDoc, progressBefore.toString("utf8"), true);
-    else rmSync(paths.progressDoc, { force: true });
-    rmSync(dirname(stagePath), { recursive: true, force: true });
-    workflow.updatePublication(publication.transactionId, "rolled_back", now);
-    workflow.transition(run.runId, { status: "failed", checkpoint: "ticket-reset-rolled-back", state: { operation: "ticket-reset", resetId, error: error instanceof Error ? error.message : String(error) } }, now);
-    throw error;
   } finally {
-    workflow.close();
-    db.close();
+    try { workflowHandle?.close(); } finally { db.close(); }
   }
 }
 

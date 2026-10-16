@@ -123,6 +123,7 @@ export function readOnlyPermissionConfig(): PermissionConfig {
       "npm run typecheck",
       "npm run lint",
       "npm run check",
+      "node --test",
       "pnpm test",
       "pnpm run test",
       "pnpm typecheck",

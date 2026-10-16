@@ -1057,13 +1057,19 @@ const ticketsCommand = buildTicketsCommand({
   },
 });
 ticketsCommand.addCommand(buildTicketPlanCommand({
-  beforeApply: projectDir => { for (const receipt of ticketOwnershipReceipts(projectDir, "plan", false)) prepareOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category); },
-  afterApply: projectDir => { for (const receipt of ticketOwnershipReceipts(projectDir, "plan", true)) finalizePreparedOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category); },
+  beforeApply: (projectDir, artifacts = []) => {
+    for (const receipt of ticketOwnershipReceipts(projectDir, "plan", false)) prepareOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category);
+    for (const path of artifacts) prepareOwnedWrite(projectDir, path, "tickets:plan", "plans");
+  },
+  afterApply: (projectDir, artifacts = []) => {
+    for (const receipt of ticketOwnershipReceipts(projectDir, "plan", true)) finalizePreparedOwnedWrite(projectDir, receipt.path, receipt.origin, receipt.category);
+    for (const path of artifacts) finalizePreparedOwnedWrite(projectDir, path, "tickets:plan", "plans");
+  },
 }));
 program.addCommand(ticketsCommand);
 program.addCommand(buildStartCommand({ beforeFreshStart: project => offerStartRecovery(project, {
-  resume: async (root, runId) => { await buildBuildResumeCommand({ executeStart: (args, context) => launchResumeStart(fileURLToPath(import.meta.url), args, context) }).parseAsync([root, "--run", runId], { from: "user" }); },
-  restart: async (root, runId, action) => { await buildBuildStartOverCommand().parseAsync([root, "--run", runId, ...(action ? ["--action", action] : [])], { from: "user" }); },
+  resume: async (root, runId) => { let outcome: import("./startRecovery.js").RecoveryOutcome = "cancelled"; await buildBuildResumeCommand({ onOutcome: value => { outcome = value; }, executeStart: (args, context) => launchResumeStart(fileURLToPath(import.meta.url), args, context) }).parseAsync([root, "--run", runId], { from: "user" }); return outcome; },
+  restart: async (root, runId, action) => { let outcome: import("./startRecovery.js").RecoveryOutcome = "cancelled"; await buildBuildStartOverCommand({ onOutcome: value => { outcome = value; } }).parseAsync([root, "--run", runId, ...(action ? ["--action", action] : [])], { from: "user" }); return outcome; },
 }) }));
 program.addCommand(buildAttachCommand());
 program.addCommand(buildDecideCommand());

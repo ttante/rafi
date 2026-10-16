@@ -10,6 +10,9 @@ import { previewTicketReset, resetTickets } from "ai-foreman/ticket-reset.js";
 import { WorkflowDb, type ProjectLease, type WorkflowRunSnapshot } from "ai-foreman/workflow-db.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
 import { assertLifecycleForCommand } from "./lifecycle.js";
+import { readInstallManifest } from "./ownership.js";
+import { ticketOwnershipReceipts } from "ai-foreman/cli/tickets.js";
+import type { RecoveryOutcome } from "./startRecovery.js";
 
 export type StartOverAction = "restart-current" | "archive-restart" | "archive-new-branch" | "new-branch" | "retain-merged" | "revert-branch" | "manual" | "cancel";
 export interface StartOverInventory {
@@ -41,8 +44,10 @@ export function inventoryBuildStartOver(projectDir: string, run: BuildRunRecordV
   const gitRepository = gitValue(worktree, ["rev-parse", "--is-inside-work-tree"]) === "true";
   const dirtyPaths = gitRepository ? gitStatusPaths(worktree) : [];
   const sourceDigest = gitRepository ? startOverSourceDigest(worktree) : undefined;
-  const initial = new Set(run.repository.git.initialStatusPaths);
-  let unexpectedPaths = dirtyPaths.filter((path) => initial.has(path) || (run.repository.git.runOwnedPaths.length > 0 && !run.repository.git.runOwnedPaths.includes(path)));
+  // Older inventories collapse untracked directories; current inventories
+  // enumerate their files so owned artifacts cannot hide unrelated documents.
+  const matches = (paths: string[], path: string) => paths.some(prior => prior === path || (prior.endsWith("/") && path.startsWith(prior)));
+  let unexpectedPaths = dirtyPaths.filter((path) => matches(run.repository.git.initialStatusPaths, path) || (run.repository.git.runOwnedPaths.length > 0 && !matches(run.repository.git.runOwnedPaths, path)));
   const pushed = Boolean(run.repository.git.upstream || (branch && gitValue(worktree, ["for-each-ref", "--format=%(upstream:short)", `refs/heads/${branch}`])));
   const openReview = branch ? detectOpenReview(worktree, branch) : undefined;
   // Uncommitted work cannot remain attached to the protected original branch
@@ -61,7 +66,7 @@ export function inventoryBuildStartOver(projectDir: string, run: BuildRunRecordV
   return { run, worktree, branch, head, baseline, baseRef, dirtyPaths, sourceDigest, unexpectedPaths, pushed, openReview, merged, baselineComplete, recommended: "restart-current", choices: ["restart-current", "archive-restart", "manual", "cancel"] };
 }
 
-export function buildBuildStartOverCommand(faults: { afterSupersession?: () => void } = {}): Command {
+export function buildBuildStartOverCommand(faults: { afterSupersession?: () => void; onOutcome?: (outcome: RecoveryOutcome) => void } = {}): Command {
   return new Command("build:start-over")
     .description("Safely preserve an implementation run, reconcile its tracker state, and prepare a fresh restart.")
     .argument("[project]", "project directory", ".")
@@ -73,6 +78,7 @@ export function buildBuildStartOverCommand(faults: { afterSupersession?: () => v
     .option("--second-confirm", "acknowledge duplicate-work risk for --action retain-merged")
     .option("--inspect", "show inventory and choices without mutation")
     .action(async (project: string, opts: { run?: string; action?: string; yes?: boolean; secondConfirm?: boolean; inspect?: boolean; tickets?: string; cleanup?: string }) => {
+      faults.onOutcome?.("cancelled");
       const root = resolve(project);
       if (opts.cleanup && !["stash", "discard", "handled"].includes(opts.cleanup)) throw new Error("--cleanup must be stash, discard, or handled");
       const runs = recoverableBuildRuns(root);
@@ -116,16 +122,16 @@ export function buildBuildStartOverCommand(faults: { afterSupersession?: () => v
         action = answer as StartOverAction;
       }
       if (action === "cancel") { console.log("rafi build:start-over: cancelled; nothing changed"); return; }
-      if (action === "manual") { printManual(inventory); return; }
+      if (action === "manual") { faults.onOutcome?.("paused"); printManual(inventory); return; }
       if (opts.tickets && action !== "restart-current") throw new Error("--tickets is available only with restart-current; Git rollback actions reset the whole saved run");
       if (inventory.unexpectedPaths.length && action !== "archive-new-branch" && action !== "restart-current") {
         const cleaned = await resolveStartOverCleanup(inventory, opts.cleanup);
-        if (!cleaned) return;
+        if (!cleaned) { faults.onOutcome?.("paused"); return; }
         const originalBranch = inventory.branch;
         inventory = inventoryBuildStartOver(root, run);
         if (inventory.branch !== originalBranch) throw new Error("Working branch changed during cleanup; return to the inspected branch and retry. Nothing was reset.");
         if (!inventory.choices.includes(action)) throw new Error(`Repository state changed during cleanup; ${action} is no longer safe. Available choices: ${inventory.choices.join(", ")}`);
-        if (inventory.unexpectedPaths.length) { printCleanupGuidance(inventory); return; }
+        if (inventory.unexpectedPaths.length) { faults.onOutcome?.("paused"); printCleanupGuidance(inventory); return; }
       }
       const pendingTickets = pending ? (pending.remainingWork as { tickets?: string[] }).tickets : undefined;
       let resetTargets = pendingTickets ?? (opts.tickets ? [...new Set(opts.tickets.split(",").map(item => item.trim()).filter(Boolean))] : action === "restart-current" ? previewTicketReset(root, "unfinished").tickets.map(item => item.id).filter(id => run!.tickets.includes(id)) : [...run.tickets]);
@@ -139,6 +145,14 @@ export function buildBuildStartOverCommand(faults: { afterSupersession?: () => v
       }
       if (!resetTargets.length) { console.log("rafi build:start-over: no tickets selected; nothing changed"); return; }
       console.log(`  restarting tickets ${resetTargets.join(", ")}; ${action === "restart-current" ? "current branch and implementation files will be kept" : "Git preservation action will be applied"}`);
+      const previewGitPlan = pending ? plannedGitResult(pending) ?? preservedGitResult(pending) ?? planStartOverGit(inventory, action) : planStartOverGit(inventory, action);
+      if (action === "archive-restart") {
+        console.log(`  archive destination ${previewGitPlan.archiveBranch}; active branch ${inventory.branch} will reset to ${inventory.baseline}`);
+        const commits = git(inventory.worktree, ["log", "--format=%h %s", `${inventory.baseline}..${inventory.head}`]);
+        console.log("  post-baseline commits will remain on the archive branch and leave the active branch:");
+        for (const commit of commits?.split("\n").filter(Boolean) ?? []) console.log(`    ${commit}`);
+        if (!commits) console.log("    none recorded");
+      }
       if (!opts.yes) {
         if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("mutation requires --yes outside an interactive terminal");
         const { confirm, isCancel } = await import("@clack/prompts");
@@ -153,11 +167,13 @@ export function buildBuildStartOverCommand(faults: { afterSupersession?: () => v
       }
       if (!pending && inventory.sourceDigest && inventory.sourceDigest !== startOverSourceDigest(inventory.worktree)) throw new Error("Implementation files changed during the start-over preview. Nothing was reset; inspect and retry with the current files.");
       const workflow = new WorkflowDb(root);
-      const operation = pending ?? workflow.createRun({ kind: "recovery", checkpoint: "start-over-inventory", originalWork: inventory, remainingWork: { action, tickets: resetTargets }, state: { operation: "build-start-over" } });
+      let operation: WorkflowRunSnapshot;
+      try { operation = pending ?? workflow.createRun({ kind: "recovery", checkpoint: "start-over-inventory", originalWork: inventory, remainingWork: { action, tickets: resetTargets }, state: { operation: "build-start-over" } }); }
+      catch (error) { workflow.close(); throw error; }
       let lease: ProjectLease | undefined;
       let admission: ReturnType<WorkflowDb["acquireBuildRecoveryAdmission"]> | undefined;
       let result = preservedGitResult(operation);
-      let planned = plannedGitResult(operation);
+      let planned = plannedGitResult(operation) ?? previewGitPlan;
       let resetId = typeof operation.state.resetId === "string" ? operation.state.resetId : undefined;
       let plannedResetId = typeof operation.state.plannedResetId === "string" ? operation.state.plannedResetId : undefined;
       try {
@@ -202,9 +218,12 @@ export function buildBuildStartOverCommand(faults: { afterSupersession?: () => v
         if (result.restartBranch) console.log(`rafi build:start-over: restart branch is ${result.restartBranch}`);
         if (result.revertBranch) console.log(`rafi build:start-over: prepared revert branch ${result.revertBranch} for review; no review was opened`);
         console.log(`rafi build:start-over: reset ${resetCount} ticket(s); old run ${run.runId} is superseded`);
+        faults.onOutcome?.("completed");
         for (const ticket of resetTargets) console.log(`rafi build:start-over: continue with \`rafi start ${shellQuote(root)} --ticket ${shellQuote(ticket)} --steps 1\``);
       } catch (error) {
+        faults.onOutcome?.("paused");
         if (admission) workflow.transition(operation.runId, { status: "paused", checkpoint: "start-over-failed", remainingWork: { action, tickets: resetTargets }, state: { operation: "build-start-over", ...(planned ? { planned } : {}), ...(result ? { gitPreserved: true, result } : {}), ...(plannedResetId ? { plannedResetId } : {}), ...(resetId ? { resetId } : {}), error: error instanceof Error ? error.message : String(error) } });
+        else if (!pending) workflow.pauseOwnStartOverIntent(operation.runId, error);
         throw error;
       } finally {
         try { if (lease) workflow.releaseLease(lease); if (admission) workflow.releaseBuildAdmission(admission); }
@@ -378,7 +397,8 @@ function git(cwd: string, args: string[]): string { return execFileSync("git", a
 function gitValue(cwd: string, args: string[]): string | undefined { try { return git(cwd, args) || undefined; } catch { return undefined; } }
 function gitOk(cwd: string, args: string[]): boolean { try { execFileSync("git", args, { cwd, stdio: "ignore" }); return true; } catch { return false; } }
 function gitStatusPaths(cwd: string): string[] {
-  const records = execFileSync("git", ["status", "--porcelain=v1", "-z"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).split("\0");
+  const controls = startOverArtifactPaths(cwd);
+  const records = execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all", "-z"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).split("\0");
   const paths: string[] = [];
   for (let i = 0; i < records.length; i++) {
     const line = records[i];
@@ -388,7 +408,7 @@ function gitStatusPaths(cwd: string): string[] {
   }
   return paths
     .filter(Boolean)
-    .filter((path) => !isStartOverControlPath(path))
+    .filter((path) => !isStartOverControlPath(path) && !controls.has(path))
     .sort();
 }
 
@@ -454,7 +474,8 @@ export async function resolveStartOverCleanup(inventory: StartOverInventory, cho
           const configured = gitValue(inventory.worktree, ["config", "--path", "--get", "core.excludesFile"]);
           const existing = configured ? resolve(inventory.worktree, configured) : join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "git", "ignore");
           mkdirSync(resolve(excludes, ".."), { recursive: true });
-          writeFileSync(excludes, `${existsSync(existing) ? readFileSync(existing, "utf8") : ""}\n/.rafi/\n/.foreman/\n/.tickets/\n/rafi-config.yaml\n`, { mode: 0o600 });
+          const artifactExcludes = [...startOverArtifactPaths(inventory.worktree)].map(path => `/${path.replace(/[\\*?\[\]]/g, "\\$&")}`).join("\n");
+          writeFileSync(excludes, `${existsSync(existing) ? readFileSync(existing, "utf8") : ""}\n/.rafi/\n/.foreman/\n/.tickets/\n/rafi-config.yaml\n${artifactExcludes}\n`, { mode: 0o600 });
           try { git(inventory.worktree, ["-c", `core.excludesFile=${excludes}`, "stash", "push", "--include-untracked", "-m", `Rafi start-over ${inventory.run.runId}`]); }
           finally { restoreStartOverControlFiles(inventory.worktree, controlFiles); rmSync(excludes, { force: true }); }
         } else {
@@ -481,6 +502,14 @@ function isStartOverControlPath(path: string): boolean {
   return [".foreman", ".rafi", ".tickets"].some(dir => path === dir || path === `${dir}/` || path.startsWith(`${dir}/`)) || path === "rafi-config.yaml";
 }
 
+function startOverArtifactPaths(root: string): Set<string> {
+  const manifest = readInstallManifest(root);
+  return new Set([
+    ...ticketOwnershipReceipts(root, "start-over", false).map(receipt => receipt.path),
+    ...(manifest?.files.filter(file => file.category === "tickets" || file.category === "plans").map(file => file.path) ?? []),
+  ]);
+}
+
 type StartOverControlFiles = Map<string, { content: Buffer; mode: number }>;
 
 function captureStartOverControlFiles(root: string): StartOverControlFiles {
@@ -498,6 +527,7 @@ function captureStartOverControlFiles(root: string): StartOverControlFiles {
     else if (!/\.(?:sqlite(?:3)?|db)(?:-(?:wal|shm|journal))?$/.test(path)) files.set(path, { content: readFileSync(absolute), mode: info.mode & 0o777 });
   };
   visit("rafi-config.yaml"); visit(".tickets");
+  for (const path of startOverArtifactPaths(root)) visit(path);
   return files;
 }
 
@@ -541,7 +571,8 @@ function startOverSourceDigest(root: string): string {
   for (const args of [["diff", "--cached", "--binary", "--no-ext-diff", ...scope], ["diff", "--binary", "--no-ext-diff", ...scope]]) {
     hash.update(execFileSync("git", args, { cwd: root, maxBuffer: 64 * 1024 * 1024 })).update("\0");
   }
-  const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z"], { cwd: root, encoding: "utf8" }).split("\0").filter(path => path && !isStartOverControlPath(path)).sort();
+  const controls = startOverArtifactPaths(root);
+  const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z"], { cwd: root, encoding: "utf8" }).split("\0").filter(path => path && !isStartOverControlPath(path) && !controls.has(path)).sort();
   for (const path of untracked) {
     const absolute = join(root, path);
     const stat = lstatSync(absolute);

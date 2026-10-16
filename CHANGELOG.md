@@ -6,6 +6,11 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+## @rafi-ai/cli 0.9.26 / ai-foreman 1.7.26 - 2026-10-16
+
+- Strengthen Builder/QA recovery, provider-session continuity, activity reporting, handoff handling, ticket recovery, and reset behavior.
+- Bumped `ai-foreman` to `1.7.26` and `@rafi-ai/cli` to `0.9.26`, with the CLI pinned to `ai-foreman@1.7.26`.
+
 ## @rafi-ai/cli 0.9.24 / ai-foreman 1.7.24 - 2026-10-14
 
 - Improve activity timing, Claude tool results, handoff acceptance, ticket delivery, and build status reporting.

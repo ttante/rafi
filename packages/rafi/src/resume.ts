@@ -2,7 +2,8 @@ import { addBuildRecoveryOptions, buildRecoveryArguments } from "./buildRecovery
 import { Command } from "commander";
 import { resolve } from "node:path";
 import { projectBuildRecovery, recoverableBuildRuns } from "ai-foreman/build-runs.js";
-import { discardInterview, findInterviewRecord, readInterviewRecords, type InterviewRecord } from "ai-foreman/interviews.js";
+import { completeInterview, discardInterview, findInterviewRecord, readInterviewRecords, type InterviewRecord } from "ai-foreman/interviews.js";
+import { detectProjectLifecycle } from "./lifecycle.js";
 
 export interface ResumeChoice {
   value: string;
@@ -23,7 +24,7 @@ export function resumeChoices(projectDir: string): ResumeChoice[] {
   });
   const interviews = readInterviewRecords(projectDir).records.filter(record => record.status !== "completed").map(record => ({
     cleanupOnly: false, value: `interview:${record.id}`, kind: "interview" as const, id: record.id, updatedAt: record.updatedAt,
-    label: `${record.workflow} — ${record.checkpoint} — ${record.failure?.summary ?? "interrupted"}`, hint: record.updatedAt,
+    label: `${record.workflow} — ${record.checkpoint} — ${record.status}${record.failure?.summary ? `: ${record.failure.summary}` : ""}`, hint: record.updatedAt,
   }));
   return [...builds, ...interviews].sort((a, b) => Number(a.cleanupOnly ?? false) - Number(b.cleanupOnly ?? false) || b.updatedAt.localeCompare(a.updatedAt) || a.value.localeCompare(b.value));
 }
@@ -71,6 +72,11 @@ export function buildResumeCommand(options: {
       }
       if (!record) throw new Error(`interview not found: ${opts.id}`);
       if (record.status === "incompatible") throw new Error(`interview ${record.id} uses an incompatible state version; use --discard ${record.id} to remove it`);
+      if (record.workflow === "create" && record.checkpoint === "ticket-setup-prompt" && detectProjectLifecycle(projectDir).state === "initialized") {
+        completeInterview(projectDir, record);
+        console.log("rafi resume: setup is already complete; the saved create walkthrough is now closed.");
+        return;
+      }
       console.log(`rafi resume: ${record.workflow} at ${record.checkpoint}`);
       if (record.runtime.sessionId) console.log(`rafi resume: saved ${record.runtime.runtime ?? "agent"} session ${record.runtime.sessionId} will be requested by the workflow.`);
       else if (record.checkpoint === "agent-run") console.log("rafi resume: the prior agent session is unavailable; the workflow will start a fresh session with the saved brief and answers.");

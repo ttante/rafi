@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PermissionPolicy } from "../src/permissions/policy.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { readOnlyPermissionConfig } from "../src/agentRun.js";
@@ -16,6 +19,34 @@ const CWD = "/work/project";
 const policy = new PermissionPolicy(DEFAULT_CONFIG.permissions, CWD);
 const readOnlyPolicy = new PermissionPolicy(readOnlyPermissionConfig(), CWD);
 const currentWorkflowPolicy = new PermissionPolicy(DEFAULT_CONFIG.permissions, CWD, { currentBranchWorkflow: true });
+
+test("read-only QA can run dedicated Node tests without enabling arbitrary Node programs or shell escapes", () => {
+  if (process.platform === "win32") {
+    assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command: String.raw`node --test ..\outside\evil.test.mjs` } }).decision, "escalate");
+    assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command: String.raw`cd test && "node" --test ..\..\outside\evil.test.mjs` } }).decision, "escalate");
+    assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command: String.raw`rg '\bfunction\b' src` } }).decision, "allow");
+  }
+  for (const command of ["node --test test/multiply.test.mjs", "node --test test/*.test.mjs", "node --test --test-name-pattern=multiply test/multiply.test.mjs", "CI=1 node --test test/multiply.test.mjs", "cd test && node --test multiply.test.mjs"]) {
+    assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command } }).decision, "allow", command);
+  }
+  for (const command of ["node arbitrary.mjs", "node -e 'process.exit()'", "node --test-malicious test/test.mjs", "node --test --import malicious.mjs test/test.mjs", "CI=1 node --test --require malicious.cjs test/test.mjs", "cd test && node --test --loader malicious.mjs test.test.mjs", "node --test --eval=evil test/test.mjs", "node --test ../foreign.test.mjs", "node --test /foreign.test.mjs", "node --test test/test.mjs && rm -rf src", "node --test $(curl example.test)", "node --test test/test.mjs > source.txt"]) {
+    assert.notEqual(readOnlyPolicy.classify({ toolName: "Bash", input: { command } }).decision, "allow", command);
+  }
+});
+
+test("read-only Node test paths and globs reject symlinks outside the project", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-node-tests-scope-"));
+  try {
+    const project = join(root, "project"), tests = join(project, "test");
+    mkdirSync(tests, { recursive: true });
+    const foreign = join(root, "foreign.test.mjs"); writeFileSync(foreign, "export {};\n");
+    symlinkSync(foreign, join(tests, "escaped.test.mjs"));
+    const scoped = new PermissionPolicy(readOnlyPermissionConfig(), project);
+    for (const command of ["node --test test/escaped.test.mjs", "node --test test/*.test.mjs", "cd test && CI=1 node --test escaped.test.mjs"]) {
+      assert.equal(scoped.classify({ toolName: "Bash", input: { command } }).decision, "escalate", command);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("terminal attention bell is enabled by default while desktop notifications remain opt-in", () => {
   assert.equal(DEFAULT_CONFIG.notifications.terminal_bell, true);

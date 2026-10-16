@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
+import { hostname } from "node:os";
 import { DurableSupervisor } from "./supervisor.js";
 import { WorkflowDb } from "./workflowDb.js";
 import type { ResolvedAutonomyPolicy } from "rafi-spec";
@@ -126,7 +127,16 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
       const startup = setTimeout(() => child.kill("SIGTERM"), 15_000);
       child.on("message", message => {
         if (!message || typeof message !== "object" || !("kind" in message) || message.kind !== "rafi-launch-registered") return;
-        try { db.acknowledgeBuildLaunchChild(authority, launch.token, child.pid!); child.send("rafi-launch-ack", () => {}); clearTimeout(startup); }
+        try {
+          db.acknowledgeBuildLaunchChild(authority, launch.token, child.pid!);
+          // Record the incarnation before acknowledging the blocked launch gate.
+          // Any persistence failure follows the existing owned-child cleanup.
+          db.transitionSupervisor(runId, generation, {
+            checkpoint: db.getRun(runId)?.checkpoint ?? "preparing", event: "worker_started",
+            payload: { workerPid: child.pid, processStart: processStartIdentity(child.pid!), host: hostname(), generation },
+          });
+          child.send("rafi-launch-ack", () => {}); clearTimeout(startup);
+        }
         catch { child.kill("SIGTERM"); }
       });
       child.once("exit", () => clearTimeout(startup));
@@ -158,9 +168,10 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
       const result = new Promise<import("./supervisor.js").WorkerOutcome>(resolve => {
         child.once("error", error => {
           clearInterval(watchdog);
+          exitCode = 1;
           if (child.pid) { stop(); return; } // exit handler owns cleanup and settlement
-          db.failBuildLaunch(authority, launch.token);
-          resolve({ kind: "failed", detail: error.message });
+          try { db.failBuildLaunch(authority, launch.token); resolve({ kind: "failed", detail: error.message }); }
+          catch (failure) { resolve({ kind: "failed", detail: `${error.message}; launch reconciliation failed: ${String(failure)}` }); }
         });
         child.once("exit", async (code, signal) => {
           clearInterval(watchdog);
@@ -217,7 +228,11 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
   const stopInt = () => { stopRequestSource = "parent-SIGINT"; supervisor.requestStop(); };
   const stopTerm = () => { stopRequestSource = "parent-SIGTERM"; supervisor.requestStop(); };
   process.once("SIGINT", stopInt); process.once("SIGTERM", stopTerm);
-  try { await supervisor.run(); }
+  try {
+    const outcome = await supervisor.run();
+    if (outcome.kind === "failed") { exitCode ||= 1; console.error(`rafi: ${outcome.detail}`); }
+    else if (outcome.kind === "waiting_for_human") exitCode ||= 2;
+  }
   finally { process.off("SIGINT", stopInt); process.off("SIGTERM", stopTerm); db.close(); }
   process.exitCode = exitCode;
   return true;

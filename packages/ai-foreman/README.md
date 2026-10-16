@@ -116,7 +116,7 @@ Provider sessions are historical after import. Resume with `rafi build:resume <p
 | `-a, --agent <agent>` | `claude` / `codex` | single `rafi-config.yaml` target, otherwise `claude` | Builder agent. Explicit `--agent` always wins. |
 | `-m, --model <model>` | `gpt-5.5` / any supported agent model | agent default | Overrides the builder model. |
 | `--effort <level>` | Claude Code: `low` / `medium` / `high` / `xhigh`<br>Codex: `low` / `medium` / `high` / `xhigh` | agent default | Reasoning level. |
-| `--fast` | flag | off | Lower latency. For Codex, maps to `effort=low` when `--effort` is not set. |
+| `--fast` | flag | off | Use native fast mode when the selected model supports it. Otherwise continue at standard speed with the same model and reasoning settings. |
 | `-t, --tickets <path>` | `.md` / `.txt` / `.yaml` | auto-detects standard tracker files | Sends a task file to the builder during preflight planning. |
 | `-y, --yes` | flag | off | Skips preflight confirmation. |
 | `--no-qa` | flag | QA on | Disables per-ticket QA review. |
@@ -640,6 +640,7 @@ For Claude:
 - Bash is denied if it contains an always-escalate substring.
 - Bash is otherwise allowed only for configured prefixes.
 - Every chained segment must start with an `allowBash` prefix.
+- Supported project test forms include literal in-worktree `cd directory &&`, constrained `PYTHONPATH` or test environment assignments, existing project-local virtualenv Python/pytest executables, and `2>&1`. `uv run --offline --no-sync` may wrap an already allowed test command. Every pipeline executable must be allowed. Configure additional test commands under `permissions.allowBash` in `foreman.yaml`; PATH/loader overrides, substitutions, file redirection, and dependency acquisition remain separate decisions.
 - Unknown tools are denied.
 - Unknown Bash commands are denied.
 

@@ -199,6 +199,40 @@ test("supervisor retry limits do not reset when a checkpoint label changes", asy
   const result = await new DurableSupervisor({ projectDir: root, runId: "run", policy, checkpoint: () => `cosmetic-${calls}`, sleep: async () => {}, spawnWorker: () => { calls++; return { result: Promise.resolve({ kind: "crashed" as const, detail: "fixture" }), stop() {} }; } }).run();
   assert.equal(result.kind, "failed");
   assert.equal(calls, 2);
+  const db = new WorkflowDb(root);
+  try { assert.equal(db.getRun("run")?.status, "failed"); }
+  finally { db.close(); }
+});
+
+for (const uncertain of [false, true]) test(`numeric worker failure persists ${uncertain ? "reconciliation pause" : "failure"}`, async t => {
+  const { DurableSupervisor } = await import("../src/supervisor.js");
+  const { resolveAutonomyPolicy } = await import("../src/recoveryPolicy.js");
+  const root = mkdtempSync(join(tmpdir(), "rafi-worker-failure-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const result = await new DurableSupervisor({ projectDir: root, runId: "run", policy: resolveAutonomyPolicy(undefined), checkpoint: () => "preparing", spawnWorker: () => {
+    if (uncertain) {
+      const db = new WorkflowDb(root);
+      try { db.planOperation({ runId: "run", idempotencyKey: "dispatch", kind: "provider-dispatch", intent: { role: "builder" } }); db.updateOperation("dispatch", "in_progress"); db.updateOperation("dispatch", "uncertain"); }
+      finally { db.close(); }
+    }
+    return { result: Promise.resolve({ kind: "failed" as const, detail: "preparation rejected" }), stop() {} };
+  } }).run();
+  assert.equal(result.kind, "failed");
+  const db = new WorkflowDb(root);
+  try {
+    assert.equal(db.getRun("run")?.status, uncertain ? "paused" : "failed");
+    assert.equal(db.getRun("run")?.checkpoint, uncertain ? "worker-reconciliation-required" : "worker-failed");
+    assert.equal(db.unresolvedRoleDispatches("run", "builder").length, uncertain ? 1 : 0);
+  } finally { db.close(); }
+});
+
+test("a rejected worker launch persists failure and releases its owned admission", async t => {
+  const { DurableSupervisor } = await import("../src/supervisor.js"); const { resolveAutonomyPolicy } = await import("../src/recoveryPolicy.js");
+  const root = mkdtempSync(join(tmpdir(), "rafi-spawn-rejected-")); t.after(() => rmSync(root, { recursive: true, force: true }));
+  await assert.rejects(new DurableSupervisor({ projectDir: root, runId: "run", policy: resolveAutonomyPolicy(undefined), checkpoint: () => "preparing", spawnWorker: async () => { throw new Error("injected launch rejection"); } }).run(), /injected launch rejection/);
+  const db = new WorkflowDb(root);
+  try { assert.equal(db.getRun("run")?.status, "failed"); assert.equal(db.supervisorState("run")?.status, "failed"); assert.equal(db.buildAdmission(), undefined); }
+  finally { db.close(); }
 });
 
 test("embedded supervisor does not replay a crashed worker with unresolved dispatch", async t => {

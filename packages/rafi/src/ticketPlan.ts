@@ -172,8 +172,8 @@ export function buildTicketPlanCommand(ownership: Pick<TicketPlanOptions, "befor
 }
 
 export interface TicketPlanOptions {
-  beforeApply?: (projectDir: string) => void;
-  afterApply?: (projectDir: string) => void;
+  beforeApply?: (projectDir: string, artifacts?: string[]) => void;
+  afterApply?: (projectDir: string, artifacts?: string[]) => void;
   interviewId?: string;
   project?: string; brief?: string; agent?: string; model?: string; effort?: string; resumeSession?: string;
   sourceStorage?: string; yes?: boolean; grillMe?: boolean;
@@ -490,8 +490,13 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
       const drift = planningFingerprintChanges(projectDir, fingerprint);
       if (drift.length) { result = await sendPlanningTurn(`The tracker/config changed during review (${drift.join(", ")}). Re-read current state, refresh the exact proposal, and request approval again.`); continue; }
       await role.builder.close();
-      opts.beforeApply?.(projectDir);
-      const applied = applyApprovedTicketPlan(projectDir, proposal, { expectedFingerprint: fingerprint, docsRoot });
+      // Freeze the publication timestamp before ownership preimages are
+      // captured so both plan paths are known before either is overwritten.
+      const appliedAt = new Date();
+      const stamp = appliedAt.toISOString().replace(/[:.]/g, "-");
+      const plannedArtifacts = [join(docsRoot, "rafi-ticket-plan.md"), join(docsRoot, "rafi-ticket-plans", `${stamp}.md`)].map(path => path.replace(/\\/g, "/"));
+      opts.beforeApply?.(projectDir, plannedArtifacts);
+      const applied = applyApprovedTicketPlan(projectDir, proposal, { expectedFingerprint: fingerprint, docsRoot, now: appliedAt });
       const publishedConfig = readProjectConfig(projectDir);
       const nextConfig: ProjectConfig = { ...publishedConfig, ...(pendingAgentDefaults ? { agent_defaults: pendingAgentDefaults } : {}), tickets: { ...publishedConfig.tickets, build: { ...publishedConfig.tickets?.build, branch_strategy: workMode ?? publishedConfig.tickets?.build?.branch_strategy, branch_prefix: publishedConfig.tickets?.build?.branch_prefix ?? "feature", ...(workMode === "current" ? { completion: "none" as const, provider: "local" as const, cleanup: false } : {}) } } };
       if (pendingAgentDefaults) saveAgentDefaults(projectDir, nextConfig, pendingAgentDefaults);
@@ -500,7 +505,7 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
       if (workMode && readback.tickets?.build?.branch_strategy !== workMode) throw new Error("approved ticket work mode failed config readback verification");
       if ((readback.agent_defaults?.roles.builder?.auto_compact_threshold_percent ?? 65) !== (pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65)) throw new Error("approved compaction threshold failed config readback verification");
       saveSourceRegistry(projectDir, stagedSources);
-      opts.afterApply?.(projectDir);
+      opts.afterApply?.(projectDir, applied.artifacts.map(path => path.replace(/\\/g, "/")));
       if (interview) completeInterview(projectDir, interview);
       console.log(`rafi tickets plan: created ${applied.added.length}, edited ${applied.edited.length}; validation passed`);
       console.log(`rafi tickets plan: wrote ${applied.artifacts.join(" and ")}`);

@@ -9,7 +9,7 @@ import type {
   HookInput,
 } from "@anthropic-ai/claude-agent-sdk";
 import { createHash, randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, isAbsolute } from "node:path";
 
 /** Lazy-load the Claude Agent SDK. Throws an actionable error if not installed. */
 export async function requireClaudeSDK() {
@@ -48,6 +48,8 @@ import type {
 import type { ProviderSessionRefV1, SessionAvailabilityV1 } from "rafi-spec";
 import { createProviderSessionRef, validateProviderSessionScope, canonicalSessionPath } from "../sessionIdentity.js";
 import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
+import { isFastModeUnavailable, reportFastModeUnavailable } from "./fastMode.js";
+import { handoffSystemInstructions } from "../handoffProtocol.js";
 
 const DEFAULT_PROVIDER_IDLE_TIMEOUT_MS = 30 * 60_000;
 
@@ -69,7 +71,9 @@ export function buildClaudeQueryOptions(
     resume: opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId,
     permissionMode: qaReadOnly ? "default" : "acceptEdits",
     effort: opts.effort,
-    extraArgs: opts.fast ? { fast: null } : undefined,
+    // Start at standard speed even when user/project settings enable fast mode.
+    // Enabling it before checking capabilities can silently switch the model.
+    settings: { fastMode: false },
     // Read-only roles still need the user's Claude authentication settings (for
     // example, an enterprise apiKeyHelper). Do not load repository-controlled
     // settings in those roles.
@@ -92,7 +96,7 @@ export function buildClaudeQueryOptions(
   const exactSkills = opts.preloadedSkillContent?.length
     ? ["# Preloaded Skills", "Use the following skills for this run.", ...opts.preloadedSkillContent.map((skill) => skill.content)].join("\n\n")
     : undefined;
-  const systemAppend = [opts.systemPromptAppend, opts.sessionRole === "builder" ? `Builder runtime contract: shell network ${opts.networkAccess === true ? "explicitly approved for this build" : "disabled"}; sandbox fallback disabled. If acquisition requires unavailable access, request input first or use a provenance-verified local bundle. A ticket answer does not grant runtime permissions.` : undefined, exactSkills].filter((part): part is string => Boolean(part)).join("\n\n");
+  const systemAppend = [handoffSystemInstructions(opts.sessionRole, opts.systemPromptAppend), opts.sessionRole === "builder" ? `Builder runtime contract: shell network ${opts.networkAccess === true ? "explicitly approved for this build" : "disabled"}; sandbox fallback disabled. If acquisition requires unavailable access, request input first or use a provenance-verified local bundle. A ticket answer does not grant runtime permissions.` : undefined, exactSkills].filter((part): part is string => Boolean(part)).join("\n\n");
   if (systemAppend) {
     base.systemPrompt = { type: "preset", preset: "claude_code", append: systemAppend };
   }
@@ -267,6 +271,7 @@ export class ClaudeAdapter implements BuilderAdapter {
     reject: (e: Error) => void;
     instruction: string;
     turnId: string;
+    submitted?: boolean;
     idleTimer?: ReturnType<typeof setTimeout>;
     hardTimer?: ReturnType<typeof setTimeout>;
     hardRemainingMs?: number;
@@ -287,6 +292,50 @@ export class ClaudeAdapter implements BuilderAdapter {
   private terminalResult?: TurnResult;
   private streamEnded = false;
   private closed = false;
+  private closePromise?: Promise<void>;
+  private launchScopeObserved = false;
+  private providerIdentityObserved = false;
+  private toolCwd?: string;
+  private readonly toolCwds = new Map<string, string>();
+  private fastModePrepared?: Promise<void>;
+  private fastModeEnabled = false;
+  private fastModeUnavailable = false;
+  private turnSawWork = false;
+
+  private async prepareFastMode(): Promise<void> {
+    if (!this.opts.fast || this.fastModeUnavailable) return;
+    this.fastModePrepared ??= (async () => {
+      // A missing capability is conservative: standard speed, same model.
+      let models: Array<{ value: string; supportsFastMode?: boolean }>;
+      try {
+        const init = await new OperationDeadline("Claude model capabilities", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.initializationResult());
+        models = init.models ?? [];
+      } catch (error) {
+        if (!isFastModeUnavailable(String(error))) throw error;
+        this.disableFastModeNotice(); return;
+      }
+      const model = models.find(item => item.value === (this.opts.model ?? "default"));
+      if (model?.supportsFastMode !== true || typeof this.query.applyFlagSettings !== "function") { this.disableFastModeNotice(); return; }
+      try {
+        await new OperationDeadline("Claude fast mode", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ fastMode: true }));
+        this.fastModeEnabled = true;
+      } catch (error) {
+        if (!isFastModeUnavailable(String(error))) throw error;
+        await this.disableFastMode();
+      }
+    })();
+    await this.fastModePrepared;
+  }
+
+  private disableFastModeNotice(): void {
+    if (!this.fastModeUnavailable) reportFastModeUnavailable(this.opts.model);
+    this.fastModeUnavailable = true; this.fastModeEnabled = false;
+  }
+
+  private async disableFastMode(): Promise<void> {
+    await new OperationDeadline("Claude standard speed", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ fastMode: false }));
+    this.disableFastModeNotice();
+  }
 
   static async create(opts: BuilderAdapterOptions): Promise<ClaudeAdapter> {
     try {
@@ -339,13 +388,16 @@ export class ClaudeAdapter implements BuilderAdapter {
       finish: (spanId, outcome) => opts.observer!.store.finishSpan(spanId, { outcome }),
     } : undefined);
     this.query = query({
-      prompt: this.inbox,
+      prompt: this.providerInputs(),
       options: {
         ...buildClaudeQueryOptions(opts),
         abortController: this.abort,
         hooks: {
           PreToolUse: [{ hooks: [async (input: HookInput) => {
             if (input.hook_event_name !== "PreToolUse") return {};
+            this.toolCwd = input.cwd;
+            this.toolCwds.set(input.tool_use_id, input.cwd);
+            if (this.toolCwds.size > 1000) this.toolCwds.delete(this.toolCwds.keys().next().value!);
             const reason = this.phaseBarrier.denial(input.tool_name);
             return reason ? { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: reason } } : {};
           }] }],
@@ -381,6 +433,7 @@ export class ClaudeAdapter implements BuilderAdapter {
             const decision = await opts.permission({
               toolName,
               input,
+              executionCwd: (requestOptions.toolUseID ? this.toolCwds.get(requestOptions.toolUseID) : undefined) ?? this.toolCwd ?? opts.cwd,
               signal: requestOptions.signal,
               title: requestOptions.title,
               displayName: requestOptions.displayName,
@@ -405,6 +458,16 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   /** Background loop: consume the SDK message stream until it ends. */
+  private async *providerInputs(): AsyncGenerator<SDKUserMessage> {
+    for await (const message of this.inbox) {
+      // A closed queue can still contain buffered input. Never let the SDK
+      // submit it after we recorded a proven pre-submit cancellation/failure.
+      if (this.closed || this.terminalResult || this.streamEnded) return;
+      if (this.pending?.instruction === message.message.content) this.pending.submitted = true;
+      yield message;
+    }
+  }
+
   private async pump(): Promise<void> {
     try {
       for await (const msg of this.query) {
@@ -463,9 +526,12 @@ export class ClaudeAdapter implements BuilderAdapter {
       for (const block of msg.message.content) {
         this.eventQueue.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType: String(block.type ?? "unknown"), payload: structuredClone(block) as unknown as Record<string, unknown>, payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
         if (block.type === "text" && block.text) {
+          if (msg.error && this.fastModeEnabled && isFastModeUnavailable(block.text) && !this.turnSawWork) continue;
+          this.turnSawWork = true;
           this.eventQueue.push({ kind: "text", text: block.text, byteCount: Buffer.byteLength(block.text), digest: createHash("sha256").update(block.text).digest("hex"), eventId: randomUUID(), observedAt: new Date().toISOString() });
           this.opts.observer?.signal(true);
         } else if (block.type === "tool_use") {
+          this.turnSawWork = true;
           const callId = block.id;
           this.toolCalls.set(callId, { name: block.name, input: block.input });
           if (this.toolCalls.size > 1000) this.toolCalls.delete(this.toolCalls.keys().next().value!);
@@ -584,7 +650,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       result.outputTokens = mergedUsage.outputTokens;
       result.usage = { scope: "session-cumulative", inputTokens: mergedUsage.sample.inputTokens, outputTokens: mergedUsage.sample.outputTokens, totalTokens: mergedUsage.sample.totalTokens, costUsd: mergedUsage.sample.authoritativeCostUsd };
       this.cumulativeUsage = mergedUsage.sample;
-      this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
+      if (!(result.isError && this.fastModeEnabled && !this.turnSawWork && isFastModeUnavailable(text))) this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
       this.settlePending(result, false);
       this.turnSignals = [];
       this.structuredError = undefined;
@@ -625,7 +691,17 @@ export class ClaudeAdapter implements BuilderAdapter {
     }
   }
 
-  private sendTurnInternal(text: string): Promise<TurnResult> {
+  private async sendTurnInternal(text: string): Promise<TurnResult> {
+    if (this.opts.fast) await this.prepareFastMode();
+    const result = await this.sendTurnAttempt(text);
+    if (result.isError && this.fastModeEnabled && !this.turnSawWork && isFastModeUnavailable(result.rawResponse ?? result.text) && !this.streamEnded) {
+      await this.disableFastMode();
+      return this.sendTurnAttempt(text);
+    }
+    return result;
+  }
+
+  private sendTurnAttempt(text: string): Promise<TurnResult> {
     if (this.closed) return Promise.reject(new Error("builder is closed"));
     if (this.terminalResult || this.streamEnded) return Promise.resolve(this.terminalResult ?? this.streamFailureResult("Claude stream is no longer available", Boolean(this.opts.resumeSessionRef ?? this.opts.resumeSessionId)));
     if (this.pending) {
@@ -634,9 +710,10 @@ export class ClaudeAdapter implements BuilderAdapter {
     return new Promise<TurnResult>((resolve, reject) => {
       this.eventQueue.push({ kind: "activity", state: "starting Claude turn", provider: "claude", model: this.opts.model });
       this.turnSignals = [];
+      this.turnSawWork = false;
       this.structuredError = undefined;
       this.apiErrorStatus = undefined;
-      const pending = this.pending = { resolve, reject, instruction: text, turnId: this.activeProviderTurnId ?? randomUUID() };
+      const pending = this.pending = { resolve, reject, instruction: text, submitted: false, turnId: this.activeProviderTurnId ?? randomUUID() };
       this.armPendingTurn(pending);
       this.inbox.push({
         type: "user",
@@ -681,6 +758,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       // continue the same turn. Preserve that state as unknown until a
       // correlated, explicit terminal result arrives.
       const resultReason = elapsedOnly ? "elapsed_placeholder"
+        : failed && /Foreman policy: this action needs human approval\b[\s\S]*\band was NOT performed\./.test(text) ? "host_policy_denied"
         : failed && /timed?\s*out|timeout/i.test(text) ? "timeout"
           : failed && /cancel(?:led|ed)/i.test(text) ? "cancelled"
             : failed && /permission denied/i.test(text) ? "permission_denied"
@@ -689,7 +767,7 @@ export class ClaudeAdapter implements BuilderAdapter {
                   : failed && /\b(?:failed|error|exception)\b/i.test(text) ? "explicit_error"
                     : failed ? "unexplained_error"
                       : "completed";
-      const status = resultReason === "timeout" ? "timed_out" : resultReason === "cancelled" ? "cancelled" : ["permission_denied", "not_found", "nonzero_exit", "explicit_error"].includes(resultReason) ? "failed" : resultReason === "completed" ? "completed" : "unknown";
+      const status = resultReason === "host_policy_denied" ? "denied" : resultReason === "timeout" ? "timed_out" : resultReason === "cancelled" ? "cancelled" : ["permission_denied", "not_found", "nonzero_exit", "explicit_error"].includes(resultReason) ? "failed" : resultReason === "completed" ? "completed" : "unknown";
       if (status !== "unknown") {
         this.completedToolCalls.add(callId);
         if (this.completedToolCalls.size > 1000) this.completedToolCalls.delete(this.completedToolCalls.values().next().value!);
@@ -729,7 +807,8 @@ export class ClaudeAdapter implements BuilderAdapter {
       });
       const prepare = async () => {
         await this.query.initializationResult();
-        if (!this._sessionRef?.validatedAt && typeof this.query.supportedCommands === "function") {
+        await this.prepareFastMode();
+        if (!this.providerIdentityObserved && typeof this.query.supportedCommands === "function") {
           const commands = await this.query.supportedCommands();
           // Some SDK/CLI pairs expose init identity only after their first input.
           // Require an advertised built-in local command; never substitute a
@@ -738,7 +817,10 @@ export class ClaudeAdapter implements BuilderAdapter {
             this.opts.onLifecycleTrace?.({ phase: "local-context-initialization-start", at: new Date().toISOString() });
             const result = await this.sendTurn("/context", { responseOnly: true });
             this.opts.onLifecycleTrace?.({ phase: "local-context-initialization-complete", at: new Date().toISOString() });
-            if (result.isError || result.failure || result.costUsd > 0) throw new Error("Claude local context initialization did not complete without model work");
+            // SDK total_cost_usd includes earlier conversation cost on resume.
+            // The advertised built-in command must report zero model turns;
+            // historical cumulative cost does not make this a paid warm-up.
+            if (result.isError || result.failure || result.numTurns !== 0 || (result.costUsd > 0 && result.usage?.scope !== "session-cumulative")) throw new Error("Claude local context initialization did not complete without model work");
           }
         }
         return this.sessionIdentityReady;
@@ -816,7 +898,7 @@ export class ClaudeAdapter implements BuilderAdapter {
     // The SDK can acknowledge initialization while its CLI is still waiting
     // for first input. Sending getContextUsage then deadlocks the control
     // queue, including a later local command. Establish identity first.
-    if (!this._sessionRef?.validatedAt && typeof this.query.supportedCommands === "function") await this.prepareSession();
+    if (!this.providerIdentityObserved && typeof this.query.supportedCommands === "function") await this.prepareSession();
     await new OperationDeadline("Claude settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ autoCompactEnabled: true }));
     const baseline = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
     if (!Number.isFinite(baseline.maxTokens) || baseline.maxTokens <= 0
@@ -836,10 +918,10 @@ export class ClaudeAdapter implements BuilderAdapter {
       || !Number.isFinite(installed.autoCompactThreshold) || installed.autoCompactThreshold === undefined) {
       throw new Error("Claude did not expose an enabled native automatic-compaction threshold after configuration");
     }
-    // `applyFlagSettings` can legitimately clamp autoCompactWindow. The
-    // provider's reported trigger is authoritative; rejecting the entire run
-    // merely because a configured value is below that minimum made defaults
-    // unusable. Lifecycle code consumes this verified effective ceiling.
+    // A control acknowledgment may disagree with the SDK's subsequent report.
+    // Use that reported threshold as the available lifecycle telemetry rather
+    // than rejecting the build. This does not prove clamping or independently
+    // verify the native trigger's actual enforcement.
     const effectiveThresholdPercent = Math.max(1, Math.min(99,
       Math.floor(installed.autoCompactThreshold / installed.maxTokens * 100)));
     this.preparedAutoCompactionPolicy = {
@@ -878,9 +960,15 @@ export class ClaudeAdapter implements BuilderAdapter {
   async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
     if (settings.effort !== this.opts.effort || settings.fast !== this.opts.fast) return { ok: false, error: "Claude SDK cannot change reasoning/fast controls on an existing transport" };
     if (settings.model === this.opts.model) return { ok: true };
+    if (this.opts.fast) await this.prepareFastMode();
+    if (this.fastModeEnabled) await new OperationDeadline("Claude standard speed", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ fastMode: false }));
+    this.fastModeEnabled = false;
     const result = await new OperationDeadline("Claude model settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.sendTurn(`/model ${settings.model ?? "default"}`), () => this.abort.abort());
     if (result.isError) return { ok: false, error: result.text, ...(result.failure ? { failure: result.failure } : {}) };
-    this.opts.model = settings.model; return { ok: true };
+    this.opts.model = settings.model;
+    this.fastModePrepared = undefined; this.fastModeUnavailable = false;
+    if (this.opts.fast) await this.prepareFastMode();
+    return { ok: true };
   }
 
   observeEvents(listener: (event: BuilderEvent) => void): () => void { return this.eventQueue.observe(listener); }
@@ -889,9 +977,11 @@ export class ClaudeAdapter implements BuilderAdapter {
     return this.eventQueue;
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> { return this.closePromise ??= this.closeInternal(); }
+  private async closeInternal(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this.pending) this.settlePending(this.streamFailureResult("Claude turn interrupted; submitted work requires recovery", false));
     this.questionTrace?.finish("closed");
     this.rejectSessionIdentity(new Error("Claude session closed during initialization"));
     this.abort.abort();
@@ -908,7 +998,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   private failSessionIdentity(error: Error): void {
     this.rejectSessionIdentity(error);
     const result = sessionUnavailableResult(new SessionUnavailableError({
-      runtime: "claude", phase: this.pending ? "turn" : "preflight", dispatchState: this.pending ? "unknown" : "not-sent",
+      runtime: "claude", phase: this.pending ? "turn" : "preflight", dispatchState: this.pending?.submitted ? "unknown" : "not-sent",
       executable: this.opts.runtimeExecutable ?? "claude", cwd: this.opts.cwd, diagnostics: error.message,
       availability: { version: 1, status: "unavailable", checkedAt: new Date().toISOString(), reason: "attach-failed", detail: error.message, ...(this._sessionRef ? { sessionRef: this._sessionRef } : {}) },
     }));
@@ -925,11 +1015,24 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.failSessionIdentity(error);
       throw error;
     }
-    if (observedCwd !== undefined && canonicalSessionPath(observedCwd) !== canonicalSessionPath(this.opts.cwd)) {
+    const launchCwd = canonicalSessionPath(this.opts.cwd);
+    const currentCwd = observedCwd === undefined ? undefined : canonicalSessionPath(observedCwd);
+    const withinLaunchScope = currentCwd === undefined ? false : (() => {
+      const path = relative(launchCwd, currentCwd);
+      return path === "" || (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`));
+    })();
+    // Establish the launch scope before trusting mutable Bash cwd. Subsequent
+    // messages for the same identity may report a directory inside that scope;
+    // they must not replace the immutable cwd in the durable session reference.
+    const trustedResumeScope = Boolean(this.opts.resumeSessionRef?.validatedAt && canonicalSessionPath(this.opts.resumeSessionRef.cwd) === launchCwd);
+    if (currentCwd !== undefined && (this.launchScopeObserved || trustedResumeScope ? !withinLaunchScope : currentCwd !== launchCwd)) {
       const error = new Error(`Claude session cwd ${observedCwd} does not match ${this.opts.cwd}`);
       this.failSessionIdentity(error);
       throw error;
     }
+    if (currentCwd === launchCwd) this.launchScopeObserved = true;
+    this.providerIdentityObserved = true;
+    if (currentCwd !== undefined) this.toolCwd = currentCwd;
     this._sessionId = sessionId;
     if (this._sessionRef?.validatedAt) {
       this.resolveSessionIdentity(this._sessionRef);
@@ -1024,19 +1127,20 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   private streamFailureResult(message: string, sessionUnavailable: boolean): TurnResult {
+    const dispatchState = this.pending?.submitted === false ? "not-sent" : "unknown";
     if (sessionUnavailable) {
       const availability: SessionAvailabilityV1 = {
         version: 1, status: "unavailable", checkedAt: new Date().toISOString(), reason: "not-found",
         detail: message, ...(this._sessionRef ? { sessionRef: this._sessionRef } : {}),
       };
       return sessionUnavailableResult(new SessionUnavailableError({
-        runtime: "claude", phase: "turn", dispatchState: "unknown", executable: this.opts.runtimeExecutable ?? "claude",
+        runtime: "claude", phase: "turn", dispatchState, executable: this.opts.runtimeExecutable ?? "claude",
         cwd: this.opts.cwd, diagnostics: message, availability,
       }));
     }
     return {
       text: message, isError: true, numTurns: 0, costUsd: 0, costAuthoritative: false,
-      failure: { runtime: "claude", phase: this.opts.runtimePhase ?? "builder", category: "agent-stream", executable: this.opts.runtimeExecutable ?? "claude", cwd: this.opts.cwd, diagnostics: message, dispatchState: "unknown" },
+      failure: { runtime: "claude", phase: this.opts.runtimePhase ?? "builder", category: "agent-stream", executable: this.opts.runtimeExecutable ?? "claude", cwd: this.opts.cwd, diagnostics: message, dispatchState },
     };
   }
 }

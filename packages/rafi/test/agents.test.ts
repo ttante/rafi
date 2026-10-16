@@ -4,7 +4,8 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { stringify } from "yaml";
-import { promptAgentSettings, type AgentSettingsPrompts } from "../src/agents.js";
+import { promptAgentSettings, waitForLiveSettingsAcknowledgments, type AgentSettingsPrompts } from "../src/agents.js";
+import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 
 function projectDir(): string {
@@ -12,6 +13,46 @@ function projectDir(): string {
   writeFileSync(join(root, "rafi-config.yaml"), stringify(buildProjectConfig(defaultAnswers())), "utf8");
   return root;
 }
+
+test("settings do not wait for a dead attempt or a role that has never started", async () => {
+  const root = projectDir();
+  const db = new WorkflowDb(root);
+  db.ensureRun("dead-attempt", "build"); db.close();
+  const started = performance.now();
+  const rows = await waitForLiveSettingsAcknowledgments(root, 1, ["builder", "qa"], { waitMs: 5000 });
+  assert.ok(performance.now() - started < 1000, "Inactive roles caused a wait");
+  assert.deepEqual(rows.map(row => row.adoption), ["deferred", "deferred"]);
+});
+
+test("settings wait only for the submitted live role and observe its acknowledgement", async () => {
+  const root = projectDir();
+  const db = new WorkflowDb(root);
+  const authority = db.acquireBuildAdmission("live", "worker");
+  try {
+    db.planOperation({ runId: "live", idempotencyKey: "builder-turn", kind: "provider-dispatch", intent: { role: "builder" } });
+    db.updateOperation("builder-turn", "in_progress");
+    const timer = setTimeout(() => db.acknowledgeSettings({ runId: "live", role: "builder", revision: 2, acknowledgedAt: new Date().toISOString() }), 30);
+    try {
+      const rows = await waitForLiveSettingsAcknowledgments(root, 2, ["builder", "qa"], { waitMs: 1000, pollMs: 10 });
+      assert.equal(rows.find(row => row.role === "builder")?.acknowledged, true);
+      assert.equal(rows.find(row => row.role === "qa")?.adoption, "deferred");
+    } finally { clearTimeout(timer); }
+  } finally { db.releaseBuildAdmission(authority); db.close(); }
+});
+
+test("settings stop waiting when the owner releases admission", async () => {
+  const root = projectDir();
+  const db = new WorkflowDb(root);
+  const authority = db.acquireBuildAdmission("exit", "worker");
+  db.planOperation({ runId: "exit", idempotencyKey: "turn", kind: "provider-dispatch", intent: { role: "builder" } }); db.updateOperation("turn", "in_progress");
+  let released = false;
+  const timer = setTimeout(() => { db.releaseBuildAdmission(authority); released = true; }, 30);
+  try {
+    const rows = await waitForLiveSettingsAcknowledgments(root, 2, ["builder"], { waitMs: 5000, pollMs: 10 });
+    assert.equal(rows[0]?.adoption, "deferred");
+    assert.equal(rows[0]?.acknowledged, false);
+  } finally { clearTimeout(timer); if (!released) db.releaseBuildAdmission(authority); db.close(); }
+});
 
 function scriptedPrompts(roles: string[], textAnswers: string[], confirmAnswers: boolean[], summaries: string[]): AgentSettingsPrompts {
   const selects = ["claude", "default", "default", "compact"];

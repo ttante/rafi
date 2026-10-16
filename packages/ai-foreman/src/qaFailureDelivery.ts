@@ -375,7 +375,7 @@ export class QaFailureDeliveryService {
         if (turn.providerInstruction !== undefined) Object.assign(record, { providerInstructionDigest: db.putEvidence("handoff", Buffer.from(turn.providerInstruction)), providerInstructionBytes: Buffer.byteLength(turn.providerInstruction), providerInstructionAvailability: "captured" });
       }
       record.eventEvidenceDigest = db.putEvidence("qa", Buffer.from(canonicalEvidence(events)));
-      record.toolCount = events.filter(e => e.kind === "tool" || e.kind === "provider-item" && !["agentMessage", "reasoning", "userMessage", "contextCompaction"].includes(e.itemType)).length;
+      record.toolCount = events.filter(e => e.kind === "tool" || e.kind === "provider-item" && !["text", "agentMessage", "reasoning", "userMessage", "contextCompaction"].includes(e.itemType)).length;
       record.terminalCount = events.filter(e => e.kind === "turn-complete").length;
       db.recordQaDeliveryTurn(record);
       this.faults.afterResponseStored?.();

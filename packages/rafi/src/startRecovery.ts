@@ -2,9 +2,10 @@ import { WorkflowReader } from "ai-foreman/workflow-reader.js";
 import { recoverableBuildRuns } from "ai-foreman/build-runs.js";
 
 type RecoveryChoice = "resume" | "restart-current" | "archive" | "cancel";
+export type RecoveryOutcome = "completed" | "paused" | "cancelled";
 export interface StartRecoveryActions {
-  resume(project: string, runId: string): Promise<void>;
-  restart(project: string, runId: string, action?: "restart-current"): Promise<void>;
+  resume(project: string, runId: string): Promise<RecoveryOutcome | void>;
+  restart(project: string, runId: string, action?: "restart-current"): Promise<RecoveryOutcome | void>;
   choose?(runId: string): Promise<RecoveryChoice>;
 }
 
@@ -48,11 +49,15 @@ export async function offerStartRecovery(project: string, actions: StartRecovery
     if (isCancel(answer)) return false;
     choice = answer as RecoveryChoice;
   }
-  if (choice === "resume") await actions.resume(project, runId);
-  else if (choice === "restart-current") await actions.restart(project, runId, "restart-current");
-  else if (choice === "archive") await actions.restart(project, runId);
+  let outcome: RecoveryOutcome | void = "cancelled";
+  if (choice === "resume") outcome = await actions.resume(project, runId);
+  else if (choice === "restart-current") outcome = await actions.restart(project, runId, "restart-current");
+  else if (choice === "archive") outcome = await actions.restart(project, runId);
   // Recovery handles its own confirmations and receipts. Never continue this
   // stale launch after cancellation, a pause, or a changed ticket selection.
-  if (choice !== "cancel") console.log("rafi: Recovery finished or paused. When it reports completion, run your start command again to launch the selected new work.");
+  if (outcome === "completed") console.log("rafi: Recovery completed. Run your start command again to launch the selected new work.");
+  else if (outcome === "cancelled") console.log("rafi: Recovery cancelled; no new build was launched.");
+  else if (outcome === "paused") console.log("rafi: Recovery paused. Follow its recovery instructions before launching new work.");
+  else console.log("rafi: Recovery returned control; review its reported outcome before launching new work.");
   return false;
 }

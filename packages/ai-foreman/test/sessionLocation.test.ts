@@ -152,20 +152,22 @@ test("Claude availability distinguishes available, missing, mismatched cwd, and 
   assert.equal((await probeClaudeSession(ref, { cwd, configRoot: root, getSessionInfo: async () => { throw new Error("metadata service failed"); } })).reason, "probe-failed");
 });
 
-test("Claude missing-conversation stream failure settles one pending turn exactly once", async () => {
+for (const submitted of [false, true]) test(`Claude missing-conversation stream failure settles once (${submitted ? "submitted" : "not submitted"})`, async () => {
   const cwd = temp("rafi-claude-stream-");
   const ref = scopedRef("claude", cwd, "missing-session");
+  let prompt!: AsyncIterable<unknown>;
   const queryObject = (async function* () {
     await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    if (submitted) await prompt[Symbol.asyncIterator]().next();
     throw new Error("No conversation found with session ID missing-session");
   })() as AsyncGenerator<never> & { interrupt(): Promise<void>; getContextUsage(): Promise<{ totalTokens: number; maxTokens: number; percentage: number }> };
   queryObject.interrupt = async () => {};
   queryObject.getContextUsage = async () => ({ totalTokens: 0, maxTokens: 100, percentage: 0 });
   const Constructor = ClaudeAdapter as unknown as new (
     opts: BuilderAdapterOptions,
-    query: (input: unknown) => typeof queryObject,
+    query: (input: { prompt: AsyncIterable<unknown> }) => typeof queryObject,
   ) => ClaudeAdapter;
-  const adapter = new Constructor({ cwd, configRoot: cwd, resumeSessionRef: ref, permission: async () => ({ behavior: "deny", message: "no tools" }) }, () => queryObject);
+  const adapter = new Constructor({ cwd, configRoot: cwd, resumeSessionRef: ref, permission: async () => ({ behavior: "deny", message: "no tools" }) }, input => { prompt = input.prompt; return queryObject; });
   const events: BuilderEvent[] = [];
   const eventPump = (async () => { for await (const event of adapter.events()) events.push(event); })();
   const result = await Promise.race([
@@ -174,7 +176,7 @@ test("Claude missing-conversation stream failure settles one pending turn exactl
   ]);
   await eventPump;
   assert.equal(result.failure?.category, "session-unavailable");
-  assert.equal(result.failure?.dispatchState, "unknown");
+  assert.equal(result.failure?.dispatchState, submitted ? "unknown" : "not-sent");
   assert.equal(events.filter((event) => event.kind === "turn-complete").length, 1);
   assert.equal((await adapter.sendTurn("must not replay")).failure?.category, "session-unavailable");
   await adapter.close();

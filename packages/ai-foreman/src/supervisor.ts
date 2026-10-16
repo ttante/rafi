@@ -87,6 +87,7 @@ export class DurableSupervisor {
         if (pending.some(decision => !this.options.policy.continueIndependentTickets || !decision.interruptionId.startsWith("ticket:"))) {
           state = { ...state, status: "waiting_for_human", workerPid: undefined, heartbeatAt: this.now().toISOString() };
           saveState();
+          if (db.getRun(this.options.runId)?.status === "running") db.transitionSupervisor(this.options.runId, state.workerGeneration, { status: "paused", checkpoint: "waiting-for-human", event: "worker_waiting_for_human" });
           return { kind: "waiting_for_human" };
         }
         const checkpoint = this.options.checkpoint();
@@ -98,6 +99,18 @@ export class DurableSupervisor {
         const outcome = await this.active.result; this.active = undefined;
         state = { ...state, workerPid: undefined, heartbeatAt: this.now().toISOString() };
         if (outcome.kind !== "crashed") {
+          if (outcome.kind === "failed" && db.getRun(this.options.runId)?.status === "running") {
+            const eligibility = db.preparationEligibility(this.options.runId);
+            db.transitionSupervisor(this.options.runId, state.workerGeneration, {
+              status: eligibility.eligible ? "failed" : "paused",
+              checkpoint: eligibility.eligible ? "worker-failed" : "worker-reconciliation-required",
+              event: "worker_exit_recorded", payload: { detail: outcome.detail, reasons: eligibility.reasons },
+            });
+          }
+          else if (db.getRun(this.options.runId)?.status === "running") db.transitionSupervisor(this.options.runId, state.workerGeneration, {
+            status: "paused", checkpoint: outcome.kind === "waiting_for_human" && db.pendingHumanDecisions(this.options.runId).length ? "waiting-for-human" : "worker-exited-before-checkpoint",
+            event: "worker_exit_recorded", payload: { outcome: outcome.kind },
+          });
           const status = outcome.kind === "completed" ? "stopped" : outcome.kind === "waiting_for_human" ? "waiting_for_human" : outcome.kind === "failed" ? "failed" : "stopped";
           state = { ...state, status }; saveState(); return outcome;
         }
@@ -111,6 +124,9 @@ export class DurableSupervisor {
         const runLimit = this.options.policy.limits.workerRestartsPerRun;
         if (state.checkpointRestarts >= checkpointLimit || state.runRestarts >= runLimit) {
           state = { ...state, status: "failed" }; saveState();
+          if (db.getRun(this.options.runId)?.status === "running") db.transitionSupervisor(this.options.runId, state.workerGeneration, {
+            status: "failed", checkpoint: "worker-restart-budget-exhausted", event: "worker_restart_budget_exhausted", payload: { checkpoint, detail: outcome.detail },
+          });
           return { kind: "failed", detail: `worker restart budget exhausted at ${checkpoint}: ${outcome.detail}` };
         }
         state = { ...state, checkpointRestarts: state.checkpointRestarts + 1, runRestarts: state.runRestarts + 1 };
@@ -118,7 +134,19 @@ export class DurableSupervisor {
         await this.sleep(Math.min(10_000, 250 * (2 ** Math.min(5, state.checkpointRestarts - 1))));
       }
       state = { ...state, status: "stopped", stopRequestedAt: this.now().toISOString(), workerPid: undefined };
+      if (db.getRun(this.options.runId)?.status === "running") db.transitionSupervisor(this.options.runId, state.workerGeneration, { status: "paused", checkpoint: "worker-stopped", event: "supervisor_stop_recorded" });
       saveState(); return { kind: "stopped" };
+    } catch (error) {
+      state = { ...state, status: "failed", workerPid: undefined, heartbeatAt: this.now().toISOString() };
+      saveState();
+      if (db.getRun(this.options.runId)?.status === "running") {
+        const eligibility = db.preparationEligibility(this.options.runId);
+        db.transitionSupervisor(this.options.runId, state.workerGeneration, { status: eligibility.eligible ? "failed" : "paused",
+          checkpoint: eligibility.eligible ? "worker-launch-failed" : "worker-reconciliation-required", event: "worker_launch_failed",
+          payload: { detail: String(error), reasons: eligibility.reasons },
+        });
+      }
+      throw error;
     } finally {
       clearInterval(heartbeat);
       try { if (ownedAdmission && db.buildAdmission()?.token === ownedAdmission.token) db.releaseBuildAdmission(ownedAdmission); }

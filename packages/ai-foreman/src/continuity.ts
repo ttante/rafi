@@ -93,6 +93,7 @@ export function continuityInstruction(role?: "builder" | "qa"): string {
   return [
     "Before your final STEP_STATUS line (or as the final line when STEP_STATUS is not requested), emit exactly one single-line continuity record:",
     `${CONTINUITY_MARKER} {"version":1,"decisions":[],"constraints":[],"discoveries":[],"completedActions":[],"evidence":[],"failures":[],"blockers":[],"openWork":[],"nextAction":"specific next action"}`,
+    "The continuity record is JSON. A requested STEP_STATUS line is separate plain text: never add JSON braces, a trailing comma, or a code fence to that status line.",
     ...(role === "qa" ? ["QA protocol: this continuity record is required even when the review requests only a report or status. Put it before RAFI_QA_FAILURE_REPORT_START when returning a failure envelope, outside the report JSON. Rafi strips the record before validating the report, so keep the report envelope immediately followed by STEP_STATUS."] : []),
     "Keep it concise and cumulative for facts learned this turn. Do not include credentials, hidden reasoning, or raw transcripts.",
   ].join("\n");
@@ -177,11 +178,6 @@ export class ContinuityAdapter implements BuilderAdapter {
     return withGraphSessionAccess(this.options.projectDir, this.adapter, () => this.sendTurnOwned(instruction, policy));
   }
   private async sendTurnOwned(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: import("./providerPhase.js").ProviderTurnPurpose }): Promise<TurnResult> {
-    const db = new WorkflowDb(this.options.projectDir);
-    try {
-      db.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "turn_started", payload: { role: this.options.role, instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) }, authoritativeStateRevision: this.revision() });
-    } finally { db.close(); }
-
     const providerInstruction = `${instruction}\n\n${continuityInstruction(this.options.role)}`;
     const journal = new WorkflowDb(this.options.projectDir);
     const dispatchId = `dispatch:${this.options.runId}:${this.options.role}:${randomUUID()}`;
@@ -203,11 +199,15 @@ export class ContinuityAdapter implements BuilderAdapter {
         if (journal.unresolvedRoleDispatches(this.options.runId, this.options.role).length) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "a previous dispatched turn has no durable completion; reconcile it before sending more work");
         journal.planOperation({ runId: this.options.runId, idempotencyKey: dispatchId, kind: "provider-dispatch", intent: { role: this.options.role, sessionRef: this.adapter.sessionRef?.(), instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) } });
         journal.updateOperation(dispatchId, "in_progress");
+        journal.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "turn_started", payload: { role: this.options.role, dispatchId, instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) }, authoritativeStateRevision: this.revision() });
       });
       try { original = await dispatchWithGraphAccess(this.options.projectDir, this.adapter, providerInstruction, policy, (text, p) => this.adapter.sendTurn(text, p)); }
       catch (error) { journal.updateOperation(dispatchId, "uncertain", { error: String(error) }); throw error; }
       const responseDigest = journal.putEvidence("handoff", original.rawResponse ?? original.text);
-      journal.updateOperation(dispatchId, original.failure?.dispatchState === "unknown" ? "uncertain" : "confirmed", { result: { responseDigest, isError: original.isError, failure: original.failure, turnId: original.turnId, sessionRef: this.adapter.sessionRef?.() } });
+      journal.atomic(() => {
+        journal.updateOperation(dispatchId, original.failure?.dispatchState === "unknown" ? "uncertain" : original.failure?.dispatchState === "not-sent" ? "failed" : "confirmed", { result: { responseDigest, isError: original.isError, failure: original.failure, turnId: original.turnId, sessionRef: this.adapter.sessionRef?.() } });
+        if (original.failure?.dispatchState === "not-sent") journal.appendContinuityEvent({ runId: this.options.runId, role: this.options.role, kind: "turn_not_sent", payload: { dispatchId, role: this.options.role }, authoritativeStateRevision: this.revision() });
+      });
     } finally { journal.close(); }
     if (policy?.handback) {
       const parsed = parseContinuityDelta(original.rawResponse ?? original.text);
@@ -387,8 +387,10 @@ export class ContinuityAdapter implements BuilderAdapter {
     const db = new WorkflowDb(this.options.projectDir);
     try {
       const sessionRef = this.adapter.sessionRef?.();
-      db.appendContinuityEvent({ runId: this.options.runId, role: this.options.role, kind, payload: { isError: result.isError, numTurns: result.numTurns, sessionId: this.adapter.sessionId(), sessionRef, delta }, authoritativeStateRevision: this.revision(), sessionRef });
-      return db.publishContinuityCheckpoint({ runId: this.options.runId, role: this.options.role, delta, authoritativeStateRevision: this.revision(), sessionRef });
+      return db.atomic(() => {
+        db.appendContinuityEvent({ runId: this.options.runId, role: this.options.role, kind, payload: { isError: result.isError, numTurns: result.numTurns, sessionId: this.adapter.sessionId(), sessionRef, delta }, authoritativeStateRevision: this.revision(), sessionRef });
+        return db.publishContinuityCheckpoint({ runId: this.options.runId, role: this.options.role, delta, authoritativeStateRevision: this.revision(), sessionRef });
+      });
     } finally { db.close(); }
   }
 

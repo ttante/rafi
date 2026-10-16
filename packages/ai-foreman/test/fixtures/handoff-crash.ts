@@ -45,7 +45,18 @@ db.close();
 const beforeAccept = WorkflowDb.prototype.acceptHandoff;
 if (phase === "before-acceptance") WorkflowDb.prototype.acceptHandoff = function(...args) { kill(); return beforeAccept.apply(this, args); };
 const beforeReceipt = WorkflowDb.prototype.updateOperation;
-if (phase === "completed-before-checkpoint") WorkflowDb.prototype.updateOperation = function(...args) { const result = beforeReceipt.apply(this, args); if (args[1] === "confirmed") kill(); return result; };
+if (phase === "receipt-before-commit") WorkflowDb.prototype.updateOperation = function(...args) { const result = beforeReceipt.apply(this, args); if (args[1] === "confirmed") kill(); return result; };
+const beforeAtomic = WorkflowDb.prototype.atomic;
+if (phase === "completed-before-checkpoint") WorkflowDb.prototype.atomic = function<T>(work: () => T): T {
+  const result = beforeAtomic.call(this, work) as T;
+  if (this.operations("run").some(operation => operation.kind === "provider-dispatch" && operation.status === "confirmed")) kill();
+  return result;
+};
+const beforeCheckpoint = WorkflowDb.prototype.publishContinuityCheckpoint;
+if (phase === "event-before-checkpoint") WorkflowDb.prototype.publishContinuityCheckpoint = function(...args) {
+  if (this.operations("run").some(operation => operation.kind === "provider-dispatch" && operation.status === "confirmed")) kill();
+  return beforeCheckpoint.apply(this, args);
+};
 const wrapped = new ContinuityAdapter({ adapter: old, projectDir: root, runId: "run", role: "builder", settings });
 await new HandoffService(root).transfer({ runId: "run", role: "builder", reason: "fixture", predecessorSessionId: old.sessionId(), predecessorSessionRef: old.ref, compactionCount: 0, compactMaximum: 10 }, async () => next);
 if (phase === "accepted") kill();

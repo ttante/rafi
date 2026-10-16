@@ -767,7 +767,7 @@ export class ThresholdCompactionController {
   }
   private handoffGeneration(): number {
     const db = new WorkflowDb(this.options.projectDir);
-    try { return db.handoffs(this.options.runId).at(-1)?.generation ?? 0; }
+    try { return db.roleMutationLease(this.options.runId, this.options.role)?.generation ?? 0; }
     finally { db.close(); }
   }
   private syncProviderEffectiveThreshold(adapter: BuilderAdapter): void {

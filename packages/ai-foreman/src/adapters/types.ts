@@ -13,6 +13,8 @@ import type { RunObserver } from "../observability.js";
 
 /** A permission request surfaced by a builder before it runs a tool. */
 export interface PermissionRequest {
+  /** Provider-observed tool cwd, distinct from immutable session launch scope. */
+  executionCwd?: string;
   toolName: string;
   input: Record<string, unknown>;
   /** Human-readable prompt from the agent, when available. */

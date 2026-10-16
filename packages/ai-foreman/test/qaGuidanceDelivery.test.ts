@@ -118,8 +118,10 @@ for(const provider of providers)for(const target of ["builder","qa","both"] as c
       const options:BranchRunnerOptions={projectDir:root,runId:"run",plan:{baseRef:base,nodes:[{ticket,branch:"ticket/T001",baseRef:base,baseBranch:base,dependencies:[],depth:0}],issues:[]},log:new Log(join(root,".foreman/branch.jsonl")),notificationsEnabled:false,qaEnabled:true,qaMaxFixAttempts:1,createPr:false,prReady:false,keepWorktrees:true,baseWorktreePolicy:"skip",createBuilder:async (cwd,sessionId)=>make(cwd,"builder",sessionId),createQa,builderSessionBoundary:async adapter=>adapter,qaContinuityManaged:true};
       const first=await runBranchPlan(options);assert.ok(["blocked","needs-human"].includes(first[0]?.buildStatus??""),JSON.stringify(first));assert.equal(reviews,1);
       const db=new WorkflowDb(root);let session:NonNullable<ReturnType<WorkflowDb["branchResumeSession"]>>;try{session=db.branchResumeSession("run","T001")!;assert.ok(session);assert.equal(db.qaTicketHead("run","T001").state,"passed");}finally{db.close();}
-      const resumed=await runBranchPlan({...options,qaProtocolResumeTicket:"T001",resumeSessions:new Map([["T001",{worktreePath:session.worktreePath,sessionId:session.sessionId,sessionRef:session.sessionRef}]])});
+      let recordedBuilders=0;
+      const resumed=await runBranchPlan({...options,recordBuilderSession:()=>{recordedBuilders++;},qaProtocolResumeTicket:"T001",resumeSessions:new Map([["T001",{worktreePath:session.worktreePath,sessionId:session.sessionId,sessionRef:session.sessionRef}]])});
       assert.equal(resumed[0]?.buildStatus,"done",JSON.stringify(resumed));assert.equal(reviews,2);assert.equal(prompts.filter(p=>p.role==="builder").length,2,"branch resume sends only one scoped follow-up");
+      assert.equal(recordedBuilders,1,"Only the genuinely dispatched authorized Builder follow-up records its session");
     } else if(scenario.startsWith("after-pass")) {
       const assignment=beginBuildAssignment(root,"run","T001",root,"Implement T001");
       const initial=await foreman.builderAdapter().sendTurn(assignment.instruction);

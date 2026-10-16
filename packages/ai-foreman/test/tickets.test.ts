@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -50,8 +51,104 @@ import { appendTicketOutput } from "../src/tickets/output.js";
 import { previewTicketReset, resetTickets } from "../src/tickets/reset.js";
 import { applyResolvedTicketReset, resolveTicketResetSelection, TicketResetDependencyConflictError } from "../src/tickets/groupReset.js";
 import { listTicketGroups } from "../src/tickets/groups.js";
+import { WorkflowDb } from "../src/workflowDb.js";
+import { withBuildInvocation } from "../src/buildAdmission.js";
+import Database from "better-sqlite3";
+import { registerHandbackWriter } from "../src/qaHandbackMigration.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+for (const grouped of [false, true]) test(`tracker ${grouped ? "group" : "ticket"} reset reconciles a dead admission while retaining uncertain dispatch`, () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Dead owner reset", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [makeDef("T001", 1000)] }), "utf8");
+    const state = new StateDb(join(dir, ".tickets", "ticket-state.sqlite"));
+    state.upsertState("T001", { status: "in_progress", owner: "builder" }, new Date().toISOString()); state.close();
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `const {WorkflowDb}=await import(process.argv[2]); const db=new WorkflowDb(process.argv[1]); db.acquireBuildAdmission('dead-run','worker'); db.planOperation({runId:'dead-run',idempotencyKey:'uncertain-turn',kind:'provider-dispatch',intent:{role:'builder',ticketId:'T001'}}); db.updateOperation('uncertain-turn','in_progress'); db.updateOperation('uncertain-turn','uncertain'); db.close();`, dir, new URL("../src/workflowDb.ts", import.meta.url).href], { encoding: "utf8" });
+    assert.equal(child.status, 0, child.stderr);
+    const result = grouped ? applyResolvedTicketReset(dir, resolveTicketResetSelection(dir, { kind: "scope", scope: "all" })) : resetTickets(dir, "all");
+    assert.deepEqual(result.tickets, ["T001"]);
+    const db = new WorkflowDb(dir);
+    try {
+      assert.equal(db.unresolvedRoleDispatches("dead-run", "builder").length, 1);
+      assert.equal(db.buildAdmission(), undefined);
+      assert.equal(db.activeRuns().filter(run => run.kind === "recovery").length, 0);
+    } finally { db.close(); }
+    assert.equal(getTicketDetails(dir, "T001").state.status, "planned");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("tracker reset rejects another live writer without leaving reset intents", () => {
+  const dir = makeTmpDir();
+  const owner = new WorkflowDb(dir);
+  let authority: ReturnType<WorkflowDb["acquireBuildAdmission"]> | undefined;
+  try {
+    cmdInit(dir, { appName: "Live owner reset", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [makeDef("T001", 1000)] }), "utf8");
+    authority = owner.acquireBuildAdmission("live-run", "worker");
+    assert.throws(() => withBuildInvocation(() => resetTickets(dir, "all")), /admission is (?:live|unknown)/);
+    assert.equal(owner.activeRuns().filter(run => run.kind === "recovery").length, 0);
+  } finally { if (authority) owner.releaseBuildAdmission(authority); owner.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const grouped of [false, true]) test(`${grouped ? "group" : "ticket"} reset protects an owner on an unverified host`, () => {
+  const dir = makeTmpDir(); let owner: WorkflowDb | undefined, authority: ReturnType<WorkflowDb["acquireBuildAdmission"]> | undefined;
+  try {
+    cmdInit(dir, { appName: "Unknown owner", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [makeDef("T001", 1000)] }));
+    owner = new WorkflowDb(dir); authority = owner.acquireBuildAdmission("unknown-owner", "worker");
+    const fault = new Database(owner.path); fault.function("rafi_protocol_v3", () => 1); registerHandbackWriter(fault);
+    try { fault.prepare("UPDATE build_admission SET record_json=json_set(record_json,'$.host','unverified-test-host')").run(); }
+    finally { fault.close(); }
+    assert.throws(() => withBuildInvocation(() => grouped ? applyResolvedTicketReset(dir, resolveTicketResetSelection(dir, { kind: "scope", scope: "all" })) : resetTickets(dir, "all")), /admission is unknown/);
+    assert.equal(owner.activeRuns().filter(run => run.kind === "recovery").length, 0);
+    assert.equal(getTicketDetails(dir, "T001").state.status, "planned");
+  } finally { if (authority) owner!.releaseBuildAdmission(authority); owner?.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const grouped of [false, true]) test(`tracker ${grouped ? "group" : "ticket"} reset validates or snapshots state only after acquiring authority`, () => {
+  const dir = makeTmpDir();
+  const originalAuthority = WorkflowDb.prototype.withTrackerMutationAuthority;
+  const originalPublication = WorkflowDb.prototype.beginPublication;
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001", 1000)] }));
+    const selection = grouped ? resolveTicketResetSelection(dir, { kind: "all-groups" }) : undefined;
+    WorkflowDb.prototype.withTrackerMutationAuthority = function<T>(work: () => T): T {
+      return originalAuthority.call(this, () => {
+        const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+        try { state.upsertState("T001", { status: "blocked", attempt_count: 7 }, new Date().toISOString()); }
+        finally { state.close(); }
+        return work();
+      }) as T;
+    };
+    WorkflowDb.prototype.beginPublication = () => { throw new Error("injected journal setup failure"); };
+    assert.throws(() => selection ? applyResolvedTicketReset(dir, selection) : resetTickets(dir, "T001"), grouped ? /inputs changed after preview/ : /journal setup failure/);
+    const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try { assert.equal(state.getState("T001")?.status, "blocked"); assert.equal(state.getState("T001")?.attempt_count, 7); }
+    finally { state.close(); }
+  } finally {
+    WorkflowDb.prototype.withTrackerMutationAuthority = originalAuthority;
+    WorkflowDb.prototype.beginPublication = originalPublication;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("publication creation failure closes the reset intent and leaves tracker unchanged", () => {
+  const dir = makeTmpDir();
+  const original = WorkflowDb.prototype.beginPublication;
+  try {
+    cmdInit(dir, { appName: "Publication setup failure", timezone: "UTC" });
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [makeDef("T001", 1000)] }), "utf8");
+    WorkflowDb.prototype.beginPublication = () => { throw new Error("injected journal setup failure"); };
+    assert.throws(() => resetTickets(dir, "all"), /injected journal setup failure/);
+    const db = new WorkflowDb(dir);
+    try { assert.equal(db.activeRuns().filter(run => run.kind === "recovery").length, 0); assert.equal(db.incompletePublications().length, 0); assert.equal(db.buildAdmission(), undefined); }
+    finally { db.close(); }
+    assert.equal(getTicketDetails(dir, "T001").state.status, "planned");
+  } finally { WorkflowDb.prototype.beginPublication = original; rmSync(dir, { recursive: true, force: true }); }
+});
 
 function makeDef(id: string, order: number, overrides: Partial<TicketDef> = {}): TicketDef {
   return {

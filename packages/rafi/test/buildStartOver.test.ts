@@ -114,6 +114,68 @@ import { StateDb } from "../../ai-foreman/dist/tickets/stateDb.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import { assertBuildAssignmentReconciled } from "ai-foreman/build-assignment.js";
 import { offerStartRecovery } from "../src/startRecovery.js";
+import { registerOwnedFile } from "../src/ownership.js";
+
+test("documentation ownership preserves generated plans without hiding unrelated documents", async () => {
+  const { dir, run } = recoveryProject();
+  try {
+    mkdirSync(join(dir, "docs-rafi"));
+    writeFileSync(join(dir, "docs-rafi/plan.md"), "approved plan\n");
+    registerOwnedFile(dir, "docs-rafi/plan.md", { origin: "plan", mode: "created", category: "plans" });
+    writeFileSync(join(dir, "docs-rafi/personal.md"), "valuable unrelated notes\n");
+    const inventory = inventoryBuildStartOver(dir, { ...run, active: false, repository: { ...run.repository, git: { ...run.repository.git, initialStatusPaths: [...run.repository.git.initialStatusPaths, "docs-rafi/"] } } });
+    assert.ok(inventory.unexpectedPaths.includes("docs-rafi/personal.md"));
+    assert.ok(!inventory.unexpectedPaths.includes("docs-rafi/plan.md"));
+    assert.equal(await resolveStartOverCleanup(inventory, "stash", { choose: async () => "stash", confirm: async () => true }), true);
+    assert.equal(readFileSync(join(dir, "docs-rafi/plan.md"), "utf8"), "approved plan\n");
+    assert.equal(git(dir, ["show", "stash@{0}^3:docs-rafi/personal.md"]), "valuable unrelated notes");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("early start-over intent failures can pause only this connection's unstarted intent", () => {
+  const { dir } = recoveryProject();
+  const db = new WorkflowDb(dir);
+  try {
+    const own = db.createRun({ kind: "recovery", checkpoint: "start-over-inventory", state: { operation: "build-start-over" } });
+    const foreign = new WorkflowDb(dir);
+    try { assert.throws(() => foreign.pauseOwnStartOverIntent(own.runId, new Error("unverified owner")), /outside this connection/); }
+    finally { foreign.close(); }
+    db.pauseOwnStartOverIntent(own.runId, new Error("unverified owner"));
+    assert.equal(db.getRun(own.runId)?.status, "paused");
+    assert.equal(db.getRun(own.runId)?.checkpoint, "start-over-setup-paused");
+    const started = db.createRun({ kind: "recovery", checkpoint: "start-over-inventory", state: { operation: "build-start-over", gitPreserved: true } });
+    assert.throws(() => db.pauseOwnStartOverIntent(started.runId, new Error("failure")), /outside this connection/);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("archive restart discloses every later commit before requiring confirmation", async () => {
+  const { dir, run } = recoveryProject();
+  const original = console.log; const lines: string[] = [];
+  try {
+    writeFileSync(join(dir, "app.txt"), "valuable later work\n");
+    git(dir, ["add", "app.txt"]); git(dir, ["commit", "-m", "Valuable later work"]);
+    const head = git(dir, ["rev-parse", "HEAD"]);
+    console.log = (...args) => { lines.push(args.join(" ")); };
+    await assert.rejects(buildBuildStartOverCommand().parseAsync([dir, "--run", run.runId, "--action", "archive-restart"], { from: "user" }), /requires --yes/);
+    assert.ok(lines.some(line => line.includes("Valuable later work")));
+    assert.ok(lines.some(line => line.includes("archive destination archive/main-") && line.includes(run.repository.git.baselineHead!)));
+    assert.equal(git(dir, ["rev-parse", "HEAD"]), head);
+  } finally { console.log = original; rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const outcome of ["completed", "paused", "cancelled"] as const) test(`start recovery reports ${outcome} without continuing the stale launch`, async () => {
+  const { dir, run } = recoveryProject();
+  const original = console.log; const lines: string[] = [];
+  try {
+    const db = new WorkflowDb(dir); const lease = db.acquireLease(run.runId);
+    db.planOperation({ runId: run.runId, idempotencyKey: "status-blocker", kind: "provider-dispatch", intent: { role: "builder" } }); db.updateOperation("status-blocker", "in_progress");
+    db.releaseLease(lease); db.close();
+    console.log = (...args) => { lines.push(args.join(" ")); };
+    assert.equal(await offerStartRecovery(dir, { choose: async () => "restart-current", resume: async () => outcome, restart: async () => outcome }), false);
+    assert.ok(lines.some(line => line.includes(`Recovery ${outcome}`)));
+    assert.ok(lines.every(line => !line.includes("finished or paused")));
+  } finally { console.log = original; rmSync(dir, { recursive: true, force: true }); }
+});
 import { buildStartCommand } from "ai-foreman/cli/start.js";
 
 function recoveryProject() {

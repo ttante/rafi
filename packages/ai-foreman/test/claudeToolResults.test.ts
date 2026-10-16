@@ -13,7 +13,7 @@ test("Claude results retain tool identity, classify uncertainty, and coalesce du
   const consume = (async () => { for await (const event of adapter.events()) events.push(event); })();
   try {
     const turn = adapter.sendTurn("Scripted fixture");
-    for (const [id, text, failed] of [["elapsed", "TIME_ELAPSED", true], ["timeout", "command timed out", true], ["failure", "command exited 1", true], ["ok", "done", false], ["mixed", "TIME_ELAPSED: command exited 1", true], ["provisional", "gateway result pending", true], ["elapsed", "command exited 1", true]] as const) {
+    for (const [id, text, failed] of [["elapsed", "TIME_ELAPSED", true], ["timeout", "command timed out", true], ["failure", "command exited 1", true], ["ok", "done", false], ["mixed", "TIME_ELAPSED: command exited 1", true], ["provisional", "gateway result pending", true], ["elapsed", "command exited 1", true], ["host-denial", "Foreman policy: this action needs human approval (command not allow-listed) and was NOT performed. Do not retry it.", true], ["approval-pending", "approval pending", true]] as const) {
       if (id !== "elapsed" || text === "TIME_ELAPSED") stream.push({ type: "assistant", message: { content: [{ type: "tool_use", id, name: "Bash", input: { command: "test" } }] } });
       const result = { type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: text, is_error: failed }] } };
       stream.push(result); stream.push(result);
@@ -22,9 +22,9 @@ test("Claude results retain tool identity, classify uncertainty, and coalesce du
     await turn;
   } finally { await adapter.close(); await consume; }
   const results = events.filter((event): event is Extract<BuilderEvent, { kind: "tool" }> => event.kind === "tool" && event.lifecycle === "completed");
-  assert.equal(results.length, 7);
-  assert.deepEqual(results.map(event => event.name), ["Bash", "Bash", "Bash", "Bash", "Bash", "Bash", "Bash"]);
-  assert.deepEqual(results.map(event => event.status), ["unknown", "timed_out", "failed", "completed", "failed", "unknown", "failed"]);
+  assert.equal(results.length, 9);
+  assert.ok(results.every(event => event.name === "Bash"));
+  assert.deepEqual(results.map(event => event.status), ["unknown", "timed_out", "failed", "completed", "failed", "unknown", "failed", "denied", "unknown"]);
   assert.equal(results[0]?.completionKnown, false);
   const diagnostic = traces.find(trace => trace.phase === "provider-tool-result" && trace.toolCallId === "provisional");
   assert.equal(diagnostic?.classification, "unknown");

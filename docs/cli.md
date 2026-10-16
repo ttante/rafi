@@ -44,6 +44,12 @@ Runtime behavior not fully expressible in Commander help:
 - Automatic ticket branches use `feature/<ticket-id>-<title>`. Explicit prefixes and delivery branch names, including `rafi/...`, remain exact. The default size policy shares compatible XS/S tickets selected in one invocation and isolates M/L/XL; this creates one review for a shared group and never creates stack edges. Explicit delivery topology always wins.
 - `rafi tickets show <id> --json` returns the complete canonical definition (including unknown fields), active state, recalculated blockers, historical validation, events, and delivery context. `rafi tickets reset` is tracker-only; `rafi build:start-over` is the Git/session/delivery-aware whole-run operation.
 - Build recovery is preview-first. `build:resume` warns without blocking on unexpected changes. `build:start-over` archives local work or creates a new/revert branch according to pushed, reviewed, merged, and legacy-baseline state; it never force-pushes or deletes/closes remote state.
+- Use `rafi resume .` or `rafi resume . --run <id>` to continue a stopped build. For current-branch builds with verified stopped processes and unchanged approved local scope, Rafi can inspect preserved source in a fresh validated session in the **same run**, including when the original session is unavailable. Completed tickets and accepted QA remain intact; the unknown old turn is retained as unknown and is never replayed or declared successful. Independent QA must verify the recovered work before completion.
+- For current-branch builds, interrupted read-only QA resumes through a fresh independent review once its cleanup and confinement proofs are verified. Completing its recovery boundary automatically continues runnable tickets within the remaining approved step allowance. Unanswered questions, unmet prerequisites and uncertain processes retain a clear pause.
+- Ambiguous execution, invalid checkpoints or unverified side effects still require reconciliation or **keep current files and restart unfinished tickets**. `rafi build:start-over . --run <id> --action restart-current` preserves the branch and implementation, lets you select unfinished tickets, preserves completed tickets by default, and explicitly retires the old execution. A tracker-only `tickets reset` does not retire provider uncertainty.
+- Ctrl-C preserves interrupted work and waits for owned-provider shutdown before releasing build ownership. Resume keeps uncertainty about an unfinished turn; it never labels that turn complete without evidence.
+- Archive-restart previews its archive branch, reset target, and every later commit leaving the active branch. Rafi-owned plans and tracker documents are preserved individually; unrelated documents still need a preservation choice.
+- Settings for inactive roles are saved for their next session. A native compaction notice distinguishes the requested threshold from the verified provider configuration; it does not mean compaction has occurred.
 - Uninstall moves selected bytes into indefinite `.rafi-uninstall/<id>` bundles. Restore backs up collisions; only `uninstall:cleanup` permanently removes a bundle.
 
 ### Complete ticket handoffs
@@ -307,8 +313,8 @@ Commands:
   show [options] [ticketId]                    Show one or all complete canonical tickets,
                                                including state, validation, delivery, and history.
   groups                                       List and repair durable ticket creation groups.
-  reset [options] [ticketId]                   Reset one ticket or an explicit ticket scope to
-                                               pristine active state while retaining history.
+  reset [options] [ticketId]                   Reset tracker state while retaining history; use
+                                               build:start-over to restart interrupted execution.
   update [options] <ticketId>                  Update ticket status or progress fields.
   complete [options] <ticketId>                Mark a ticket done with validation evidence.
   block [options] <ticketId>                   Mark a ticket as blocked.
@@ -731,7 +737,8 @@ Options:
                                        builder as context
   -y, --yes                            skip pre-flight confirmation prompt
   --effort <level>                     reasoning effort level (low|medium|high|xhigh)
-  --fast                               fast mode — lower latency (maps to effort=low for codex)
+  --fast                               use native fast mode when available; keep the model and
+                                       reasoning settings
   --no-qa                              disable per-ticket QA review (enabled by default)
   --autonomy <profile>                 autonomy profile (supervised | balanced | unattended)
   --detach                             return after launching the durable supervisor
@@ -856,7 +863,7 @@ Commands:
   populate [options]                           Populate tickets from an approved Rafi plan or configured external import.
   show [options] [ticketId]                    Show one or all complete canonical tickets, including state, validation, delivery, and history.
   groups                                       List and repair durable ticket creation groups.
-  reset [options] [ticketId]                   Reset one ticket or an explicit ticket scope to pristine active state while retaining history.
+  reset [options] [ticketId]                   Reset tracker state while retaining history; use build:start-over to restart interrupted execution.
   update [options] <ticketId>                  Update ticket status or progress fields.
   complete [options] <ticketId>                Mark a ticket done with validation evidence.
   block [options] <ticketId>                   Mark a ticket as blocked.
@@ -912,8 +919,8 @@ Options:
   -y, --yes                            skip pre-flight confirmation prompt
   --effort <level>                     reasoning effort level
                                        (low|medium|high|xhigh)
-  --fast                               fast mode — lower latency (maps to
-                                       effort=low for codex)
+  --fast                               use native fast mode when available;
+                                       keep the model and reasoning settings
   --no-qa                              disable per-ticket QA review (enabled by
                                        default)
   --autonomy <profile>                 autonomy profile (supervised | balanced
@@ -1204,7 +1211,7 @@ Options:
 ```text
 Usage: rafi tickets reset [options] [ticketId]
 
-Reset one ticket or an explicit ticket scope to pristine active state while retaining history.
+Reset tracker state while retaining history; use build:start-over to restart interrupted execution.
 
 Options:
   -p, --project <dir>         project directory (default: cwd)

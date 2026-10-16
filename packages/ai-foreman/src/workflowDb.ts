@@ -16,6 +16,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { validateQaFailureReport } from "rafi-spec";
 import { migrateQaHandback, registerHandbackWriter, reportOccurrenceId } from "./qaHandbackMigration.js";
@@ -45,6 +46,9 @@ import type {
 } from "rafi-spec";
 import type { QaDeliveryTurn, QaDeliveryOutcome, QaDeliveryInvocationV3 } from "./qaDeliveryJournal.js";
 import { providerSessionKey } from "./sessionIdentity.js";
+import { captureFrozenQaSource } from "./qaSnapshot.js";
+import { loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
+import { loadTickets } from "./tickets/ticketLoader.js";
 import { processGroupQuiescent, taggedProcesses, classifyProcess, isLiveProcessIdentity, processStartIdentity } from "./processIdentity.js";
 import type { BranchResumeSession } from "./branch/resume.js";
 import {
@@ -293,6 +297,40 @@ export interface QaReportRecordV2 {
 }
 
 /** Authoritative persistence for every resumable workflow in a project. */
+function partialQaRecoveryProcessProof(db: WorkflowDb, runId: string, ticketId: string, launchToken: string) {
+    const run = db.getRun(runId);
+    const launch = db.buildLaunch(launchToken);
+    const supervisor = db.supervisorState(runId);
+    if (!run || run.status !== "paused" || run.state.status !== "recoverable" || run.checkpoint !== "qa-recovery-complete"
+      || !launch || launch.runId !== runId || launch.state !== "claimed" || !launch.claimant
+      || !supervisor || supervisor.status !== "waiting_for_human" || supervisor.workerPid
+      || launch.role !== "coordinator" || launch.claimant.pid !== supervisor.pid || launch.claimant.processStart !== supervisor.processStart
+      || !["completed", "waived"].includes(db.qaTicketHead(runId, ticketId).state)
+      || !((run.state.progress as { completedTickets?: string[] } | undefined)?.completedTickets?.includes(ticketId))
+      || db.pendingHumanDecisions(runId).length || db.readinessProcesses(runId).length
+      || db.unresolvedRoleDispatches(runId, "builder").length || db.unresolvedRoleDispatches(runId, "qa").length) return undefined;
+    const events = db.events(runId);
+    const exit = events.filter(event => event.type === "worker_exit").at(-1);
+    const started = events.filter(event => event.type === "worker_started").at(-1);
+    const exitProof = exit?.payload as { code?: number; signal?: string | null; stopRequested?: boolean; generation?: number } | undefined;
+    const startProof = started?.payload as { generation?: number } | undefined;
+    if (!exit || !started || exit.at < launch.createdAt || started.at < launch.createdAt
+      || !exitProof || !startProof || exitProof.code !== 0 || exitProof.signal != null || exitProof.stopRequested !== false
+      || exitProof.generation !== supervisor.workerGeneration || startProof.generation !== exitProof.generation) return undefined;
+    const worker = started.payload as { workerPid?: number; processStart?: string; host?: string };
+    if (!worker.workerPid || !worker.processStart || !worker.host) return undefined;
+    return { worker: { pid: worker.workerPid, processStart: worker.processStart, host: worker.host }, claimant: launch.claimant,
+      launchToken, checkpoint: run.checkpoint, supervisorGeneration: supervisor.generation,
+      workerGeneration: supervisor.workerGeneration, startedAt: started.at, exitedAt: exit.at,
+      startedSequence: started.sequence, exitedSequence: exit.sequence };
+}
+
+function partialQaProcessesSettled(proof: NonNullable<ReturnType<typeof partialQaRecoveryProcessProof>>): boolean {
+  return classifyProcess(proof.worker.pid, proof.worker.processStart, proof.worker.host).state === "dead"
+    && processGroupQuiescent(proof.worker.pid)
+    && classifyProcess(proof.claimant.pid, proof.claimant.processStart, proof.claimant.host).state === "dead";
+}
+
 export class WorkflowDb {
   readonly path: string;
   private readonly db: Database.Database;
@@ -301,6 +339,7 @@ export class WorkflowDb {
   private coordinatorTransition = 0;
   private lineageTransition = 0;
   private workAuthority = 0;
+  private readonly createdRecoveryIntents = new Set<string>();
 
   constructor(readonly projectDir: string, path = join(resolve(projectDir), WORKFLOW_DB_FILE), private readonly readinessAccess?: { probeId: string } | { runId: string }) {
     this.path = path;
@@ -462,6 +501,57 @@ export class WorkflowDb {
   atomic<T>(work: () => T): T { return this.db.transaction(work).immediate(); }
 
   buildAdmission(): BuildAdmission | undefined { return readAdmission(this.db); }
+  /** Short synchronous tracker mutations share the build fence without retiring
+   * provider receipts or granting authority to resume implementation. */
+  withTrackerMutationAuthority<T>(work: () => T): T {
+    if (this.writerAuthority) { this.assertBuildAdmission(this.writerAuthority); return work(); }
+    let authority: BuildAdmission | undefined;
+    let lease: ProjectLease | undefined;
+    let intent: WorkflowRunSnapshot | undefined;
+    try {
+      const prior = this.buildAdmission();
+      if (prior) {
+        authority = this.acquireBuildRecoveryAdmission(prior.runId);
+        lease = this.acquireLease(prior.runId);
+      } else {
+        this.atomic(() => {
+          this.assertNoLegacyBuildOwner();
+          for (const owner of this.runningSupervisors()) {
+            if (owner.state.pid && classifyProcess(owner.state.pid, owner.state.processStart).state !== "dead") throw new Error("A live or unverified supervisor must stop before tracker reset");
+          }
+          for (const row of this.db.prepare("SELECT DISTINCT run_id FROM build_owned_processes WHERE state<>'quiescent'").all() as Array<{run_id:string}>) {
+            if (this.unresolvedPreparationProcesses(row.run_id).length) throw new Error("Owned preparation descendants require reconciliation before tracker reset");
+          }
+          intent = this.createRun({ kind: "recovery", checkpoint: "tracker-mutation-intent", state: { operation: "tracker-mutation" } });
+          lease = this.acquireLease(intent.runId);
+          authority = this.admitLeasedBuild(lease);
+        });
+      }
+      const result = work();
+      if (intent) this.transition(intent.runId, { status: "completed", checkpoint: "tracker-mutation-completed" });
+      return result;
+    } catch (error) {
+      if (intent && this.getRun(intent.runId) && authority && this.buildAdmission()?.token === authority.token) {
+        this.transition(intent.runId, { status: "failed", checkpoint: "tracker-mutation-failed", payload: { error: error instanceof Error ? error.message : String(error) } });
+      }
+      throw error;
+    } finally {
+      try {
+        if (lease) {
+          this.releaseLease(lease);
+          // Acquisition can have been rolled back by the outer transaction.
+          // Drop only this invocation's cached token, never a replacement owner.
+          if (this.currentLease()?.owner !== lease.owner) forgetOriginalLease(this.projectDir, lease);
+        }
+      } finally {
+        if (authority && this.buildAdmission()?.token === authority.token) this.releaseBuildAdmission(authority);
+        else if (authority) {
+          forgetBuildAuthority(authority);
+          if ((this.writerAuthority as BuildAdmission | undefined)?.token === authority.token) this.writerAuthority = undefined;
+        }
+      }
+    }
+  }
   private assertNoLegacyBuildOwner(): void {
     for (const row of this.db.prepare("SELECT run_id,state_json FROM workflow_runs WHERE kind='build' AND legacy=1").all() as Array<{run_id:string;state_json:string}>) {
       const state = parseJson(row.state_json) as { status?: string; lease?: {pid:number;processStart?:string;hostname?:string} };
@@ -565,6 +655,28 @@ export class WorkflowDb {
     });
   }
   buildLaunch(token: string): BuildLaunch | undefined { return readLaunch(this.db, token); }
+
+  /** A supervisor's waiting exit may represent a successful partial QA boundary.
+   * Require this launch's clean worker exit and verified cleanup, never just QA. */
+  successfulPartialQaRecovery(runId: string, ticketId: string, launchToken: string): boolean {
+    const proof = partialQaRecoveryProcessProof(this, runId, ticketId, launchToken);
+    return Boolean(proof && partialQaProcessesSettled(proof));
+  }
+
+  async waitForSuccessfulPartialQaRecovery(runId: string, ticketId: string, launchToken: string): Promise<boolean> {
+    // Clean exits can precede native descendant/inventory settlement. Recheck
+    // only an already validated exact boundary; never kill or relax ownership.
+    const initial = partialQaRecoveryProcessProof(this, runId, ticketId, launchToken);
+    if (!initial || process.platform === "win32") return false;
+    const deadline = Date.now() + 3000;
+    do {
+      const proof = partialQaRecoveryProcessProof(this, runId, ticketId, launchToken);
+      if (!proof || JSON.stringify(proof) !== JSON.stringify(initial)) return false;
+      if (partialQaProcessesSettled(proof)) return true;
+      await new Promise<void>(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < deadline);
+    return false;
+  }
 
   preparationSuccessor(runId: string): string {
     const seen = new Set<string>();
@@ -812,7 +924,20 @@ export class WorkflowDb {
       }
       this.insertEvent(run.runId, "run_created", run.checkpoint, { kind: run.kind }, at);
     })();
+    if (run.kind === "recovery") this.createdRecoveryIntents.add(run.runId);
     return run;
+  }
+
+  /** Record failure of an intent this connection just created, before recovery
+   * authority was acquired. This cannot write build execution or publications. */
+  pauseOwnStartOverIntent(runId: string, error: unknown): void {
+    const run = this.getRun(runId);
+    if (!this.createdRecoveryIntents.has(runId) || run?.kind !== "recovery" || run.state.operation !== "build-start-over"
+      || run.checkpoint !== "start-over-inventory" || run.state.gitPreserved || this.operations(runId).length
+      || this.incompletePublications().some(publication => publication.runId === runId)) throw new Error("Recovery intent is outside this connection's unstarted setup scope");
+    this.coordinatorTransition++;
+    try { this.transition(runId, { status: "paused", checkpoint: "start-over-setup-paused", state: { ...run.state, error: error instanceof Error ? error.message : String(error) } }); }
+    finally { this.coordinatorTransition--; }
   }
 
   getRun(runId: string): WorkflowRunSnapshot | undefined {
@@ -953,6 +1078,19 @@ export class WorkflowDb {
     return rows.map((row) => ({ runId: row.run_id, role: row.role, ...(row.provider_session_id ? { providerSessionId: row.provider_session_id } : {}), ...(row.session_key ? { sessionKey: row.session_key } : {}), ...(row.session_ref_json ? { sessionRef: parseJson(row.session_ref_json) as ProviderSessionRefV1 } : {}), revision: row.revision, acknowledgedAt: row.acknowledged_at }));
   }
 
+  settingsAdoptionState(runId: string, role: "builder" | "qa"): "active" | "deferred" | "unknown" {
+    const admission = this.buildAdmission();
+    const lease = this.currentLease();
+    const owner = admission?.runId === runId ? admission : lease?.runId === runId ? lease : undefined;
+    if (!owner) return "deferred";
+    const liveness = classifyProcess(owner.pid, owner.processStart, owner.host).state;
+    if (liveness === "unknown") return "unknown";
+    if (liveness !== "live" || this.getRun(runId)?.status !== "running" || this.pendingHumanDecisions(runId).length) return "deferred";
+    // Historical role/session records are not proof of an active role. A
+    // submitted turn can adopt saved settings at its next safe boundary.
+    return this.unresolvedRoleDispatches(runId, role).some(operation => operation.status === "in_progress") ? "active" : "deferred";
+  }
+
   appendContinuityEvent(input: {
     runId: string;
     role: "builder" | "qa" | "host";
@@ -1012,7 +1150,7 @@ export class WorkflowDb {
       this.refreshRunContinuityHead(input.runId, input.authoritativeStateRevision, at);
       this.insertEvent(input.runId, "continuity_checkpoint", `continuity:${input.role}`, { checkpointId: checkpoint.checkpointId, digest, state: checkpoint.state }, at);
       return checkpoint;
-    })();
+    }).immediate();
   }
 
   continuityCheckpoints(runId: string, role?: "builder" | "qa"): ContinuityCheckpoint[] {
@@ -1744,6 +1882,74 @@ export class WorkflowDb {
     })();
   }
 
+  /** Retire an interrupted, proven read-only review transport, never a QA pass
+   * or Builder remediation. A fresh immutable review must still run afterward. */
+  reconcileInterruptedQaDispatch(runId: string, ticketId: string): boolean {
+    const dispatches = this.unresolvedRoleDispatches(runId, "qa");
+    if (!dispatches.length) return false;
+    const lease = this.currentLease();
+    if (lease?.runId !== runId || lease.pid !== process.pid) throw new Error("QA reconciliation requires the original build recovery lease");
+    const worker = this.events(runId).filter(event => event.type === "worker_started").at(-1)?.payload as { workerPid?: number; processStart?: string; host?: string } | undefined;
+    if (!worker?.workerPid || classifyProcess(worker.workerPid, worker.processStart, worker.host).state !== "dead" || !processGroupQuiescent(worker.workerPid)
+      || this.readinessProcesses().length || this.unresolvedRoleDispatches(runId, "builder").length) throw new Error("Interrupted QA and all owned provider processes must be verified stopped before a fresh review");
+    const head = this.qaTicketHead(runId, ticketId);
+    if (!["turn-intended", "turn-uncertain", "operator-menu"].includes(head.state)) throw new Error("QA dispatch is not an interrupted review boundary");
+    const run = this.getRun(runId)?.state as { tickets?: string[]; repository?: { branch?: string }; progress?: { completedTickets?: string[] } } | undefined;
+    if (!run?.tickets?.includes(ticketId) || run.progress?.completedTickets?.includes(ticketId)) throw new Error("QA recovery cannot reopen completed or unapproved tickets");
+    const definition = loadTickets(resolveTicketPaths(loadTicketsConfig(this.projectDir), this.projectDir).tickets).find(ticket => ticket.id === ticketId);
+    if (!definition || qaDigest("admitted-requirements", definition) !== this.assertAdmittedWork(runId, ticketId).requirementsDigest) throw new Error("QA recovery requirements changed; approval is required");
+    const owner = this.roleMutationLease(runId, "qa");
+    // A cancellation can have a durable host terminal receipt while the
+    // provider dispatch is still unknown. Exact frozen-turn bindings remain
+    // required; the old receipt is never promoted to an accepted QA result.
+    const rows = this.db.prepare("SELECT status,intent_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND status IN ('intended','uncertain','unknown','completed')").all(runId, ticketId) as Array<{ status: string; intent_json: string }>;
+    const turns = rows.flatMap(row => {
+      const turn = parseJson(row.intent_json) as QaTurnIntentV2;
+      if (row.status === "completed" && !dispatches.some(dispatch => {
+        const result = dispatch.result as { isError?: boolean; failure?: { dispatchState?: string } } | undefined;
+        return result?.isError === true && result.failure?.dispatchState === "unknown"
+          && (dispatch.intent as { instructionDigest?: string }).instructionDigest === turn.instructionDigest;
+      })) return [];
+      return [turn];
+    });
+    const bindings = dispatches.map(dispatch => {
+      const intent = dispatch.intent as { sessionRef?: ProviderSessionRefV1; instructionDigest?: string };
+      const ref = intent.sessionRef;
+      if (!ref || !owner?.sessionKey || ref.role !== "qa" || ref.stream !== "qa" || !Number.isSafeInteger(ref.generation) || ref.generation < 0
+        || !ref.configRoot || canonicalProject(ref.configRoot) !== canonicalProject(this.projectDir) || !ref.validatedAt || Number.isNaN(Date.parse(ref.validatedAt))
+        || ref.source !== "observed" || providerSessionKey(ref) !== owner.sessionKey) throw new Error("QA dispatch has no validated owner binding");
+      const turn = turns.find(turn => turn.reviewNumber === head.reviewNumber && turn.instructionDigest === intent.instructionDigest
+        && turn.providerSession.sessionId === ref.sessionId && turn.providerSession.provider === ref.provider && turn.providerSession.generation === ref.generation
+        && turn.providerSession.cwd === ref.cwd && turn.providerSession.configRoot === ref.configRoot);
+      if (!turn || turn.sourceStateDigest !== head.sourceStateDigest || turn.reviewBasisDigest !== head.reviewBasisDigest) throw new Error("QA dispatch does not match the frozen review turn");
+      const sessions = this.db.prepare("SELECT session_json FROM qa_sessions WHERE run_id=? AND ticket_id=? AND generation=? AND source_state_digest=? AND review_basis_digest=?").all(runId, ticketId, ref.generation, turn.sourceStateDigest, turn.reviewBasisDigest) as Array<{ session_json: string }>;
+      const session = sessions.map(row => parseJson(row.session_json) as { session: ProviderSessionRefV1; confinement?: Record<string, unknown> }).find(session => providerSessionKey(session.session) === owner.sessionKey && session.confinement);
+      const confinement = session?.confinement;
+      if (!confinement) throw new Error("Interrupted QA lacks a retained read-only confinement proof");
+      const { digest, ...fields } = confinement;
+      if (fields.version !== 2 || fields.sourceMode !== "read-only" || fields.scratchMode !== "isolated" || !["none", "user"].includes(String(fields.settingsSources))
+        || !["disabled", "provider-required"].includes(String(fields.networkMode)) || !/^[a-f0-9]{64}$/.test(String(fields.environmentDigest)) || !/^[a-f0-9]{64}$/.test(String(fields.policyDigest)) || digest !== qaDigest("qa-confinement", fields)) throw new Error("Interrupted QA confinement is invalid");
+      const sourceRow = this.db.prepare("SELECT state_json FROM qa_source_states WHERE run_id=? AND ticket_id=? AND digest=?").get(runId, ticketId, turn.sourceStateDigest) as { state_json: string } | undefined;
+      const frozen = sourceRow ? parseJson(sourceRow.state_json) as FrozenQaSourceStateV2 : undefined;
+      if (!frozen || frozen.version !== 2 || frozen.runId !== runId || frozen.ticketId !== ticketId || frozen.digest !== turn.sourceStateDigest || !/^[a-f0-9]{64}$/.test(frozen.contentDigest) || !/^[a-f0-9]{64}$/.test(frozen.originDigest) || !Array.isArray(frozen.paths)) throw new Error("Interrupted QA frozen source binding is missing or invalid");
+      const basisRow = this.db.prepare("SELECT basis_json FROM qa_review_bases WHERE run_id=? AND ticket_id=? AND digest=?").get(runId, ticketId, turn.reviewBasisDigest) as { basis_json: string } | undefined;
+      if (!basisRow) throw new Error("Interrupted QA review basis is missing");
+      const basis = parseJson(basisRow.basis_json) as QaReviewBasisV2;
+      const { digest: basisDigest, ...basisFields } = basis;
+      if (basisDigest !== qaDigest("review-basis-fields", basisFields) || basis.confinementDigest !== digest || basis.ticketDigest !== qaDigest("ticket", definition)) throw new Error("Interrupted QA review basis is invalid");
+      return { dispatch, turn, confinementDigest: digest };
+    });
+    const source = captureFrozenQaSource(this.projectDir);
+    if (run.repository?.branch && execFileSync("git", ["branch", "--show-current"], { cwd: this.projectDir, encoding: "utf8" }).trim() !== run.repository.branch) throw new Error("Return to the build's owning branch before QA recovery");
+    this.atomic(() => {
+      if (captureFrozenQaSource(this.projectDir).digest !== source.digest) throw new Error("QA source changed during recovery inspection; retry");
+      const reconciliationId = `qa-review-resume:${runId}:${randomUUID()}`;
+      for (const { dispatch, turn, confinementDigest } of bindings) this.updateOperation(dispatch.idempotencyKey, "failed", { result: { recovery: "interrupted-read-only-qa", reconciliationId, outcomeUnknown: true, providerReplayAuthorized: false, priorResult: dispatch.result, qaTurnId: turn.operationId, reviewedSourceDigest: turn.sourceStateDigest, currentSourceDigest: source.digest, confinementDigest }, error: "Interrupted read-only QA outcome remains unknown; replaced by a fresh immutable full review, never replayed or treated as a pass" });
+      this.appendContinuityEvent({ runId, role: "host", kind: "interrupted_qa_reconciled", payload: { reconciliationId, ticketId, dispatchIds: dispatches.map(dispatch => dispatch.idempotencyKey), currentSourceDigest: source.digest, outcomeUnknown: true, providerReplayAuthorized: false }, authoritativeStateRevision: this.continuityHead(runId, "run")?.authoritativeStateRevision ?? 0 });
+    });
+    return true;
+  }
+
   commitQaTurnIntent(intent: QaTurnIntentV2, expectedRevision: number): QaReducerStateV2 {
     return this.db.transaction(() => {
       const next = this.transitionQa(intent.runId, intent.ticketId, expectedRevision, { type: "turn-intended", slot: intent.slot }, new Date(intent.intendedAt));
@@ -1912,6 +2118,21 @@ export class WorkflowDb {
   builderRemediationReceipt(operationId: string): BuilderRemediationReceiptV2 | BuilderRemediationReceiptV3 | undefined {
     const row = this.db.prepare("SELECT receipt_json FROM qa_remediation_receipts WHERE operation_id=?").get(operationId) as { receipt_json: string } | undefined;
     return row ? parseJson(row.receipt_json) as BuilderRemediationReceiptV2 | BuilderRemediationReceiptV3 : undefined;
+  }
+
+  hasConfirmedQaRemediationForRecheck(runId: string, ticketId: string): boolean {
+    const head = this.qaTicketHead(runId, ticketId);
+    const attempt = this.qaRemediationAttempts(runId, ticketId).at(-1);
+    if (head.state !== "recheck-required" || !attempt || attempt.status !== "succeeded"
+      || attempt.generation !== head.remediationGeneration || this.unresolvedRoleDispatches(runId, "builder").length) return false;
+    const receipt = this.builderRemediationReceipt(attempt.attemptId);
+    const review = this.qaReviewAttempt(attempt.reviewAttemptId);
+    const transition = this.db.prepare("SELECT to_revision,event_json FROM qa_transitions WHERE run_id=? AND ticket_id=? ORDER BY to_revision DESC LIMIT 1").get(runId, ticketId) as { to_revision: number; event_json: string } | undefined;
+    return Boolean(receipt && review && review.status === "failed" && receipt.runId === runId && receipt.ticketId === ticketId
+      && receipt.operationId === attempt.attemptId && receipt.requestDigest === attempt.requestDigest
+      && receipt.responseDigest === attempt.responseDigest && receipt.summaryDigest === attempt.summaryDigest
+      && receipt.sourceStateDigest === review.sourceDigest && receipt.reportDigest === review.reportDigest && receipt.providerTurnId
+      && transition?.to_revision === head.revision && (parseJson(transition.event_json) as { type?: string }).type === "remediation-received");
   }
 
   recordBuilderRemediationReceipt(receipt: BuilderRemediationReceiptV2 | BuilderRemediationReceiptV3): void {
@@ -2445,16 +2666,20 @@ export class WorkflowDb {
    */
   hasUncheckpointedRoleTurn(runId: string, role: "builder" | "qa"): boolean {
     const events = this.continuityEvents(runId);
-    let startSequence = 0;
+    const pending = new Map<number, string | undefined>();
     for (const event of events) {
       if (event.kind === "turn_started" && event.role === "host" && (event.payload as { role?: string }).role === role) {
-        startSequence = event.sequence;
-      } else if (startSequence && event.sequence > startSequence && event.role === role
-        && (event.kind === "turn_completed" || event.kind === "turn_completed_after_repair" || event.kind === "handback_turn_completed" || event.kind === "fresh_successor_accepted")) {
-        startSequence = 0;
+        const dispatchId = (event.payload as { dispatchId?: unknown }).dispatchId;
+        pending.set(event.sequence, typeof dispatchId === "string" ? dispatchId : undefined);
+      } else if (event.role === role && event.kind === "turn_not_sent") {
+        const dispatchId = (event.payload as { dispatchId?: unknown }).dispatchId;
+        if (typeof dispatchId === "string") for (const [sequence, id] of pending) { if (id === dispatchId) pending.delete(sequence); }
+      } else if (event.role === role
+        && (event.kind === "turn_completed" || event.kind === "turn_completed_after_repair" || event.kind === "handback_turn_completed" || event.kind === "fresh_successor_accepted" || event.kind === "handoff_successor_accepted")) {
+        pending.clear();
       }
     }
-    return startSequence > 0;
+    return pending.size > 0;
   }
 
   beginPublication(runId: string, intent: unknown, previousDigests: unknown, now = new Date()): PublicationTransaction {

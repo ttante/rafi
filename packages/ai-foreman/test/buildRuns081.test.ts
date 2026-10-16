@@ -1,6 +1,8 @@
 import { admitFixtureWork } from "./helpers/workAdmission.js";
-import { legacyTrackerWorkHints } from "../src/buildRuns.js";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { legacyTrackerWorkHints, hasRunnableBuildRemainder } from "../src/buildRuns.js";
+import { stringify } from "yaml";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +13,70 @@ import { bindBuildAuthority, BUILD_RUN_DIRECTORY, buildRecoveryPreview, complete
 import { WorkflowDb } from "../src/workflowDb.js";
 import { cmdInit } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
+
+test("automatic recovery respects explicit blockers, prerequisites and the approved remaining step budget", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-recovery-eligibility-"));
+  try {
+    cmdInit(dir, {});
+    const ticket = { id: "T001", order: 1, title: "Feature", area: "test", priority: "P2", size: "XS", risk: "Low", summary: "Feature", acceptance: ["Works"], required_tests: [], likely_files: [], notes: "Fixture", depends_on: [] as string[] };
+    writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [ticket, { ...ticket, id: "T002", order: 2, depends_on: ["T001"] }] }));
+    const run = createBuildRun({ repositoryRoot: dir, tickets: ["T001", "T002"], authorizedBatch: { tickets: ["T001", "T002"], requestedSteps: 2, scopeRevision: "approved", startedTickets: ["T001"] } });
+    const partial = { ...run, progress: { ...run.progress, completedTickets: ["T001"], remainingTickets: ["T002"] } };
+    const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try {
+      state.upsertState("T001", { status: "done" }, new Date().toISOString());
+      state.upsertState("T002", { status: "blocked" }, new Date().toISOString());
+      assert.equal(hasRunnableBuildRemainder(dir, partial), false);
+      state.upsertState("T002", { status: "next" }, new Date().toISOString());
+      assert.equal(hasRunnableBuildRemainder(dir, partial), true);
+      state.upsertState("T001", { status: "in_progress" }, new Date().toISOString());
+      assert.equal(hasRunnableBuildRemainder(dir, partial), false);
+      state.upsertState("T001", { status: "done" }, new Date().toISOString());
+      assert.equal(hasRunnableBuildRemainder(dir, { ...partial, authorizedBatch: { ...run.authorizedBatch!, requestedSteps: 1 } }), false);
+    } finally { state.close(); }
+    releaseBuildLease(dir, run, "recoverable");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const name of ["feature4.txt", " leading ü.txt"]) test(`Git recovery inventory preserves the full first modified path ${JSON.stringify(name)}`,()=>{
+  const dir=mkdtempSync(join(tmpdir(),"rafi-porcelain-path-"));
+  try {
+    const git=(args:string[])=>execFileSync("git",args,{cwd:dir,stdio:"pipe"});
+    git(["init","-q","-b","main"]);git(["config","user.email","fixture@example.test"]);git(["config","user.name","Fixture"]);
+    writeFileSync(join(dir,name),"before\n");git(["add","--",name]);git(["commit","-qm","Baseline"]);
+    writeFileSync(join(dir,name),"after\n");
+    const run=createBuildRun({repositoryRoot:dir,tickets:["T001"]});
+    assert.ok(run.repository.git.initialStatusPaths.includes(name));
+    assert.equal(run.repository.git.initialStatusPaths.includes(name.slice(1)),false);
+    releaseBuildLease(dir,run,"recoverable");
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test("Git recovery inventory consumes both raw paths for a staged rename",()=>{
+  const dir=mkdtempSync(join(tmpdir(),"rafi-porcelain-rename-"));
+  try {
+    const git=(args:string[])=>execFileSync("git",args,{cwd:dir,stdio:"pipe"});
+    git(["init","-q","-b","main"]);git(["config","user.email","fixture@example.test"]);git(["config","user.name","Fixture"]);
+    writeFileSync(join(dir,"old ü.txt"),"before\n");git(["add","."]);git(["commit","-qm","Baseline"]);git(["mv","old ü.txt"," new ü.txt"]);
+    const run=createBuildRun({repositoryRoot:dir,tickets:["T001"]});
+    assert.ok(run.repository.git.initialStatusPaths.includes("old ü.txt"));assert.ok(run.repository.git.initialStatusPaths.includes(" new ü.txt"));
+    assert.equal(run.repository.git.initialStatusPaths.includes(" ü.txt"),false);
+    releaseBuildLease(dir,run,"recoverable");
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+for (const status of ["paused", "blocked", "failed"] as const) test(`authoritative ${status} worker outcome overrides a stale running build snapshot`, () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-worker-projection-"));
+  const run = createBuildRun({ tickets: ["T001"], repositoryRoot: dir });
+  const db = new WorkflowDb(dir); const lease = db.currentLease();
+  try {
+    db.transition(run.runId, { status, checkpoint: "uncertain-worker-dispatch" });
+    const projected = readBuildRuns(dir)[0]!;
+    assert.equal(projected.status, status === "failed" ? "failed" : "recoverable");
+    assert.equal(projected.checkpoint, "uncertain-worker-dispatch");
+    assert.deepEqual(projected.progress.completedTickets, []);
+  } finally { if (lease) db.releaseLease(lease); db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("child recovery rejects a superseded decision after acquiring its lease", () => {
   const dir = mkdtempSync(join(tmpdir(), "rafi-recovery-decision-"));
