@@ -27,14 +27,15 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     const instruction = (p.input || []).map(item => item.text || '').join('\n');
     const assignedTicket = instruction.match(/Assigned ticket: ([^\s.]+)\./)?.[1] || instruction.match(/Ticket scope: ([^\s.]+)\./)?.[1];
     const ticketMarker = assignedTicket ? `ticket="${assignedTicket}" ` : '';
-    if (process.env.RAFI_FIXTURE_QUESTION === "1" && !questionAsked && /You are being run by an automated foreman/.test(instruction)) {
+    const isWorkInstruction = /Assigned ticket:|Implement exactly this ticket|Implement the next ticket or step now|You are being run by an automated foreman/.test(instruction);
+    if (process.env.RAFI_FIXTURE_QUESTION === "1" && !questionAsked && isWorkInstruction) {
       questionAsked = true;
       send({ id: request.id, result: { turn: { id: 'question-turn' } } });
       send({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text: 'STEP_STATUS: needs_input | ' + ticketMarker + 'question="Fixture terminal decision?" choices="Continue|Cancel"\nRAFI_CONTINUITY_DELTA: ' + JSON.stringify(delta) } } });
       send({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'question-turn', status: 'completed' } } });
       return;
     }
-    if (/Implement exactly this ticket|You are being run by an automated foreman/.test(instruction)) {
+    if (isWorkInstruction) {
       if (process.env.RAFI_FIXTURE_HANG_WORKER === '1') { require('node:fs').writeFileSync(require('node:path').join(cwd, 'work-started'), String(process.ppid)); process.kill(process.ppid, 'SIGSTOP'); return; }
       if (process.env.RAFI_FIXTURE_WAIT_ON_WORK === '1') { require('node:fs').writeFileSync(require('node:path').join(cwd, 'work-started'), String(process.ppid)); return; }
       if (process.env.RAFI_FIXTURE_CRASH_ON_WORK === '1') { process.kill(process.ppid, 'SIGKILL'); return; }

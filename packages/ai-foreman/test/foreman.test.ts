@@ -40,6 +40,10 @@ function makeTmpDir(): string {
   return dir;
 }
 
+function writeBuilderProduct(dir: string, index: number): void {
+  writeFileSync(join(dir, ".builder-product.ts"), `fixture implementation ${index}\n`, "utf8");
+}
+
 const qaPass = 'checked\nSTEP_STATUS: qa_pass | summary="tests passed"';
 const qaFail = `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify({ version: 1, summary: "missing test", checks_run: [{ check: "unit test", outcome: "failed", evidence: "not found" }], findings: [{ id: "QA-1", requirement: "Unit test", locations: ["repository-wide"], problem: "missing test", evidence: "no matching test", expected: "test exists", fix_direction: "add the test", verification: ["run the test"] }], observations: [] })}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="missing test"`;
 
@@ -284,7 +288,7 @@ test("runBatch completes ticket only after QA passes", async () => {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
 
-    const builder = new FakeBuilder(['implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"']);
+    const builder = new FakeBuilder(['implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"'], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaPass]), cwd));
     const startedTickets: string[] = [];
 
@@ -318,7 +322,7 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
     const builder = attachBuilderRef(new FakeBuilder([
       'implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"',
       'fixed\nSTEP_STATUS: done | ticket="T001" summary="fixed"',
-    ]), dir, "T001");
+    ], index => writeBuilderProduct(dir, index)), dir, "T001");
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 1, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaFail]), cwd));
 
     const result = await foreman.runBatch(1);
@@ -351,7 +355,7 @@ test("runBatch pins recovery to the requested in-progress ticket", async () => {
     cmdUpdate(dir, "T001", { status: "next", actor: "test" });
     cmdUpdate(dir, "T002", { status: "in_progress", actor: "test" });
 
-    const builder = new FakeBuilder(['continued T002\nSTEP_STATUS: done | ticket="T002" summary="finished recovery"']);
+    const builder = new FakeBuilder(['continued T002\nSTEP_STATUS: done | ticket="T002" summary="finished recovery"'], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaPass]), cwd));
 
     const result = await foreman.runBatch(1, undefined, undefined, "T002");
@@ -375,7 +379,7 @@ test("explicit recovery reopens a safely paused blocked ticket", async () => {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
     cmdBlock(dir, "T001", { summary: "user chose safe pause", actor: "test" });
-    const builder = new FakeBuilder(['resumed\nSTEP_STATUS: done | ticket="T001" summary="finished after guidance"']);
+    const builder = new FakeBuilder(['resumed\nSTEP_STATUS: done | ticket="T001" summary="finished after guidance"'], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaPass]), cwd));
 
     const result = await foreman.runBatch(1, undefined, undefined, "T001");
@@ -398,7 +402,10 @@ for (const blocked of [false, true]) test(`scoped recovery ${blocked ? "stops at
     cmdUpdate(dir, "T001", { status: "in_progress", actor: "test" });
     if (blocked) cmdBlock(dir, "T002", { summary: "independent unresolved blocker", actor: "test" });
     else cmdUpdate(dir, "T002", { status: "next", actor: "test" });
-    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"', 'STEP_STATUS: done | ticket="T002"']);
+    const builder = new FakeBuilder([
+      (instruction: string) => `STEP_STATUS: done | ticket="${/Assigned ticket: ([^\.]+)\./.exec(instruction)?.[1]}"`,
+      (instruction: string) => `STEP_STATUS: done | ticket="${/Assigned ticket: ([^\.]+)\./.exec(instruction)?.[1]}"`,
+    ], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
     const result = await foreman.runBatch(10, undefined, undefined, "T001", ["T001", "T002"]);
     assert.equal(result.completed, blocked ? 1 : 2);
@@ -434,7 +441,7 @@ test("independent QA may write Foreman's own .foreman runtime files", async () =
   try {
     const builder = new FakeBuilder([
       (instruction:string) => `implemented\nSTEP_STATUS: done | ticket="${/Ticket scope: ([^ ]+)\./.exec(instruction)?.[1]}" summary="implemented"`,
-    ]);
+    ], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(
       builder,
       new Log(join(dir, ".foreman/test.jsonl")),
@@ -466,7 +473,7 @@ test("independent QA source changes still require human review", async () => {
     writeFileSync(join(dir, "source.ts"), "before\n", "utf8");
     const builder = new FakeBuilder([
       (instruction:string) => `implemented\nSTEP_STATUS: done | ticket="${/Ticket scope: ([^ ]+)\./.exec(instruction)?.[1]}" summary="implemented"`,
-    ]);
+    ], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(
       builder,
       new Log(join(dir, ".foreman/test.jsonl")),
@@ -540,7 +547,7 @@ for (const mode of ["pending", "answered", "stale", "outside", "run-wide"] as co
     if (["answered", "stale", "outside"].includes(mode)) db.answerHumanDecision("questions", decision.decisionId, "a");
     if (mode === "stale") writeFileSync(join(dir, "rafi-config.yaml"), "changed: true\n");
     const selected = mode === "answered" ? "T001" : "T002";
-    const builder = new FakeBuilder([`STEP_STATUS: done | ticket="${selected}"`]);
+    const builder = new FakeBuilder([`STEP_STATUS: done | ticket="${selected}"`], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "questions", true);
     const result = await foreman.runBatch(1, undefined, undefined, mode === "outside" ? "T002" : "T001", mode === "outside" ? ["T002"] : ["T001", "T002"]);
     assert.equal(result.completed, mode === "run-wide" ? 0 : 1, result.detail);
@@ -556,7 +563,10 @@ for (const mode of ["pending", "answered", "stale", "outside", "run-wide"] as co
       const replacement = db.pendingHumanDecisions("questions")[0]!;
       assert.ok(replacement); assert.notEqual(replacement.decisionId, decision.decisionId);
       db.answerHumanDecision("questions", replacement.decisionId, "a");
-      builder.sendTurn = async instruction => ({ text: 'STEP_STATUS: done | ticket="T001"', isError: false, numTurns: 1, costUsd: 0 });
+      builder.sendTurn = async instruction => {
+        writeBuilderProduct(dir, 99);
+        return { text: 'STEP_STATUS: done | ticket="T001"', isError: false, numTurns: 1, costUsd: 0 };
+      };
       const resumed = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
       assert.equal(resumed.completed, 1, resumed.detail);
       assert.equal(db.pendingHumanDecisions("questions").length, 0);
@@ -606,6 +616,7 @@ test("approval covers later work, revalidates edits between turns and binds ever
     let approvals = 0;
     const gate = createBuildApprovalGate(dir, ["T001", "T002"], false, undefined, async () => { approvals++; });
     const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"', 'STEP_STATUS: done | ticket="T002"'], index => {
+      writeBuilderProduct(dir, index);
       if (index === 0) writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [tickets[0], { ...tickets[1], acceptance: ["new requirement"] }] }));
       if (index === 1) assert.equal(approvals, 2, "must approve changed T002 before dispatch");
     });
@@ -653,7 +664,7 @@ test("response-only protocol correction retains the assigned ticket across safe 
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
     cmdUpdate(dir, "T001", { status: "next", actor: "test" });
-    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"}', 'STEP_STATUS: done | ticket="T001"']);
+    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"}', 'STEP_STATUS: done | ticket="T001"'], index => writeBuilderProduct(dir, index));
     const boundaries: string[] = [];
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir, undefined, undefined, undefined, undefined, undefined, undefined,
       async (adapter, action) => { boundaries.push(action); return adapter; });
