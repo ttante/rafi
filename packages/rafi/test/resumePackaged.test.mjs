@@ -21,7 +21,9 @@ for (const alias of ['resume','build:resume']) test(`packaged ${alias} cleans te
   const root=mkdtempSync(join(tmpdir(),'rafi packaged resume ü '));
   try {
     execFileSync('git',['init','-q',root]);
-    writeFileSync(join(root,'rafi-config.yaml'),stringify(buildProjectConfig(defaultAnswers())));
+    // The fake provider models legacy runtime recovery, not QA preparation.
+    const config=buildProjectConfig(defaultAnswers()); config.qa_preparation=false;
+    writeFileSync(join(root,'rafi-config.yaml'),stringify(config));
     cmdInit(root,{appName:'Test',timezone:'UTC'});
     writeFileSync(join(root,'.tickets/tickets.yaml'),stringify({tickets:[{id:'T001',order:1,title:'Implement',area:'test',priority:'P1',size:'S',risk:'Low',summary:'work',acceptance:['works'],required_tests:['tests'],likely_files:[],depends_on:[]}]}));
     cmdUpdate(root,'T001',{status:'next',actor:'test'});

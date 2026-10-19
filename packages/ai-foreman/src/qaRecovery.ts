@@ -5,7 +5,7 @@ import {
   realpathSync, renameSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { parseQaFailureReport, type QaFailureReportV1 } from "rafi-spec";
+import { parseProviderContract, parseQaFailureReport, qaRecoveryAcknowledgementV1Schema, type QaFailureReportV1 } from "rafi-spec";
 import { calculateFrozenQaStateDigest, captureFrozenQaSource, type FrozenQaSourceState, type QaSourcePathState, type QaUntrackedCapture } from "./qaSnapshot.js";
 import { WorkflowDb } from "./workflowDb.js";
 
@@ -86,6 +86,65 @@ export interface QaRecoveryPacketInput {
   pendingAction?: QaRecoveryPendingAction;
   resources: Record<string, { value: unknown; purpose: string; mediaType?: string; requiredForRecovery?: boolean; exactText?: boolean }>;
   reportJson?: string;
+}
+
+/**
+ * Keeps an unresolved packet auditable without making a successor reread every
+ * failed attempt.  Sealed history remains in the packet and in its digest
+ * lineage; only the current review/source closure and this digest-indexed
+ * history manifest are required for recovery.
+ */
+export function canonicalizeQaRecoveryRequirements(packet: QaRecoveryPacket): QaRecoveryPacket {
+  const loaded = loadQaRecoveryPacket(packet.directory);
+  if (loaded.manifest.packetDigest !== packet.manifest.packetDigest) throw new Error("cannot canonicalize a stale QA recovery packet revision");
+  // Ordinary first-attempt packets stay byte-for-byte on their established
+  // publication path.  The bundle is introduced only once retry/turn history
+  // would otherwise make the next successor inspect an accumulating archive.
+  const hasBundle = loaded.manifest.resources.some((resource) => resource.path.startsWith("canonical-recovery-bundle/"));
+  const hasRetryHistory = loaded.manifest.resources.some((resource) => /^(?:reviews\/|turns\/|prompts\/|qa-responses\/|validation\/|recovery-history\/)/.test(resource.path));
+  if (!hasBundle && !hasRetryHistory) return loaded;
+  const currentSourcePrefix = currentReviewedStatePrefix(loaded);
+  const currentReviewPrefix = `reviews/r${loaded.manifest.reviewAttempt}/context/`;
+  const currentTransition = `review-transitions/${loaded.manifest.reviewAttemptId}.json`;
+  const baseContext = new Set([
+    "ticket", "qa-review-prompt", "report-schema", "builder-result", "builder-response-history",
+    "original-host-prompt", "original-provider-prompt", "original-raw-response", "original-cleaned-response",
+    "original-validation", "tool-events", "continuity", "settings", "context-usage",
+    "uncertain-turn-instruction", "uncertain-turn-detail", "review-binding",
+  ]);
+  const isCurrent = (resource: QaRecoveryResourceV2): boolean => {
+    if (resource.path === "report.json") return true;
+    if (resource.path.startsWith(`${currentSourcePrefix}/`) || resource.path.startsWith(currentReviewPrefix)) return true;
+    if (resource.path === currentTransition) return true;
+    const context = /^context\/([^./]+)\.(?:json|txt)$/.exec(resource.path)?.[1];
+    return Boolean(context && baseContext.has(context));
+  };
+  const history = loaded.manifest.resources
+    .filter((resource) => !resource.path.startsWith("canonical-recovery-bundle/") && !isCurrent(resource))
+    .map(({ path, digest, bytes, mediaType, purpose, integrityPolicy }) => ({ path, digest, bytes, mediaType, purpose, integrityPolicy }));
+  const current = loaded.manifest.resources
+    .filter((resource) => !resource.path.startsWith("canonical-recovery-bundle/") && isCurrent(resource))
+    .map(({ path, digest, bytes, mediaType, purpose }) => ({ path, digest, bytes, mediaType, purpose }));
+  const bundleBytes = encodeValue({
+    version: 1,
+    purpose: "Bounded canonical QA recovery closure; all omitted records remain sealed packet history and are verified by the packet digest and revision lineage",
+    runId: loaded.manifest.runId, ticketId: loaded.manifest.ticketId,
+    reviewAttempt: loaded.manifest.reviewAttempt, reviewAttemptId: loaded.manifest.reviewAttemptId,
+    reviewedStateDigest: loaded.manifest.reviewedStateDigest,
+    currentRequiredResources: current,
+    retainedHistory: history,
+  }, false);
+  const priorBundle = loaded.manifest.resources.filter((resource) => resource.path.startsWith("canonical-recovery-bundle/")).at(-1);
+  const unchanged = priorBundle && priorBundle.digest === hash(bundleBytes)
+    && loaded.manifest.resources.every((resource) => resource.requiredForRecovery === (isCurrent(resource) || resource.path === priorBundle.path));
+  if (unchanged) return loaded;
+  const bundle = storeSealed(loaded.directory, `canonical-recovery-bundle/r${loaded.manifest.revision + 1}.json`, bundleBytes,
+    "Canonical current recovery closure and digest-indexed sealed history", "application/json", true);
+  const resources = loaded.manifest.resources
+    .map((resource) => ({ ...resource, requiredForRecovery: isCurrent(resource) }))
+    .concat(bundle)
+    .sort(resourceOrder);
+  return revise(loaded, { resources });
 }
 
 export function loadQaRecoveryPacket(directory: string): QaRecoveryPacket {
@@ -472,6 +531,11 @@ export function validateQaRecoveryAcknowledgement(text: string, packet: QaRecove
   const expected = `RAFI_QA_RECOVERY_ACK packet="${packet.manifest.packetDigest}" reviewed_state="${packet.manifest.reviewedStateDigest}" required_resources_read="all"`;
   const errors: string[] = [];
   if (lines[0] !== expected) errors.push("missing or malformed exact recovery-packet acknowledgement");
+  const acknowledgement = /^RAFI_QA_RECOVERY_ACK packet="([a-f0-9]{64})" reviewed_state="([a-f0-9]{64})" required_resources_read="(all)"$/.exec(lines[0] ?? "");
+  if (acknowledgement) {
+    try { parseProviderContract(qaRecoveryAcknowledgementV1Schema, { packet: acknowledgement[1], reviewed_state: acknowledgement[2], required_resources_read: acknowledgement[3] }, "RAFI_QA_RECOVERY_ACK"); }
+    catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
+  }
   if (options.continuityAlreadyValidated) {
     if (lines.length !== 1) errors.push("recovery acknowledgement must not contain additional text");
   } else if (lines.length !== 2 || !/^RAFI_CONTINUITY_DELTA(?:\s|$)/.test(lines[1] ?? "")) errors.push("exactly one continuity record must follow the recovery acknowledgement");

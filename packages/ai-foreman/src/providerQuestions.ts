@@ -3,6 +3,7 @@ import { durableHumanDecision, HumanDecisionRequired } from "./humanDecision.js"
 import { isCancel, multiselect, select, text } from "@clack/prompts";
 import type { PermissionDecision, PermissionRequest } from "./adapters/types.js";
 import { currentActivity, pauseActivityForInput } from "./activity.js";
+import { providerQuestionV1Schema } from "rafi-spec";
 
 const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
 const CUSTOM_VALUE = "__rafi_custom_response__";
@@ -140,27 +141,9 @@ function parseQuestions(input: Record<string, unknown>): ProviderQuestion[] {
   const rawQuestions = input.questions;
   if (!Array.isArray(rawQuestions)) return [];
   return rawQuestions.flatMap((raw): ProviderQuestion[] => {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
-    const record = raw as Record<string, unknown>;
-    const question = typeof record.question === "string" ? record.question.trim() : "";
-    if (!question) return [];
-    const header = typeof record.header === "string" && record.header.trim()
-      ? record.header.trim()
-      : undefined;
-    const options = Array.isArray(record.options)
-      ? record.options.flatMap((option): PromptOption[] => {
-          if (!option || typeof option !== "object" || Array.isArray(option)) return [];
-          const optionRecord = option as Record<string, unknown>;
-          const label = typeof optionRecord.label === "string" ? optionRecord.label.trim() : "";
-          if (!label) return [];
-          return [{
-            label,
-            description: typeof optionRecord.description === "string" ? optionRecord.description : undefined,
-            preview: typeof optionRecord.preview === "string" ? optionRecord.preview : undefined,
-          }];
-        })
-      : [];
-    return [{ question, header, options, multiSelect: record.multiSelect === true }];
+    const result = providerQuestionV1Schema.safeParse(raw);
+    if (!result.success) return [];
+    return [result.data];
   });
 }
 

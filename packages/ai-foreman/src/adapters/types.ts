@@ -239,6 +239,8 @@ export interface BuilderAdapter {
   enableContractEnforcement?(): void;
   contractCompactionSequence?(): number;
   acceptContractDelivery?(sequence: number): void;
+  /** Codex re-sends this exact contract reminder on its first host turn after native compaction. */
+  configureQaContractReminder?(reminder: string, onEvent?: (event: { kind: "installed" | "compaction-observed" | "reminder-delivered" | "reminder-retained"; at: string; sessionId?: string }) => void): void;
 
   /** Send one instruction; resolves when that turn completes. */
   sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: ProviderTurnPurpose }): Promise<TurnResult>;

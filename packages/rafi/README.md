@@ -19,6 +19,28 @@ rafi create .
 
 The interview accepts existing plans or sources, improves a rough plan, or starts from an idea. It configures Rafi and can continue to initial planning and ticket setup.
 
+New projects enable QA preparation by default for both Claude and Codex. Before
+each Builder ticket, QA records requirements and verification checks. Set
+`qa_preparation: false` in `rafi-config.yaml` only to use the older
+Builder-first flow. `qa_preparation_shadow: true` is an advanced non-blocking
+rollout mode and requires `qa_preparation: true`. If Codex compacts while
+working, Rafi automatically re-sends the current QA contract on its next turn;
+it does not stop the Builder or interrupt QA handoff.
+
+Older `qa_preparation: { mode: ... }` configuration is supported during
+migration. Run `rafi compile .` to rewrite it to the public boolean settings;
+custom preparation timing is retained as `qa_preparation_wall_time_ms`.
+`rafi manager . --ask "Is QA preparation ready?"` reports the active mode and,
+once a build exists, the count of ready, pending, and blocked QA contracts.
+
+For an npm project, `rafi qa-rehearse-rollback` runs `npm test` before and
+after reverting the current uncommitted product changes in a temporary Git
+repository. It does not revert the original project. The temporary commit
+includes all uncommitted product changes, not necessarily just one ticket.
+The rehearsal does not install or link dependencies and rejects symbolic links;
+projects needing those capabilities need a different verification method. Like
+any `npm test`, it runs the project's test script with the caller's permissions.
+
 ## Adding Rafi To An Existing Project
 
 Adopt Rafi in a repository that already exists:
@@ -82,6 +104,8 @@ rafi state export . --output rafi-state.rafi.gz
 rafi state inspect rafi-state.rafi.gz
 rafi state import /path/to/matching-checkout rafi-state.rafi.gz
 ```
+
+If a checkout was copied or moved with its local `.rafi/recovery.sqlite3`, inspect the old and current path binding with `rafi state rebind .`. After reviewing both paths, `rafi state rebind . --yes` explicitly adopts that copied local build history and records the rebinding. Use state export/import instead when transferring state from the original checkout.
 
 ### Uninstall
 

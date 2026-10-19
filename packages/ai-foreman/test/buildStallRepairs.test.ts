@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
@@ -60,6 +61,7 @@ test("blocked ticket and its dependent defer while an independent ticket complet
   cmdUpdate(dir, "T003", { status: "next", actor: "test" });
   const replies = ['STEP_STATUS: blocked | ticket="T001" reason="registry unavailable"', 'STEP_STATUS: done | ticket="T003" summary="implemented independent work"'];
   let turns = 0;
+  const instructions: string[] = [];
   const builder: BuilderAdapter = { agent: "codex", async sendTurn() { turns++; return { text: replies.shift() ?? "STEP_STATUS: plan_complete", isError: false, numTurns: 1, costUsd: 0 }; }, async *events(): AsyncIterable<BuilderEvent> {}, sessionId: () => "session", async close() {} };
   const foreman = new Foreman(builder, new Log(join(dir, "log.jsonl")), false, false, 3, dir);
   const result = await foreman.runBatch(1);
@@ -68,6 +70,36 @@ test("blocked ticket and its dependent defer while an independent ticket complet
   const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
   try { assert.equal(db.getState("T001")?.status, "blocked"); assert.notEqual(db.getState("T002")?.status, "done"); }
   finally { db.close(); }
+});
+
+test("current-branch plan-only resume is retried before QA", async t => {
+  const dir = fixture(t);
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "qa@example.test"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "QA Test"], { cwd: dir });
+  execFileSync("git", ["commit", "--allow-empty", "-qm", "base"], { cwd: dir });
+  mkdirSync(join(dir, ".foreman"), { recursive: true });
+  cmdInit(dir, { appName: "Test", timezone: "UTC" });
+  writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [{ id: "T001", order: 1, title: "Implement", area: "test", priority: "P1", size: "S", risk: "Low", summary: "work", acceptance: ["works"], required_tests: ["tests"], likely_files: ["index.mjs"], depends_on: [] }] }));
+  cmdUpdate(dir, "T001", { status: "next", actor: "test" });
+  let turns = 0;
+  const instructions: string[] = [];
+  const builder: BuilderAdapter = {
+    agent: "codex",
+    async sendTurn(instruction) {
+      turns++;
+      instructions.push(instruction);
+      if (turns === 1) return { text: 'Plan only T001 and T002; do not implement yet.\nSTEP_STATUS: done | ticket="T001" summary="planned"', isError: false, numTurns: 1, costUsd: 0 };
+      writeFileSync(join(dir, "index.mjs"), "export const subtract = (a, b) => a - b;\n");
+      return { text: 'STEP_STATUS: done | ticket="T001" summary="implemented"', isError: false, numTurns: 1, costUsd: 0 };
+    },
+    async *events(): AsyncIterable<BuilderEvent> {},
+    sessionId: () => "session",
+    async close() {},
+  };
+  const result = await new Foreman(builder, new Log(join(dir, ".foreman/log.jsonl")), false, false, 3, dir).runBatch(1, undefined, undefined, "T001");
+  assert.equal(result.completed, 1);
+  assert.equal(turns, 2);
 });
 
 test("approved unchanged scope starts automatically, but a material ticket change needs approval even with yes", async t => {

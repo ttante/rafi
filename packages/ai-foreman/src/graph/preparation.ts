@@ -18,9 +18,12 @@ export async function sendPreparationGraphTurn(adapter: BuilderAdapter, instruct
     runId: input.runId, workId: input.workId, operationId: input.operationId,
     logicalTaskId: input.operationId, sourceRef: input.sourceRef, accessWorkspace: input.accessWorkspace,
   });
-  const policy = { purpose: input.phase === "repair" ? "response-repair" as const
-    : input.phase === "planner" ? "planning" as const : "preparation" as const,
-    responseOnly: input.phase === "repair" };
+  // A preparation repair may need to re-read the frozen snapshot to recover
+  // an otherwise valid artifact. Keep it confined to the read-only
+  // preparation role, but do not force responseOnly: Codex may need a
+  // read-only tool to reconstruct the retained artifact.
+  const policy = { purpose: input.phase === "planner" ? "planning" as const : "preparation" as const,
+    responseOnly: false };
   const deadline = new OperationDeadline("QA preparation graph exchange", input.remainingMs);
   let expired = false;
   const result = await deadline.run(() => sendGraphTurn(adapter, instruction, context, policy, (text, turnPolicy) => {

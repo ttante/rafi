@@ -8,7 +8,7 @@ import { parse, stringify } from "yaml";
 
 import { buildNextQueue, formatStackAwareQueue } from "../src/tickets/queue.js";
 import { computeDisplayStatus, resolveBlockers } from "../src/tickets/blockers.js";
-import { validateTicketDefs, detectCycles } from "../src/tickets/ticketLoader.js";
+import { hasRollbackOrMitigationPlan, validateTicketDefs, detectCycles } from "../src/tickets/ticketLoader.js";
 import {
   cmdInit,
   cmdUpdate,
@@ -26,6 +26,10 @@ import {
   cmdPopulateCli,
   buildPopulateAgentRunOptions,
   buildPopulateInstruction,
+  TicketPopulationRiskCorrectionExhaustedError,
+  normalizeRiskWaiverTicketIds,
+  applyRiskNoteRepairProposal,
+  waiveTicketRiskNotes,
   resolveContextSources,
   resolvePopulationMode,
   resolvePopulationPlan,
@@ -525,6 +529,41 @@ test("populate instruction says to scan when no source hints are provided", () =
 
   assert.match(instruction, /No original context sources were provided/);
   assert.match(instruction, /Use the approved plan/);
+});
+
+test("populate instruction makes the Medium/High rollback policy unambiguous", () => {
+  const instruction = buildPopulateInstruction("docs/rafi-plan.json");
+  assert.match(instruction, /For every Medium or High risk ticket, `rollback` is required/);
+  assert.match(instruction, /`notes` may add context but never satisfies this requirement/);
+  assert.match(instruction, /"risk":"Medium"/);
+  assert.match(instruction, /Disable the feature flag/);
+});
+
+test("populate treats file lists as hints without weakening explicit safety restrictions", () => {
+  const instruction = buildPopulateInstruction("docs/rafi-plan.json");
+  assert.match(instruction, /not an exhaustive allowlist/);
+  assert.match(instruction, /Do not invent acceptance criteria or tests that require an exact changed-file list/);
+  assert.match(instruction, /Preserve explicit user-established security/);
+  assert.match(instruction, /Rafi manages ticket lifecycle state/);
+});
+
+test("populate preserves slice independence without inventing sibling-absence requirements", () => {
+  const instruction = buildPopulateInstruction("docs/rafi-plan.json");
+  assert.match(instruction, /Preserve additive-slice independence without inventing an absence test/);
+  assert.match(instruction, /shared approved baseline/);
+  assert.match(instruction, /unless the approved plan explicitly requires sibling absence testing/);
+});
+
+test("exhausted risk-plan correction gives an exact retry without unrelated doctor guidance", () => {
+  const error = new TicketPopulationRiskCorrectionExhaustedError(["T001", "T004"], "/tmp/project with spaces", "ivw_123", "/tmp/project with spaces/.rafi/ticket-population-proposals/ivw_123.json");
+  assert.match(error.message, /No tickets were published/);
+  assert.match(error.message, /--interview-id ivw_123/);
+  assert.match(error.message, /--project '.*project with spaces'/);
+  assert.doesNotMatch(error.message, /plan:doctor/);
+});
+
+test("risk-plan waiver IDs accept both comma-delimited and repeated CLI values", () => {
+  assert.deepEqual(normalizeRiskWaiverTicketIds(["T001,T004", "T009"]), ["T001", "T004", "T009"]);
 });
 
 function approvedPlan(planId = "pln_test"): Record<string, unknown> {
@@ -1179,7 +1218,43 @@ test("validateTicketDefs: unknown dependency is caught", () => {
 test("validateTicketDefs: Medium risk without rollback is caught", () => {
   const defs = [makeDef("T001", 1000, { risk: "Medium", rollback: null })];
   const errors = validateTicketDefs(defs);
-  assert.ok(errors.some((e) => e.message.includes("requires rollback")));
+  assert.ok(errors.some((e) => e.message.includes("rollback or mitigation plan")));
+});
+
+test("validateTicketDefs: Medium risk whitespace rollback is caught", () => {
+  const defs = [makeDef("T001", 1000, { risk: "Medium", rollback: " \n " })];
+  const errors = validateTicketDefs(defs);
+  assert.ok(errors.some((e) => e.message.includes("rollback or mitigation plan")));
+  assert.equal(hasRollbackOrMitigationPlan("Revert the old handler and check the error rate."), true);
+  assert.equal(hasRollbackOrMitigationPlan("  \t"), false);
+});
+
+test("risk-plan waiver is exact, reasoned, and invalidates when the definition changes", () => {
+  const dir = makeTmpDir();
+  try {
+    cmdInit(dir, { appName: "Risk waiver", timezone: "UTC" });
+    const missingPlan = makeDef("T001", 1000, { risk: "Medium", rollback: null });
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [missingPlan] }), "utf8");
+    assert.equal(cmdValidate(dir).clean, false);
+    waiveTicketRiskNotes(dir, ["T001"], "Accepted during initial backlog triage", "tyler");
+    const waived = cmdValidate(dir);
+    assert.equal(waived.clean, true);
+    assert.ok(waived.issues.some((issue) => issue.severity === "warn" && issue.message.includes("explicitly waived by tyler")));
+    writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [{ ...missingPlan, title: "Changed scope" }] }), "utf8");
+    assert.equal(cmdValidate(dir).clean, false, "definition edit invalidates the prior waiver");
+    assert.throws(() => waiveTicketRiskNotes(dir, ["T001", "T001"], "duplicate"), /duplicate IDs/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("risk-note repair changes only exact missing rollback fields", () => {
+  const ticket = {
+    id: "T001", order: 1, title: "Risky", area: "core", priority: "P1" as const, size: "S" as const, risk: "Medium" as const,
+    depends_on: [], summary: "change", acceptance: ["works"], required_tests: ["test"], likely_files: [], rollback: null,
+  };
+  const repaired = applyRiskNoteRepairProposal([ticket], { version: 1, tickets: [{ id: "T001", rollback: "Disable the feature flag and restore the prior handler." }] });
+  assert.equal(repaired[0]!.rollback, "Disable the feature flag and restore the prior handler.");
+  assert.throws(() => applyRiskNoteRepairProposal([ticket], { version: 1, tickets: [{ id: "T999", rollback: "wrong" }] }), /exactly these ticket IDs/);
+  assert.throws(() => applyRiskNoteRepairProposal([ticket], { version: 1, tickets: [{ id: "T001", rollback: "  " }] }), /non-empty/);
 });
 
 test("detectCycles: linear dependency chain has no cycle", () => {

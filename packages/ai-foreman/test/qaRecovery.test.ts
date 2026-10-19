@@ -11,7 +11,7 @@ import { registerHandbackWriter } from "../src/qaHandbackMigration.js";
 import type { BuilderAdapter, BuilderEvent, CompactResult, TurnResult } from "../src/adapters/types.js";
 import { beginQaFinalization, completeQaFinalization, verifyPendingQaFinalizationSource, type QaSessionBoundaryRecovery, type QaSessionBoundaryResult, type QaSessionHandle, type QaStreamState } from "../src/qaReview.js";
 import type { ProviderSessionRefV1 } from "rafi-spec";
-import { appendQaRecoveryResource, compareQaRecoveryReviewedState, LegacyQaRecoveryPacketError, loadQaRecoveryPacket, materializeQaRecoveryContext, recoverPendingQaRecoveryPublications, updateQaRecoveryPosition, validateManualQaReport } from "../src/qaRecovery.js";
+import { appendQaRecoveryResource, canonicalizeQaRecoveryRequirements, compareQaRecoveryReviewedState, LegacyQaRecoveryPacketError, loadQaRecoveryPacket, materializeQaRecoveryContext, recoverPendingQaRecoveryPublications, renderQaRecoveryAcknowledgementInstruction, updateQaRecoveryPosition, validateManualQaReport } from "../src/qaRecovery.js";
 import { createDisposableQaSnapshot } from "../src/qaSnapshot.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { PermissionPolicy } from "../src/permissions/policy.js";
@@ -628,6 +628,38 @@ test("packet creation uses the frozen snapshot even when the live Builder worktr
     assert.equal(readFileSync(join(packet.directory, stored.path), "utf8"), "exact untracked\n");
     assert.notEqual(packet.manifest.reviewedStateDigest, compareQaRecoveryReviewedState(packet, dir).currentDigest);
   } finally { snapshot.remove(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("canonical QA recovery bundle bounds required reads while retaining sealed retry history", () => {
+  const dir = repository();
+  try {
+    let packet = createQaRecoveryPacket({
+      projectDir: dir, reviewedWorktree: dir, runId: "bounded-bundle", ticketId: "T1", cycle: 1, reviewAttempt: 1,
+      recoveryStage: "operator-menu", resources: {
+        ticket: { value: { id: "T1", acceptance: ["works"] }, purpose: "Current admitted requirements" },
+        "qa-review-prompt": { value: "Review the admitted source", purpose: "Current review instruction", exactText: true },
+      },
+    });
+    for (let index = 0; index < 48; index++) {
+      packet = appendQaRecoveryResource(packet, `turns/failed-${String(index).padStart(2, "0")}/raw-response.txt`, `failed response ${index}`,
+        { purpose: `Historical failed retry ${index}`, exact: true });
+    }
+    packet = canonicalizeQaRecoveryRequirements(packet);
+    const loaded = loadQaRecoveryPacket(packet.directory);
+    const historical = loaded.manifest.resources.filter((resource) => resource.path.startsWith("turns/failed-"));
+    assert.equal(historical.length, 48);
+    assert.ok(historical.every((resource) => resource.requiredForRecovery === false));
+    const bundle = loaded.manifest.resources.filter((resource) => resource.path.startsWith("canonical-recovery-bundle/")).at(-1)!;
+    assert.equal(bundle.requiredForRecovery, true);
+    const required = loaded.manifest.resources.filter((resource) => resource.requiredForRecovery);
+    assert.ok(required.length < 20, `expected a compact required closure, got ${required.length}`);
+    const bundleBody = JSON.parse(readFileSync(join(loaded.directory, bundle.path), "utf8")) as { retainedHistory: Array<{ path: string; digest: string }> };
+    assert.equal(bundleBody.retainedHistory.length, 48);
+    assert.ok(bundleBody.retainedHistory.every((entry) => /^[a-f0-9]{64}$/.test(entry.digest)));
+    const acknowledgement = renderQaRecoveryAcknowledgementInstruction(loaded, ".foreman/qa-recovery-context/test");
+    assert.match(acknowledgement, /canonical-recovery-bundle/);
+    assert.doesNotMatch(acknowledgement, /turns\/failed-/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("legacy V1 packets are detected and never loaded as authoritative V2 packets", () => {

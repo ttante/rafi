@@ -7,6 +7,7 @@ import {
   materializeStructuredPlan, readAndValidateStructuredPlanPair, regenerateStructuredPlanMarkdown,
   readNamedApprovedPlan, renderStructuredPlanMarkdown, validateMaterializedPlan, writeStructuredPlanArtifacts,
   validateStructuredPlanProposal,
+  extractStructuredPlanProposal,
   type StructuredPlanProposalV1,
 } from "../src/structuredPlan.js";
 
@@ -79,6 +80,15 @@ test("structured plan proposal validation rejects malformed delivery units clear
   assert.ok(issues.includes("delivery unit ui.slice_refs must be a string array"));
 });
 
+test("structured plan extraction rejects provider-added fields at the contract boundary", () => {
+  const value = proposal() as unknown as Record<string, unknown>;
+  value.provider_claimed_plan_id = "pln_provider";
+  assert.throws(
+    () => extractStructuredPlanProposal(`RAFI_PLAN_PROPOSAL_START\n${JSON.stringify(value)}\nRAFI_PLAN_PROPOSAL_END`),
+    /invalid structured plan proposal contract.*provider_claimed_plan_id/s,
+  );
+});
+
 test("structured plan proposal validation rejects invalid dependencies and source refs without throwing", () => {
   const p = proposal() as unknown as Record<string, unknown>;
   const slices = structuredClone(p.slices) as Array<Record<string, unknown>>;
@@ -113,7 +123,7 @@ test("invalid materialized plan JSON returns validation errors before rendering 
 });
 
 test("enforcing depth decisions survive initial and revised materialization, digests and approved snapshots", () => {
-  const policy = { mode: "enforce" as const, policyVersion: "qa-preparation-v1" as const, wallTimeMs: [300000, 600000, 1200000, 1800000, 2700000] as [number, number, number, number, number] };
+  const policy = { mode: "enforce" as const, policyVersion: "qa-preparation-v1" as const, wallTimeMs: [600000, 1200000, 2400000, 3600000, 5400000] as [number, number, number, number, number] };
   const depth = { version: 1 as const, decisionId: "planner-depth", level: 2 as const, rationale: "Source and behavior inspected", riskFactors: [], policyVersion: "qa-preparation-v1", plannerOperationId: "planner-op", plannerIdentity: "planner-session", timestamp: "2026-10-09T00:00:00Z", minimumLevel: 2 as const, minimumReasons: [] };
   const p = proposal(); assert.throws(() => materializeStructuredPlan(p, undefined, undefined, policy), /depth/);
   p.slices.forEach((slice, index) => { slice.qa_preparation = { ...depth, decisionId: `planner-depth-${index}` }; });

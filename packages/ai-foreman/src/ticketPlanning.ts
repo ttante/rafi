@@ -21,6 +21,8 @@ import { renderAndWrite } from "./tickets/renderMarkdown.js";
 import { runAllValidation } from "./tickets/validate.js";
 import { normalizeDeliveryConfig, validateDeliveryConfig, type DeliveryConfig } from "./tickets/delivery.js";
 import { loadTicketSetupConfig, mergeTicketSetup, saveTicketSetupConfig, type TicketBuildSetupConfig } from "./tickets/setupConfig.js";
+import { z } from "zod";
+import { documentationPolicyV1ZodSchema as documentationPolicyZodSchema, qaPreparationDepthDecisionZodSchema, zodIssues } from "rafi-spec";
 
 export const PROPOSAL_START = "RAFI_PROPOSAL_START";
 export const PROPOSAL_END = "RAFI_PROPOSAL_END";
@@ -66,6 +68,31 @@ export interface TicketPlanValidationContext {
   futureWorkIds?: Iterable<number>;
 }
 
+const providerText = (max = 20_000) => z.string().trim().min(1).max(max);
+const identifier = z.string().regex(/^[A-Za-z][A-Za-z0-9-_]{0,127}$/);
+const ticketSourceRef = z.strictObject({ source: providerText(500), item: providerText(2_000), source_id: identifier.optional(), url: z.string().url().nullable().optional(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(), note: providerText(2_000).nullable().optional() });
+const ticketDefinitionProposal = z.strictObject({
+  qa_preparation: qaPreparationDepthDecisionZodSchema.optional(), id: identifier, order: z.number().int().min(0),
+  documentation: documentationPolicyZodSchema.optional(),
+  title: providerText(500), area: providerText(500), priority: z.enum(["P0", "P1", "P2", "P3"]), size: z.enum(["XS", "S", "M", "L", "XL"]), risk: z.enum(["Low", "Medium", "High"]),
+  depends_on: z.array(identifier).max(200), summary: providerText(), acceptance: z.array(providerText()).min(1).max(200), required_tests: z.array(providerText()).min(1).max(200), likely_files: z.array(providerText(1_000)).max(200),
+  rollback: z.string().max(20_000).nullable().optional(), notes: z.string().max(20_000).nullable().optional(),
+  external_refs: z.array(z.strictObject({ provider: providerText(100), id: providerText(500), key: providerText(500).nullable().optional(), url: z.string().url().nullable().optional() })).max(100).optional(),
+  source_refs: z.array(ticketSourceRef).max(100).optional(), superseded_by: z.array(identifier).max(200).optional(), supersedes: z.array(identifier).max(200).optional(),
+  plan_ref: z.strictObject({ plan_id: identifier, revision: z.number().int().min(1), slice_ref: identifier }).optional(),
+});
+const deliveryConfigProposal = z.strictObject({
+  version: z.literal(1), plan: z.strictObject({ plan_id: identifier, revision: z.number().int().min(1) }).optional(),
+  units: z.array(z.strictObject({ id: identifier, tickets: z.array(identifier).min(1).max(200), branch_mode: z.enum(["current", "per-ticket", "shared"]), completion: z.enum(["pr", "auto-merge", "direct-merge", "none"]).optional(), provider: z.enum(["auto", "github", "gitlab", "local"]).optional(), pr_ready: z.boolean().optional(), merge_method: z.enum(["squash", "merge", "rebase"]).optional(), cleanup: z.boolean().optional(), depends_on: z.array(identifier).max(200).optional(), dependency_mode: z.enum(["combine", "wait", "stack"]).optional() })).max(200),
+  stacks: z.array(z.strictObject({ id: identifier, name: providerText(500), units: z.array(identifier).min(1).max(5), status: z.enum(["planned", "in_progress", "partial", "blocked", "awaiting_review", "merged"]).optional(), completed_prefix: z.array(identifier).max(5).optional(), next_ticket: identifier.optional(), review_links: z.array(z.string().url()).max(20).optional(), remote_checked_at: z.string().datetime().optional(), remote_stale: z.boolean().optional(), published_branches: z.record(identifier, providerText(500)).optional() })).max(200).optional(),
+});
+const buildDefaultsProposal = z.strictObject({
+  branch_strategy: z.enum(["current", "batch", "branch-per-ticket"]).optional(), completion: z.enum(["pr", "auto-merge", "direct-merge", "none"]).optional(), provider: z.enum(["auto", "github", "gitlab", "local"]).optional(), pr_ready: z.boolean().optional(), merge_method: z.enum(["squash", "merge", "rebase"]).optional(), cleanup: z.boolean().optional(), auto_merge_wait: z.boolean().optional(), auto_merge_timeout_minutes: z.number().int().min(0).nullable().optional(), base_branch: providerText(500).optional(), branch_prefix: providerText(500).optional(), branch_policy: z.strictObject({ mode: z.enum(["global", "size"]), global_strategy: z.enum(["current", "batch", "branch-per-ticket"]), by_size: z.strictObject({ XS: z.enum(["shared", "per-ticket"]), S: z.enum(["shared", "per-ticket"]), M: z.enum(["shared", "per-ticket"]), L: z.enum(["shared", "per-ticket"]), XL: z.enum(["shared", "per-ticket"]) }) }).optional(), review: z.strictObject({ title_style: z.enum(["ticket-title", "conventional", "none", "custom"]), title_template: z.string().max(500).nullable(), description_sections: z.array(providerText(500)).max(50) }).optional(), validation_checklist: z.array(providerText(500)).max(100).optional(),
+});
+export const ticketPlanProposalV1Schema = z.strictObject({
+  version: z.literal(1), title: providerText(500), markdown: providerText(100_000), additions: z.array(ticketDefinitionProposal).max(200), edits: z.array(z.strictObject({ id: identifier, patch: ticketDefinitionProposal.partial() })).max(200), supersessions: z.array(z.strictObject({ replaced: z.array(identifier).min(1).max(200), replacements: z.array(identifier).min(1).max(200), reason: providerText() })).max(200), state_changes: z.array(z.strictObject({ id: identifier, status: z.enum(["planned", "next", "in_progress", "blocked", "done", "canceled", "obsolete"]), reason: providerText() })).max(200), source_reconciliation: z.array(z.strictObject({ source: providerText(500), item: providerText(2_000), disposition: z.enum(["mapped", "split", "combined", "deferred", "excluded"]), ticket_ids: z.array(identifier).max(200), reason: providerText().optional() })).max(500), delivery: deliveryConfigProposal.nullable().optional(), build_defaults: buildDefaultsProposal.partial().nullable().optional(), future_work: z.array(z.strictObject({ id: z.number().int().min(0), disposition: z.enum(["accepted", "rejected", "merged", "queued"]) })).max(500), next: z.strictObject({ ticket_ids: z.array(identifier).max(200), replace_existing: z.boolean() }),
+});
+
 const TICKET_STATUSES = new Set<TicketStatus>([
   "planned", "next", "in_progress", "blocked", "done", "canceled", "obsolete",
 ]);
@@ -105,13 +132,17 @@ export function extractTicketPlanProposal(output: string, existingTickets: Ticke
   const raw = output.slice(start + PROPOSAL_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch (err) { throw new Error(`planner proposal is not valid JSON: ${err instanceof Error ? err.message : String(err)}`); }
-  const issues = validateTicketPlanProposal(parsed, existingTickets, context);
+  const contract = ticketPlanProposalV1Schema.safeParse(parsed);
+  if (!contract.success) throw new Error(`planner proposal contract validation failed:\n${zodIssues(contract.error).map((issue) => `- ${issue}`).join("\n")}`);
+  const issues = validateTicketPlanProposal(contract.data, existingTickets, context);
   if (issues.length) throw new Error(`invalid planner proposal:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
-  return parsed as TicketPlanProposal;
+  return contract.data;
 }
 
 export function validateTicketPlanProposal(value: unknown, existingTickets: TicketDef[] = [], context: TicketPlanValidationContext = {}): string[] {
   const issues: string[] = [];
+  const contract = ticketPlanProposalV1Schema.safeParse(value);
+  const contractIssues = contract.success ? [] : zodIssues(contract.error);
   if (!value || typeof value !== "object" || Array.isArray(value)) return ["proposal must be an object"];
   const proposal = value as Record<string, unknown>;
   if (proposal.version !== 1) issues.push("version must be 1");
@@ -176,7 +207,7 @@ export function validateTicketPlanProposal(value: unknown, existingTickets: Tick
   issues.push(...validateTicketDefs(staged).map((issue) => `${issue.path}: ${issue.message}`));
   issues.push(...detectCycles(staged).map((cycle) => `dependency cycle: ${cycle}`));
   if (p.delivery) issues.push(...validateDeliveryConfig(p.delivery, staged).map((issue) => `delivery ${issue.path}: ${issue.message}`));
-  return [...new Set(issues)];
+  return [...new Set([...contractIssues, ...issues])];
 }
 
 export interface ApplyTicketPlanOptions {

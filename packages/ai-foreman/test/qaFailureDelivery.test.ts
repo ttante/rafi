@@ -18,7 +18,7 @@ import {
   type QaFailureReportV1,
 } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/types.js";
-import { QaFailureDeliveryService } from "../src/qaFailureDelivery.js";
+import { QaFailureDeliveryService, QA_REMEDIATION_CHUNK_SIZE, selectQaRemediationFindingIds } from "../src/qaFailureDelivery.js";
 import { canonicalJson, createQaFindingRefs } from "../src/qaProtocolV2.js";
 import { qaReportDigest } from "../src/qaRecovery.js";
 import { captureFrozenQaSourceAsync } from "../src/qaSnapshot.js";
@@ -56,6 +56,20 @@ const report: QaFailureReportV1 = {
   }],
   observations: ["happy path still passes"],
 };
+
+test("QA remediation chunks are bounded and never replace the full failure report", () => {
+  const expanded = {
+    ...report,
+    findings: [
+      ...report.findings,
+      { ...report.findings[0]!, id: "QA-2", requirement: "second requirement" },
+      { ...report.findings[0]!, id: "QA-3", requirement: "third requirement" },
+    ],
+  };
+  assert.deepEqual(selectQaRemediationFindingIds(expanded), ["QA-1", "QA-2"]);
+  assert.equal(selectQaRemediationFindingIds(expanded).length <= QA_REMEDIATION_CHUNK_SIZE, true);
+  assert.equal(expanded.findings.length, 3, "the full QA report remains available to the subsequent independent review");
+});
 
 class FakeBuilder implements BuilderAdapter {
   readonly agent = "codex" as const;
@@ -235,7 +249,9 @@ for (const scenario of [false, true, "retained-repair", "revoked-repair", "inher
     }
     assert.equal(result.ok, true, result.detail);
     assert.equal(builder.instructions.length,graphEnabled || repair?2:1);
-    assert.match(builder.instructions[0] ?? "", /Current validated QA failure report/);
+    assert.match(builder.instructions[0] ?? "", /Current validated QA remediation chunk/);
+    assert.match(builder.instructions[0] ?? "", /Remediation chunk:/);
+    assert.match(builder.instructions[0] ?? "", /finalIndependentReviewRequired/);
     assert.match(builder.instructions[0] ?? "", new RegExp(findingRefs[0]!.findingKey));
 
     const finalDb = new WorkflowDb(root);

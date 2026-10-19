@@ -178,12 +178,15 @@ for (const outcome of ["completed", "paused", "cancelled"] as const) test(`start
 });
 import { buildStartCommand } from "ai-foreman/cli/start.js";
 
-function recoveryProject() {
+function recoveryProject(options: { legacyPreparation?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "rafi-start-over-command-"));
   git(dir, ["init", "-b", "main"]); git(dir, ["config", "user.email", "test@example.test"]); git(dir, ["config", "user.name", "Test"]);
   writeFileSync(join(dir, "app.txt"), "baseline\n"); git(dir, ["add", "app.txt"]); git(dir, ["commit", "-m", "baseline"]);
   mkdirSync(join(dir, ".tickets"));
-  writeFileSync(join(dir, "rafi-config.yaml"), stringify(buildProjectConfig(defaultAnswers())));
+  const config = buildProjectConfig(defaultAnswers());
+  // This fixture models an older in-flight assignment without a QA contract.
+  if (options.legacyPreparation) config.qa_preparation = false;
+  writeFileSync(join(dir, "rafi-config.yaml"), stringify(config));
   writeFileSync(join(dir, ".tickets/config.yaml"), "app_name: Test\n");
   writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: ["T001", "T007", "T008"].map((id, order) => ({ id, order, title: id, area: "core", priority: "P2", size: "S", risk: "Low", depends_on: [], summary: id, acceptance: ["works"], required_tests: ["test"], likely_files: ["app.txt"] })) }));
   const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
@@ -260,7 +263,7 @@ test("start command redirects before ticket lookup or provider setup", async () 
 });
 
 test("restart-current retires broken execution, preserves branch and bytes, and resets only unfinished run tickets", async () => {
-  const { dir, run } = recoveryProject();
+  const { dir, run } = recoveryProject({ legacyPreparation: true });
   try {
     const beforeHead = git(dir, ["rev-parse", "HEAD"]);
     writeFileSync(join(dir, "app.txt"), "preserved implementation\n");

@@ -50,7 +50,7 @@ function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compil
       turns++; assert.equal(policy?.responseOnly, true);
       let value: unknown, tag: string;
       if (policy?.purpose === "contract-acceptance") { tag = "RAFI_QA_ACCEPTANCE"; value = { workId, revision: contract.revision, digest: contract.contentDigest, missingSections: [] }; }
-      else { tag = "RAFI_QA_COVERAGE"; const binding = JSON.parse(instruction.split("Exact coverage binding: ")[1]!.split("\n")[0]!); value = { ...coverage(contract), ...binding, checks: [{ ...coverage(contract).checks[0]!, outcome: failCoverage ? "not-run" : "passed", evidence: [{ procedure: "Inspect regression result", cwd: workspace, runtime: "node20", sourceDigest: binding.sourceDigest, reference: "retained-output" }] }] }; }
+      else { tag = "RAFI_QA_COVERAGE"; const binding = JSON.parse(instruction.split("Exact coverage binding: ")[1]!.split("\n")[0]!); assert.equal(binding.attemptId.length > 0, true); assert.equal(binding.sessionId, "actual-builder"); assert.equal(binding.sourceDigest, captureBuildSource(workspace).digest); assert.equal(binding.inputBasisDigest.length, 64); value = { ...coverage(contract), ...binding, checks: [{ ...coverage(contract).checks[0]!, outcome: failCoverage ? "not-run" : "passed", evidence: [{ procedure: "Inspect regression result", cwd: workspace, runtime: "node20", sourceDigest: binding.sourceDigest, reference: "retained-output" }] }] }; }
       return { text: `${tag}_START\n${JSON.stringify(value)}\n${tag}_END`, isError: false, costUsd: 0, numTurns: 1 };
     } };
   return { root, workspace, db, store, contract, admission, adapter, workId, ticket, compact: () => { sequence++; }, turns: () => turns, blockedClaims: () => { failCoverage = true; }, cleanup: () => { db.close(); rmSync(root, { recursive: true, force: true }); } };
@@ -97,7 +97,12 @@ test("certificate issue and consumption bind immutable dispatch, terminal covera
     f.db.commitQaTurnIntent({ version: 2, operationId, runId: "run", ticketId: f.workId, reviewNumber: head.reviewNumber, sessionGeneration: 1, slot: "initial", sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, instructionDigest: f.db.putEvidence("qa", `${instruction}\nImmutable input-basis digest: ${basis.digest}. Coverage must bind this inputBasisDigest.`), intendedAt: at, providerSession: { version: 2, provider: "claude", sessionId, role: "qa", stream: "qa", generation: 1, cwd: f.workspace, configRoot: f.root, createdAt: at, validatedAt: at } }, head.revision);
     head = f.db.qaTicketHead("run", f.workId);
     const result = { ...coverage(f.contract), workId: f.workId, sourceDigest, inputBasisDigest: basis.digest, attemptId, sessionId }; result.checks[0]!.evidence[0]!.sourceDigest = sourceDigest;
-    const response = `RAFI_QA_COVERAGE_START\n${JSON.stringify(result)}\nRAFI_QA_COVERAGE_END\nSTEP_STATUS: qa_pass`;
+    // Provider-controlled binding fields may be stale or wrong. The host
+    // binds them before storing coverage; certificate validation must compare
+    // against that normalized representation, not the raw provider claims.
+    const providerResult = { ...structuredClone(result), phase: "builder" as const, sourceDigest: "b".repeat(64), inputBasisDigest: "c".repeat(64), attemptId: "provider-attempt", sessionId: "provider-session" };
+    providerResult.checks[0]!.evidence[0]!.sourceDigest = providerResult.sourceDigest;
+    const response = `RAFI_QA_COVERAGE_START\n${JSON.stringify(providerResult)}\nRAFI_QA_COVERAGE_END\nSTEP_STATUS: qa_pass`;
     const responseDigest = f.db.putEvidence("qa", response), receipt = { version: 2 as const, operationId, dispatch: "completed" as const, providerTurnId: "native-turn", terminalEventObserved: true, sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, rawResponseDigest: responseDigest, cleanedResponseDigest: responseDigest, completedAt: at }; f.db.finishQaTurn(receipt);
     const input = { runId: "run", ticketId: f.workId, qaRevision: head.revision + 1, sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, turnReceiptDigest: qaDigest("turn-receipt", receipt) };
     assert.throws(() => f.db.commitQaPassAttempt(attemptId, input, "Generic pass", head.revision), /tagged contract coverage/); assert.equal(f.db.qaReviewAttempt(attemptId)?.status, "started");

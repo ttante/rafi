@@ -15,7 +15,8 @@ for(const alias of ['resume','build:resume'])for(const qaEnabled of [false,true]
   try {
     const git=(...args)=>execFileSync('git',args,{cwd:root,stdio:'pipe'});
     git('init','-q');git('config','user.name','Test');git('config','user.email','test@example.test');
-    const config=buildProjectConfig(defaultAnswers());config.agent_defaults={version:1,revision:1,roles:Object.fromEntries(['builder','qa','planner'].map(role=>[role,{make:'codex',model:'default',reasoning:'default',fast:false,session_strategy:'compact'}]))};
+    const config=buildProjectConfig(defaultAnswers());config.qa_preparation=false; // Legacy synthetic recovery fixture; independent QA remains separately exercised.
+    config.agent_defaults={version:1,revision:1,roles:Object.fromEntries(['builder','qa','planner'].map(role=>[role,{make:'codex',model:'default',reasoning:'default',fast:false,session_strategy:'compact'}]))};
     writeFileSync(join(root,'rafi-config.yaml'),JSON.stringify(config));
     writeFileSync(join(root,'.gitignore'),'.rafi/\n.foreman/\nbin/\n');
     writeFileSync(join(root,'source.txt'),'baseline\n');git('add','.');git('commit','-qm','baseline');

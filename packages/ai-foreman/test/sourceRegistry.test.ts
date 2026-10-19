@@ -67,6 +67,13 @@ test("structured requests and URL answers preserve commas and plus signs", () =>
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("legacy source-request lines pass through the structured contract boundary", () => {
+  assert.deepEqual(extractSourceRequests("SOURCE_REQUEST: inspect docs and issue exports"), [
+    { description: "inspect docs and issue exports" },
+  ]);
+  assert.throws(() => extractSourceRequests("RAFI_SOURCE_REQUEST_START\n{\"type\":\"local\",\"unexpected\":true}\nRAFI_SOURCE_REQUEST_END"), /contract validation failed/);
+});
+
 test("prose ending in a file path remains a description", () => {
   const dir = temp();
   try {

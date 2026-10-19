@@ -79,6 +79,27 @@ export class PermissionPolicy {
     if (hitEscalate) {
       return { decision: "escalate", reason: `command matches "${hitEscalate}"` };
     }
+    const entry = process.env.RAFI_REHEARSAL_CLI_ENTRY;
+    const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    const launchingRehearsal = entry && isAbsolute(entry) && !/[\r\n\0]/.test(entry)
+      ? `${shellQuote(process.execPath)} ${shellQuote(entry)} qa-rehearse-rollback` : undefined;
+    // Providers sometimes omit unnecessary quotes from the supplied command.
+    // Accept that equivalent form only when both paths are shell-safe tokens.
+    const unquotedRehearsal = entry && isAbsolute(entry) && /^[A-Za-z0-9_./-]+$/.test(entry) && /^[A-Za-z0-9_./-]+$/.test(process.execPath)
+      ? `${process.execPath} ${entry} qa-rehearse-rollback` : undefined;
+    if ((launchingRehearsal && command.trim() === launchingRehearsal) || (unquotedRehearsal && command.trim() === unquotedRehearsal)) {
+      return canonicalToolPath(this.cwd) === canonicalToolPath(executionCwd) && this.config.allowBash.includes("rafi qa-rehearse-rollback") && this.config.allowBash.includes("node ")
+        ? { decision: "allow", reason: "bounded rollback rehearsal using the launching CLI" }
+        : { decision: "escalate", reason: "rollback rehearsal requires permission and the project root" };
+    }
+    // The rehearsal is a host-owned fixed operation, not a general shell grant.
+    // Do not permit arguments, chains, or a working directory outside the project.
+    if (/\brafi\s+qa-rehearse-rollback\b/.test(command)) {
+      return command.trim() === "rafi qa-rehearse-rollback" && canonicalToolPath(this.cwd) === canonicalToolPath(executionCwd)
+        && this.config.allowBash.includes("rafi qa-rehearse-rollback")
+        ? { decision: "allow", reason: "bounded rollback rehearsal" }
+        : { decision: "escalate", reason: "rollback rehearsal must be invoked alone without arguments inside the project" };
+    }
     const restrictedNodeTests = this.config.allowBash.includes("node --test") && !this.config.allowBash.includes("node ") && !this.config.allowBash.includes("node");
     if (restrictedNodeTests && /(?:^|\s|[&|;])node\s/.test(command)
       || /^\s*(?:cd(?:\s|$)|[A-Za-z_]\w*=|uv\s+run\b)|(?:&&|\|)\s*(?:cd(?:\s|$)|[A-Za-z_]\w*=|uv\s+run\b)|2>&1|[/\\](?:python3?|pytest)(?:["']|\s|$)/.test(command)) {

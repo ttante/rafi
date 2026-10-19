@@ -81,6 +81,10 @@ export class CodexAdapter implements BuilderAdapter {
   private fastTier?: string;
   private readonly fastUnavailableModels = new Set<string>();
   private turnSawTool = false;
+  /** Native compaction is non-blocking. The next host turn gets this reminder. */
+  private qaContractReminder?: string;
+  private qaContractReminderPending = false;
+  private qaContractReminderEvent?: (event: { kind: "installed" | "compaction-observed" | "reminder-delivered" | "reminder-retained"; at: string; sessionId?: string }) => void;
 
   private disableFastMode(): void {
     const model = this.opts.model ?? this.effectiveModel ?? "default";
@@ -117,6 +121,24 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   contractCapabilities() { return { sameSessionAcceptance: true, nativeCompactionBarrier: false }; }
+  contractCompactionSequence(): number { return this.nativeCompactionSequence; }
+
+  configureQaContractReminder(reminder: string, onEvent?: (event: { kind: "installed" | "compaction-observed" | "reminder-delivered" | "reminder-retained"; at: string; sessionId?: string }) => void): void {
+    this.qaContractReminder = reminder;
+    this.qaContractReminderEvent = onEvent;
+    onEvent?.({ kind: "installed", at: new Date().toISOString(), sessionId: this._sessionId });
+  }
+
+  private qaReminderEvent(kind: "installed" | "compaction-observed" | "reminder-delivered" | "reminder-retained"): void {
+    this.qaContractReminderEvent?.({ kind, at: new Date().toISOString(), sessionId: this._sessionId });
+  }
+
+  private instructionWithPendingQaReminder(instruction: string): { instruction: string; includedReminder: boolean } {
+    if (!this.qaContractReminderPending || !this.qaContractReminder) return { instruction, includedReminder: false };
+    // Do not clear this before the provider has completed a turn. A failed or
+    // disconnected dispatch is not evidence that Codex received the reminder.
+    return { instruction: `${this.qaContractReminder}\n\nContinue the assigned ticket now.\n\n${instruction}`, includedReminder: true };
+  }
 
   buildInstruction(instruction: string): string {
     return [this.opts.systemPromptAppend,
@@ -146,11 +168,22 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: ProviderTurnPurpose }): Promise<TurnResult> {
+    const prepared = this.instructionWithPendingQaReminder(instruction);
+    instruction = prepared.instruction;
     const turnId = randomUUID();
     this.activeProviderTurnId = turnId;
     const observer = this.opts.observer;
     if (!observer) {
-      try { return await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction, policy)); }
+      try {
+        const result = await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction, policy));
+        if (prepared.includedReminder && !result.isError && !result.failure) { this.qaContractReminderPending = false; this.qaReminderEvent("reminder-delivered"); }
+        else if (prepared.includedReminder) this.qaReminderEvent("reminder-retained");
+        return result;
+      }
+      catch (error) {
+        if (prepared.includedReminder) this.qaReminderEvent("reminder-retained");
+        throw error;
+      }
       finally { this.activeProviderTurnId = undefined; this.activeNativeTurnId = undefined; }
     }
     const context = this.observationContext();
@@ -160,8 +193,11 @@ export class CodexAdapter implements BuilderAdapter {
     try {
       const result = await withActivityPhase(`Codex ${activityPhase(this.opts.runtimePhase)}`, () => this.sendTurnInternal(instruction, policy));
       observer.store.finishSpan(spanId, { outcome: result.isError ? "failed" : "completed", attributes: { usage: result.usage } });
+      if (prepared.includedReminder && !result.isError && !result.failure) { this.qaContractReminderPending = false; this.qaReminderEvent("reminder-delivered"); }
+      else if (prepared.includedReminder) this.qaReminderEvent("reminder-retained");
       return result;
     } catch (error) {
+      if (prepared.includedReminder) this.qaReminderEvent("reminder-retained");
       observer.store.finishSpan(spanId, { outcome: "failed", attributes: { error: String(error).slice(0, 500) } });
       throw error;
     } finally {
@@ -652,6 +688,10 @@ export class CodexAdapter implements BuilderAdapter {
           provider: "codex",
           usageRevision: this.usageRevision,
         });
+        // A native compaction does not invalidate completed work or QA handoff.
+        // The next Rafi-controlled turn re-supplies the full requirement
+        // contract and tells the Builder to check it before continuing.
+        if (this.qaContractReminder) { this.qaContractReminderPending = true; this.qaReminderEvent("compaction-observed"); }
         this.eventQueue.push({ kind: "session-transition", transition: "compacted", detail: "provider-native automatic compaction" });
       }
       else {

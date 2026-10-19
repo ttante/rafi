@@ -44,6 +44,11 @@ export class CurrentWorkflowGuardAdapter implements BuilderAdapter {
     assertCurrentWorkflowIdentity(this.cwd, this.expected);
     return result;
   }
+  contractCapabilities() { return this.adapter.contractCapabilities?.() ?? { sameSessionAcceptance: false, nativeCompactionBarrier: false }; }
+  enableContractEnforcement(): void { this.adapter.enableContractEnforcement?.(); }
+  contractCompactionSequence(): number { return this.adapter.contractCompactionSequence?.() ?? 0; }
+  acceptContractDelivery(sequence: number): void { this.adapter.acceptContractDelivery?.(sequence); }
+  configureQaContractReminder(reminder: string, onEvent?: Parameters<NonNullable<BuilderAdapter["configureQaContractReminder"]>>[1]): void { this.adapter.configureQaContractReminder?.(reminder, onEvent); }
   sessionId(): string | undefined { return this.adapter.sessionId(); }
   sessionRef(): ProviderSessionRefV1 | undefined { return this.adapter.sessionRef?.(); }
   async prepareSession(): Promise<ProviderSessionRefV1> {

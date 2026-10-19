@@ -154,6 +154,7 @@ for (const provider of ["claude", "codex"] as const) test(`${provider} actual Bu
       store.putArtifact("semantic-assessment", review); store.retainProgress(budget, "inventory", draft.requirements); store.publish(contract, 0, Date.now());
       let calls = 0;
       const adapter: BuilderAdapter = { agent: provider, sessionId: () => "actual-builder", sessionRef: () => createProviderSessionRef({ provider, sessionId: "actual-builder", role: "builder", stream: "builder", generation: 0, cwd: root, configRoot: root, source: "observed" }),
+        configureQaContractReminder: () => {},
         contractCapabilities: () => ({ sameSessionAcceptance: true, nativeCompactionBarrier: true }), enableContractEnforcement: () => {}, contractCompactionSequence: () => 0, acceptContractDelivery: () => {}, events: async function* () {}, close: async () => {},
         sendTurn: async (instruction, policy) => {
           calls++; assert.equal(policy?.responseOnly, true);
@@ -168,11 +169,11 @@ for (const provider of ["claude", "codex"] as const) test(`${provider} actual Bu
       await collectBuilderContractCoverage(root, "run", "T1", root, adapter, "implementation", "work", implementation);
       const result = db.operation("builder-coverage:implementation")!.result as { coverageDigest: string };
       assert.ok(store.artifact(result.coverageDigest, "builder-coverage"));
-      assert.equal(calls, 2);
+      assert.equal(calls, provider === "codex" ? 1 : 2);
       disableGraph(root);
       assert.throws(() => store.artifact(result.coverageDigest, "builder-coverage"), /revoked|withheld|unavailable/i);
       await assert.rejects(collectBuilderContractCoverage(root, "run", "T1", root, adapter, "later", "work", implementation), /revoked graph evidence/);
-      assert.equal(calls, 2);
+      assert.equal(calls, provider === "codex" ? 1 : 2);
     } finally { db.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

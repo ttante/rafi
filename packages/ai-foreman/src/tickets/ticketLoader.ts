@@ -21,8 +21,21 @@ export function saveTickets(ticketsPath: string, tickets: TicketDef[]): void {
 }
 
 export interface ValidationError {
+  /** Stable machine-readable policy identifier. Undefined for legacy/schema errors. */
+  code?: string;
   path: string;
   message: string;
+}
+
+export const RISK_ROLLBACK_REQUIRED = "ticket.risk.rollback_required";
+
+/**
+ * This is deliberately a small syntactic floor, not an attempt to infer whether
+ * a human's operational plan is good. The latter needs review; accepting an
+ * empty or whitespace-only string, however, made the required field toothless.
+ */
+export function hasRollbackOrMitigationPlan(value: TicketDef["rollback"]): boolean {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 export function validateTicketDefs(tickets: TicketDef[]): ValidationError[] {
@@ -76,8 +89,12 @@ export function validateTicketDefs(tickets: TicketDef[]): ValidationError[] {
   }
 
   for (const t of tickets) {
-    if ((t.risk === "Medium" || t.risk === "High") && !t.rollback) {
-      errors.push({ path: `tickets[${t.id}]`, message: `${t.risk} risk ticket requires rollback/mitigation notes` });
+    if ((t.risk === "Medium" || t.risk === "High") && !hasRollbackOrMitigationPlan(t.rollback)) {
+      errors.push({
+        code: RISK_ROLLBACK_REQUIRED,
+        path: `tickets[${t.id}].rollback`,
+        message: `${t.risk} risk ticket requires a rollback or mitigation plan in \`rollback\`; \`notes\` may add context but cannot satisfy this requirement`,
+      });
     }
   }
 

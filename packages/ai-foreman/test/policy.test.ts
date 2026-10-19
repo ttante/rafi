@@ -20,6 +20,41 @@ const policy = new PermissionPolicy(DEFAULT_CONFIG.permissions, CWD);
 const readOnlyPolicy = new PermissionPolicy(readOnlyPermissionConfig(), CWD);
 const currentWorkflowPolicy = new PermissionPolicy(DEFAULT_CONFIG.permissions, CWD, { currentBranchWorkflow: true });
 
+test("rollback rehearsal is a fixed builder command, not a general shell or QA grant", () => {
+  assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command: "rafi qa-rehearse-rollback" } }).decision, "allow");
+  assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command: "rafi qa-rehearse-rollback" } }).decision, "escalate");
+  for (const command of ["rafi qa-rehearse-rollback --anything", "rafi qa-rehearse-rollback && git reset --hard", "echo x && rafi qa-rehearse-rollback", "cp -R . /tmp/x", "git revert HEAD"]) {
+    assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command } }).decision, "escalate", command);
+  }
+  assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command: "rafi qa-rehearse-rollback" }, executionCwd: "/work/project/sub" }).decision, "escalate");
+});
+
+test("rollback rehearsal may use the exact launching CLI, without chains or arguments", () => {
+  const previous = process.env.RAFI_REHEARSAL_COMMAND;
+  const previousEntry = process.env.RAFI_REHEARSAL_CLI_ENTRY;
+  const entry = "/trusted/rafi/index.js";
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  const command = `${quote(process.execPath)} ${quote(entry)} qa-rehearse-rollback`;
+  try {
+    process.env.RAFI_REHEARSAL_CLI_ENTRY = entry;
+    process.env.RAFI_REHEARSAL_COMMAND = command;
+    assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command } }).decision, "allow");
+    const unquoted = `${process.execPath} ${entry} qa-rehearse-rollback`;
+    assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command: unquoted } }).decision, "allow");
+    assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command: `${unquoted} && git status` } }).decision, "escalate");
+    assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command } }).decision, "escalate");
+    const nodeRestricted = new PermissionPolicy({ ...DEFAULT_CONFIG.permissions, allowBash: ["rafi qa-rehearse-rollback"] }, CWD);
+    assert.equal(nodeRestricted.classify({ toolName: "Bash", input: { command } }).decision, "escalate");
+    assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command: `${command} --other` } }).decision, "escalate");
+    assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command: `${command} && git status` } }).decision, "escalate");
+    process.env.RAFI_REHEARSAL_COMMAND = "touch /tmp/untrusted";
+    assert.equal(currentWorkflowPolicy.classify({ toolName: "Bash", input: { command: "touch /tmp/untrusted" } }).decision, "escalate");
+  } finally {
+    if (previous === undefined) delete process.env.RAFI_REHEARSAL_COMMAND; else process.env.RAFI_REHEARSAL_COMMAND = previous;
+    if (previousEntry === undefined) delete process.env.RAFI_REHEARSAL_CLI_ENTRY; else process.env.RAFI_REHEARSAL_CLI_ENTRY = previousEntry;
+  }
+});
+
 test("read-only QA can run dedicated Node tests without enabling arbitrary Node programs or shell escapes", () => {
   if (process.platform === "win32") {
     assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command: String.raw`node --test ..\outside\evil.test.mjs` } }).decision, "escalate");

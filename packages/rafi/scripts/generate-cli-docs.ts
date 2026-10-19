@@ -73,6 +73,7 @@ const cases: Array<[string, Command]> = [
   ["rafi state export --help", commandByPath(["state", "export"])],
   ["rafi state inspect --help", commandByPath(["state", "inspect"])],
   ["rafi state import --help", commandByPath(["state", "import"])],
+  ["rafi state rebind --help", commandByPath(["state", "rebind"])],
   ["rafi uninstall --help", commandByPath(["uninstall"])],
   ["rafi start --help", commandByPath(["start"])],
   ["rafi doctor --help", commandByPath(["doctor"])],
@@ -87,6 +88,7 @@ const cases: Array<[string, Command]> = [
   ["ai-foreman state export --help", commandByPath(["state", "export"], foremanProgram)],
   ["ai-foreman state inspect --help", commandByPath(["state", "inspect"], foremanProgram)],
   ["ai-foreman state import --help", commandByPath(["state", "import"], foremanProgram)],
+  ["ai-foreman state rebind --help", commandByPath(["state", "rebind"], foremanProgram)],
 ];
 
 let docs = readFileSync(docsPath, "utf8");

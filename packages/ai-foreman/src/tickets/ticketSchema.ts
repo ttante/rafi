@@ -1,4 +1,4 @@
-import { qaPreparationDepthDecisionV1Schema, type QaPreparationDepthDecisionV1 } from "rafi-spec";
+import { documentationPolicyV1Schema, qaPreparationDepthDecisionV1Schema, type DocumentationPolicyV1, type QaPreparationDepthDecisionV1 } from "rafi-spec";
 export type TicketPriority = "P0" | "P1" | "P2" | "P3";
 export type TicketSize = "XS" | "S" | "M" | "L" | "XL";
 export type TicketRisk = "Low" | "Medium" | "High";
@@ -28,6 +28,7 @@ export interface TicketPlanRef {
 
 export interface TicketDef {
   qa_preparation?: QaPreparationDepthDecisionV1;
+  documentation?: DocumentationPolicyV1;
   id: string;
   order: number;
   title: string;
@@ -58,6 +59,7 @@ export const TICKET_JSON_SCHEMA = {
   additionalProperties: true,
   properties: {
     qa_preparation: qaPreparationDepthDecisionV1Schema,
+    documentation: documentationPolicyV1Schema,
     id: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9-_]*$" },
     order: { type: "number", minimum: 0 },
     title: { type: "string", minLength: 1 },

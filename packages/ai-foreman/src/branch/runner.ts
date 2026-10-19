@@ -41,7 +41,7 @@ import { join, resolve } from "node:path";
 import { WorkflowDb } from "../workflowDb.js";
 import { assertBuildAssignmentReconciled, BuildAssignmentRejected } from "../buildAssignment.js";
 import { currentActivity, withActivityPhase } from "../activity.js";
-import { SessionUnavailableError } from "../adapters/sessionFailure.js";
+import { SessionUnavailableError, recoverableBuilderTurnError } from "../adapters/sessionFailure.js";
 import { SessionUnavailableContinuityError } from "../continuity.js";
 import type { QaRecoveryPacket } from "../qaRecovery.js";
 
@@ -483,7 +483,11 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
         isError: result.isError,
       });
 
-      if (result.isError) throw new Error(`builder turn errored: ${result.text.slice(0, 200)}`);
+      if (result.isError) {
+        const recoverable = recoverableBuilderTurnError(result);
+        if (recoverable) throw recoverable;
+        throw new Error(`builder turn errored: ${result.text.slice(0, 200)}`);
+      }
       if (status.branchDependency) {
         throw new Error(`builder requested branch_dependency=${status.branchDependency}; retry is not available after ticket start in this run`);
       }

@@ -25,9 +25,9 @@ for (const phase of ["planner", "prepare", "assess", "challenge", "repair"] as c
       const adapter: BuilderAdapter = { agent: "claude", sessionId: () => `${phase}-independent`, events: async function* () {}, close: async () => {},
         sendTurn: async (text, policy) => {
           calls++;
-          assert.equal(policy?.purpose, phase === "planner" ? "planning" : phase === "repair" ? "response-repair" : "preparation");
-          assert.equal(policy?.responseOnly, phase === "repair");
-          if (phase === "repair") assert.equal(text, "complete mandatory inventory");
+          assert.equal(policy?.purpose, phase === "planner" ? "planning" : "preparation");
+          assert.equal(policy?.responseOnly, false);
+          if (phase === "repair") assert.match(text, /^complete mandatory inventory/);
           else {
             assert.equal(policy?.logicalActionId, "reserved-operation");
             assert.match(text, calls === 1 ? /complete mandatory inventory/ : /Continue the same frozen action/);
@@ -39,12 +39,12 @@ for (const phase of ["planner", "prepare", "assess", "challenge", "repair"] as c
       const result = await sendPreparationGraphTurn(adapter, "complete mandatory inventory", { phase, projectDir: root, workspace: root, sourceRef: "frozen-source", runId: "run", workId: "work", operationId: "reserved-operation", remainingMs: 5000 });
       assert.equal(result.text, "normal phase result");
       assert.equal(calls, phase === "repair" ? 1 : 2);
-      assert.equal(result.graphReceiptRefs.length, phase === "repair" ? 0 : 2);
+      assert.equal(result.graphReceiptRefs.length, phase === "repair" ? 1 : 2);
       assert.equal(result.costUsd, calls * 0.1);
       const db = new WorkflowDb(root);
       try {
-        const receipt = db.graphStore().get<{ purpose: string; sessionRef: string }>("receipt", "reserved-operation:1")?.value;
-        if (phase === "repair") assert.equal(receipt, undefined);
+        const receipt = db.graphStore().get<{ purpose: string; sessionRef: string }>("receipt", `reserved-operation:${phase === "repair" ? 0 : 1}`)?.value;
+        if (phase === "repair") assert.equal(receipt?.purpose, "qa-preparation");
         else {
           assert.equal(receipt?.purpose, phase === "planner" ? "planning" : phase === "assess" ? "preparation-assessment" : phase === "challenge" ? "preparation-challenge" : "qa-preparation");
           assert.equal(receipt?.sessionRef, `${phase}-independent`);

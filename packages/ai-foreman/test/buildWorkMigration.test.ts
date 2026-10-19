@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { registerHandbackWriter } from "../src/qaHandbackMigration.js";
-import { migrateBuildWork } from "../src/buildWorkMigration.js";
+import { BuildProjectIdentityMismatchError, migrateBuildWork } from "../src/buildWorkMigration.js";
+import { inspectBuildProjectIdentity, rebindBuildProjectIdentity } from "../src/stateTransfer.js";
 import { makeLegacyWorkFixture } from "./helpers/legacyWork.js";
 import { admitFixtureWork } from "./helpers/workAdmission.js";
 import { readQaEvidenceSnapshot } from "../src/qaEvidenceReader.js";
@@ -43,4 +44,21 @@ test("legacy observed QA is quarantined rather than inferred as authorized work"
     upgraded.close();const after=readQaEvidenceSnapshot(root,"run");
     assert.equal(after.rows.build_work_scope?.[0]?.state,"quarantined");assert.equal(after.rows.qa_review_attempts?.[0]?.status,"started");
   }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("copied recovery state reports both paths and can be explicitly rebound",()=>{
+  const source=mkdtempSync(join(tmpdir(),"work-rebind-source-"));
+  const copied=mkdtempSync(join(tmpdir(),"work-rebind-copy-"));
+  try {
+    const original=new WorkflowDb(source);original.ensureRun("run");original.close();
+    cpSync(join(source,".rafi"),join(copied,".rafi"),{recursive:true});
+    const status=inspectBuildProjectIdentity(copied);
+    assert.equal(status.matches,false);
+    assert.equal(status.storedRoot,realpathSync(source));
+    assert.equal(status.currentRoot,realpathSync(copied));
+    assert.throws(()=>new WorkflowDb(copied),(error:unknown)=>error instanceof BuildProjectIdentityMismatchError&&error.message.includes(realpathSync(source))&&error.message.includes(realpathSync(copied))&&error.message.includes("rafi state rebind . --yes"));
+    const rebound=rebindBuildProjectIdentity(copied);
+    assert.equal(rebound.matches,true);
+    const opened=new WorkflowDb(copied);opened.close();
+  }finally{rmSync(source,{recursive:true,force:true});rmSync(copied,{recursive:true,force:true});}
 });

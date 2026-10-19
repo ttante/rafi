@@ -12,7 +12,7 @@ import type {
   LoadedSourceRegistry,
   StructuredSourceRequest,
 } from "ai-foreman/sources/source-registry.js";
-import type { ProjectSourceEntry, SourceRegistryConfig } from "rafi-spec";
+import { discoveryEnvelopeV1Schema, parseProviderContract, type ProjectSourceEntry, type SourceRegistryConfig } from "rafi-spec";
 import { findNearestRafiProject, RAFI_CONFIG_FILE, resolveExplicitRafiProject } from "./project.js";
 
 export const DISCOVERY_ENVELOPE_START = "RAFI_DISCOVERY_REPORT_START";
@@ -394,7 +394,8 @@ Permissions:
 Output:
 - Print a readable discovery report first.
 - Then print exactly one JSON object between ${DISCOVERY_ENVELOPE_START} and ${DISCOVERY_ENVELOPE_END}.
-- Envelope shape: {"version":1,"detected_stack":{"frontend":"...","backend":"...","database":"..."},"discovered_artifacts":[],"likely_current_state":{},"relevant_prior_plans_docs_tickets":[],"rafi_history_confidence":{"answer":"...","confidence":"low|medium|high","basis":"..."},"recommended_next_command":"rafi tickets plan|rafi tickets populate|rafi create|none","source_candidates":[],"excluded_or_avoided_resources":[],"handoff_brief":"..."}.
+- Envelope shape: {"version":1,"detected_stack":{"frontend":"...","backend":"...","database":"..."},"discovered_artifacts":[{"path":"workspace-relative/path","kind":"file|directory","bytes":0,"reason":"evidence"}],"likely_current_state":{"state":"...","evidence":["workspace-relative/path"]},"relevant_prior_plans_docs_tickets":[{"path":"workspace-relative/path","status":"current|stale|unknown"}],"rafi_history_confidence":{"answer":"...","confidence":"low|medium|high","basis":"..."},"recommended_next_command":"rafi tickets plan|rafi tickets populate|rafi create|none","source_candidates":[],"excluded_or_avoided_resources":[],"handoff_brief":"..."}.
+- Keep arrays at most 500 items and strings bounded; use workspace-relative paths without absolute paths or parent traversal. These are observations and suggestions only: the host owns source IDs, persistence, snapshots, capture status, and execution of the recommended command. Do not claim a source was captured when it was only suggested.
 - End with exactly one final marker line:
 STEP_STATUS: plan_complete | summary="discovery_complete"`;
 }
@@ -442,9 +443,9 @@ export function extractDiscoveryEnvelope(output: string): DiscoveryEnvelope | un
   const end = output.lastIndexOf(DISCOVERY_ENVELOPE_END);
   if (start < 0 || end <= start) return undefined;
   const body = output.slice(start + DISCOVERY_ENVELOPE_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  const parsed = JSON.parse(body) as DiscoveryEnvelope;
-  if (parsed.version !== 1) throw new Error("discovery envelope version must be 1");
-  return parsed;
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { throw new Error("discovery envelope is not valid JSON"); }
+  return parseProviderContract(discoveryEnvelopeV1Schema, parsed, "discovery envelope") as DiscoveryEnvelope;
 }
 
 export function buildLocalInventory(projectDir: string, docsRoot = "docs", limit = 400): DiscoveryInventoryEntry[] {

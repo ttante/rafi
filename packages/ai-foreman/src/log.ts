@@ -51,6 +51,7 @@ export interface LogRecord {
     | "agent-status"
     | "context-lifecycle"
     | "handoff-transfer"
+    | "handoff-acceptance-not-attempted"
     | "recovery-handoff-accepted"
     | "guided-recovery-required"
     | "safe-boundary-paused"

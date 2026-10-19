@@ -24,7 +24,11 @@ export function admittedPlanInput(projectDir: string, ticket: TicketDef): { inpu
     if (!slice) throw new Error("Admitted plan slice is absent from its exact approved revision");
     const input: ContractInputRef = { id: "approved-plan", kind: "plan", reference: path, digest: plan.content_digest, authority: "approved-scope", revision: String(plan.revision), availability: "available" };
     const requirements: RequirementRef[] = [];
-    for (const [field, entries, location] of [["acceptance_criteria", plan.acceptance_criteria, ""], ["test_plan", plan.test_plan, ""], ["acceptance", slice.acceptance, `slices.${slice.slice_ref}.`], ["required_tests", slice.required_tests, `slices.${slice.slice_ref}.`]] as const) {
+    // Plan-level acceptance and test-plan entries describe the whole plan, not
+    // this one ticket. Including them in every ticket's inventory makes an
+    // independent slice appear responsible for sibling work. The ticket and
+    // admitted slice are the scoped authorities for this contract.
+    for (const [field, entries, location] of [["acceptance", slice.acceptance, `slices.${slice.slice_ref}.`], ["required_tests", slice.required_tests, `slices.${slice.slice_ref}.`]] as const) {
       const occurrences = new Map<string, number>();
       entries.forEach((statement, index) => {
         const fingerprint = contractDigest("plan-requirement", { field, statement }), occurrence = occurrences.get(fingerprint) ?? 0;

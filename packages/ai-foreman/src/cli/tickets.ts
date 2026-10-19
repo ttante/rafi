@@ -1,9 +1,10 @@
 import { Command } from "commander";
 import { accent, error, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { DeletedTicketResetPolicy, RequestedTicketResetTarget, SourceRegistryConfig, StructuredPlanV1, TicketGroupId } from "rafi-spec";
+import { riskNoteRepairProposalV1Schema, zodIssues } from "rafi-spec";
 import { select, text, confirm, isCancel, multiselect } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
@@ -84,14 +85,17 @@ import {
   resumeInterviewRecord,
   type InterviewRecord,
 } from "../interviews.js";
-import { applyTicketPopulation, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, recoverTicketPublications, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
-import { loadTickets } from "../tickets/ticketLoader.js";
+import { applyTicketPopulation, assertRiskPlanOnlyCorrection, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, recoverTicketPublications, TicketPopulationValidationError, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
+import { loadTickets, saveTickets, validateTicketDefs } from "../tickets/ticketLoader.js";
 import { resolveTicketPaths } from "../tickets/config.js";
 import { formatAllTicketDetails, formatTicketDetails, getAllTicketDetails, getTicketDetails } from "../tickets/details.js";
 import { appendTicketOutput } from "../tickets/output.js";
 import { applyResolvedTicketReset, previewTicketReset, recoverTicketResetPublications, resetTickets, resolveTicketResetSelection, TicketResetDependencyConflictError, type TicketResetScope } from "../tickets/reset.js";
 import { validateBranchPrefix } from "../branch/prefix.js";
 import { listTicketGroups, previewTicketGroupRepair, repairTicketGroups } from "../tickets/groups.js";
+import { StateDb } from "../tickets/stateDb.js";
+import { ticketDefinitionDigest } from "../tickets/riskWaivers.js";
+import { hasRollbackOrMitigationPlan } from "../tickets/ticketLoader.js";
 
 let nestedTicketCommandDepth = 0;
 class TicketInterviewCancelled extends Error {}
@@ -116,6 +120,49 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
+/** Commander preserves comma-delimited values as one argument; accept both documented forms. */
+export function normalizeRiskWaiverTicketIds(values: readonly string[] | undefined): string[] {
+  return unique((values ?? []).flatMap((value) => value.split(",")).map((value) => value.trim()).filter(Boolean));
+}
+
+/** Record an explicit, definition-bound exception for existing risk tickets. */
+export function waiveTicketRiskNotes(projectDir: string, ticketIds: string[], reason: string, actor = "operator"): void {
+  const ids = unique(ticketIds);
+  if (!ids.length) throw new Error("provide exact ticket IDs with --tickets");
+  if (ids.length !== ticketIds.length) throw new Error("--tickets must not contain duplicate IDs");
+  if (!reason.trim()) throw new Error("--reason is required when waiving risk plans");
+  const config = loadTicketsConfig(projectDir);
+  const paths = resolveTicketPaths(config, projectDir);
+  const definitions = loadTickets(paths.tickets);
+  const selected = ids.map((id) => definitions.find((ticket) => ticket.id === id));
+  if (selected.some((ticket) => !ticket)) throw new Error(`unknown ticket ID(s): ${ids.filter((id, index) => !selected[index]).join(", ")}`);
+  for (const ticket of selected) {
+    if (ticket!.risk === "Low" || hasRollbackOrMitigationPlan(ticket!.rollback)) throw new Error(`${ticket!.id} does not have a missing Medium/High-risk rollback plan to waive`);
+  }
+  const db = new StateDb(paths.stateDb);
+  try {
+    db.transaction(() => {
+      const now = new Date().toISOString();
+      for (const ticket of selected as import("../tickets/ticketSchema.js").TicketDef[]) {
+        db.upsertTicketRiskWaiver({ ticket_id: ticket.id, definition_digest: ticketDefinitionDigest(ticket), reason: reason.trim(), waived_at: now, waived_by: actor });
+      }
+    });
+  } finally { db.close(); }
+}
+
+function riskWaiverWarnings(projectDir: string, ticketIds: readonly string[]): string[] {
+  const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);
+  const definitions = new Map(loadTickets(paths.tickets).map((ticket) => [ticket.id, ticket]));
+  const db = new StateDb(paths.stateDb, { readOnly: true });
+  try {
+    return ticketIds.flatMap((id) => {
+      const ticket = definitions.get(id);
+      const waiver = ticket && db.getTicketRiskWaiver(id, ticketDefinitionDigest(ticket));
+      return waiver ? [`     Warning: missing risk plan explicitly waived${waiver.waived_by ? ` by ${sanitizeTerminalText(waiver.waived_by)}` : ""}; ${sanitizeTerminalText(waiver.reason)}`] : [];
+    });
+  } finally { db.close(); }
+}
+
 function optionWasProvided(command: Command, name: string): boolean {
   const source = command.getOptionValueSource(name);
   return source !== undefined && source !== "default";
@@ -123,6 +170,35 @@ function optionWasProvided(command: Command, name: string): boolean {
 
 const TICKET_POPULATE_ROLE = "ticket-maker";
 const RAFI_CONFIG_FILES = ["rafi-config.yaml", "project.yaml"] as const;
+const RISK_NOTE_REPAIR_START = "RAFI_RISK_NOTE_REPAIR_START";
+const RISK_NOTE_REPAIR_END = "RAFI_RISK_NOTE_REPAIR_END";
+
+export interface RiskNoteRepairProposal { version: 1; tickets: Array<{ id: string; rollback: string }> }
+
+export function extractRiskNoteRepairProposal(output: string): RiskNoteRepairProposal {
+  const start = output.lastIndexOf(RISK_NOTE_REPAIR_START); const end = output.lastIndexOf(RISK_NOTE_REPAIR_END);
+  if (start < 0 || end <= start) throw new Error(`Ticket Maker repair output is missing ${RISK_NOTE_REPAIR_START}/${RISK_NOTE_REPAIR_END}`);
+  const raw = output.slice(start + RISK_NOTE_REPAIR_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch (error) { throw new Error(`Ticket Maker risk-note repair is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
+  const validated = riskNoteRepairProposalV1Schema.safeParse(parsed);
+  if (!validated.success) throw new Error(`Ticket Maker risk-note repair contract validation failed:\n${zodIssues(validated.error).map((issue) => `- ${issue}`).join("\n")}`);
+  return validated.data;
+}
+
+/** Validate a deliberately narrow repair: only exactly the missing rollback fields may change. */
+export function applyRiskNoteRepairProposal(tickets: import("../tickets/ticketSchema.js").TicketDef[], proposal: RiskNoteRepairProposal): import("../tickets/ticketSchema.js").TicketDef[] {
+  const targets = tickets.filter(ticket => ticket.risk !== "Low" && !hasRollbackOrMitigationPlan(ticket.rollback));
+  const expected = targets.map(ticket => ticket.id).sort();
+  const received = proposal.tickets.map(ticket => ticket.id).sort();
+  if (proposal.version !== 1 || new Set(received).size !== received.length || JSON.stringify(received) !== JSON.stringify(expected)) throw new Error(`risk-note repair must contain exactly these ticket IDs: ${expected.join(", ") || "none"}`);
+  const byId = new Map(proposal.tickets.map(ticket => [ticket.id, ticket.rollback]));
+  for (const [id, rollback] of byId) if (typeof rollback !== "string" || !rollback.trim()) throw new Error(`risk-note repair for ${id} needs a concrete non-empty rollback or mitigation plan`);
+  const repaired = tickets.map(ticket => byId.has(ticket.id) ? { ...ticket, rollback: byId.get(ticket.id)!.trim() } : ticket);
+  const validation = validateTicketDefs(repaired);
+  if (validation.length) throw new Error(`risk-note repair did not produce a valid ticket set: ${validation.map(issue => `${issue.path}: ${issue.message}`).join("; ")}`);
+  return repaired;
+}
 
 function validateEffort(effort: string | undefined): asserts effort is EffortLevel | undefined {
   try {
@@ -172,7 +248,11 @@ Return ticket content using Foreman's schema:
 - slice_ref: the exact approved plan slice reference. Do not allocate ticket IDs.
 - order: unique numeric implementation order. Use gaps like 1000, 2000, 3000.
 - title, area, priority, size, risk, depends_on, summary, acceptance, required_tests, likely_files, rollback, notes.
-- Keep dependencies, acceptance criteria, testing expectations, file hints, risk notes, and implementation notes from the source material.
+- Keep dependencies, acceptance criteria, testing expectations, file hints, risk notes, and implementation notes from the source material. For each ticket, use only the mapped approved slice's acceptance and required tests; do not copy plan-level acceptance criteria or add requirements about sibling slices or unfinished tickets. A ticket's acceptance must remain implementable and verifiable when its own slice is delivered.
+- Preserve additive-slice independence without inventing an absence test: each ticket's own behavior and tests should work against the shared approved baseline and must not depend on sibling implementation. Do not add wording such as "with the sibling absent/present," "without [sibling] present," or "with this slice alone" unless the approved plan explicitly requires sibling absence testing or an isolated branch. Otherwise use positive own-ticket checks, the shared project tests, and the combined-result check.
+- Preserve the approved slice's documentation policy exactly. Documentation is off by default; do not invent a documentation requirement because a docs directory exists. When documentation is required, retain its exact targets and criteria so the Builder and independent QA can enforce it.
+- File names and likely_files are implementation hints, not an exhaustive allowlist. Do not invent acceptance criteria or tests that require an exact changed-file list; allow other relevant files needed to complete the approved work. Preserve explicit user-established security, privacy, access, and other safety restrictions. Rafi manages ticket lifecycle state; do not require the Builder to mark tickets done in a document.
+- For every Medium or High risk ticket, \`rollback\` is required. It must state a concrete rollback or mitigation action: what is disabled, reverted, or contained, and how recovery or impact is verified. \`notes\` may add context but never satisfies this requirement. Low-risk tickets may use \`rollback: null\`.
 - Do not store mutable status/progress fields in .tickets/tickets.yaml.
 - Dependencies must reference slice_ref values. Include the exact IDs of existing populated tickets whose removed slices should become obsolete.
 
@@ -180,13 +260,57 @@ If source content does not cleanly map to the new schema, ask for guidance inste
 STEP_STATUS: needs_input | question="..." choices="..."
 
 Output one JSON object between ${TICKET_POPULATION_PROPOSAL_START} and ${TICKET_POPULATION_PROPOSAL_END} with shape:
-{"version":1,"plan_id":"approved plan ID","revision":1,"tickets":[{"slice_ref":"slc_...","title":"...","area":"...","priority":"P1","size":"S","risk":"Low","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"depends_on":["slice_ref"],"rollback":null,"notes":null}],"retirements":["exact existing ticket ID"]}
+{"version":1,"plan_id":"approved plan ID","revision":1,"tickets":[{"slice_ref":"slc_low","title":"...","area":"...","priority":"P1","size":"S","risk":"Low","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"documentation":{"required":false,"targets":[],"criteria":[]},"depends_on":[],"rollback":null,"notes":null},{"slice_ref":"slc_medium","title":"...","area":"...","priority":"P1","size":"S","risk":"Medium","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"documentation":{"required":false,"targets":[],"criteria":[]},"depends_on":["slc_low"],"rollback":"Disable the feature flag, restore the previous handler, and verify the affected error rate returns to baseline.","notes":null}],"retirements":["exact existing ticket ID"]}
 Triple-check that every approved slice appears exactly once.
 
 End with exactly one marker line as the final non-empty line:
 STEP_STATUS: done | summary="populated Foreman tickets from existing project ticket sources"
 or
 STEP_STATUS: blocked | reason="why ticket population cannot proceed"`;
+}
+
+/** A bounded correction loop ended without a publishable proposal. */
+export class TicketPopulationRiskCorrectionExhaustedError extends Error {
+  readonly ticketIds: string[];
+  readonly projectDir: string;
+  readonly interviewId: string;
+  readonly proposalFile: string;
+  constructor(ticketIds: string[], projectDir: string, interviewId: string, proposalFile: string) {
+    super([
+      `Ticket Maker did not provide usable rollback or mitigation plans for ${ticketIds.join(", ")} after two targeted corrections. No tickets were published.`,
+      `The population session was retained as ${interviewId}.`,
+      `Retry: rafi tickets populate --project ${shellQuote(projectDir)} --interview-id ${shellQuote(interviewId)}`,
+      `Or edit the frozen proposal ${shellQuote(proposalFile)}, then apply it with: rafi tickets populate --project ${shellQuote(projectDir)} --proposal-file ${shellQuote(proposalFile)}`,
+      "Or update the approved plan/context with rollback guidance and run `rafi tickets populate` again.",
+    ].join("\n"));
+    this.name = "TicketPopulationRiskCorrectionExhaustedError";
+    this.ticketIds = [...ticketIds];
+    this.projectDir = projectDir;
+    this.interviewId = interviewId;
+    this.proposalFile = proposalFile;
+  }
+}
+
+function populationProposalArtifactPath(projectDir: string, interviewId: string): string {
+  return join(projectDir, ".rafi", "ticket-population-proposals", `${interviewId}.json`);
+}
+
+function savePopulationProposalArtifact(projectDir: string, interviewId: string, approvedPlan: { path: string; plan: { plan_id: string; revision: number } }, proposal: unknown): string {
+  const path = populationProposalArtifactPath(projectDir, interviewId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify({ version: 1, approved_plan: { path: approvedPlan.path, plan_id: approvedPlan.plan.plan_id, revision: approvedPlan.plan.revision }, proposal }, null, 2)}\n`, "utf8");
+  return path;
+}
+
+function readPopulationProposalArtifact(projectDir: string, source: string): import("../ticketPopulation.js").TicketPopulationProposalV1 {
+  const path = resolve(projectDir, source);
+  if (!existsSync(path)) throw new Error(`population proposal file does not exist: ${path}`);
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(path, "utf8")); }
+  catch (err) { throw new Error(`population proposal file is not valid JSON: ${err instanceof Error ? err.message : String(err)}`); }
+  const proposal = parsed && typeof parsed === "object" && "proposal" in parsed ? (parsed as { proposal: unknown }).proposal : parsed;
+  if (!proposal || typeof proposal !== "object") throw new Error("population proposal file must contain a proposal object");
+  return proposal as import("../ticketPopulation.js").TicketPopulationProposalV1;
 }
 
 export function resolvePopulateSources(
@@ -288,7 +412,45 @@ interface PopulateCommandOptions {
   fast?: boolean;
   yes?: boolean;
   authorizeRetire?: string[];
+  waiveRiskNotes?: string[];
+  waiverReason?: string;
+  waiverActor?: string;
   resumeSession?: string;
+  proposalFile?: string;
+}
+
+async function resolvePopulationRiskWaiver(
+  opts: PopulateCommandOptions,
+  error: TicketPopulationRiskCorrectionExhaustedError,
+): Promise<{ ticketIds: string[]; reason: string; actor: string } | undefined> {
+  const expected = [...error.ticketIds].sort();
+  const requested = normalizeRiskWaiverTicketIds(opts.waiveRiskNotes).sort();
+  const exact = JSON.stringify(expected) === JSON.stringify(requested);
+  if (requested.length || opts.waiverReason) {
+    if (!exact) throw new Error(`--waive-risk-notes must name exactly the unresolved tickets: ${expected.join(", ")}`);
+    if (!opts.waiverReason?.trim()) throw new Error("--waiver-reason is required with --waive-risk-notes");
+    return { ticketIds: expected, reason: opts.waiverReason.trim(), actor: opts.waiverActor?.trim() || "operator" };
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
+  const action = await select({
+    message: `Ticket Maker could not supply rollback plans for ${expected.join(", ")}. What next?`,
+    options: [
+      { value: "retry", label: "Repair all missing plans with Ticket Maker (Recommended)" },
+      { value: "waive", label: "Publish with explicit risk-plan waivers" },
+      { value: "manual", label: "Review or edit the saved proposal manually" },
+      { value: "cancel", label: "Cancel and retain the saved population session" },
+    ],
+  });
+  if (isCancel(action) || action === "cancel") return undefined;
+  if (action === "retry" || action === "manual") {
+    const guidance = action === "retry"
+      ? `Retry: rafi tickets populate --project ${shellQuote(error.projectDir)} --interview-id ${shellQuote(error.interviewId)}`
+      : `Edit ${shellQuote(error.proposalFile)}, then validate and apply it: rafi tickets populate --project ${shellQuote(error.projectDir)} --proposal-file ${shellQuote(error.proposalFile)}`;
+    throw new Error(guidance);
+  }
+  const reason = await text({ message: `Reason for waiving rollback plans for ${expected.join(", ")}:`, validate: value => String(value ?? "").trim() ? undefined : "A waiver reason is required" });
+  if (isCancel(reason)) return undefined;
+  return { ticketIds: expected, reason: String(reason).trim(), actor: opts.waiverActor?.trim() || "operator" };
 }
 
 interface TicketSetupPatch {
@@ -1282,6 +1444,29 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
   const approvedPlan = approvedPlanForMode ?? resolvePopulationPlan(dir, sourceHints, ticketsConfig);
   const contextSources = sourceHints.filter((source) => !isApprovedPlanArtifact(dir, source, approvedPlan.path));
 
+  // A retained proposal is an intentionally narrow manual recovery route. It
+  // still goes through the exact same materialization and publication checks as
+  // an agent response; editing JSON never grants a bypass.
+  if (opts.proposalFile) {
+    const proposal = readPopulationProposalArtifact(dir, opts.proposalFile);
+    const requestedWaiverIds = normalizeRiskWaiverTicketIds(opts.waiveRiskNotes);
+    const materialized = materializeTicketPopulation(proposal, approvedPlan.plan, loadTickets(resolveTicketPaths(ticketsConfig, dir).tickets), {
+      waiveRiskTicketIds: requestedWaiverIds,
+      waiverReason: opts.waiverReason,
+      waiverActor: opts.waiverActor,
+      branchStrategy: setup?.build.branch_strategy,
+    });
+    if (!opts.yes) {
+      const approved = await confirm({ message: "Apply this manually edited ticket population proposal?", initialValue: false });
+      if (isCancel(approved) || !approved) { console.log("foreman tickets: cancelled; no files or tracker state changed"); return; }
+    }
+    authorizeTicketRetirements(materialized.retirements, { authorizedIds: opts.authorizeRetire, computerRun: Boolean(opts.yes), interactiveConfirmed: !opts.yes });
+    const applied = applyTicketPopulation(dir, materialized);
+    console.log(`foreman tickets: applied manually reviewed proposal atomically (run ${applied.runId}, transaction ${applied.transactionId})`);
+    if (materialized.riskWaivers?.length) console.log(`foreman tickets: explicit risk-plan waivers recorded for ${materialized.riskWaivers.map((waiver) => waiver.ticketId).join(", ")}`);
+    return;
+  }
+
   if (!opts.yes) {
     const action = await select({
       message: "Ask the read-only Ticket Maker for a structured population proposal?",
@@ -1314,7 +1499,10 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
       fast: opts.fast,
       yes: Boolean(opts.yes),
       log,
-      resumeSession: opts.resumeSession,
+      // A recovered interview should continue its recorded Ticket Maker
+      // session unless the caller deliberately supplied another one or the
+      // interview already recorded a lost-continuity boundary.
+      resumeSession: opts.resumeSession ?? (savedPlanning?.continuityLost ? undefined : savedPlanning?.runtime.sessionId),
     }));
     builder = roleBuilder.builder;
     planningRecord = checkpointInterview(dir, planningRecord, { runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() } });
@@ -1331,10 +1519,8 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     if (contextSources.length) {
       console.log(`foreman tickets: context sources ${contextSources.join(" ")}`);
     }
-    const turn = await foreman.runInstruction(buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc));
+    let turn = await foreman.runInstruction(buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc));
     planningRecord = checkpointInterview(dir, planningRecord, { runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() }, decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text } });
-    await builder.close();
-    await viewer;
 
     log.write("ticket-populate", {
       statusKind: turn.status.kind,
@@ -1355,8 +1541,46 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     }
 
     const existing = loadTickets(resolveTicketPaths(ticketsConfig, dir).tickets);
-    const proposal = extractTicketPopulationProposal(turn.result.text);
-    const materialized = materializeTicketPopulation(proposal, approvedPlan.plan, existing);
+    let proposal = extractTicketPopulationProposal(turn.result.text);
+    let proposalArtifact = savePopulationProposalArtifact(dir, planningRecord.id, approvedPlan, proposal);
+    let materialized: ReturnType<typeof materializeTicketPopulation>;
+    let populationWaiver: { ticketIds: string[]; reason: string; actor: string } | undefined;
+    for (let correction = 0; ; correction++) {
+      try {
+        materialized = materializeTicketPopulation(proposal, approvedPlan.plan, existing, {
+          waiveRiskTicketIds: populationWaiver?.ticketIds,
+          waiverReason: populationWaiver?.reason,
+          waiverActor: populationWaiver?.actor,
+          branchStrategy: setup?.build.branch_strategy,
+        });
+        break;
+      } catch (err) {
+        if (!(err instanceof TicketPopulationValidationError) || !err.onlyRepairableRiskFailures) throw err;
+        const ids = err.repairableRiskTicketIds.join(", ");
+        if (correction >= 2) {
+          const exhausted = new TicketPopulationRiskCorrectionExhaustedError(err.repairableRiskTicketIds, dir, planningRecord.id, proposalArtifact);
+          populationWaiver = await resolvePopulationRiskWaiver(opts, exhausted);
+          if (!populationWaiver) throw exhausted;
+          continue;
+        }
+        console.log(`foreman tickets: ${ids} need risk plans; asking Ticket Maker for a targeted correction (${correction + 1}/2)`);
+        const correctionTurn = await foreman.runInstruction(`Correct the existing ticket population proposal only. Do not change plan_id, revision, slice_ref mappings, ticket IDs, dependencies, scope, ownership, acceptance criteria, tests, retirements, or any field except \`rollback\` for these tickets: ${ids}. Each listed ticket is Medium or High risk and requires a concrete rollback or mitigation plan in \`rollback\`; \`notes\` cannot satisfy this requirement. Return the complete replacement JSON proposal between ${TICKET_POPULATION_PROPOSAL_START} and ${TICKET_POPULATION_PROPOSAL_END}, followed by STEP_STATUS: done.`);
+        if (correctionTurn.result.isError || (correctionTurn.status.kind !== "done" && correctionTurn.status.kind !== "plan_complete")) {
+          throw new Error(`Ticket Maker could not correct missing risk plans for ${ids}: ${correctionTurn.status.reason ?? correctionTurn.status.error ?? correctionTurn.result.text.slice(0, 200)}`);
+        }
+        turn = correctionTurn;
+        planningRecord = checkpointInterview(dir, planningRecord, {
+          runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() },
+          decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text, riskPlanCorrections: correction + 1 },
+        });
+        const corrected = extractTicketPopulationProposal(turn.result.text);
+        assertRiskPlanOnlyCorrection(proposal, corrected, err.repairableRiskSliceRefs);
+        proposal = corrected;
+        proposalArtifact = savePopulationProposalArtifact(dir, planningRecord.id, approvedPlan, proposal);
+      }
+    }
+    await builder.close(); builder = undefined;
+    await viewer; viewer = undefined;
     let retirementsConfirmed = false;
     if (!opts.yes) {
       console.log(`foreman tickets: proposal maps ${materialized.sliceToTicket.size} slice(s) and retires ${materialized.retirements.join(", ") || "none"}`);
@@ -1372,12 +1596,54 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     const applied = applyTicketPopulation(dir, materialized);
     completeInterview(dir, planningRecord);
     console.log(`foreman tickets: populated atomically (run ${applied.runId}, transaction ${applied.transactionId})`);
+    if (materialized.riskWaivers?.length) console.log(`foreman tickets: explicit risk-plan waivers recorded for ${materialized.riskWaivers.map((waiver) => waiver.ticketId).join(", ")}`);
   } catch (err) {
     failInterview(dir, planningRecord, planningRecord.checkpoint, err);
     await builder?.close().catch(() => {});
     await viewer?.catch(() => {});
-    fail(`${err instanceof Error ? err.message : String(err)}\nRecover with \`rafi plan:doctor\`.`);
+    const message = err instanceof Error ? err.message : String(err);
+    fail(err instanceof TicketPopulationRiskCorrectionExhaustedError ? message : `${message}\nRecover with \`rafi plan:doctor\`.`);
   }
+}
+
+interface RepairRiskNotesOptions { project?: string; agent?: string; model?: string; effort?: string; fast?: boolean; apply?: boolean; yes?: boolean }
+
+/** Ask Ticket Maker for a reviewable, rollback-only repair of published tickets. */
+export async function cmdRepairRiskNotesCli(opts: RepairRiskNotesOptions): Promise<void> {
+  const dir = cwd(opts); validateEffort(opts.effort);
+  if (!isTicketsInitialized(dir)) throw new Error(`ticket tracker is not initialized in ${dir}`);
+  const paths = resolveTicketPaths(loadTicketsConfig(dir), dir);
+  const current = loadTickets(paths.tickets);
+  const targets = current.filter(ticket => ticket.risk !== "Low" && !hasRollbackOrMitigationPlan(ticket.rollback));
+  if (!targets.length) { console.log("foreman tickets: no Medium/High-risk tickets are missing rollback plans"); return; }
+  const log = new Log(makeLogPath(dir, "tickets-risk-note-repair"));
+  const roleBuilder = await createRoleBuilder(buildPopulateAgentRunOptions({ projectDir: dir, agent: opts.agent, model: opts.model, effort: opts.effort as EffortLevel | undefined, fast: opts.fast, yes: Boolean(opts.yes), log }));
+  const builder = roleBuilder.builder; const viewer = printEvents(builder.events());
+  try {
+    const foreman = new Foreman(builder, log, { desktop: loadConfig(join(dir, "foreman.yaml")).notifications.enabled, terminalBell: false }, false, 3, dir);
+    const instruction = [
+      "You are Ticket Maker in read-only repair mode. Do not edit files.",
+      "For every listed ticket, supply a concrete rollback or mitigation plan. Do not change any other field or add/remove tickets.",
+      `Tickets requiring repair:\n${JSON.stringify(targets.map(ticket => ({ id: ticket.id, title: ticket.title, risk: ticket.risk, summary: ticket.summary, acceptance: ticket.acceptance, required_tests: ticket.required_tests })), null, 2)}`,
+      `Return exactly one JSON object between ${RISK_NOTE_REPAIR_START} and ${RISK_NOTE_REPAIR_END}: {"version":1,"tickets":[{"id":"T001","rollback":"Concrete reversal or mitigation steps."}]}.`,
+      "End with STEP_STATUS: done | summary=\"risk-note repair proposed\"",
+    ].join("\n\n");
+    const turn = await foreman.runInstruction(instruction);
+    if (turn.result.isError || (turn.status.kind !== "done" && turn.status.kind !== "plan_complete")) throw new Error(`Ticket Maker could not propose risk-plan repairs: ${turn.status.reason ?? turn.status.error ?? turn.result.text.slice(0, 300)}`);
+    const proposal = extractRiskNoteRepairProposal(turn.result.text);
+    const repaired = applyRiskNoteRepairProposal(current, proposal);
+    for (const target of targets) console.log(`  ${target.id}: ${proposal.tickets.find(item => item.id === target.id)!.rollback.trim()}`);
+    if (!opts.apply) { console.log("foreman tickets: preview only; rerun with `rafi tickets repair --risk-notes --apply` to write this exact class of change."); return; }
+    if (!opts.yes) {
+      const approved = await confirm({ message: `Apply rollback-only repairs to ${targets.map(ticket => ticket.id).join(", ")}?`, initialValue: false });
+      if (isCancel(approved) || !approved) { console.log("foreman tickets: cancelled; no ticket definitions changed"); return; }
+    }
+    saveTickets(paths.tickets, repaired);
+    cmdRender(dir);
+    const validation = cmdValidate(dir);
+    if (!validation.clean) throw new Error(`risk-note repair was written but validation still fails: ${validation.issues.map(issue => issue.message).join("; ")}`);
+    console.log(`foreman tickets: applied rollback-only repair for ${targets.map(ticket => ticket.id).join(", ")}`);
+  } finally { await builder.close().catch(() => {}); await viewer.catch(() => {}); }
 }
 
 /** Resolve only the strategy. Context documents never select an import mode. */
@@ -1808,7 +2074,11 @@ export function buildTicketsCommand(options: {
     .option("--fast", "fast mode - lower latency")
     .option("--resume-session <id>", "resume a saved Ticket Maker session (normally selected by plan:doctor)")
     .option("--interview-id <id>", "recover an exact saved population interview (normally selected by plan:doctor)")
+    .option("--proposal-file <path>", "validate and publish a manually reviewed frozen population proposal")
     .option("--authorize-retire <ids...>", "exact ticket IDs authorized to become obsolete in computer-run mode")
+    .option("--waive-risk-notes <ids...>", "publish only these exact unresolved Medium/High-risk tickets with explicit risk-plan waivers")
+    .option("--waiver-reason <text>", "required rationale for --waive-risk-notes")
+    .option("--waiver-actor <name>", "operator recorded with the population waiver", "operator")
     .option("-y, --yes", "computer-run approval; retirements still require --authorize-retire exact IDs")
     .action(async (opts) => {
       try {
@@ -1849,6 +2119,39 @@ export function buildTicketsCommand(options: {
       } catch (err) {
         fail(String(err instanceof Error ? err.message : err));
       }
+    });
+
+  tickets
+    .command("waive-risk-notes")
+    .description("Record an explicit, definition-bound waiver for missing Medium/High-risk rollback plans.")
+    .requiredOption("--tickets <ids...>", "exact ticket IDs to waive")
+    .requiredOption("--reason <text>", "why the missing plans are accepted")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("--actor <name>", "operator recorded with the waiver", "operator")
+    .action((opts) => {
+      try {
+        const dir = cwd(opts);
+        waiveTicketRiskNotes(dir, opts.tickets, opts.reason, opts.actor);
+        const validation = cmdValidate(dir);
+        console.log(`foreman tickets: waived missing risk plans for ${opts.tickets.join(", ")}`);
+        console.log(formatValidationIssues(validation.issues));
+      } catch (err) { fail(String(err instanceof Error ? err.message : err)); }
+    });
+
+  tickets
+    .command("repair")
+    .description("Ask Ticket Maker for narrowly scoped repairs to published ticket metadata.")
+    .requiredOption("--risk-notes", "repair only missing Medium/High-risk rollback or mitigation plans")
+    .option("--apply", "apply the reviewed rollback-only proposal")
+    .option("-p, --project <dir>", "project directory (default: cwd)")
+    .option("-a, --agent <agent>", "Ticket Maker agent (claude | codex)")
+    .option("-m, --model <model>", "override Ticket Maker model")
+    .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
+    .option("--fast", "fast mode - lower latency")
+    .option("-y, --yes", "approve the reviewed rollback-only proposal when used with --apply")
+    .action(async (opts) => {
+      try { await cmdRepairRiskNotesCli(opts); }
+      catch (err) { fail(String(err instanceof Error ? err.message : err)); }
     });
 
   const groups = tickets.command("groups").description("List and repair durable ticket creation groups.");
@@ -2294,6 +2597,10 @@ export function buildTicketsCommand(options: {
         if (delivery?.stacks?.length) {
           const lines = cmdStackQueue(dir, Boolean(opts.refresh));
           if (!lines.length) console.log("No remaining tickets."); else for (const line of lines) console.log(line);
+          const risky = loadTickets(resolveTicketPaths(loadTicketsConfig(dir), dir).tickets)
+            .filter((ticket) => ticket.risk !== "Low" && !hasRollbackOrMitigationPlan(ticket.rollback))
+            .map((ticket) => ticket.id);
+          for (const message of riskWaiverWarnings(dir, risky)) console.log(message);
           return;
         }
         console.log(`${accent("Batches:")} none configured. Queue is flat.`);
@@ -2304,6 +2611,7 @@ export function buildTicketsCommand(options: {
           for (const r of rows) {
             console.log(`  ${r.rank}. [${r.status}] ${r.ticket}: ${r.title} (${r.priority}, blocked: ${r.blockedBy})`);
             if (r.status === "blocked") console.log(`     Next: ${sanitizeTerminalText(r.nextAction)}`);
+            for (const message of riskWaiverWarnings(dir, [r.ticket])) console.log(message);
           }
         }
       } catch (err) {

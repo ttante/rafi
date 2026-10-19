@@ -3,6 +3,8 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Command } from "commander";
 import type { InstallManifestEntryV2, UninstallProposal } from "rafi-spec";
+import { parseProviderContract } from "rafi-spec";
+import { z } from "zod";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 import { cleanupUninstallRecovery, INSTALL_MANIFEST, listUninstallRecoveries, preservePreimagesForLaterRestore, readInstallManifest, removeManagedBlocksTransaction, removeOwnedPathsTransaction, restoreOwnedPreimagesTransaction, restoreUninstallRecovery, validateOwnedPath } from "./ownership.js";
 import { readOnlyPermissionConfig, runRoleInstruction } from "ai-foreman/agent-run.js";
@@ -20,6 +22,11 @@ export interface UninstallPlan {
   warnings: string[];
   fingerprint: string;
 }
+
+const uninstallProposalSchema = z.strictObject({
+  operations: z.array(z.strictObject({ kind: z.enum(["keep", "delete", "edit", "remove-dependency"]), target: z.string().trim().min(1).max(4_000), reason: z.string().trim().min(1).max(10_000), confidence: z.enum(["high", "medium", "low"]) })).max(500),
+  followUpQuestion: z.string().trim().min(1).max(4_000).optional(),
+});
 
 export function buildUninstallPlan(projectDir: string, choices: UninstallChoice[], proposal?: UninstallProposal): UninstallPlan {
   const root = resolve(projectDir);
@@ -252,8 +259,7 @@ export async function interpretUninstallInstruction(projectDir: string, instruct
   if (run.turn.result.isError) throw new Error(`uninstaller agent failed: ${run.turn.result.text.slice(0, 300)}`);
   const match = run.turn.result.text.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("uninstaller agent did not return a JSON proposal");
-  const proposal = JSON.parse(match[0]) as UninstallProposal;
-  if (!proposal || !Array.isArray(proposal.operations)) throw new Error("uninstaller agent returned an invalid proposal");
+  const proposal = parseProviderContract(uninstallProposalSchema, JSON.parse(match[0]), "UninstallProposalV1");
   return proposal;
 }
 

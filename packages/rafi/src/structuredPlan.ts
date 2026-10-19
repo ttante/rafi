@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import type { StructuredPlanDeliveryUnit, StructuredPlanSlice, StructuredPlanStack, StructuredPlanV1 } from "rafi-spec";
+import { structuredPlanProposalV1Schema, zodIssues } from "rafi-spec";
 import { capturePreimage, finalizeOwnedWrite } from "./ownership.js";
 
 export const PLAN_PROPOSAL_START = "RAFI_PLAN_PROPOSAL_START";
@@ -59,13 +60,24 @@ export function extractStructuredPlanProposal(output: string): StructuredPlanPro
   const json = output.slice(start + PLAN_PROPOSAL_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   let parsed: unknown;
   try { parsed = JSON.parse(json); } catch (error) { throw new Error(`structured plan proposal is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
+  const validated = structuredPlanProposalV1Schema.safeParse(parsed);
+  const contractIssues = validated.success ? [] : zodIssues(validated.error);
+  // Preserve the established repair diagnostics for missing/mistyped fields,
+  // but surface unknown provider-owned fields as contract violations at the
+  // extraction boundary.
+  if (contractIssues.some((issue) => issue.includes("Unrecognized key"))) {
+    throw new Error(`invalid structured plan proposal contract:\n${contractIssues.map((issue) => `- ${issue}`).join("\n")}`);
+  }
   const issues = validateStructuredPlanProposal(parsed);
   if (issues.length) throw new Error(`invalid structured plan proposal:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
-  return parsed as StructuredPlanProposalV1;
+  if (!validated.success) throw new Error(`invalid structured plan proposal contract:\n${contractIssues.map((issue) => `- ${issue}`).join("\n")}`);
+  return validated.data;
 }
 
 export function validateStructuredPlanProposal(value: unknown): string[] {
   const issues: string[] = [];
+  const contract = structuredPlanProposalV1Schema.safeParse(value);
+  const contractIssues = contract.success ? [] : zodIssues(contract.error);
   if (!value || typeof value !== "object" || Array.isArray(value)) return ["proposal must be an object"];
   const p = value as Record<string, unknown>;
   if (p.version !== 1) issues.push("version must be 1");
@@ -74,7 +86,7 @@ export function validateStructuredPlanProposal(value: unknown): string[] {
   for (const field of ["assumptions", "implementation_changes", "acceptance_criteria", "test_plan"] as const) {
     if (Array.isArray(p[field]) && !p[field].every((item) => typeof item === "string")) issues.push(`${field} must be a string array`);
   }
-  if (issues.length) return issues;
+  if (issues.length) return [...new Set([...contractIssues, ...issues])];
   const proposal = p as Record<string, unknown> & StructuredPlanProposalV1;
   const localRefs = new Set<string>();
   for (const [index, rawSlice] of proposal.slices.entries()) {
@@ -161,7 +173,7 @@ export function validateStructuredPlanProposal(value: unknown): string[] {
       if (stackedUnits.has(id)) issues.push(`delivery unit ${id} belongs to multiple stacks`); else stackedUnits.add(id);
     }
   }
-  return [...new Set(issues)];
+  return [...new Set([...contractIssues, ...issues])];
 }
 
 export function materializeStructuredPlan(

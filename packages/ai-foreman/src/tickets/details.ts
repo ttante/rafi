@@ -2,9 +2,10 @@ import { existsSync } from "node:fs";
 import { loadTicketsConfig, resolveTicketPaths } from "./config.js";
 import { loadDeliveryConfig, type DeliveryStack, type DeliveryUnit } from "./delivery.js";
 import { resolveBlockers } from "./blockers.js";
-import { StateDb, pristineTicketState, type TicketEvent, type TicketState, type ValidationSnapshot } from "./stateDb.js";
+import { StateDb, pristineTicketState, type TicketEvent, type TicketRiskWaiver, type TicketState, type ValidationSnapshot } from "./stateDb.js";
 import { loadTickets } from "./ticketLoader.js";
 import type { TicketDef } from "./ticketSchema.js";
+import { ticketDefinitionDigest } from "./riskWaivers.js";
 
 export interface TicketDeliveryDetails {
   units: DeliveryUnit[];
@@ -18,6 +19,7 @@ export interface TicketDetails {
   validation_history: ValidationSnapshot[];
   events: TicketEvent[];
   delivery: TicketDeliveryDetails;
+  risk_plan_waiver?: TicketRiskWaiver;
 }
 
 export interface AllTicketDetails {
@@ -46,6 +48,7 @@ export function getTicketDetails(projectDir: string, ticketId: string, now = new
       db.getValidationSnapshots(ticketId),
       db.getTicketEvents(ticketId),
       delivery,
+      db.getTicketRiskWaiver(definition.id, ticketDefinitionDigest(definition)),
     );
   } finally {
     db.close();
@@ -72,6 +75,7 @@ export function getAllTicketDetails(projectDir: string, now = new Date()): AllTi
       validations.get(definition.id) ?? [],
       events.get(definition.id) ?? [],
       delivery,
+      db.getTicketRiskWaiver(definition.id, ticketDefinitionDigest(definition)),
     ));
     return { version: 1, generated_at: generatedAt, ticket_count: tickets.length, tickets };
   } finally {
@@ -86,6 +90,7 @@ function assembleTicketDetails(
   validationHistory: ValidationSnapshot[],
   events: TicketEvent[],
   delivery: ReturnType<typeof loadDeliveryConfig>,
+  riskPlanWaiver: TicketRiskWaiver | undefined,
 ): TicketDetails {
   const units = delivery?.units.filter((unit) => unit.tickets.includes(definition.id)) ?? [];
   const unitIds = new Set(units.map((unit) => unit.id));
@@ -97,6 +102,7 @@ function assembleTicketDetails(
     validation_history: validationHistory,
     events,
     delivery: { units, stacks },
+    ...(riskPlanWaiver ? { risk_plan_waiver: riskPlanWaiver } : {}),
   };
 }
 
@@ -129,6 +135,7 @@ export function formatTicketDetails(details: TicketDetails): string[] {
   lines.push(...formatField("validation_commands", details.state.validation_commands));
   lines.push(...formatField("validation_notes", details.state.validation_notes));
   lines.push(...formatField("evidence", details.state.evidence));
+  if (details.risk_plan_waiver) lines.push("", "Risk-plan waiver", ...formatField("waiver", details.risk_plan_waiver));
   lines.push("", "Historical validation");
   lines.push(...formatRecords(details.validation_history));
   lines.push("", "Delivery");

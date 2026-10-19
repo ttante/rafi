@@ -39,6 +39,8 @@ export interface QaFailureDeliveryInput {
   reviewNumber: number;
   reviewedSourceStateDigest: string;
   reviewBasisDigest: string;
+  /** Frozen published contract identity when contract enforcement is active. */
+  contractDigest?: string;
   remediationGeneration: number;
   latestBuilderResult: string;
   history: unknown[];
@@ -47,6 +49,13 @@ export interface QaFailureDeliveryInput {
   authorizationId?: string;
   operatorAnswer?: { decisionId: string; answer: string };
 }
+
+/**
+ * Remediation is deliberately smaller than review.  The initial and every
+ * subsequent QA review still sees the complete ticket; only the Builder's
+ * follow-up work is limited to a bounded set of current findings.
+ */
+export const QA_REMEDIATION_CHUNK_SIZE = 2;
 
 export interface QaFailureDeliveryController {
   adapter(): BuilderAdapter | undefined;
@@ -99,6 +108,17 @@ interface QaFailureHandoffV3 {
     rawEvidenceDigest: string;
     value: QaFailureReportV1;
     findingRefs: QaFindingRefV2[];
+  };
+  remediationChunk: {
+    version: 1;
+    ordinal: number;
+    findingIds: string[];
+    findingKeys: string[];
+    sourceDigest: string;
+    contractBinding: { kind: "published-contract" | "review-basis"; digest: string };
+    reviewBasisDigest: string;
+    reviewAttemptId: string;
+    finalIndependentReviewRequired: true;
   };
   latestBuilderResult: {
     rawResponseDigest: string;
@@ -177,6 +197,7 @@ export class QaFailureDeliveryService {
         prior = read.atomic(() => read.transitionQaFailureHandoff(handoffId, "recheck-required", { receiptDigest, responseDigest: historical.responseDigest, providerTurnId: historical.providerTurnId, detail: "Linked confirmed historical remediation idempotently; fresh source-bound QA required" }));
       }
       if (prior && prior.state !== "prepared") {
+        validateReplayBinding(read, input, prior);
         const raw = prior.receiptDigest ? read.getEvidence(prior.receiptDigest) : undefined;
         const receipt = raw ? JSON.parse(raw.toString()) as { version: number; outcome?: QaDeliveryOutcome; turnRecordId?: string } : undefined;
         const accepted = prior.state === "recheck-required" && read.qaRemediationAttempt(prior.operationId)?.status === "succeeded";
@@ -197,7 +218,8 @@ export class QaFailureDeliveryService {
     if (!builder) return { ok: false, outcome: "delivery-uncertain", detail: "Builder session unavailable" };
     const preBoundary = await phase("source-before-preparation", () => captureFrozenQaSourceAsync(input.builderWorktree));
     if (preBoundary.digest !== input.reviewedSourceStateDigest) return this.drift(input, "source-drift-before-delivery", preBoundary.digest);
-    const findingRefs = createQaFindingRefs({ runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, rawFindingIds: input.report.findings.map(f => f.id) });
+    const chunkFindingIds = selectRemediationChunk(input);
+    const findingRefs = createQaFindingRefs({ runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, rawFindingIds: chunkFindingIds });
     const handoff = this.buildHandoff(input, preBoundary, findingRefs);
     let instruction = renderQaFailureHandoff(handoff) + (input.operatorAnswer ? `\nAuthorized operator answer (${input.operatorAnswer.decisionId}): ${JSON.stringify(input.operatorAnswer.answer)}` : "");
     enforceMandatoryPromptLimit(Buffer.from(instruction));
@@ -406,7 +428,7 @@ export class QaFailureDeliveryService {
       }
       let graphRequest = false;
       try { graphRequest = Boolean(turn && parseGraphRequest(turn.cleanedResponse ?? turn.text)); } catch (caught) { errors.push(String(caught)); }
-      const contract = turn && !graphRequest ? parseBuilderQaRemediationContract(turn.cleanedResponse ?? turn.text, { handoffId: qaDigest("qa-failure-handoff", { runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, remediationGeneration: input.remediationGeneration + 1 }), findings: createQaFindingRefs({ runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, rawFindingIds: input.report.findings.map(f => f.id) }) }) : undefined;
+      const contract = turn && !graphRequest ? parseBuilderQaRemediationContract(turn.cleanedResponse ?? turn.text, { handoffId: qaDigest("qa-failure-handoff", { runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, remediationGeneration: input.remediationGeneration + 1 }), findings: createQaFindingRefs({ runId: input.runId, ticketId: input.ticket.id, reviewAttemptId: input.reviewAttemptId, reportDigest: input.reportDigest, rawFindingIds: selectRemediationChunk(input) }) }) : undefined;
       record.parserErrors = [...(contract?.errors ?? []), ...(turn?.continuityErrors ?? [])];
       record.validationErrors = errors;
       if (contract?.report) record.parsedResponseDigest = db.putEvidence("qa", Buffer.from(canonicalEvidence(contract.report)));
@@ -479,8 +501,23 @@ export class QaFailureDeliveryService {
         occurrenceId: reportOccurrenceId(input.runId, input.ticket.id, input.reviewNumber),
         digest: input.reportDigest,
         rawEvidenceDigest: input.reportDigest,
-        value: input.report,
+        // The complete report remains host-retained under rawEvidenceDigest.
+        // Builder receives only the bounded remediation chunk.
+        value: { ...input.report, findings: input.report.findings.filter((finding) => findingRefs.some((ref) => ref.rawId === finding.id)) },
         findingRefs,
+      },
+      remediationChunk: {
+        version: 1 as const,
+        ordinal: input.remediationGeneration + 1,
+        findingIds: findingRefs.map((finding) => finding.rawId),
+        findingKeys: findingRefs.map((finding) => finding.findingKey),
+        sourceDigest: input.reviewedSourceStateDigest,
+        contractBinding: input.contractDigest
+          ? { kind: "published-contract" as const, digest: input.contractDigest }
+          : { kind: "review-basis" as const, digest: input.reviewBasisDigest },
+        reviewBasisDigest: input.reviewBasisDigest,
+        reviewAttemptId: input.reviewAttemptId,
+        finalIndependentReviewRequired: true as const,
       },
       latestBuilderResult: {
         rawResponseDigest: evidenceDigest(input.latestBuilderResult),
@@ -519,6 +556,8 @@ export function renderQaFailureHandoff(handoff: QaFailureHandoffV3): string {
     `Remediation generation: ${handoff.scope.remediationGeneration}`,
     `Reviewed source digest: ${handoff.source.reviewedContentDigest}`,
     `Review basis digest: ${handoff.source.reviewBasisDigest}`,
+    `Contract binding: ${JSON.stringify(handoff.remediationChunk.contractBinding)}`,
+    `Remediation chunk: ${JSON.stringify(handoff.remediationChunk)}`,
     `Captured at: ${handoff.source.capturedAt}`,
     `Builder worktree: ${handoff.source.worktreePath}`,
     `Git directory: ${handoff.source.gitDir}`,
@@ -528,7 +567,7 @@ export function renderQaFailureHandoff(handoff: QaFailureHandoffV3): string {
     `Latest Builder result digest: ${handoff.latestBuilderResult.rawResponseDigest}`,
     `Latest Builder result summary${handoff.latestBuilderResult.summaryTruncated ? " (truncated)" : ""}:\n${handoff.latestBuilderResult.summary}`,
     `Current validated QA failure report digest: ${handoff.report.digest}`,
-    `Current validated QA failure report:\n${JSON.stringify(handoff.report.value, null, 2)}`,
+    `Current validated QA remediation chunk:\n${JSON.stringify(handoff.report.value, null, 2)}`,
     `Raw QA finding ID to host finding key mapping:\n${findingMap}`,
     `Prior QA/report/remediation history:\n${handoff.history.length ? JSON.stringify(handoff.history, null, 2) : "(none)"}`,
     ...(handoff.plannerRemediation ? [
@@ -584,8 +623,9 @@ function boundedUtf8(text: string, maximumBytes: number): { text: string; trunca
 function responseInstructions(handoff: QaFailureHandoffV3): string {
   return [
     `QA failure handoff ID: ${handoff.handoffId}`,
-    `Required finding identities: ${JSON.stringify(handoff.report.findingRefs.map(f => ({ finding_key: f.findingKey, raw_id: f.rawId })))}`,
-    "Address, dispute with evidence, or mark blocked every current finding. A Builder claim never approves QA findings.",
+    `Required finding identities for this remediation chunk: ${JSON.stringify(handoff.report.findingRefs.map(f => ({ finding_key: f.findingKey, raw_id: f.rawId })))}`,
+    "Address, dispute with evidence, or mark blocked every finding in this remediation chunk. Do not address findings outside the chunk. A Builder claim never approves QA findings.",
+    "This is only a bounded remediation chunk. It does not approve the ticket. Any source change invalidates this chunk's source binding, and Rafi must perform a fresh full independent QA review afterward.",
     "The envelope must be the first non-empty content of the cleaned response. STEP_STATUS must be the final non-empty line. No prologue, trailing prose, duplicate keys, unknown or missing findings.",
     "In raw output, put the required RAFI_CONTINUITY_DELTA record between the envelope end and STEP_STATUS. The continuity wrapper removes only that record before contract validation.",
     `${BUILDER_QA_REMEDIATION_START}\n${JSON.stringify({ version: 3, handoff_id: handoff.handoffId, summary: "Truthful result", findings: handoff.report.findingRefs.map(f => ({ finding_key: f.findingKey, raw_id: f.rawId, disposition: "disputed", changes: ["Explain actual changes or why none were needed"], evidence: "Actual evidence", verification: [{ check: "Actual verification", outcome: "not_run", evidence: "Actual reason" }] })), observations: [] })}\n${BUILDER_QA_REMEDIATION_END}\nSTEP_STATUS: done | summary="short truthful summary"`,
@@ -593,6 +633,56 @@ function responseInstructions(handoff: QaFailureHandoffV3): string {
     'If a decision is required, use STEP_STATUS: needs_input | question="actual unanswered question" without fabricating an envelope or answer.',
     `Authoritative V3 schema: ${JSON.stringify(builderQaRemediationReportV3Schema)}`,
   ].join("\n\n");
+}
+
+export function selectQaRemediationFindingIds(report: QaFailureReportV1): string[] {
+  const ids = report.findings.slice(0, QA_REMEDIATION_CHUNK_SIZE).map((finding) => finding.id);
+  if (!ids.length) throw new Error("QA remediation cannot create a chunk without a validated finding");
+  return ids;
+}
+
+function selectRemediationChunk(input: QaFailureDeliveryInput): string[] {
+  return selectQaRemediationFindingIds(input.report);
+}
+
+function currentPublishedContractDigest(db: WorkflowDb, input: QaFailureDeliveryInput): string | undefined {
+  if (!input.contractDigest) return undefined;
+  const admission = db.assertAdmittedWork(input.runId, input.ticket.id);
+  const preparation = db.qaPreparationStore();
+  const contractHead = preparation.head(input.runId, input.ticket.id, admission.requirementsDigest);
+  return contractHead.state === "ready" && contractHead.digest ? preparation.contract(contractHead.digest).contentDigest : undefined;
+}
+
+function validateReplayBinding(db: WorkflowDb, input: QaFailureDeliveryInput, prior: ReturnType<WorkflowDb["qaFailureHandoff"]>): void {
+  if (!prior || prior.runId !== input.runId || prior.ticketId !== input.ticket.id || prior.reviewAttemptId !== input.reviewAttemptId
+    || prior.reportDigest !== input.reportDigest || prior.generation !== input.remediationGeneration + 1
+    || prior.reviewedContentDigest !== input.reviewedSourceStateDigest || prior.reviewBasisDigest !== input.reviewBasisDigest) {
+    throw new Error("Replayed QA remediation handoff does not match the current review, source, or review basis");
+  }
+  if (input.contractDigest && currentPublishedContractDigest(db, input) !== input.contractDigest) {
+    throw new Error("Replayed QA remediation handoff has a stale or changed host-published contract binding");
+  }
+  if (prior.handoffDigest) {
+    const raw = db.getEvidence(prior.handoffDigest);
+    if (!raw) throw new Error("Replayed QA remediation handoff is missing its durable request evidence");
+    const handoff = JSON.parse(raw.toString()) as Partial<QaFailureHandoffV3>;
+    const chunk = handoff.remediationChunk;
+    const expectedBinding = input.contractDigest
+      ? { kind: "published-contract", digest: input.contractDigest }
+      : { kind: "review-basis", digest: input.reviewBasisDigest };
+    // Older durable handoffs predate chunk metadata. Their review/source/basis
+    // bindings were checked above; preserve idempotent recovery for those
+    // records, while requiring complete chunk metadata for new handoffs.
+    if (!chunk) return;
+    const legacyChunk = chunk as unknown as { contractDigest?: unknown };
+    const storedBinding = chunk.contractBinding ?? (typeof legacyChunk.contractDigest === "string"
+      ? { kind: input.contractDigest ? "published-contract" as const : "review-basis" as const, digest: legacyChunk.contractDigest }
+      : undefined);
+    if (chunk.sourceDigest !== input.reviewedSourceStateDigest || chunk.reviewBasisDigest !== input.reviewBasisDigest
+      || chunk.reviewAttemptId !== input.reviewAttemptId || storedBinding?.kind !== expectedBinding.kind || storedBinding?.digest !== expectedBinding.digest) {
+      throw new Error("Replayed QA remediation chunk binding is stale or incomplete");
+    }
+  }
 }
 
 function validateReviewBinding(db: WorkflowDb, input: QaFailureDeliveryInput) {
@@ -607,6 +697,10 @@ function validateReviewBinding(db: WorkflowDb, input: QaFailureDeliveryInput) {
     || head.state !== "review-failed" || head.reviewNumber !== input.reviewNumber || head.sourceStateDigest !== input.reviewedSourceStateDigest
     || head.reviewBasisDigest !== input.reviewBasisDigest || !head.openReportDigests.includes(input.reportDigest)) {
     throw new Error("Builder remediation binding does not match the current failed review and open report occurrence");
+  }
+  if (input.contractDigest) {
+    const currentContractDigest = currentPublishedContractDigest(db, input);
+    if (currentContractDigest !== input.contractDigest) throw new Error("Builder remediation contract binding is stale or does not match the host-published QA contract");
   }
   return head;
 }

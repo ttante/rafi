@@ -29,6 +29,7 @@ Runtime behavior not fully expressible in Commander help:
 - Authorized batch tickets and requested count are retained separately from started tickets. Recovery excludes completed work and never adds newly discovered tickets automatically. Legacy records without original scope require reconciliation before whole-build completion can be certified.
 - `rafi create --runtime <both|claude|codex>` controls `harness.targets`. `--defaults` keeps both targets unless `--runtime` is supplied.
 - `rafi compile` emits native artifacts only for configured targets: Codex writes `AGENTS.md`, `.codex/agents/*`, and `.agents/skills/*`; Claude writes `CLAUDE.md`, `.claude/agents/*`, and `.claude/skills/*`. `.rafi/compiled/<role>/*` is always emitted. Files for unselected targets are preserved, not deleted.
+- `rafi compile` automatically migrates the legacy `qa_preparation: { mode: ... }` object to `qa_preparation: true|false` plus `qa_preparation_shadow` when applicable. A custom legacy timing policy is retained as `qa_preparation_wall_time_ms`; no timing limits are silently discarded. Manager project evidence exposes the QA-preparation mode, migration state, and ready/pending/blocked contract counts for the focused build.
 - In `agent_files.mode: append` or `--root-file-mode append`, Rafi appends generated guidance inline unless that would exceed the target runtime's root-file startup guard. Overflow writes generated guidance to a target-specific sidecar (`AGENTS-rafi.md` or `CLAUDE-rafi.md`) and inserts a compact managed reference block near the top of the root file. Claude `@file` imports still load into Claude's context; this keeps root files short, but it is not a Claude context-reduction mechanism.
 - `rafi plan`, `rafi start`, `ai-foreman start`, and `tickets populate` use a single `harness.targets` value from `rafi-config.yaml` when `--agent` is omitted. Missing config or both targets default to Claude.
 - Interactive runtime auth/readiness failures, including structured failures after the initial probe, offer retry, verified switch to the other runtime, or cancel. A switch starts a fresh provider session and reports lost conversational continuity. Cancel keeps generated files and installed packages in place. Non-interactive and `--yes` runs fail clearly instead of switching automatically. Resume/continue flows do not offer switching because exact sessions are provider- and location-scoped; the stored binding must validate against the original canonical worktree before any turn is sent.
@@ -110,6 +111,9 @@ Commands:
                                                       source registry.
   discover [options] [project]                        Run a read-only project continuation
                                                       discovery report.
+  qa-rehearse-rollback                                Test rollback of the current uncommitted
+                                                      changes in an independent temporary
+                                                      repository.
   compile [options] <project>                         Re-render .claude/, .codex/, AGENTS.md, and
                                                       role bundles from an existing
                                                       rafi-config.yaml.
@@ -481,7 +485,12 @@ Options:
                                plan:doctor)
   --interview-id <id>          recover an exact saved population interview (normally selected by
                                plan:doctor)
+  --proposal-file <path>       validate and publish a manually reviewed frozen population proposal
   --authorize-retire <ids...>  exact ticket IDs authorized to become obsolete in computer-run mode
+  --waive-risk-notes <ids...>  publish only these exact unresolved Medium/High-risk tickets with
+                               explicit risk-plan waivers
+  --waiver-reason <text>       required rationale for --waive-risk-notes
+  --waiver-actor <name>        operator recorded with the population waiver (default: "operator")
   -y, --yes                    computer-run approval; retirements still require --authorize-retire
                                exact IDs
   -h, --help                   display help for command
@@ -1372,6 +1381,8 @@ Commands:
   inspect [options] <bundle>                   Inspect and verify a Rafi state bundle.
   import [options] <projectOrBundle> [bundle]  Restore a portable Rafi state bundle into an
                                                existing matching source checkout.
+  rebind [options] [project]                   Inspect or explicitly rebind copied local build
+                                               state to this checkout.
   help [command]                               display help for command
 ```
 
@@ -1435,6 +1446,7 @@ Commands:
   export [options] [project]                   Write a portable Rafi state bundle for sequential machine handoff.
   inspect [options] <bundle>                   Inspect and verify a Rafi state bundle.
   import [options] <projectOrBundle> [bundle]  Restore a portable Rafi state bundle into an existing matching source checkout.
+  rebind [options] [project]                   Inspect or explicitly rebind copied local build state to this checkout.
   help [command]                               display help for command
 ```
 
@@ -1753,5 +1765,35 @@ Arguments:
   project     project directory (default: discover from cwd)
 
 Options:
+  -h, --help  display help for command
+```
+
+### `rafi state rebind --help`
+
+```text
+Usage: rafi state rebind [options] [project]
+
+Inspect or explicitly rebind copied local build state to this checkout.
+
+Arguments:
+  project     project directory (default: ".")
+
+Options:
+  -y, --yes   confirm rebinding copied local state
+  -h, --help  display help for command
+```
+
+### `ai-foreman state rebind --help`
+
+```text
+Usage: ai-foreman state rebind [options] [project]
+
+Inspect or explicitly rebind copied local build state to this checkout.
+
+Arguments:
+  project     project directory (default: ".")
+
+Options:
+  -y, --yes   confirm rebinding copied local state
   -h, --help  display help for command
 ```

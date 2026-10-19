@@ -38,14 +38,17 @@ importers:
         specifier: 4.10.38
         version: 4.10.38
       rafi-spec:
-        specifier: 0.8.15
+        specifier: 0.8.16
         version: link:../spec
       special-agents:
-        specifier: 0.8.15
+        specifier: 0.8.16
         version: link:../special-agents
       yaml:
         specifier: ^2.5.1
         version: 2.9.0
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.13
@@ -73,7 +76,7 @@ importers:
         specifier: ^1.4.0
         version: 1.5.0
       ai-foreman:
-        specifier: 1.7.26
+        specifier: 1.7.27
         version: link:../ai-foreman
       ajv:
         specifier: ^8.20.0
@@ -82,14 +85,17 @@ importers:
         specifier: ^12.1.0
         version: 12.1.0
       rafi-spec:
-        specifier: 0.8.15
+        specifier: 0.8.16
         version: link:../spec
       special-agents:
-        specifier: 0.8.15
+        specifier: 0.8.16
         version: link:../special-agents
       yaml:
         specifier: ^2.5.1
         version: 2.9.0
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: ^20.14.0
@@ -106,6 +112,9 @@ importers:
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: ^20.14.0
@@ -123,7 +132,7 @@ importers:
         specifier: ^8.20.0
         version: 8.20.0
       rafi-spec:
-        specifier: 0.8.15
+        specifier: 0.8.16
         version: link:../spec
       yaml:
         specifier: ^2.5.1
@@ -1914,5 +1923,4 @@ snapshots:
       zod: 4.4.3
     optional: true
 
-  zod@4.4.3:
-    optional: true
+  zod@4.4.3: {}

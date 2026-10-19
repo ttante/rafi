@@ -5,6 +5,8 @@ import { execFileSync } from "node:child_process";
 import { readInterviewRecords } from "./interviews.js";
 import { cmdQueue, cmdValidate } from "./tickets/commands.js";
 import { getAllTicketDetails } from "./tickets/details.js";
+import { loadRafiConfigObject } from "./tickets/setupConfig.js";
+import { resolveQaPreparationConfig } from "./qaPreparationPolicy.js";
 
 function collectProjectState(root: string): NonNullable<ManagerProjectDiagnosticReportV1["projectState"]> {
   const state: NonNullable<ManagerProjectDiagnosticReportV1["projectState"]> = { configPresent: existsSync(join(root, "rafi-config.yaml")), dirtyPaths: [], planningSessions: [], errors: [] };
@@ -15,6 +17,20 @@ function collectProjectState(root: string): NonNullable<ManagerProjectDiagnostic
   if (existsSync(join(root, ".tickets/config.yaml"))) {
     try { state.tickets = { count: getAllTicketDetails(root).ticket_count, queue: cmdQueue(root), validationIssues: cmdValidate(root).issues }; }
     catch (error) { state.errors.push(String(error)); }
+  }
+  if (state.configPresent) {
+    try {
+      const config = loadRafiConfigObject(root);
+      const legacy = Boolean(config && config.qa_preparation && typeof config.qa_preparation === "object" && !Array.isArray(config.qa_preparation));
+      const policy = resolveQaPreparationConfig(config?.qa_preparation, config?.qa_preparation_shadow === true, config?.qa_preparation_wall_time_ms);
+      state.qaPreparation = {
+        mode: policy.mode,
+        configuration: legacy ? "legacy" : "current",
+        detail: legacy ? "Legacy QA preparation configuration will be rewritten to public booleans by `rafi compile <project>`." : policy.mode === "legacy" ? "QA preparation is disabled; enable qa_preparation: true to require QA requirements before Builder work." : policy.mode === "shadow" ? "QA preparation is collecting non-blocking rollout evidence." : "QA preparation is enabled and requires a ticket contract before Builder work.",
+      };
+    } catch (error) {
+      state.qaPreparation = { mode: "legacy", configuration: "invalid", detail: `QA preparation configuration is invalid: ${error instanceof Error ? error.message : String(error)}` };
+    }
   }
   return state;
 }
@@ -94,6 +110,17 @@ export function collectManagerProjectDiagnostics(projectDir: string, options: Co
     if (initialFocus && !ids.has(initialFocus)) throw new Error(`build run not found: ${initialFocus}`);
     const currentFocus = options.currentFocusRunId ?? initialFocus;
     if (currentFocus && !ids.has(currentFocus)) throw new Error(`build run not found: ${currentFocus}`);
+
+    if (projectState.qaPreparation && currentFocus) {
+      const preparation = workflow.qaPreparation(currentFocus);
+      const states = preparation.works.reduce((counts, work) => {
+        if (work.state === "ready") counts.ready++;
+        else if (["blocked", "incomplete", "uncertain"].includes(work.state)) counts.blocked++;
+        else counts.pending++;
+        return counts;
+      }, { ready: 0, pending: 0, blocked: 0 });
+      projectState.qaPreparation = { ...projectState.qaPreparation, mode: preparation.mode as "legacy" | "shadow" | "enforce", runId: currentFocus, contracts: states };
+    }
 
     const summaries = [...ids].map(runId => mergeSummary({ runId, build: buildById.get(runId), stored: storedById.get(runId), rollup: rollupById.get(runId), workflow: workflowById.get(runId), activeRunId, leaseRunId: lease?.runId, now, schemaVersion: observability.schemaVersion() }))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.createdAt.localeCompare(a.createdAt) || a.runId.localeCompare(b.runId));

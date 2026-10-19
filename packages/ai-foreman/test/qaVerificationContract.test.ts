@@ -1,8 +1,100 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { candidate, assessment } from "./qaPreparationFixtures.js";
-import { assembleContract, contractDigest, draftDigest, validateCandidate, verifyContractDigest } from "../src/qaVerificationContract.js";
+import { candidate, assessment, digest } from "./qaPreparationFixtures.js";
+import { allocateStableCheckIds, assembleContract, bindUniqueBaselineCheckIds, contractDigest, draftDigest, parsePreparationArtifact, renderVerificationContract, validateAssessment, validateCandidate, verifyContractDigest } from "../src/qaVerificationContract.js";
 import { validateDepthDecision, depthObligations, resolveQaPreparationConfig } from "../src/qaPreparationPolicy.js";
+import { normalizeAssessmentMetadata } from "../src/qaPreparation.js";
+
+test("stable check IDs update exact provider-prose references without changing approved text or partial matches", () => {
+  const draft = candidate(); draft.checks[0]!.id = "check-original"; draft.coverage[0]!.checkIds = ["check-original"];
+  draft.checks[0]!.expectedEvidence = ["See check-original; not check-original-extra"];
+  draft.preparationEvidence[0]!.analysis = "Evidence for check-original";
+  draft.unresolved.push({ reason: "Related to check-original", requirementIds: ["req"], checkIds: ["check-original"], material: false, owner: "qa", nextAction: "Inspect check-original" });
+  const originalRequirements = structuredClone(draft.requirements); const allocated = allocateStableCheckIds(draft), id = allocated.checks[0]!.id;
+  assert.notEqual(id, "check-original"); assert.equal(allocated.coverage[0]!.checkIds[0], id);
+  assert.equal(allocated.checks[0]!.expectedEvidence[0], `See ${id}; not check-original-extra`);
+  assert.equal(allocated.preparationEvidence[0]!.analysis, `Evidence for ${id}`);
+  assert.equal(allocated.unresolved[0]!.nextAction, `Inspect ${id}`);
+  assert.deepEqual(allocated.requirements, originalRequirements);
+});
+
+test("preparation parser accepts repeated identical artifacts but rejects conflicting ones", () => {
+  const one = "RAFI_QA_CANDIDATE_START\n{\"checks\":[]}\nRAFI_QA_CANDIDATE_END";
+  assert.deepEqual(parsePreparationArtifact(one + "\n" + one, "RAFI_QA_CANDIDATE"), { checks: [] });
+  assert.throws(() => parsePreparationArtifact(one + "\nRAFI_QA_CANDIDATE_START\n{\"checks\":[1]}\nRAFI_QA_CANDIDATE_END", "RAFI_QA_CANDIDATE"), /unambiguous/);
+  assert.deepEqual(parsePreparationArtifact("The text RAFI_QA_CANDIDATE_START is only a label.\n" + one, "RAFI_QA_CANDIDATE"), { checks: [] });
+  assert.throws(() => parsePreparationArtifact("RAFI_QA_CANDIDATE_START\n{\"checks\":[]}", "RAFI_QA_CANDIDATE"), /Expected exactly one/);
+});
+
+test("stable check ID allocation is idempotent for host IDs copied into baseline references", () => {
+  const allocated = allocateStableCheckIds(candidate());
+  const replay = candidate();
+  replay.baseline = [{
+    id: "baseline-check",
+    checkId: allocated.checks[0]!.id,
+    sourceDigest: digest,
+    phase: "preimplementation-investigation",
+    runtime: "node20",
+    procedure: "Inspect the existing token test",
+    observedAt: "2026-10-09T00:00:00Z",
+    status: "passed",
+    evidenceDigest: digest,
+    relevance: "Existing behavior baseline",
+    expectedTransition: "The postimplementation check remains passing",
+  }];
+  const normalized = allocateStableCheckIds(replay);
+  assert.equal(normalized.baseline[0]!.checkId, normalized.checks[0]!.id);
+});
+
+test("baseline check IDs are repaired only from a unique explicit prerequisite", () => {
+  const draft = candidate();
+  draft.checks[0]!.prerequisiteRefs = ["baseline-node"];
+  draft.baseline = [{ id: "baseline-node", checkId: "", sourceDigest: digest, phase: "preimplementation-investigation", runtime: "node20", procedure: "Check node", observedAt: "2026-10-09T00:00:00Z", status: "passed", evidenceDigest: digest, relevance: "Runtime prerequisite", expectedTransition: "Remains available" }];
+  const normalized = bindUniqueBaselineCheckIds(allocateStableCheckIds(draft));
+  assert.equal(normalized.baseline[0]!.checkId, normalized.checks[0]!.id);
+
+  const ambiguous = structuredClone(draft);
+  ambiguous.checks.push({ ...ambiguous.checks[0]!, id: "second-check" });
+  assert.equal(bindUniqueBaselineCheckIds(allocateStableCheckIds(ambiguous)).baseline[0]!.checkId, "");
+});
+
+test("assessment removes only non-authoritative provider timestamps and names other unexpected properties", () => {
+  const draft = candidate(), review = assessment(draft);
+  const withMetadata = { ...review, createdAt: "2026-01-01T00:00:00Z" };
+  assert.deepEqual(normalizeAssessmentMetadata(withMetadata), review);
+  const extra = { ...withMetadata, inventedAuthority: true };
+  assert.ok(validateAssessment(draft, normalizeAssessmentMetadata(extra), "author").some(issue => issue.includes("inventedAuthority")));
+});
+
+test("material preparation blockers include their reason and next action", () => {
+  const draft = candidate();
+  draft.unresolved.push({ reason: "The approved plan and ticket disagree on documentation scope", requirementIds: ["req"], checkIds: ["check"], material: true, owner: "host", nextAction: "Ask which scope is approved" });
+  assert.ok(validateCandidate(draft, draft.requirements).some(issue => issue.includes("plan and ticket disagree") && issue.includes("Ask which scope is approved")));
+});
+
+test("documentation policy is opt-in, explicit, and delivered with the contract", () => {
+  const disabled = candidate();
+  assert.deepEqual(disabled.documentation, undefined);
+  assert.deepEqual(validateCandidate(disabled, disabled.requirements), []);
+  const enabled = candidate();
+  enabled.documentation = { required: true, targets: ["README.md"], criteria: ["Document the public token-expiry behavior"] };
+  const contract = assembleContract(enabled, enabled.requirements, assessment(enabled), "author");
+  assert.equal(contract.documentation?.required, true);
+  assert.match(renderVerificationContract(contract), /Documentation required: yes/);
+  const incomplete = candidate(); incomplete.documentation = { required: true, targets: [], criteria: [] };
+  assert.match(validateCandidate(incomplete, incomplete.requirements).join(";"), /Documentation policy requires explicit targets and criteria/);
+});
+
+test("independent assessment blockers include their reason and next action", () => {
+  const draft = candidate(), review = assessment(draft);
+  review.concerns.push({ reason: "The proposed verification misses the boundary case", requirementIds: ["req"], checkIds: ["check"], material: true, owner: "host", nextAction: "Add a boundary check" });
+  assert.ok(validateAssessment(draft, review, "author").some(issue => issue.includes("misses the boundary") && issue.includes("Add a boundary check")));
+});
+
+test("invalid coverage identifies the missing check-to-requirement link", () => {
+  const draft = candidate(); draft.checks[0]!.requirementRefs = ["different"];
+  assert.ok(validateCandidate(draft, draft.requirements).some(issue => issue.includes("Invalid coverage req/check") && issue.includes("requirementRefs must include req")));
+});
 
 test("canonical content and draft digests are non-circular, order-stable and sensitive to meaning", () => {
   const draft = candidate(); const review = assessment(draft);
@@ -38,6 +130,10 @@ test("Exceptional requires fresh independent challenge with separate resolved ap
 });
 test("risk minimums, low-risk evidence and policy defaults never depend on size, cost or provider failure", () => {
   assert.equal(resolveQaPreparationConfig(undefined).mode, "legacy");
+  assert.equal(resolveQaPreparationConfig(true).mode, "enforce");
+  assert.equal(resolveQaPreparationConfig(true, true).mode, "shadow");
+  assert.equal(resolveQaPreparationConfig(false).mode, "legacy");
+  assert.throws(() => resolveQaPreparationConfig(false, true), /requires qa_preparation/);
   assert.throws(() => resolveQaPreparationConfig({ mode: "automatic" }));
   assert.throws(() => resolveQaPreparationConfig({ mode: "enforce", wallTimeMs: [1, 2, 3, 4, 5] }));
   const selection = candidate().depthDecision; selection.riskFactors = [{ category: "migration", rationale: "Persisted records change format", references: ["schema.ts:migrate"] }];

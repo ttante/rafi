@@ -30,6 +30,9 @@ export class RecoveringAdapter implements BuilderAdapter {
   private eventPump: Promise<void>;
   private closed = false;
   private contractEnforcing = false;
+  /** Reapply a Codex post-compaction reminder if recovery recreates its adapter. */
+  private qaContractReminder?: string;
+  private qaContractReminderEvent?: Parameters<NonNullable<BuilderAdapter["configureQaContractReminder"]>>[1];
 
   constructor(private readonly opts: RecoveringAdapterOptions) {
     this.adapter = opts.initial;
@@ -46,6 +49,11 @@ export class RecoveringAdapter implements BuilderAdapter {
   enableContractEnforcement(): void { this.contractEnforcing = true; this.adapter.enableContractEnforcement?.(); }
   contractCompactionSequence(): number { return this.adapter.contractCompactionSequence?.() ?? 0; }
   acceptContractDelivery(sequence: number): void { this.adapter.acceptContractDelivery?.(sequence); }
+  configureQaContractReminder(reminder: string, onEvent?: Parameters<NonNullable<BuilderAdapter["configureQaContractReminder"]>>[1]): void {
+    this.qaContractReminder = reminder;
+    this.qaContractReminderEvent = onEvent;
+    this.adapter.configureQaContractReminder?.(reminder, onEvent);
+  }
   async sendTurn(text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     while (true) {
       const result = await this.adapter.sendTurn(text, policy);
@@ -143,6 +151,7 @@ export class RecoveringAdapter implements BuilderAdapter {
     await this.adapter.close().catch(() => {});
     await this.eventPump.catch(() => {});
     this.adapter = await this.opts.recreate(runtime, resumeSessionId, resumeSessionRef);
+    if (this.qaContractReminder) this.adapter.configureQaContractReminder?.(this.qaContractReminder, this.qaContractReminderEvent);
     this.runtime = runtime;
     this.opts.onRuntimeChange?.(runtime);
     this.eventPump = this.forwardEvents(this.adapter);

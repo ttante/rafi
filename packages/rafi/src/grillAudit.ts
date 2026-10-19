@@ -11,6 +11,7 @@ import {
   isGrillMeProviderQuestion,
   type AnsweredProviderQuestion,
 } from "ai-foreman/provider-questions.js";
+import { grillAuditVerdictV1Schema, parseProviderContract } from "rafi-spec";
 
 export { GRILL_ME_STOP_CHOICE } from "ai-foreman/provider-questions.js";
 
@@ -227,19 +228,10 @@ export function parseGrillAuditVerdict(output: string): GrillAuditVerdict {
   const body = output.slice(output.indexOf(GRILL_AUDIT_START) + GRILL_AUDIT_START.length, output.indexOf(GRILL_AUDIT_END)).trim();
   let parsed: unknown;
   try { parsed = JSON.parse(body); } catch { throw new Error("auditor verdict is not valid JSON"); }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("auditor verdict must be an object");
-  const record = parsed as Record<string, unknown>;
-  if (record.status === "complete") {
-    if (typeof record.evidence !== "string" || record.evidence.trim().length < 20) throw new Error("complete audit verdict requires concrete evidence");
-    if (Object.keys(record).some((key) => !["status", "evidence"].includes(key))) throw new Error("complete audit verdict contains unknown fields");
-    return { status: "complete", evidence: record.evidence.trim() };
-  }
-  if (record.status === "needs_user_input") {
-    if (!Array.isArray(record.questions) || record.questions.length < 1 || record.questions.length > 5) {
-      throw new Error("needs_user_input audit verdict requires one to five questions");
-    }
-    if (Object.keys(record).some((key) => !["status", "questions"].includes(key))) throw new Error("needs_user_input audit verdict contains unknown fields");
-    const questions = record.questions.map(parseAuditQuestion);
+  const contract = parseProviderContract(grillAuditVerdictV1Schema, parsed, "grill audit verdict");
+  if (contract.status === "complete") return { status: "complete", evidence: contract.evidence.trim() };
+  if (contract.status === "needs_user_input") {
+    const questions = contract.questions.map(parseAuditQuestion);
     if (new Set(questions.map((question) => question.id)).size !== questions.length) throw new Error("audit question ids must be unique");
     return { status: "needs_user_input", questions };
   }

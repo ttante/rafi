@@ -352,6 +352,47 @@ export function finishRecoveredTicketScope(projectDir: string, run: BuildRunReco
   }), "recoverable");
 }
 
+/**
+ * Branch recovery may run one preserved ticket at a time.  Its returned summary
+ * is therefore never proof that the original admitted run is complete.  Use the
+ * tracker and (when enabled) each ticket's durable QA terminal state to derive
+ * the original scope before changing the run's terminal status.
+ */
+export function branchTicketScopeProgress(projectDir: string, run: BuildRunRecordV2): { completed: string[]; remaining: string[] } | undefined {
+  if (run.branchMode === "current" || !run.tickets.length || !isTicketsInitialized(projectDir)) return undefined;
+  if (run.status === "completed") return { completed: [...run.tickets], remaining: [] };
+  let state: Database.Database | undefined;
+  let workflow: WorkflowDb | undefined;
+  try {
+    const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);
+    state = new Database(paths.stateDb, { readonly: true, fileMustExist: true });
+    workflow = new WorkflowDb(projectDir);
+    const read = state.prepare("SELECT status FROM ticket_state WHERE ticket_id=?");
+    const qaEnabled = "qaEnabled" in run && run.qaEnabled === true;
+    const completed = run.tickets.filter((ticket) => {
+      if ((read.get(ticket) as { status: string } | undefined)?.status !== "done") return false;
+      // A tracker row cannot replace a missing or unfinished QA verdict.
+      return !qaEnabled || ["completed", "waived"].includes(workflow!.qaTicketHead(run.runId, ticket).state);
+    });
+    return { completed, remaining: run.tickets.filter(ticket => !completed.includes(ticket)) };
+  } catch {
+    // Missing tracker/QA evidence must retain a recoverable scope.
+    return { completed: [], remaining: [...run.tickets] };
+  } finally { workflow?.close(); state?.close(); }
+}
+
+/** Complete an isolated-branch run only after its entire admitted scope is proven done. */
+export function finishBranchTicketScope(projectDir: string, run: BuildRunRecordV2, checkpoint: string): BuildRunRecordV2 {
+  if (run.branchMode === "current") throw new Error("Branch scope reconciliation requires an isolated branch run");
+  const progress = branchTicketScopeProgress(projectDir, run);
+  if (!progress) throw new Error("Branch scope reconciliation requires initialized ticket evidence");
+  if (!progress.remaining.length) return completeBuildRun(projectDir, run);
+  return releaseBuildLease(projectDir, checkpointBuildRun(projectDir, run, checkpoint, {
+    currentTicket: progress.remaining[0],
+    progress: { ...run.progress, completedTickets: progress.completed, remainingTickets: progress.remaining, nextAction: `Resume ${progress.remaining[0]}` },
+  }), "recoverable");
+}
+
 /** A recovered boundary cannot authorize work on a still-blocked remainder. */
 export function hasRunnableBuildRemainder(projectDir: string, run: BuildRunRecordV2): boolean {
   if (run.authorizedBatch && run.progress.completedTickets.length >= run.authorizedBatch.requestedSteps) return false;

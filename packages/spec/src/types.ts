@@ -475,6 +475,7 @@ export interface ResolvedAgentSettings {
 
 export interface StructuredPlanSlice {
   qa_preparation?: import("./qaPreparation.js").QaPreparationDepthDecisionV1;
+  documentation?: import("./qaPreparation.js").DocumentationPolicyV1;
   slice_ref: string;
   title: string;
   summary: string;
@@ -905,7 +906,12 @@ export interface RuntimeArtifactConfig {
  * the library defaults, which reproduce today's hardcoded guidance.
  */
 export interface ProjectConfig {
-  qa_preparation?: Partial<import("./qaPreparation.js").QaPreparationConfigV1> & { mode: import("./qaPreparation.js").QaPreparationMode };
+  /** Public switch for QA requirements before Builder work. The object form is accepted only for legacy config migration. */
+  qa_preparation?: boolean | (Partial<import("./qaPreparation.js").QaPreparationConfigV1> & { mode: import("./qaPreparation.js").QaPreparationMode });
+  /** Non-blocking rollout measurement. Valid only when qa_preparation is true. */
+  qa_preparation_shadow?: boolean;
+  /** Optional per-depth QA preparation ceilings. Kept when migrating legacy mode objects. */
+  qa_preparation_wall_time_ms?: import("./qaPreparation.js").QaPreparationConfigV1["wallTimeMs"];
   graph?: import("./graph.js").GraphConfigV1;
   appName: string;
   timezone: string;
@@ -1241,7 +1247,7 @@ export interface ManagerProjectDiagnosticReportV1 {
   generatedAt: string;
   projectDigest: string;
   totalRunCount: number;
-  projectState?: { configPresent: boolean; dirtyPaths: string[]; planningSessions: Array<{ id: string; workflow: string; status: string; checkpoint: string; updatedAt: string; failure?: string }>; tickets?: { count: number; queue: unknown[]; validationIssues: unknown[] }; errors: string[] };
+  projectState?: { configPresent: boolean; dirtyPaths: string[]; planningSessions: Array<{ id: string; workflow: string; status: string; checkpoint: string; updatedAt: string; failure?: string }>; tickets?: { count: number; queue: unknown[]; validationIssues: unknown[] }; qaPreparation?: { mode: "legacy" | "shadow" | "enforce"; configuration: "current" | "legacy" | "invalid"; detail: string; runId?: string; contracts?: { ready: number; pending: number; blocked: number } }; errors: string[] };
   dateRange?: { earliestCreatedAt: string; latestCreatedAt: string; latestCompletedAt?: string };
   statusDistribution: Record<string, number>;
   capabilityDistribution: Record<string, number>;

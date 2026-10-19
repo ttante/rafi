@@ -211,6 +211,11 @@ export class AgentStatusReporter {
 export class RoleStatusAdapter implements BuilderAdapter {
   readonly agent: "claude" | "codex";
   constructor(private readonly adapter: BuilderAdapter, private readonly onActive: (adapter: BuilderAdapter) => void, private readonly onClose: () => void) { this.agent = adapter.agent; }
+  contractCapabilities() { return this.adapter.contractCapabilities?.() ?? { sameSessionAcceptance: false, nativeCompactionBarrier: false }; }
+  enableContractEnforcement(): void { this.adapter.enableContractEnforcement?.(); }
+  contractCompactionSequence(): number { return this.adapter.contractCompactionSequence?.() ?? 0; }
+  acceptContractDelivery(sequence: number): void { this.adapter.acceptContractDelivery?.(sequence); }
+  configureQaContractReminder(reminder: string, onEvent?: Parameters<NonNullable<BuilderAdapter["configureQaContractReminder"]>>[1]): void { this.adapter.configureQaContractReminder?.(reminder, onEvent); }
   async sendTurn(text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> { this.onActive(this.adapter); return this.adapter.sendTurn(text, policy); }
   sessionId(): string | undefined { return this.adapter.sessionId(); }
   sessionRef(): import("rafi-spec").ProviderSessionRefV1 | undefined { return this.adapter.sessionRef?.(); }

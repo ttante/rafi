@@ -53,6 +53,7 @@ import { buildManagerCommand } from "ai-foreman/cli/manager.js";
 import { buildStateCommand } from "ai-foreman/cli/state.js";
 import { buildAttachCommand, buildDecideCommand, buildStopCommand } from "ai-foreman/cli/recovery.js";
 import { withActivityContext } from "ai-foreman/activity.js";
+import { rehearseRollback } from "ai-foreman/qa-rollback-rehearsal.js";
 import { accent, error as errorText, sanitizeTerminalText, success } from "ai-foreman/terminal-style.js";
 import { buildPlanCommand, runPlanWorkflow } from "./plan.js";
 import { resolvePlanningRuntime } from "./planningRuntime.js";
@@ -84,6 +85,14 @@ const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 )?.version as string;
 
+// Provider shells can resolve a different globally installed `rafi`. Pass the
+// exact executable and CLI entry that launched this build to its Builder.
+if (process.platform !== "win32") {
+  const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  process.env.RAFI_REHEARSAL_CLI_ENTRY = fileURLToPath(import.meta.url);
+  process.env.RAFI_REHEARSAL_COMMAND = `${shellQuote(process.execPath)} ${shellQuote(process.env.RAFI_REHEARSAL_CLI_ENTRY)} qa-rehearse-rollback`;
+}
+
 export const program = new Command();
 program.addCommand(buildGraphCommand());
 program
@@ -93,6 +102,10 @@ program
 
 program.addCommand(buildSourcesCommand());
 program.addCommand(buildDiscoveryCommand());
+
+program.command("qa-rehearse-rollback")
+  .description("Test rollback of the current uncommitted changes in an independent temporary repository.")
+  .action(() => console.log(rehearseRollback(process.cwd())));
 
 program
   .command("compile")
@@ -110,7 +123,7 @@ program
     }
     if (loaded.migrated) {
       writeRafiConfigYaml(targetDir, loaded.config);
-    console.log(`${success("rafi: migrated")} ${LEGACY_PROJECT_CONFIG_FILE} to ${RAFI_CONFIG_FILE}; you can delete ${LEGACY_PROJECT_CONFIG_FILE}.`);
+      console.log(`${success("rafi: migrated")} configuration to the current public format.`);
     }
     await compileAsync(targetDir, loaded.config, {
       force: opts.force as boolean | undefined,
@@ -266,6 +279,17 @@ program
       if (isCancel(runtimeSelection)) process.exit(0);
       checkpointCreateAnswer("docs-root", "runtimeTargets", String(runtimeSelection));
 
+      const qaPreparation = await select({
+        message: "Prepare QA requirements before Builder work?",
+        initialValue: answers.qaPreparation ? "yes" : "no",
+        options: [
+          { value: "yes", label: "Yes — prepare QA requirements before each Builder ticket (Recommended)" },
+          { value: "no", label: "No — use the legacy Builder-first flow" },
+        ],
+      });
+      if (isCancel(qaPreparation)) process.exit(0);
+      checkpointCreateAnswer("qa-preparation", "qaPreparation", qaPreparation === "yes");
+
       const docsRoot = await chooseDocsRootForCreate(targetDir, docsRootOption, {
         interactive: true,
         select,
@@ -354,6 +378,8 @@ program
         usesAI: Boolean(usesAI),
         runtimeTargets: runtimeSelectionToTargets(parseRuntimeSelection(runtimeSelection) ?? "both"),
         qa: true,
+        qaPreparation: qaPreparation === "yes",
+        qaPreparationShadow: false,
         docsRoot,
         planningSources,
         sourceStorage,
@@ -466,9 +492,10 @@ program.addCommand(buildPlanDoctorCommand({ resume: resumeInterview }));
 function loadRafiConfig(targetDir: string): { config: ProjectConfig; migrated: boolean } | undefined {
   const configPath = join(targetDir, RAFI_CONFIG_FILE);
   if (existsSync(configPath)) {
+    const raw = parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown>;
     return {
-      config: normalizeProjectConfig(parseYaml(readFileSync(configPath, "utf8"))),
-      migrated: false,
+      config: normalizeProjectConfig(raw),
+      migrated: Boolean(raw && typeof raw.qa_preparation === "object" && raw.qa_preparation !== null && !Array.isArray(raw.qa_preparation)),
     };
   }
   const legacyPath = join(targetDir, LEGACY_PROJECT_CONFIG_FILE);

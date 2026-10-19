@@ -50,7 +50,20 @@ export function evaluateTicketEligibility(context: EligibilityContext, ticketId:
 }
 
 export function eligibleTickets(context: EligibilityContext): TicketDef[] {
-  return implementationWindow(context.tickets, context.states, context.implementationLimit)
+  return runnableTickets(context, implementationWindow(context.tickets, context.states, context.implementationLimit));
+}
+
+/**
+ * Runnable work across the complete unfinished queue.  This deliberately does
+ * not apply the implementation window: callers that are admitting a fresh
+ * build use it to avoid a blocked early ticket hiding later independent work.
+ */
+export function globallyEligibleTickets(context: EligibilityContext): TicketDef[] {
+  return runnableTickets(context, context.tickets);
+}
+
+function runnableTickets(context: EligibilityContext, candidates: readonly TicketDef[]): TicketDef[] {
+  return candidates
     .filter((ticket) => {
       const state = context.states.get(ticket.id);
       if (["done", "canceled", "obsolete", "in_progress"].includes(state?.status ?? "planned") || state?.owner) return false;

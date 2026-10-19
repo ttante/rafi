@@ -33,6 +33,9 @@ for (const alias of ['resume', 'build:resume']) for (const role of ['builder', '
     const git = (...args) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
     git('init', '-q'); git('config', 'user.email', 'recovery@example.test'); git('config', 'user.name', 'Recovery Test');
     const config = buildProjectConfig(defaultAnswers());
+    // This provider fixture models recovery of pre-preparation runs; it does
+    // not implement the depth/contract protocol used by enforcing mode.
+    config.qa_preparation = false;
     config.agent_defaults = { version: 1, revision: 1, roles: Object.fromEntries(['builder', 'qa', 'planner'].map(name => [name, { make: 'codex', model: 'default', reasoning: 'default', fast: false, session_strategy: 'compact' }])) };
     writeFileSync(join(root, 'rafi-config.yaml'), stringify(config));
     writeFileSync(join(root, '.gitignore'), '.rafi/\n.foreman/\n.tickets/\n');

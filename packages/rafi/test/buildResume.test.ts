@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -12,7 +13,10 @@ import { createBuildRun as createUnadmittedBuildRun, persistBuildSession, projec
 import { createProviderSessionRef } from "ai-foreman/session-identity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import { assertBuildAssignmentReconciled, isInterruptedBuilderRecovery } from "ai-foreman/build-assignment.js";
-import { createQaRecoveryPacket } from "ai-foreman/qa-recovery.js";
+import { appendQaRecoveryResource, createQaRecoveryPacket, loadQaRecoveryPacket } from "ai-foreman/qa-recovery.js";
+import { captureFrozenQaSource } from "../../ai-foreman/dist/qaSnapshot.js";
+import { loadTickets } from "../../ai-foreman/dist/tickets/ticketLoader.js";
+import { qaDigest, type QaTurnIntentV2 } from "ai-foreman/qa-protocol-v2.js";
 import { HandoffService } from "ai-foreman/handoffs.js";
 import { assertQaRecoveryHandoffInventory } from "../../ai-foreman/dist/qaReview.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
@@ -26,9 +30,13 @@ function createBuildRun(input:Parameters<typeof createUnadmittedBuildRun>[0]) {
   return run;
 }
 
-function initializedProject(): string {
+function initializedProject(options: { legacyPreparation?: boolean } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), "rafi-build-resume-"));
-  writeFileSync(join(dir, "rafi-config.yaml"), stringify(buildProjectConfig(defaultAnswers())), "utf8");
+  const config = buildProjectConfig(defaultAnswers());
+  // These legacy recovery fixtures deliberately have no preparation receipt;
+  // enforcing-mode coverage must instead create a real bound contract.
+  if (options.legacyPreparation) config.qa_preparation = false;
+  writeFileSync(join(dir, "rafi-config.yaml"), stringify(config), "utf8");
   mkdirSync(join(dir, ".tickets"), { recursive: true });
   writeFileSync(join(dir, ".tickets/config.yaml"), "app_name: Test\n", "utf8");
   writeFileSync(join(dir, ".tickets/tickets.yaml"), "tickets: []\n", "utf8");
@@ -55,6 +63,44 @@ function scopedSession(dir: string, sessionId: string, provider: "claude" | "cod
     configRoot: dir,
     source: "observed",
   });
+}
+
+function scopedQaSession(dir: string, sessionId: string) {
+  return { ...createProviderSessionRef({ provider: "codex", sessionId, role: "qa", stream: "qa", cwd: dir, configRoot: dir, source: "observed" }), validatedAt: new Date().toISOString() };
+}
+
+/** A fully-bound read-only QA turn stopped after provider dispatch. */
+function interruptedQaDispatchFixture(dir: string, options: { withoutDispatchSessionRef?: boolean } = {}) {
+  initializeGit(dir);
+  const definition = { id: "T001", order: 1, title: "Feature", area: "tests", priority: "P2", size: "XS", risk: "Low", depends_on: [], summary: "Feature", acceptance: ["Feature works"], required_tests: [], likely_files: ["tracked.txt"], notes: "Fixture" };
+  writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [definition] }));
+  let run = createUnadmittedBuildRun({ repositoryRoot: dir, tickets: ["T001"], branchMode: "shared", builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false }, qa: { role: "qa", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
+  const ref = scopedQaSession(dir, "interrupted-qa");
+  run = persistBuildSession(dir, run, "qa", ref);
+  const db = new WorkflowDb(dir);
+  try {
+    const ticket = loadTickets(join(dir, ".tickets", "tickets.yaml"))[0];
+    db.admitWork({ runId: run.runId, kind: "ticket", ticketId: "T001", definition: ticket, approvalId: "fixture", scopeRevision: "fixture", provenance: { userTurn: "Approved T001", reason: "Fixture" } });
+    db.claimInitialRoleLease(run.runId, "qa", ref);
+    const deadPid = Number(execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }));
+    db.transition(run.runId, { checkpoint: "qa-review", event: "worker_started", payload: { workerPid: deadPid, processStart: "dead-fixture", host: hostname() } });
+    const source = captureFrozenQaSource(dir);
+    const confinementFields = { version: 2, sourceMode: "read-only", scratchMode: "isolated", networkMode: "disabled", settingsSources: "none", environmentDigest: "e".repeat(64), policyDigest: "a".repeat(64) };
+    const confinement = { ...confinementFields, digest: qaDigest("qa-confinement", confinementFields) };
+    const basisFields = { version: 2 as const, ticketDigest: qaDigest("ticket", ticket), instructionDigest: "instruction", roleInstructionsDigest: "role", skillsDigest: "skills", runtimeDigest: "runtime", validationChecklistDigest: "check", confinementDigest: confinement.digest };
+    const basis = { ...basisFields, digest: qaDigest("review-basis-fields", basisFields) };
+    const head = db.commitQaReviewReady({ version: 2, runId: run.runId, ticketId: "T001", originDigest: source.originDigest, contentDigest: source.contentDigest, digest: source.digest, capturedAt: source.capturedAt, paths: source.pathInventory }, basis, ref, confinement, { attemptId: "review-1", cycle: 1, remediationGeneration: 0 }, 0);
+    const turn: QaTurnIntentV2 = { version: 2, operationId: "qa-turn", runId: run.runId, ticketId: "T001", reviewNumber: head.reviewNumber, sessionGeneration: ref.generation, slot: "initial", sourceStateDigest: source.digest, reviewBasisDigest: basis.digest, providerSession: { version: 2, provider: ref.provider, sessionId: ref.sessionId, role: "qa", stream: "qa", generation: ref.generation, cwd: ref.cwd, configRoot: ref.configRoot, createdAt: ref.createdAt, validatedAt: ref.validatedAt }, instructionDigest: "raw-instruction-digest", intendedAt: new Date().toISOString() };
+    db.commitQaTurnIntent(turn, head.revision);
+    db.planOperation({ runId: run.runId, idempotencyKey: "qa-dispatch", kind: "provider-dispatch", intent: options.withoutDispatchSessionRef
+      ? { role: "qa", instructionDigest: turn.instructionDigest }
+      : { role: "qa", sessionRef: ref, instructionDigest: turn.instructionDigest } });
+    db.updateOperation("qa-dispatch", "in_progress");
+    db.updateOperation("qa-dispatch", "uncertain", { result: { unknown: "retained" } });
+    db.appendContinuityEvent({ runId: run.runId, role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+    db.publishContinuityCheckpoint({ runId: run.runId, role: "qa", authoritativeStateRevision: 1, delta: { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: ["fresh QA review"], nextAction: "recover QA" } });
+  } finally { db.close(); }
+  return { run: releaseBuildLease(dir, run, "recoverable"), ref };
 }
 
 function decisionDigest(dir: string, runId: string): string {
@@ -142,7 +188,7 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
 });
 
 test("build:resume continues an interrupted Builder in its validated exact session before QA", async () => {
-  const dir = initializedProject();
+  const dir = initializedProject({ legacyPreparation: true });
   try {
     const settings = {
       role: "builder" as const, source: "project" as const, make: "codex" as const,
@@ -178,7 +224,7 @@ test("build:resume continues an interrupted Builder in its validated exact sessi
 });
 
 test("build:resume never continues an interrupted Builder through a different provider session", async () => {
-  const dir = initializedProject();
+  const dir = initializedProject({ legacyPreparation: true });
   try {
     const settings = {
       role: "builder" as const, source: "project" as const, make: "codex" as const,
@@ -208,7 +254,7 @@ test("build:resume never continues an interrupted Builder through a different pr
 });
 
 for (const degraded of [false, true]) test(`interrupted ${degraded ? "degraded" : "uncheckpointed"} Builder never retires dispatch for an incompatible exact or guided launch`, async () => {
-  const dir = initializedProject();
+  const dir = initializedProject({ legacyPreparation: true });
   try {
     const settings = { role: "builder" as const, source: "project" as const, make: "codex" as const, model: "default", reasoning: "default", fast: false };
     let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"], builder: settings });
@@ -332,7 +378,13 @@ test("build:resume scopes a pending V2 QA packet and accepts only one undispatch
   try {
     initializeGit(dir);
     let run = createBuildRun({ repositoryRoot: dir, tickets: ["T031", "T032"], branchMode: "shared", qa: { role: "qa", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
-    const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: run.runId, ticketId: "T032", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", pendingAction: "operator-menu", resources: { prompt: { value: "review", purpose: "Exact review prompt", exactText: true } } });
+    let packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: run.runId, ticketId: "T032", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", pendingAction: "operator-menu", resources: { prompt: { value: "review", purpose: "Exact review prompt", exactText: true } } });
+    // An old packet can carry many failed-turn records. Public resume must
+    // publish the bounded successor before staging its fresh QA handoff.
+    for (let index = 0; index < 24; index++) {
+      packet = appendQaRecoveryResource(packet, `turns/failed-${String(index).padStart(2, "0")}/raw-response.txt`, `failed ${index}`, { purpose: "Historical failed QA turn", exact: true });
+    }
+    const preCanonicalDigest = packet.manifest.packetDigest;
     const db = new WorkflowDb(dir);
     db.beginQaReviewAttempt({ attemptId: packet.manifest.reviewAttemptId, runId: run.runId, ticketId: "T032", reviewNumber: 1, cycle: 1, remediationGeneration: 0, sourceDigest: packet.manifest.reviewedStateDigest });
     let protocolHead = db.qaTicketHead(run.runId, "T032");
@@ -356,7 +408,16 @@ test("build:resume scopes a pending V2 QA packet and accepts only one undispatch
     assert.equal(invoked[invoked.indexOf("--ticket") + 1], "T032");
     assert.equal(invoked[invoked.indexOf("--steps") + 1], "1");
     assert.equal(invoked.includes("--branch-per-ticket"), true);
+    const canonical = loadQaRecoveryPacket(packet.directory);
+    assert.notEqual(canonical.manifest.packetDigest, preCanonicalDigest);
+    assert.ok(canonical.manifest.resources.some((resource) => resource.path.startsWith("canonical-recovery-bundle/") && resource.requiredForRecovery));
+    assert.ok(canonical.manifest.resources.filter((resource) => resource.path.startsWith("turns/failed-")).every((resource) => !resource.requiredForRecovery));
+    const canonicalHead = new WorkflowDb(dir);
+    try { assert.equal(canonicalHead.qaRecoveryHead(run.runId, "T032")?.packetDigest, canonical.manifest.packetDigest); }
+    finally { canonicalHead.close(); }
     const staged = new HandoffService(dir).loadStaged(run.runId, Number(invoked[invoked.indexOf("--accept-handoff") + 1]));
+    assert.ok(!staged.manifest.resources.some((resource) => resource.label.startsWith("turns/failed-")));
+    assert.ok(staged.manifest.resources.some((resource) => resource.label.startsWith("canonical-recovery-bundle/")));
     assertQaRecoveryHandoffInventory(staged.manifest.resources);
     assert.throws(() => assertQaRecoveryHandoffInventory(staged.manifest.resources.filter(resource => resource.label !== "frozen-qa-action")), /missing frozen-qa-action/);
     const action = staged.manifest.roleState.frozenQaAction;
@@ -385,6 +446,53 @@ test("build:resume discovers a pending durable QA reducer even without a packet"
     assert.equal(invoked[invoked.indexOf("--ticket") + 1], "T041");
     assert.equal(invoked[invoked.indexOf("--qa-revision") + 1], String(head.revision));
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("build:resume preserves the validated interrupted QA dispatch identity for the fresh handoff", async () => {
+  if (process.platform === "win32") return;
+  const dir = initializedProject();
+  try {
+    const { run, ref } = interruptedQaDispatchFixture(dir);
+    let invoked: string[] | undefined;
+    await buildBuildResumeCommand({
+      executeStart: args => { invoked = args; return 0; },
+      resolveProjection: availableProjection,
+    }).parseAsync([dir, "--run", run.runId, "--yes", "--fresh-with-handoff"], { from: "user" });
+
+    assert.ok(invoked);
+    assert.equal(invoked[invoked.indexOf("--accept-handoff-role") + 1], "qa");
+    const staged = new HandoffService(dir).loadStaged(run.runId, Number(invoked[invoked.indexOf("--accept-handoff") + 1]));
+    assert.deepEqual(staged.manifest.predecessorSessionRef, ref);
+    const after = new WorkflowDb(dir);
+    try {
+      assert.equal(after.operation("qa-dispatch")?.status, "failed");
+      assert.equal((after.operation("qa-dispatch")?.result as { outcomeUnknown?: boolean }).outcomeUnknown, true);
+      assert.equal(after.unresolvedRoleDispatches(run.runId, "qa").length, 0);
+    } finally { after.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("build:resume safely pauses when an interrupted QA dispatch lacks its predecessor identity", async () => {
+  const dir = initializedProject();
+  const priorExitCode = process.exitCode;
+  try {
+    const { run } = interruptedQaDispatchFixture(dir, { withoutDispatchSessionRef: true });
+
+    let invoked = false;
+    await buildBuildResumeCommand({
+      executeStart: () => { invoked = true; return 0; },
+      resolveProjection: availableProjection,
+    }).parseAsync([dir, "--run", run.runId, "--yes", "--fresh-with-handoff"], { from: "user" });
+
+    assert.equal(invoked, false);
+    assert.equal(process.exitCode, 2);
+    const after = new WorkflowDb(dir);
+    try { assert.equal(after.operation("qa-dispatch")?.status, "uncertain"); }
+    finally { after.close(); }
+  } finally {
+    process.exitCode = priorExitCode;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("build:resume refuses to treat a V1 QA packet as authoritative", async () => {
@@ -842,7 +950,7 @@ test("safe pause at a pending question performs zero projection or launch calls"
 });
 
 for (const automaticQa of [false, true]) test(`mixed recovery continues interrupted Builder before older QA${automaticQa ? " and automatically launches queued QA after completion" : " and preserves its packet"}`, async () => {
-  const dir = initializedProject();
+  const dir = initializedProject({ legacyPreparation: true });
   try {
     initializeGit(dir);
     let run = createBuildRun({ repositoryRoot: dir, tickets: ["T031", "T032"], branchMode: "shared", builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false }, qa: { role: "qa", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
@@ -909,7 +1017,7 @@ for (const automaticQa of [false, true]) test(`mixed recovery continues interrup
 
 
 test("unavailable interrupted Builder session offers a file-preserving restart without retiring the dispatch", async () => {
-  const dir = initializedProject();
+  const dir = initializedProject({ legacyPreparation: true });
   try {
     const settings = { role: "builder" as const, source: "project" as const, make: "codex" as const, model: "default", reasoning: "default", fast: false };
     let run = createBuildRun({ repositoryRoot: dir, tickets: ["T007"], builder: settings });

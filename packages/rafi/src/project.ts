@@ -39,6 +39,10 @@ export interface WalkthroughAnswers {
   /** Legacy input accepted for compatibility with callers built before --runtime. */
   useClaude?: boolean;
   qa: boolean;
+  /** Enable QA requirement preparation before Builder implementation. */
+  qaPreparation: boolean;
+  /** Advanced non-blocking rollout mode; valid only with qaPreparation. */
+  qaPreparationShadow?: boolean;
   /** Repo-relative folder where Rafi project docs are written. */
   docsRoot?: string;
   /** Files, folders, or globs with existing tickets or planning material. */
@@ -178,6 +182,8 @@ export function defaultAnswers(): WalkthroughAnswers {
     usesAI: Boolean(d.flags.usesAI),
     useClaude: true,
     qa: true,
+    qaPreparation: true,
+    qaPreparationShadow: false,
   };
 }
 
@@ -205,6 +211,8 @@ export function buildProjectConfig(answers: WalkthroughAnswers): ProjectConfig {
       targets,
       qa: answers.qa,
     },
+    qa_preparation: answers.qaPreparation,
+    ...(answers.qaPreparationShadow ? { qa_preparation_shadow: true } : {}),
     agent_files: {
       mode: "overwrite",
       codex: "./AGENTS.md",
@@ -234,9 +242,13 @@ export function normalizeProjectConfig(raw: unknown): ProjectConfig {
     assertProjectConfig(raw);
   }
   const cfg = raw as Partial<ProjectConfig>;
+  // Convert the one-release legacy object form to the public configuration.
+  // Preserve custom timing rather than silently changing existing behavior.
+  const qaPreparation = migrateQaPreparationConfiguration(cfg);
+  resolveQaPreparationConfig(qaPreparation.qa_preparation, qaPreparation.qa_preparation_shadow === true, qaPreparation.qa_preparation_wall_time_ms);
   const normalized = {
     ...cfg,
-    ...(cfg.qa_preparation !== undefined ? { qa_preparation: resolveQaPreparationConfig(cfg.qa_preparation) } : {}),
+    ...qaPreparation,
     agent_files: cfg.agent_files ?? {
       mode: "overwrite",
       codex: "./AGENTS.md",
@@ -261,6 +273,26 @@ export function normalizeProjectConfig(raw: unknown): ProjectConfig {
   };
   assertProjectConfig(normalized);
   return normalized;
+}
+
+/** Convert legacy qa_preparation.mode config to the public boolean form without losing timing policy. */
+export function migrateQaPreparationConfiguration(config: Pick<ProjectConfig, "qa_preparation" | "qa_preparation_shadow" | "qa_preparation_wall_time_ms">): Pick<ProjectConfig, "qa_preparation" | "qa_preparation_shadow" | "qa_preparation_wall_time_ms"> {
+  const value = config.qa_preparation;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {
+    ...(value !== undefined ? { qa_preparation: value } : {}),
+    ...(config.qa_preparation_shadow !== undefined ? { qa_preparation_shadow: config.qa_preparation_shadow } : {}),
+    ...(config.qa_preparation_wall_time_ms !== undefined ? { qa_preparation_wall_time_ms: config.qa_preparation_wall_time_ms } : {}),
+  };
+  // Validate the legacy shape before translating it. Otherwise a typo such as
+  // `{ mode: "automatic" }` could accidentally become `true`.
+  resolveQaPreparationConfig(value, config.qa_preparation_shadow === true);
+  const legacy = value as { mode: "legacy" | "shadow" | "enforce"; wallTimeMs?: ProjectConfig["qa_preparation_wall_time_ms"] };
+  const mode = legacy.mode;
+  return {
+    qa_preparation: mode !== "legacy",
+    ...(mode === "shadow" ? { qa_preparation_shadow: true } : {}),
+    ...(legacy.wallTimeMs ? { qa_preparation_wall_time_ms: legacy.wallTimeMs } : {}),
+  };
 }
 
 function cloneAutonomyConfig(config: AutonomyConfig): AutonomyConfig {

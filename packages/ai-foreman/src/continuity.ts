@@ -2,6 +2,7 @@ import { dispatchWithGraphAccess, withGraphSessionAccess } from "./graph/session
 import { localBuildAuthority, type BuildAdmission } from "./buildAdmission.js";
 import { randomUUID, createHash } from "node:crypto";
 import type { ContinuityCheckpoint, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
+import { continuityDeltaV1Schema, zodIssues } from "rafi-spec";
 import type { BuilderAdapter, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, ProviderSessionUsage, ProviderSettingSwitch, RuntimeFailure, TurnResult } from "./adapters/types.js";
 import { BuilderEventQueue } from "./activity.js";
 import { providerSessionKey } from "./sessionIdentity.js";
@@ -45,6 +46,8 @@ export function validateContinuityDelta(value: unknown): ContinuityDelta {
   const problems: string[] = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ContinuityValidationError(["delta must be an object"]);
   const input = value as Record<string, unknown>;
+  const contract = continuityDeltaV1Schema.safeParse(value);
+  if (!contract.success) problems.push(...zodIssues(contract.error));
   if (input.version !== 1) problems.push("version must be 1");
   const output: ContinuityDelta = {
     version: 1,
@@ -130,6 +133,7 @@ export class ContinuityAdapter implements BuilderAdapter {
   enableContractEnforcement(): void { this.contractEnforcing = true; this.adapter.enableContractEnforcement?.(); }
   contractCompactionSequence(): number { return this.adapter.contractCompactionSequence?.() ?? 0; }
   acceptContractDelivery(sequence: number): void { this.adapter.acceptContractDelivery?.(sequence); }
+  configureQaContractReminder(reminder: string, onEvent?: Parameters<NonNullable<BuilderAdapter["configureQaContractReminder"]>>[1]): void { this.adapter.configureQaContractReminder?.(reminder, onEvent); }
 
   private readonly queue = new BuilderEventQueue();
   private sourcePump?: Promise<void>;

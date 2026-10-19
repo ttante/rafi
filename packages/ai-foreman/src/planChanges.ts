@@ -1,6 +1,6 @@
 export type PlanChangeClassification = "bookkeeping" | "material";
 
-const MATERIAL_KEYS = new Set(["scope", "summary", "acceptance", "acceptance_criteria", "depends_on", "dependencies", "delivery", "delivery_strategy", "branch", "branch_mode", "completion", "completion_mode"]);
+const MATERIAL_KEYS = new Set(["scope", "summary", "acceptance", "acceptance_criteria", "documentation", "depends_on", "dependencies", "delivery", "delivery_strategy", "branch", "branch_mode", "completion", "completion_mode"]);
 const BOOKKEEPING_KEYS = new Set(["status", "evidence", "updated_at", "updatedAt", "timestamp", "notes"]);
 
 /** Structural classification; agent prose is intentionally ignored. */

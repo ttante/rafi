@@ -1,6 +1,6 @@
 {
   "name": "ai-foreman",
-  "version": "1.7.26",
+  "version": "1.7.27",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
   "license": "Apache-2.0",
   "type": "module",
@@ -17,6 +17,10 @@
     "ai-foreman": "dist/index.js"
   },
   "exports": {
+    "./qa-rollback-rehearsal.js": {
+      "types": "./dist/qaRollbackRehearsal.d.ts",
+      "default": "./dist/qaRollbackRehearsal.js"
+    },
     "./build-assignment.js": {
       "types": "./dist/buildAssignment.d.ts",
       "default": "./dist/buildAssignment.js"
@@ -307,9 +311,10 @@
     "luxon": "^3.7.2",
     "parse5": "7.2.1",
     "pdfjs-dist": "4.10.38",
-    "rafi-spec": "0.8.15",
-    "special-agents": "0.8.15",
-    "yaml": "^2.5.1"
+    "rafi-spec": "0.8.16",
+    "special-agents": "0.8.16",
+    "yaml": "^2.5.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

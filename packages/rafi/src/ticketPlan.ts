@@ -119,6 +119,7 @@ ${opts.unattended ? "- This is an unattended approved run. Do not ask questions 
 - Account for every discovered source item with mapped, split, combined, deferred, or excluded disposition and a reason where required.
 - Existing IDs are stable. Preserve completed state/evidence. Represent replacements with reciprocal supersession links through the proposal.
 - Every addition is a full ticket object with: id, order, title, area, priority (P0-P3), size (XS-XL), risk (Low/Medium/High), depends_on, summary, acceptance, required_tests, likely_files, optional rollback/notes, source_refs, and optional supersession links.
+- For multiple additive tickets, "independent" means the ticket's own behavior and tests work against the shared approved baseline without depending on sibling implementation. Do not express that as requiring sibling removal, sibling absence, or a reconstructed pre-sibling branch unless the user explicitly requires absence testing or an isolated branch. Use positive own-ticket checks and the shared project tests instead.
 - Use source_refs entries with source and item (plus optional url/fingerprint/note) for general many-to-many provenance; retain legacy external_refs when editing imported tickets.
 - When setting next work, explicitly honor whether existing next tickets are retained or replaced.
 - The user may ask to upgrade to exhaustive grill-me at any time; retain the current proposal and continue.

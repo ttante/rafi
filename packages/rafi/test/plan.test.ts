@@ -59,6 +59,7 @@ function validStructuredProposal(): StructuredPlanProposalV1 {
       required_tests: ["Unit test label persistence."],
       likely_files: ["src/labels.ts"],
       depends_on: [],
+      qa_preparation: fixtureQaDepth(),
     }],
     delivery_units: [{
       id: "labels",
@@ -74,6 +75,10 @@ function validStructuredProposal(): StructuredPlanProposalV1 {
     }],
     stacks: [],
   };
+}
+
+function fixtureQaDepth() {
+  return { version: 1 as const, decisionId: "fixture-depth", level: 1 as const, rationale: "Narrow isolated behavior.", riskFactors: [], lowRisk: { narrowBehavior: "One isolated feature.", understoodDependencies: "No external dependencies.", adequateVerification: "Focused test coverage." }, policyVersion: "qa-preparation-v1" as const, plannerOperationId: "fixture-plan", plannerIdentity: "fixture-planner", timestamp: "2026-10-16T00:00:00.000Z", minimumLevel: 1 as const, minimumReasons: [] };
 }
 
 function planCompleteOutput(proposal: unknown): string {
@@ -132,7 +137,21 @@ test("standard plan instruction excludes grill-me and keeps the output contract"
     assert.match(instruction, new RegExp(section));
   }
   assert.match(instruction, /branch\/batch strategy for repeated component-library work/);
+  assert.match(instruction, /source_refs are host-validated provenance/);
+  assert.match(instruction, /Never invent IDs such as src_index_mjs/);
+  assert.match(instruction, /repository files belong in likely_files, not source_refs/);
+  assert.match(instruction, /Independent-slice contract/);
+  assert.match(instruction, /Do not turn that into an acceptance criterion requiring the sibling feature to be removed/);
   assert.match(instruction, /STEP_STATUS: plan_complete/);
+});
+
+test("current-branch planning does not assume a ticket branch or commit", () => {
+  const instruction = buildPlanInstruction({
+    brief: "Add subtraction.", docsRoot: "docs", latestPlanPath: "docs/rafi-plan.md",
+    historyDirPath: "docs/rafi-plans", workMode: "current",
+  });
+  assert.match(instruction, /Do not assume a ticket branch or ticket commit will exist/);
+  assert.match(instruction, /synthetic commit in an independent temporary copy/);
 });
 
 test("standard plan run uses planner without grill-me and non-mutating permissions", () => {

@@ -46,6 +46,7 @@ function completedPlanOutput(): string {
       required_tests: ["Run the focused tests."],
       likely_files: ["src/feature.ts"],
       depends_on: [],
+      qa_preparation: { version: 1, decisionId: "fixture-depth", level: 1, rationale: "Narrow isolated behavior.", riskFactors: [], lowRisk: { narrowBehavior: "One isolated feature.", understoodDependencies: "No external dependencies.", adequateVerification: "Focused test coverage." }, policyVersion: "qa-preparation-v1", plannerOperationId: "fixture-plan", plannerIdentity: "fixture-planner", timestamp: "2026-10-16T00:00:00.000Z", minimumLevel: 1, minimumReasons: [] },
     }],
     delivery_units: [{
       id: "feature", slice_refs: ["S1"], branch_mode: "per-ticket", completion: "none", provider: "local",

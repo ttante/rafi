@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { parseStrictJson } from "rafi-spec";
+import { parseProviderContract, semanticResultV1Schema } from "rafi-spec";
 import { canonical, digest, readBounded } from "./util.js";
 import type { GraphSemanticHost, SemanticChunk, SemanticExtraction } from "./maintenance.js";
 export interface SemanticExchangeV1 {
@@ -17,7 +18,7 @@ export function semanticExchange(chunks: SemanticChunk[], operationId: string): 
 export function parseSemanticResult(text: string, request: SemanticExchangeV1): SemanticExtraction {
   if (Buffer.byteLength(text) > 8 * 1024 * 1024)
     throw new Error("Semantic result exceeds byte budget");
-  const result = parseStrictJson(text) as SemanticExtraction & {
+  const result = parseProviderContract(semanticResultV1Schema, parseStrictJson(text), "graph semantic result") as SemanticExtraction & {
     kind?: string;
     version?: number;
     operationId?: string;

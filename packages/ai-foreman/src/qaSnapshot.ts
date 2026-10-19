@@ -80,7 +80,7 @@ export async function captureStableFrozenQaSourceAsync(read: (attempt: number, p
   throw new QaSourceInstabilityError(MAX_CAPTURE_ATTEMPTS);
 }
 
-export function createDisposableQaSnapshot(builderWorktree: string): DisposableQaSnapshot {
+export function createDisposableQaSnapshot(builderWorktree: string, options: { projectDependencies?: boolean } = {}): DisposableQaSnapshot {
   const source = resolve(builderWorktree);
   const root = gitText(source, ["rev-parse", "--show-toplevel"]);
   const frozenState = captureFrozenQaSource(source);
@@ -89,7 +89,7 @@ export function createDisposableQaSnapshot(builderWorktree: string): DisposableQ
   cloneRepositorySync(root, review, frozenState.head);
   try {
     applyFrozenSync(review, frozenState);
-    projectDependencyTrees(root, review);
+    if (options.projectDependencies !== false) projectDependencyTrees(root, review);
     mkdirSync(join(tempRoot, "scratch"), { mode: 0o700 });
     const manifest = manifestFromFrozen(frozenState);
     const snapshot: DisposableQaSnapshot = {

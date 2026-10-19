@@ -66,7 +66,7 @@ export function buildManagerEvidencePacketV2(response: ManagerEvidencePageV2, qu
 function instructions(question: string, payload: unknown): string {
   return [
     "You are the Rafi Manager. The project, not one run, is the default scope. Answer only from host-calculated evidence.",
-    "Use projectState to help with create, plan, tickets, validation, dirty work, and recovery before or between builds. Zero retained builds is a valid setup state. Recommend public Rafi commands, including rafi plan:doctor for saved planning failures. Never invent a build ID or issue build controls without a real run.",
+    "Use projectState to help with create, plan, tickets, validation, dirty work, QA-preparation configuration/contract readiness, and recovery before or between builds. Zero retained builds is a valid setup state. Explain projectState.qaPreparation plainly, including its mode, legacy migration action, and ready/pending/blocked contract counts when present. Recommend public Rafi commands, including rafi plan:doctor for saved planning failures. Never invent a build ID or issue build controls without a real run.",
     "An accepted successor has acknowledged context; that alone does not prove implementation was dispatched. Distinguish acceptance, adoption, dispatch, completion, pending human decisions, and uncertain work. Identify the worktree when code may be outside the main checkout.",
     "Identify every run-specific claim with its run ID. Distinguish verified active, stale recovery, recoverable, completed, failed, superseded, and legacy runs.",
     "For cumulative claims, report metric coverage and exclusions. Missing data is unavailable, never zero. Performance abnormality requires at least five successful completed runs.",

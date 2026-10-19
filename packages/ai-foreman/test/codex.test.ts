@@ -375,6 +375,23 @@ test("Codex records provider-triggered compactions when usage follows completion
   await a.close();
 });
 
+test("Codex re-supplies the QA requirement reminder on the next host turn after native compaction", async () => {
+  const a = adapter({ resumeSessionId: "session-1" });
+  const lifecycle: string[] = [];
+  a.configureQaContractReminder("RAFI CONTINUITY NOTICE: re-read QA contract digest contract-1.", event => lifecycle.push(event.kind));
+  const internal = a as unknown as { handle(message: unknown): void; instructionWithPendingQaReminder(instruction: string): { instruction: string; includedReminder: boolean } };
+  internal.handle({ method: "item/completed", params: { threadId: "session-1", item: { type: "contextCompaction" } } });
+  const reminder = internal.instructionWithPendingQaReminder("Implement the next step.");
+  assert.match(reminder.instruction, /RAFI CONTINUITY NOTICE/);
+  assert.match(reminder.instruction, /Implement the next step/);
+  assert.equal(reminder.includedReminder, true);
+  // Merely preparing a provider request cannot prove that it was accepted.
+  // The pending reminder stays armed until sendTurn receives a clean result.
+  assert.equal(internal.instructionWithPendingQaReminder("later turn").includedReminder, true);
+  assert.deepEqual(lifecycle, ["installed", "compaction-observed"]);
+  await a.close();
+});
+
 test("CodexAdapter normalizes 401 process failures into repair guidance", async () => {
   const binDir = mkdtempSync(join(tmpdir(), "codex-auth-test-"));
   const projectDir = mkdtempSync(join(tmpdir(), "codex-auth-project-"));

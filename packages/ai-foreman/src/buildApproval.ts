@@ -16,7 +16,7 @@ function canonical(value: unknown): string {
 }
 function material(ticket: TicketDef): unknown {
   return { id: ticket.id, plan_ref: ticket.plan_ref, title: ticket.title, summary: ticket.summary, acceptance: ticket.acceptance,
-    required_tests: ticket.required_tests, depends_on: ticket.depends_on, likely_files: ticket.likely_files, rollback: ticket.rollback, source_refs: ticket.source_refs };
+    required_tests: ticket.required_tests, depends_on: ticket.depends_on, likely_files: ticket.likely_files, rollback: ticket.rollback, documentation: ticket.documentation ?? { required: false, targets: [], criteria: [] }, source_refs: ticket.source_refs };
 }
 
 /** Reuse only source-bound approval. Ambiguous legacy provenance still asks. */
@@ -48,6 +48,7 @@ export function approvedBuildScope(projectDir: string, ticketIds?: readonly stri
         const ids = new Map(all.filter(item => item.plan_ref?.plan_id === ref.plan_id && item.plan_ref.revision === ref.revision).map(item => [item.plan_ref!.slice_ref, item.id]));
         const legacy = slice && !ticket.rollback ? { ...ticket, title: slice.title, summary: slice.summary,
           acceptance: slice.acceptance, required_tests: slice.required_tests, likely_files: slice.likely_files,
+          documentation: slice.documentation ?? { required: false, targets: [], criteria: [] },
           depends_on: (slice.depends_on ?? []).map((id: string) => ids.get(id)),
           source_refs: slice.source_refs?.map((source: Record<string, unknown>) => ({ source: source.source_id, item: source.item ?? "document", source_id: source.source_id, fingerprint: source.fingerprint, ...(source.url !== undefined ? { url: source.url } : {}), ...(source.note !== undefined ? { note: source.note } : {}) })) } : undefined;
         if (canonical(material(approved ?? legacy ?? {} as TicketDef)) !== canonical(material(ticket))) return { approved: false, reason: `material ticket changes or missing immutable approval for ${ticket.id}` };

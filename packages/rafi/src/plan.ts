@@ -162,6 +162,12 @@ ${SOURCE_REQUEST_END}
 - For Linear and Jira, request only team/filter/site/query and environment-variable names. Never request or emit a secret.
 - Rafi retrieves requested content outside this read-only agent and resumes this same session.
 
+Source provenance contract:
+- source_refs are host-validated provenance, not guesses about repository filenames.
+- Use a source_refs entry only when its source_id and fingerprint appear exactly in the supplied source registry context.
+- Never invent IDs such as src_index_mjs, src_package_json, or src_<filename>.
+- If no supplied registry entry supports a slice, use source_refs: [] (or omit source_refs); repository files belong in likely_files, not source_refs.
+
 Saved ticket setup preferences:
 ${opts.ticketSetupSummary ?? "- No saved ticket setup preferences found."}
 
@@ -193,10 +199,17 @@ STEP_STATUS: needs_input | question="..." choices="recommended option|alternativ
 
 QA preparation planning policy: ${JSON.stringify(opts.qaPreparationPolicy ?? { mode: "legacy" })}. In enforcing mode, select qa_preparation for every slice using this schema: ${JSON.stringify(qaPreparationDepthDecisionV1Schema)}. Standard is the starting policy; Focused requires cited low-risk assessment. Host risk minimums: interaction/compatibility/state/external-dependency=3; authorization/security/migration/data-integrity/concurrency/recovery/deployment=4; unresolved architecture uncertainty=5. The ticket-maker must preserve this decision.
 
+Documentation policy: documentation is disabled by default. Add documentation only when the user, an explicit approved project rule, or an approved source requirement clearly requests it. When enabled, include a structured documentation object on the affected slice with required: true, exact workspace-relative targets, and concrete criteria; do not invent documentation requirements merely because a docs directory exists. When disabled, omit the field or use {required:false,targets:[],criteria:[]}. A documentation policy is host-owned and must be preserved by Ticket Maker.
+
+Independent-slice contract:
+- When multiple additive slices are planned, independence means each slice's own behavior and tests are valid against the shared approved baseline and do not depend on sibling implementation.
+- Do not turn that into an acceptance criterion requiring the sibling feature to be removed, absent, or tested on a reconstructed pre-sibling branch. Do not generate wording such as "with [sibling] absent/present" or "slice alone" unless the user explicitly requires absence testing or an isolated branch.
+- If the user explicitly requires absence testing, preserve that requirement as written and make the permitted verification method concrete. Otherwise, use positive own-slice checks plus the shared project tests and combined-result validation.
+
 Output contract:
 - Cover the planning concepts Goal, Problem Statement, Repo Findings, Locked Decisions, Open Questions, Scope, Out Of Scope, Risks, Rollback Notes, and Ticket-Maker Guidance in the corresponding structured fields. Include a branch/batch strategy for repeated component-library work when relevant.
 - Return exactly one JSON object between ${PLAN_PROPOSAL_START} and ${PLAN_PROPOSAL_END}.
-- Shape: {"version":1,"summary":"...","assumptions":["..."],"implementation_changes":["..."],"acceptance_criteria":["..."],"test_plan":["..."],"slices":[{"local_ref":"S1","retains":"optional existing slice_ref only when revising","title":"...","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"depends_on":["local_ref"],"source_refs":[{"source_id":"src_...","fingerprint":"64 hex characters","item":"optional item"}]}],"delivery_units":[{"id":"unit-name","slice_refs":["local_ref"],"branch_mode":"current|per-ticket|shared","completion":"pr|auto-merge|direct-merge|none","provider":"auto|github|gitlab|local","pr_ready":false,"merge_method":"squash|merge|rebase","cleanup":false,"depends_on":["unit-id"],"dependency_mode":"combine|wait|stack"}],"stacks":[{"local_ref":"STACK1","retains":"optional existing stack_id only when revising","name":"...","units":["root-unit","child-unit"]}]}.
+- Shape: {"version":1,"summary":"...","assumptions":["..."],"implementation_changes":["..."],"acceptance_criteria":["..."],"test_plan":["..."],"slices":[{"local_ref":"S1","retains":"optional existing slice_ref only when revising","title":"...","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"documentation":{"required":false,"targets":[],"criteria":[]},"depends_on":["local_ref"],"source_refs":[{"source_id":"src_...","fingerprint":"64 hex characters","item":"optional item"}]}],"delivery_units":[{"id":"unit-name","slice_refs":["local_ref"],"branch_mode":"current|per-ticket|shared","completion":"pr|auto-merge|direct-merge|none","provider":"auto|github|gitlab|local","pr_ready":false,"merge_method":"squash|merge|rebase","cleanup":false,"depends_on":["unit-id"],"dependency_mode":"combine|wait|stack"}],"stacks":[{"local_ref":"STACK1","retains":"optional existing stack_id only when revising","name":"...","units":["root-unit","child-unit"]}]}.
 - Local refs exist only inside the proposal. Never invent plan_id, slice_ref, stack_id, revision, or digest values.
 - Every slice maps to exactly one delivery unit. Use independent non-stacked units when delivery grouping is not otherwise material.
 - Make each slice small enough for \`rafi start --steps ...\` or branch-per-ticket execution. Do not include patches or Markdown.
@@ -1151,11 +1164,18 @@ function readPlanningProjectConfig(projectDir: string): ProjectConfig {
 }
 
 function buildPlanRepairInstruction(diagnostic: string, attempt: number): string {
+  const qaRiskRepair = diagnostic.includes("Minimum reasons must enumerate evidenced risk categories")
+    ? " For every slice, copy each qa_preparation.riskFactors[].category verbatim into qa_preparation.minimumReasons; do not omit or rename any evidenced risk category."
+    : "";
+  const sourceRepair = diagnostic.includes("invalid source provenance")
+    ? " Remove every source_refs entry whose source_id and fingerprint are not present verbatim in the supplied source registry. Do not invent source IDs from filenames; use source_refs: [] when no registry entry supports a slice."
+    : "";
   return `Your previous final proposal was rejected by Rafi validation (repair attempt ${attempt} of 3).
 
 Validation errors:
 ${diagnostic}
 
+${qaRiskRepair}${sourceRepair}
 Return a complete replacement proposal only. Use the exact ${PLAN_PROPOSAL_START}/${PLAN_PROPOSAL_END} JSON envelope, preserve the required shape, and end with exactly:
 STEP_STATUS: plan_complete | summary="created ticket-maker-ready Rafi plan"`;
 }

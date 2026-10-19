@@ -7,10 +7,28 @@ import { classifyProcess } from "./processIdentity.js";
 export const BUILD_WORK_SCHEMA_VERSION = 4;
 const migration = "004_admitted_build_work";
 
+/**
+ * The recovery database is local state, rather than repository content. Keep
+ * the roots on the error so callers can give a copied checkout an actionable
+ * recovery path without weakening the ordinary writer guard.
+ */
+export class BuildProjectIdentityMismatchError extends Error {
+  readonly storedRoot: string;
+  readonly currentRoot: string;
+
+  constructor(storedRoot: string, currentRoot: string) {
+    super(`Rafi local build state belongs to a different project path.\n  Stored path: ${storedRoot}\n  Current path: ${currentRoot}\n\nThis usually means the checkout was copied or moved with .rafi/recovery.sqlite3. Rafi will not write copied build history until you choose how to recover it.\n\nOptions:\n  1. Inspect: rafi state rebind .\n  2. Keep this copied local state: rafi state rebind . --yes\n  3. Transfer state from the original checkout: rafi state export <original-project> --output rafi-state.rafi.gz, then rafi state import . rafi-state.rafi.gz\n  4. Resolve it yourself: preserve or remove the copied .rafi/recovery.sqlite3, then rerun the command.`);
+    this.name = "BuildProjectIdentityMismatchError";
+    this.storedRoot = storedRoot;
+    this.currentRoot = currentRoot;
+  }
+}
+
 /** A copied database must be rebound by state transfer, never by an ordinary writer. */
 export function assertBuildProject(db: Database.Database, projectDir: string): void {
   const identity = db.prepare("SELECT canonical_root FROM build_project_identity WHERE singleton=1").get() as { canonical_root: string };
-  if (identity.canonical_root !== realpathSync(projectDir)) throw new Error("Build project identity requires explicit state-transfer rebinding");
+  const currentRoot = realpathSync(projectDir);
+  if (identity.canonical_root !== currentRoot) throw new BuildProjectIdentityMismatchError(identity.canonical_root, currentRoot);
 }
 
 /** Classify legacy records without converting observed progress into permission. */

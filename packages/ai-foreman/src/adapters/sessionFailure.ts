@@ -62,3 +62,22 @@ export function sessionUnavailableErrorFromFailure(failure: RuntimeFailure): Ses
     availability: failure.availability,
   });
 }
+
+/**
+ * A Builder turn whose dispatch outcome is unknown must enter durable source
+ * recovery. It is not an ordinary ticket blocker: the provider may have
+ * applied part of the requested change before its stream failed.
+ */
+export function recoverableBuilderTurnError(result: TurnResult): SessionUnavailableError | undefined {
+  const failure = result.failure;
+  if (!failure || failure.dispatchState !== "unknown") return undefined;
+  return new SessionUnavailableError({
+    runtime: failure.runtime,
+    phase: failure.phase === "preflight" || failure.phase === "attach" || failure.phase === "turn" ? failure.phase : "turn",
+    dispatchState: "unknown",
+    executable: failure.executable,
+    cwd: failure.cwd,
+    diagnostics: result.text || failure.diagnostics,
+    availability: failure.availability,
+  });
+}

@@ -120,7 +120,7 @@ test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { sk
     env: { ...process.env, NO_COLOR: "1" },
   });
 
-  assert.match(output, /migrated project\.yaml to rafi-config\.yaml/);
+  assert.match(output, /migrated configuration to the current public format/);
   assert.ok(existsSync(join(dir, "rafi-config.yaml")));
   assert.ok(existsSync(join(dir, "AGENTS.md")));
   assert.ok(existsSync(join(dir, ".claude", "agents", "builder.md")));

@@ -1,5 +1,6 @@
 import { withGraphSessionAccess } from "./graph/session.js";
 import { collectBuilderContractCoverage } from "./qaBuilderCoverage.js";
+import { observeHostBuilderTests, type HostBuilderToolObservation } from "./qaBuilderEvidence.js";
 import { maintainGraphTask } from "./graph/boundary.js";
 import { ensureBuilderContract } from "./qaBuildGate.js";
 import { actualContractSession } from "./qaContractDelivery.js";
@@ -40,11 +41,11 @@ import type { SessionStrategy } from "rafi-spec";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { SessionUnavailableError, sessionUnavailableErrorFromFailure } from "./adapters/sessionFailure.js";
+import { SessionUnavailableError, recoverableBuilderTurnError, sessionUnavailableErrorFromFailure } from "./adapters/sessionFailure.js";
 import type { RunObserver } from "./observability.js";
 import type { QaRecoveryPacket } from "./qaRecovery.js";
 import { WorkflowDb } from "./workflowDb.js";
-import { assertBuildAssignmentReconciled, beginBuildAssignment, BuildAssignmentRejected, finishBuildAssignment, validateBuildAssignment } from "./buildAssignment.js";
+import { assertBuildAssignmentReconciled, beginBuildAssignment, BuildAssignmentRejected, captureBuildSource, finishBuildAssignment, validateBuildAssignment } from "./buildAssignment.js";
 
 /** Parsed STEP_STATUS marker from a builder's turn. */
 export interface StepStatus {
@@ -65,6 +66,23 @@ export interface StepStatus {
   ticket?: string;
   branchDependency?: string;
   error?: string;
+}
+
+/** Compare Builder product state without Rafi's own tracker bookkeeping. */
+function builderProductDigest(source: ReturnType<typeof captureBuildSource>, hostOwnedPaths: string[]): string {
+  const ignored = new Set(hostOwnedPaths.map(path => path.replace(/\\/g, "/").replace(/^\.\//, "")));
+  const hostOwned = (path: string): boolean => {
+    const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
+    return ignored.has(normalized)
+      || [".foreman/", ".rafi/", ".tickets/", ".codex/", ".agents/", "docs-rafi/"]
+        .some(prefix => normalized.startsWith(prefix))
+      || [".gitignore", "AGENTS.md", "rafi-config.yaml", "foreman.yaml"].includes(normalized);
+  };
+  const inventory = source.pathInventory
+    .filter(item => !hostOwned(item.path))
+    .map(item => ({ ...item, path: item.path.replace(/\\/g, "/") }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+  return createHash("sha256").update(JSON.stringify(inventory)).digest("hex");
 }
 
 /** Phrases that suggest the builder ended its turn by asking the human. */
@@ -212,6 +230,8 @@ export function buildQaInstruction(): string {
 - Confidence — would you bet money this works as described in production?
 
 Triple-check. Do not rubber-stamp your own work. Be skeptical.
+
+The independent QA workspace is a disposable snapshot and may have a detached HEAD even when the Builder's source workspace is on a named branch. Do not infer the Builder's branch or a branch change from the QA snapshot's branch name; use independently retained source-workspace evidence for any actual branch requirement. A detached snapshot by itself is not a defect.
 
 If an otherwise required test is denied only because you added a pipe, redirection, substitution, or wrapper, retry the exact required-test command without that extra shell syntax. Do not retry other denied actions.
 
@@ -465,6 +485,7 @@ export class Foreman {
     mode: "builder" | "qa" = "builder",
   ): Promise<{ result: TurnResult; status: StepStatus }> {
     const ticket = mode === "builder" ? this.currentTicketId : undefined;
+    const hostToolObservations: HostBuilderToolObservation[] = [];
     const scopedInstruction = (text: string): string => !ticket || text.includes(`Ticket scope: ${ticket}.`) ? text
       : `${text}\nTicket scope: ${ticket}. Do not substitute another ticket. Include ticket="${ticket}" in any STEP_STATUS marker.`;
     instruction = scopedInstruction(instruction);
@@ -476,12 +497,19 @@ export class Foreman {
       const finalInstruction = scopedInstruction([text, context, contractContext].filter(Boolean).join("\n\n"));
       const assignment = ticket && this.projectDir ? beginBuildAssignment(this.projectDir, this.qaRunId, ticket, this.builderWorktree ?? this.projectDir, finalInstruction, undefined, adapter) : undefined;
       const submitted=assignment?.instruction??finalInstruction;
-      const response = this.projectDir
-        ? await sendGraphTurn(adapter,submitted,graphContext(this.projectDir,this.builderWorktree??this.projectDir,this.graphPurpose,submitted,{...(assignment?{operationId:`graph:${assignment.operationId}`} : {}),logicalTaskId:assignment?.operationId??randomUUID(),runId:this.qaRunId,workId:ticket}),policy)
-        : await adapter.sendTurn(submitted, policy);
+      const initialSourceDigest = this.builderWorktree || this.projectDir ? captureBuildSource(this.builderWorktree ?? this.projectDir!).digest : undefined;
+      const stopHostObservation = ticket && mode === "builder" && (this.builderWorktree || this.projectDir)
+        ? observeHostBuilderTests(adapter, this.builderWorktree ?? this.projectDir!, hostToolObservations)
+        : () => {};
+      let response: TurnResult;
+      try {
+        response = this.projectDir
+          ? await sendGraphTurn(adapter,submitted,graphContext(this.projectDir,this.builderWorktree??this.projectDir,this.graphPurpose,submitted,{...(assignment?{operationId:`graph:${assignment.operationId}`} : {}),logicalTaskId:assignment?.operationId??randomUUID(),runId:this.qaRunId,workId:ticket}),policy)
+          : await adapter.sendTurn(submitted, policy);
+      } finally { stopHostObservation(); }
       const parsed = parseStepStatus(response.text);
       const applicable = parsed.kind === "unknown" && looksLikeQuestion(response.text) ? { kind: "needs_input" as const, question: lastLine(response.text) } : parsed;
-      if (!this.interruptionRequested && assignment && !response.isError && !response.failure && ["done", "plan_complete"].includes(applicable.kind)) await collectBuilderContractCoverage(this.projectDir!, assignment.runId, assignment.ticketId, assignment.worktree, adapter, assignment.operationId, submitted, response);
+      if (!this.interruptionRequested && assignment && !response.isError && !response.failure && ["done", "plan_complete"].includes(applicable.kind)) await collectBuilderContractCoverage(this.projectDir!, assignment.runId, assignment.ticketId, assignment.worktree, adapter, assignment.operationId, submitted, response, hostToolObservations, initialSourceDigest);
       const rejection = assignment ? finishBuildAssignment(this.projectDir!, assignment, response, applicable) : undefined;
       this.assertNotInterrupted();
       if (rejection) throw new BuildAssignmentRejected(rejection);
@@ -1002,7 +1030,12 @@ export class Foreman {
         } finally {db.close();}
       }
       this.currentTicketId = pendingTicketId;
-      let instruction = i === 1
+      // The CLI always runs the approval-gated preflight before this batch.
+      // Do not send its plan-only primer a second time after approval: a
+      // resumed provider can obey the stale "do not implement yet" language
+      // and reach QA with unchanged product source. Direct batch callers that
+      // have no preflight still receive the primer for compatibility.
+      let instruction = i === 1 && !this.preflightPlan
         ? buildPrimer(n, trackerPath, this.ticketsEnabled, pendingTicketId)
         : buildNextStepInstruction(i, n);
       if (pendingTicketId) instruction += `\n\nAssigned ticket: ${pendingTicketId}. Implement exactly this ticket. Do not substitute another ticket. End with ticket="${pendingTicketId}" in the STEP_STATUS marker.`;
@@ -1023,6 +1056,14 @@ export class Foreman {
         } finally { db.close(); }
       }
       if (i > 1) await this.prepareBuilderBoundary(instruction);
+      // Current-branch builds do not always populate builderWorktree.  The
+      // project directory is still the authoritative source boundary, so a
+      // plan-only resumed turn must be compared there before QA can run.
+      const builderSourceRoot = this.builderWorktree ?? this.projectDir;
+      const hostOwnedSourcePaths = this.projectDir && this.ticketsEnabled
+        ? generatedTrackerDirtyPaths(loadTicketsConfig(this.projectDir).paths)
+        : [];
+      const sourceBeforeTurn = builderSourceRoot ? captureBuildSource(builderSourceRoot) : undefined;
       this.builderWorkSessions += 1;
       const turn = () => this.doTurn(instruction);
       let response: Awaited<ReturnType<typeof turn>>;
@@ -1032,7 +1073,7 @@ export class Foreman {
         if (!(error instanceof BuildAssignmentRejected || error instanceof BuildControlBoundary)) throw error;
         outcome = "needs-human"; detail = error.message; break;
       }
-      const { result, status } = response;
+      let { result, status } = response;
 
       if (continuations.length) {
         const db = new WorkflowDb(this.projectDir!);
@@ -1051,9 +1092,44 @@ export class Foreman {
       });
 
       if (result.isError) {
+        const recoverable = recoverableBuilderTurnError(result);
+        if (recoverable) throw recoverable;
         outcome = "blocked";
         detail = `builder turn errored: ${result.text.slice(0, 200)}`;
         break;
+      }
+
+      // A resumed provider can answer the mandatory primer with a planning
+      // response while still emitting a done marker. Do not send unchanged
+      // source to QA or mark the ticket complete. Retry the bounded
+      // implementation once; if it still produces no work, stop as a real
+      // Builder blocker.
+      if (["done", "plan_complete"].includes(status.kind) && pendingTicketId && sourceBeforeTurn && builderSourceRoot) {
+        const sourceAfterTurn = captureBuildSource(builderSourceRoot);
+        const beforeProductDigest = builderProductDigest(sourceBeforeTurn, hostOwnedSourcePaths);
+        const afterProductDigest = builderProductDigest(sourceAfterTurn, hostOwnedSourcePaths);
+        // plan_complete is explicitly a planning response. Even if the
+        // provider touched bookkeeping while planning, never send that state
+        // to QA as if implementation were complete.
+        const responseIsPlanningOnly = /\bplan(?:ning)?\s+only\b|\bdo not implement(?: yet)?\b|\bawait(?:ing)? (?:approval|go-ahead)\b/i.test(result.text)
+          && !/\bimplemented\b|\badded\b|\bchanged\b/i.test(result.text);
+        if (status.kind === "plan_complete" || responseIsPlanningOnly || afterProductDigest === beforeProductDigest) {
+          this.log.write("step", { index: i, statusKind: "plan_only_without_source_change", ticket: pendingTicketId });
+          const retry = await this.doTurn(`The previous turn did not complete implementation. Implement the assigned ticket now: ${pendingTicketId}. Inspect the current files, make the required changes and tests, then report truthful evidence with STEP_STATUS: done | ticket="${pendingTicketId}" summary="...". Do not return another plan-only response.`);
+          result = retry.result;
+          status = retry.status;
+          if (result.isError) {
+            const recoverable = recoverableBuilderTurnError(result);
+            if (recoverable) throw recoverable;
+            outcome = "blocked"; detail = `builder implementation retry errored: ${result.text.slice(0, 200)}`; break;
+          }
+          const sourceAfterRetry = captureBuildSource(builderSourceRoot);
+          if (status.kind === "plan_complete" || (status.kind === "done" && builderProductDigest(sourceAfterRetry, hostOwnedSourcePaths) === beforeProductDigest)) {
+            outcome = "needs-human";
+            detail = `Builder returned planning-only responses without changing product source for ${pendingTicketId}`;
+            break;
+          }
+        }
       }
 
       if (status.kind === "done" || status.kind === "plan_complete") {

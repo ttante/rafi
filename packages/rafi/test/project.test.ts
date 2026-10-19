@@ -8,6 +8,7 @@ import {
   buildProjectConfig,
   defaultAnswers,
   normalizeProjectConfig,
+  migrateQaPreparationConfiguration,
   NO_UI,
   LOCAL_ONLY,
   runtimeSelectionToTargets,
@@ -226,12 +227,21 @@ test("explicit project resolution never searches ancestors and recognizes legacy
   assert.deepEqual(resolveExplicitRafiProject(root), { root, configFile: "project.yaml", legacy: true });
 });
 
-test("QA preparation config preserves absent legacy behavior and normalizes explicit modes without changing final QA", () => {
-  const base = buildProjectConfig(defaultAnswers()); assert.equal(base.qa_preparation, undefined); assert.equal(normalizeProjectConfig(base).qa_preparation, undefined);
+test("QA preparation defaults on, supports the public booleans, and accepts legacy modes during migration", () => {
+  const base = buildProjectConfig(defaultAnswers());
+  assert.equal(base.qa_preparation, true);
+  assert.equal(base.qa_preparation_shadow, undefined);
+  assert.equal(normalizeProjectConfig(base).qa_preparation, true);
+  assert.equal(normalizeProjectConfig({ ...base, qa_preparation: false }).qa_preparation, false);
+  assert.equal(normalizeProjectConfig({ ...base, qa_preparation: true, qa_preparation_shadow: true }).qa_preparation_shadow, true);
+  assert.throws(() => normalizeProjectConfig({ ...base, qa_preparation: false, qa_preparation_shadow: true }), /requires qa_preparation/);
   for (const mode of ["legacy", "shadow", "enforce"] as const) {
     const configured = normalizeProjectConfig({ ...base, qa_preparation: { mode } });
-    assert.equal(configured.qa_preparation?.mode, mode); assert.equal(configured.qa_preparation?.policyVersion, "qa-preparation-v1"); assert.deepEqual(configured.qa_preparation?.wallTimeMs, [300000, 600000, 1200000, 1800000, 2700000]); assert.deepEqual(configured.tickets, base.tickets);
+    assert.equal(configured.qa_preparation, mode !== "legacy");
+    assert.equal(configured.qa_preparation_shadow, mode === "shadow" ? true : undefined);
+    assert.deepEqual(configured.tickets, base.tickets);
   }
+  assert.deepEqual(migrateQaPreparationConfiguration({ qa_preparation: { mode: "enforce", wallTimeMs: [300000, 600000, 1200000, 1800000, 2800000] } }), { qa_preparation: true, qa_preparation_wall_time_ms: [300000, 600000, 1200000, 1800000, 2800000] });
   assert.throws(() => normalizeProjectConfig({ ...base, qa_preparation: { mode: "automatic" } }), /mode/);
   assert.throws(() => normalizeProjectConfig({ ...base, qa_preparation: { mode: "enforce", wallTimeMs: [300000, 300000, 300000, 300000, 300000] } }), /ceilings/);
 });

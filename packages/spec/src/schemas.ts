@@ -417,7 +417,13 @@ export const projectConfigSchema = {
   additionalProperties: false,
   required: ["appName", "timezone", "stack", "flags", "harness", "agent_files", "agents", "skills"],
   properties: {
-    qa_preparation: { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { enum: ["legacy", "shadow", "enforce"] }, policyVersion: { const: "qa-preparation-v1" }, wallTimeMs: { type: "array", minItems: 5, maxItems: 5, items: [300000, 600000, 1200000, 1800000, 2700000].map(minimum => ({ type: "integer", minimum })) } } },
+    qa_preparation: { anyOf: [
+      { type: "boolean" },
+      // Compatibility only: migrate this legacy object form to the public booleans.
+      { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { enum: ["legacy", "shadow", "enforce"] }, policyVersion: { const: "qa-preparation-v1" }, wallTimeMs: { type: "array", minItems: 5, maxItems: 5, items: [600000, 1200000, 2400000, 3600000, 5400000].map(minimum => ({ type: "integer", minimum })) } } },
+    ] },
+    qa_preparation_shadow: { type: "boolean" },
+    qa_preparation_wall_time_ms: { type: "array", minItems: 5, maxItems: 5, items: [600000, 1200000, 2400000, 3600000, 5400000].map(minimum => ({ type: "integer", minimum })) },
     graph: graphConfigSchema,
     appName: { type: "string", minLength: 1 },
     timezone: { type: "string", minLength: 1 },

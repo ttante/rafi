@@ -9,7 +9,7 @@ export function workModeLabel(mode: TicketBuildBranchStrategy): string {
 }
 
 export function workModeConsequences(mode: TicketBuildBranchStrategy): string {
-  if (mode === "current") return "Rafi may edit, test, run QA, and update tracker/recovery state, but performs no branch/worktree, commit, push, merge, rebase, or review lifecycle operation.";
+  if (mode === "current") return "Rafi may edit, test, run QA, and update tracker/recovery state, but performs no branch/worktree, commit, push, merge, rebase, or review lifecycle operation in the source repository. Do not assume a ticket branch or ticket commit will exist. A rollback rehearsal may use a synthetic commit in an independent temporary copy; describe any later real commit as user-managed.";
   if (mode === "batch") return "Rafi creates and manages shared isolated delivery branches and may perform the explicitly approved completion workflow.";
   return "Rafi creates isolated ticket branches/worktrees and may perform the explicitly approved completion workflow.";
 }

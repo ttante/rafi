@@ -3,7 +3,8 @@ import { join } from "node:path";
 import type { TicketsConfig } from "./config.js";
 import type { TicketDef } from "./ticketSchema.js";
 import type { TicketState, StateDb } from "./stateDb.js";
-import { validateTicketDefs, detectCycles } from "./ticketLoader.js";
+import { RISK_ROLLBACK_REQUIRED, validateTicketDefs, detectCycles } from "./ticketLoader.js";
+import { ticketDefinitionDigest } from "./riskWaivers.js";
 import { buildNextQueue } from "./queue.js";
 import { loadDeliveryConfig, validateDeliveryConfig } from "./delivery.js";
 
@@ -25,6 +26,15 @@ export function runAllValidation(
 
   // Pass 1: schema and source
   for (const err of validateTicketDefs(ticketDefs)) {
+    const ticketId = err.path.match(/^tickets\[([^\]]+)\]/)?.[1];
+    const ticket = ticketId ? ticketDefs.find((candidate) => candidate.id === ticketId) : undefined;
+    if (err.code === RISK_ROLLBACK_REQUIRED && ticket) {
+      const waiver = db.getTicketRiskWaiver(ticket.id, ticketDefinitionDigest(ticket));
+      if (waiver) {
+        issues.push({ pass: 1, severity: "warn", message: `[schema] ${err.path}: ${err.message} — explicitly waived${waiver.waived_by ? ` by ${waiver.waived_by}` : ""} on ${waiver.waived_at}; ${waiver.reason}` });
+        continue;
+      }
+    }
     issues.push({ pass: 1, severity: "error", message: `[schema] ${err.path}: ${err.message}` });
   }
   for (const cycle of detectCycles(ticketDefs)) {

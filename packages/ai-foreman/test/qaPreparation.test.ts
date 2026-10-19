@@ -1,10 +1,41 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { candidate, assessment, storeFixture, digest } from "./qaPreparationFixtures.js";
-import { prepareVerificationContract } from "../src/qaPreparation.js";
+import { normalizeAssessmentObligations, normalizeExpectedFutureAssessment, prepareVerificationContract, removeExtraneousRequirementReferences } from "../src/qaPreparation.js";
 import { draftDigest, inventoryDigest } from "../src/qaVerificationContract.js";
 import type { QaContractCandidateV1 } from "rafi-spec";
 function envelope(tag: string, value: unknown) { return `${tag}_START\n${JSON.stringify(value)}\n${tag}_END`; }
+test("bounded requirement-reference repair removes only extra unknown refs", () => {
+  const draft = candidate(); draft.checks[0]!.requirementRefs = ["req", "invented-requirement"];
+  const repaired = removeExtraneousRequirementReferences(draft, draft.requirements);
+  assert.deepEqual(repaired.checks[0]!.requirementRefs, ["req"]);
+  const soleUnknown = candidate(); soleUnknown.checks[0]!.requirementRefs = ["invented-requirement"];
+  assert.deepEqual(removeExtraneousRequirementReferences(soleUnknown, soleUnknown.requirements).checks[0]!.requirementRefs, ["invented-requirement"]);
+});
+test("assessment obligation repair accepts only exact known labels", () => {
+  const review = assessment(candidate());
+  (review.assessedObligations as unknown as unknown[]) = review.assessedObligations.map(obligation => ({ obligation }));
+  const repaired = normalizeAssessmentObligations(review, review.assessedObligations.map(item => typeof item === "object" && item ? String((item as { obligation: string }).obligation) : String(item)));
+  assert.deepEqual(repaired.assessedObligations, depthLabels(review));
+  const ambiguous = structuredClone(review);
+  (ambiguous.assessedObligations as unknown as unknown[])[0] = { obligation: "not-an-obligation", label: "also-not-an-obligation" };
+  assert.equal(typeof normalizeAssessmentObligations(ambiguous, depthLabels(review)).assessedObligations[0], "object");
+});
+
+test("assessment obligation repair leaves a missing field for schema validation", () => {
+  const value = { assessedRequirementIds: [] } as unknown as import("rafi-spec").QaSemanticAssessmentV1;
+  assert.doesNotThrow(() => normalizeAssessmentObligations(value, ["ordinary"]));
+  assert.equal("assessedObligations" in value, false);
+});
+test("assessment does not block on expected pre-builder absence of postimplementation work", () => {
+  const draft = candidate();
+  const review = assessment(draft);
+  review.concerns = [{ reason: "The required export and test file are missing before implementation.", requirementIds: ["req"], checkIds: ["check"], material: true, owner: "qa", nextAction: "Implement the export and test file, then rerun the focused test." }];
+  assert.equal(normalizeExpectedFutureAssessment(review, draft).concerns[0]?.material, false);
+});
+function depthLabels(review: QaContractCandidateV1 | ReturnType<typeof assessment>): string[] {
+  return (review as ReturnType<typeof assessment>).assessedObligations.map(item => typeof item === "string" ? item : String((item as { obligation: string }).obligation));
+}
 test("shared orchestration persists ready contract after independent assessment and reuses it without provider replay", async () => {
   const { db, store } = storeFixture(); let calls = 0; let prepared: QaContractCandidateV1;
   const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
@@ -14,6 +45,10 @@ test("shared orchestration persists ready contract after independent assessment 
       if (phase === "prepare") { prepared = candidate(); for (const item of prepared.preparationEvidence) { item.operationId = operationId; item.sessionId = "author"; } return { text: envelope("RAFI_QA_CANDIDATE", prepared), sessionId: "author" }; }
       assert.equal(phase, "assess"); assert.ok(instruction.includes(draftDigest(prepared!)));
       const result = assessment(prepared!); result.operationId = operationId; result.draftPayloadDigest = draftDigest(prepared!); result.inventoryDigest = inventoryDigest(prepared!.requirements);
+      // Provider JSON may omit host-owned dispatch metadata. The adapter
+      // receipt must supply it before strict contract validation.
+      delete (result as Partial<typeof result>).sessionId;
+      delete (result as Partial<typeof result>).operationId;
       return { text: envelope("RAFI_QA_ASSESSMENT", result), sessionId: "assessor" };
     } };
     const result = await prepareVerificationContract(initial, initial.requirements, deps); assert.equal(result.status, "ready"); assert.equal(calls, 2);
@@ -58,7 +93,13 @@ test("discovered interacting architecture risk escalates through planner ownersh
         return { text: envelope("RAFI_QA_DEPTH", decision), sessionId: "fresh-planner" };
       }
       const review = assessment(draft); review.operationId = operationId;
-      if (phase === "challenge") { challenges++; return { text: envelope("RAFI_QA_CHALLENGE", { ...review, approach: "Retain expiry boundary and rejection invariant before coordinated caller verification", concernCategories: ["scope", "invariants", "failure-boundaries", "verification"], approachConcerns: [] }), sessionId: "fresh-challenger" }; }
+        if (phase === "challenge") {
+          challenges++;
+          const receipt = { ...review, approach: "Retain expiry boundary and rejection invariant before coordinated caller verification", concernCategories: ["scope", "invariants", "failure-boundaries", "verification"], approachConcerns: [] };
+          delete (receipt as Partial<typeof receipt>).sessionId;
+          delete (receipt as Partial<typeof receipt>).operationId;
+          return { text: envelope("RAFI_QA_CHALLENGE", receipt), sessionId: "fresh-challenger" };
+        }
       assert.equal(phase, "assess"); return { text: envelope("RAFI_QA_ASSESSMENT", review), sessionId: "fresh-assessor" };
     } });
     assert.equal(result.status, "ready"); assert.equal(calls, 5); assert.equal(challenges, 1); assert.equal(store.budget("run", "T1", digest)!.level, 5); assert.equal(store.budget("run", "T1", digest)!.startMs, 1000);

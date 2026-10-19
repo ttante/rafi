@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ContinuityDelta, HandoffAcceptanceReceiptV1, HandoffLineage, HandoffManifestV1, ProviderSessionRefV1, SessionUsageSample } from "rafi-spec";
+import { builderHandoffRequestV1Schema, parseProviderContract } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent, TurnResult } from "./adapters/types.js";
 import { continuityInstruction, mergeContinuityDeltas, parseContinuityDelta } from "./continuity.js";
 import { WorkflowDb } from "./workflowDb.js";
@@ -54,26 +55,17 @@ export function parseBuilderHandoffRequest(text: string): BuilderHandoffRequest 
   const raw = text.slice(starts[0]!.index! + HANDOFF_REQUEST_START.length, ends[0]!.index!).trim();
   let parsed: Record<string, unknown>;
   try { parsed = JSON.parse(raw) as Record<string, unknown>; } catch { throw new Error("Builder handoff request is not valid JSON"); }
-  const expected = new Set(["version", "reason", "decisions", "constraints", "discoveries", "completed_actions", "evidence", "failures", "blockers", "open_work", "next_action", "role_state"]);
-  const unknown = Object.keys(parsed).filter((key) => !expected.has(key));
-  if (unknown.length) throw new Error(`Builder handoff request has unknown fields: ${unknown.join(", ")}`);
-  if (parsed.version !== 1 || typeof parsed.reason !== "string" || !parsed.reason.trim() || !parsed.role_state || typeof parsed.role_state !== "object" || Array.isArray(parsed.role_state)) throw new Error("Builder handoff request is missing required v1 fields");
-  const list = (key: string): string[] => {
-    const value = parsed[key];
-    if (!Array.isArray(value) || value.length > 500 || value.some((item) => typeof item !== "string" || !item.trim() || item.length > 4_000)) throw new Error(`Builder handoff request field ${key} must be a bounded string array`);
-    return value as string[];
-  };
-  if (typeof parsed.next_action !== "string" || !parsed.next_action.trim() || parsed.next_action.length > 4_000) throw new Error("Builder handoff next_action must be a non-empty bounded string");
+  const contract = parseProviderContract(builderHandoffRequestV1Schema, parsed, "Builder handoff request");
   return {
     version: 1,
-    reason: clean(parsed.reason, 2_000),
+    reason: clean(contract.reason, 2_000),
     delta: {
       version: 1,
-      decisions: list("decisions"), constraints: list("constraints"), discoveries: list("discoveries"),
-      completedActions: list("completed_actions"), evidence: list("evidence"), failures: list("failures"),
-      blockers: list("blockers"), openWork: list("open_work"), nextAction: parsed.next_action.trim(),
+      decisions: contract.decisions, constraints: contract.constraints, discoveries: contract.discoveries,
+      completedActions: contract.completed_actions, evidence: contract.evidence, failures: contract.failures,
+      blockers: contract.blockers, openWork: contract.open_work, nextAction: contract.next_action,
     },
-    roleState: sanitizeObject(parsed.role_state as Record<string, unknown>),
+    roleState: sanitizeObject(contract.role_state),
   };
 }
 

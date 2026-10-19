@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
-import { bindBuildAuthority, BUILD_RUN_DIRECTORY, buildRecoveryPreview, completeBuildRun, createBuildRun, currentBranchRecoveryTicket, currentBranchTicketProgress, recoveryExecutionTickets, finishRecoveredTicketScope, heartbeatBuildRun, persistBuildSession, readBuildRuns, recordBuildReceipt, recoverableBuildRuns, releaseBuildLease, resumeBuildRun, saveBuildRun } from "../src/buildRuns.js";
+import { bindBuildAuthority, BUILD_RUN_DIRECTORY, branchTicketScopeProgress, buildRecoveryPreview, completeBuildRun, createBuildRun, currentBranchRecoveryTicket, currentBranchTicketProgress, recoveryExecutionTickets, finishBranchTicketScope, finishRecoveredTicketScope, heartbeatBuildRun, persistBuildSession, readBuildRuns, recordBuildReceipt, recoverableBuildRuns, releaseBuildLease, resumeBuildRun, saveBuildRun } from "../src/buildRuns.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { cmdInit } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
@@ -167,6 +167,46 @@ test("ticket recovery retains the QA finalization guard even when tracker says d
       assert.deepEqual(next.progress.remainingTickets, ["T001"]);
       assert.notEqual(db.getRun(run.runId)?.status, "completed");
     } finally { db.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("branch recovery preserves an unstarted original ticket after a targeted ticket completes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-branch-scope-recovery-"));
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001", "T002"], branchMode: "per-ticket", qaEnabled: false });
+    const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try { state.upsertState("T001", { status: "done" }, new Date().toISOString()); } finally { state.close(); }
+
+    assert.deepEqual(branchTicketScopeProgress(dir, run), { completed: ["T001"], remaining: ["T002"] });
+    run = finishBranchTicketScope(dir, run, "branch-partial-scope-complete");
+    assert.equal(run.status, "recoverable");
+    assert.equal(run.currentTicket, "T002");
+    assert.deepEqual(run.progress.completedTickets, ["T001"]);
+    assert.deepEqual(run.progress.remainingTickets, ["T002"]);
+    assert.equal(readBuildRuns(dir).find(candidate => candidate.runId === run.runId)?.status, "recoverable");
+
+    run = resumeBuildRun(dir, run.runId, {});
+    const resumedState = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try { resumedState.upsertState("T002", { status: "done" }, new Date().toISOString()); } finally { resumedState.close(); }
+    run = finishBranchTicketScope(dir, run, "branch-scope-complete");
+    assert.equal(run.status, "completed");
+    assert.deepEqual(run.progress.completedTickets, ["T001", "T002"]);
+    assert.deepEqual(run.progress.remainingTickets, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("branch completion requires a terminal QA state for every tracker-complete ticket when QA is enabled", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-branch-scope-qa-"));
+  try {
+    cmdInit(dir, { appName: "Test", timezone: "UTC" });
+    const run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"], branchMode: "per-ticket", qaEnabled: true });
+    const state = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
+    try { state.upsertState("T001", { status: "done" }, new Date().toISOString()); } finally { state.close(); }
+    assert.deepEqual(branchTicketScopeProgress(dir, run), { completed: [], remaining: ["T001"] });
+    const paused = finishBranchTicketScope(dir, run, "branch-partial-scope-complete");
+    assert.equal(paused.status, "recoverable");
+    assert.deepEqual(paused.progress.remainingTickets, ["T001"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

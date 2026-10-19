@@ -289,8 +289,15 @@ export async function sendGraphTurn(adapter: BuilderAdapter, instruction: string
       return accumulated(result);
     }
     if (result.continuityErrors?.length) {
-      state.state = "uncertain";
+      // The provider response was received; a missing/malformed continuity
+      // record is a response-format defect, not an uncertain dispatch. Keep
+      // the operation terminal so callers can perform their bounded
+      // response-only correction without replaying provider work.
+      state.state = "completed";
       persist();
+      // The turn completed, but its response is unusable until the bounded
+      // correction path repairs the continuity record. Preserve the error
+      // contract so callers do not treat this as successful business work.
       return accumulated({ ...result, isError: true });
     }
     let request: GraphReadRequestV1 | undefined;

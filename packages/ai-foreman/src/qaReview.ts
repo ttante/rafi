@@ -1,9 +1,11 @@
 import { withGraphDerivedAccess } from "./graph/derived.js";
 import { dispatchWithGraphAccess } from "./graph/session.js";
 import { finalQaRoleInstructions, resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
-import { COVERAGE_INSTRUCTIONS, parseContractCoverage, validateContractCoverage } from "./qaContractCoverage.js";
+import { COVERAGE_INSTRUCTIONS, bindCoverageHostFields, parseContractCoverage, validateContractCoverage } from "./qaContractCoverage.js";
 import { contractDigest, renderVerificationContract } from "./qaVerificationContract.js";
 import { finalReviewContractContext } from "./qaContractDelivery.js";
+import { qaCommandOutputExcerptsAllowed, retainedQaCommandObservations } from "./qaReviewEvidence.js";
+import { qaHostGraphFact } from "./qaHostFacts.js";
 import { graphContext, parseGraphRequest, prepareGraphInstruction, sendGraphTurn } from "./graph/turn.js";
 import { BuildControlBoundary } from "./buildInterventions.js";
 import { formatRecoveryCommand } from "./recoveryGuidance.js";
@@ -295,7 +297,10 @@ async function runIsolatedQaOwned(opts: IsolatedQaOptions): Promise<IsolatedQaRe
   const maxBuilderFixes = Math.min(opts.maxCycles, durableLimit);
   let automaticFixes = persistedQaFixCount(opts);
   let reviewAttempt = Math.max(opts.state.reviews, ...durableReviews.map((item) => item.reviewNumber), 0);
-  let remediationGeneration = Math.max(opts.state.remediationGeneration ?? 0, durableRemediationGeneration, ...durableReviews.map((item) => item.remediationGeneration), ...durableRemediations.map((item) => item.generation), 0);
+  // Remediation generations are scoped to a ticket head.  The surrounding
+  // build state is shared across tickets, so using its counter here can leak
+  // T-001's fixes into T-002 and make a valid review fail binding validation.
+  let remediationGeneration = Math.max(durableRemediationGeneration, ...durableReviews.map((item) => item.remediationGeneration), ...durableRemediations.map((item) => item.generation), 0);
   const resumedHeadDb = new WorkflowDb(opts.recovery.projectDir);
   resumedHeadDb.reconcileInstructionDeliveries(opts.recovery.runId,opts.ticket.id);
   opts.qaRemediationAuthorization ??= resumedHeadDb.consumeInstructionControls(opts.recovery.runId,opts.ticket.id,"attempts");
@@ -561,6 +566,10 @@ function deliverQaFailureOrLegacyFix(opts: IsolatedQaOptions, request: QaFixRequ
       const attempt = headDb.qaReviewAttempt(causingAttemptId);
       const reportDigest = request.reportDigest;
       if (!attempt) throw new Error(`QA failure delivery is missing review attempt ${causingAttemptId}`);
+      const admission = headDb.assertAdmittedWork(opts.recovery.runId, opts.ticket.id);
+      const preparation = headDb.qaPreparationStore();
+      const contractHead = preparation.head(opts.recovery.runId, opts.ticket.id, admission.requirementsDigest);
+      const contract = contractHead.state === "ready" && contractHead.digest ? preparation.contract(contractHead.digest) : undefined;
       const input: QaFailureDeliveryInput = {
         projectDir: opts.recovery.projectDir,
         runId: opts.recovery.runId,
@@ -572,6 +581,7 @@ function deliverQaFailureOrLegacyFix(opts: IsolatedQaOptions, request: QaFixRequ
         reviewNumber: attempt.reviewNumber,
         reviewedSourceStateDigest: attempt.sourceDigest,
         reviewBasisDigest: headDb.qaTicketHead(opts.recovery.runId, opts.ticket.id).reviewBasisDigest ?? "",
+        ...(contract ? { contractDigest: contract.contentDigest } : {}),
         remediationGeneration: attempt.remediationGeneration,
         latestBuilderResult: request.latestBuilderResult,
         history: request.history,
@@ -899,7 +909,12 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
       const contract = responseContract;
       if (!contract.valid) return pauseQaReview(opts, "invalid-pass-contract", `invalid QA pass response: ${contract.errors.join("; ")}`, reviewedSnapshot.frozenState);
       if (missingPrerequisites.length) return pauseQaReview(opts, "verification-not-run", "Required verification remains not_run; prerequisite recovery and fresh QA required", reviewedSnapshot.frozenState);
-      const certificate = finishV2Pass(opts, qa, status.summary ?? "qa_pass");
+      let certificate: ReturnType<typeof finishV2Pass>;
+      try { certificate = finishV2Pass(opts, qa, status.summary ?? "qa_pass"); }
+      catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return retryFreshQaReview(opts, "invalid-qa-coverage", `QA pass evidence was not parseable or complete: ${detail}`, reviewedSnapshot.frozenState);
+      }
       markQaRecoveryResolved(opts);
       durableReviewFinished = true;
       opts.evidence?.({ cycle, reviewAttempt: activeBinding.reviewNumber, remediationGeneration, attemptId: activeBinding.reviewAttemptId, outcome: "passed", detail: status.summary ?? "qa_pass", durationMs: Math.max(0, performance.now() - started) }); return { outcome: "passed", summary: status.summary, passCertificateId: certificate.certificateId, sourceStateDigest: certificate.sourceStateDigest, reviewBasisDigest: certificate.reviewBasisDigest };
@@ -936,7 +951,12 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
         }
         if (contract.valid && contract.status === "qa_pass") {
           if (missingPrerequisites.length) return pauseQaReview(opts, "verification-not-run", "Required verification remains not_run; prerequisite recovery and fresh QA required", reviewedSnapshot.frozenState);
-          const certificate = finishV2Pass(opts, qa, contract.fields.summary ?? "qa_pass");
+          let certificate: ReturnType<typeof finishV2Pass>;
+          try { certificate = finishV2Pass(opts, qa, contract.fields.summary ?? "qa_pass"); }
+          catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            return retryFreshQaReview(opts, "invalid-qa-coverage", `Recovered QA pass evidence was not parseable or complete: ${detail}`, reviewedSnapshot.frozenState);
+          }
           markQaRecoveryResolved(opts);
           durableReviewFinished = true;
           opts.evidence?.({ cycle, reviewAttempt: activeBinding.reviewNumber, remediationGeneration, attemptId: activeBinding.reviewAttemptId, outcome: "passed", detail: contract.fields.summary ?? "qa_pass", durationMs: Math.max(0, performance.now() - started) });
@@ -1415,7 +1435,7 @@ function validateBoundaryReceipt(receipt: HandoffAcceptanceReceiptV2, packet: Qa
     if (!durable || canonicalJson(durable) !== canonicalJson(receipt)) throw new Error("QA recovery acceptance receipt is not durably recorded");
   } finally { receiptDb.close(); }
   const byLabel = new Map(receipt.resources.map((resource) => [resource.label, resource]));
-  for (const expected of packet.manifest.resources) {
+  for (const expected of packet.manifest.resources.filter((resource) => resource.requiredForRecovery)) {
     const actual = byLabel.get(expected.path);
     if (!actual || actual.authoritative !== true || actual.digest !== expected.digest || actual.path !== expected.path || actual.purpose !== expected.purpose
       || actual.bytes !== expected.bytes || actual.mediaType !== expected.mediaType || actual.requiredForRecovery !== expected.requiredForRecovery) {
@@ -1501,7 +1521,9 @@ function beginV2Review(
         return operation.kind === "builder-coverage" && operation.status === "confirmed" && intent.workId === opts.ticket.id && intent.contractDigest === contract.contentDigest && result?.binding?.sourceDigest === source.digest && result.coverageDigest
           ? [{ operationId: operation.idempotencyKey, digest: result.coverageDigest, coverage: preparationStore.artifact(result.coverageDigest, "builder-coverage") }] : [];
       });
-      instruction += finalReviewContractContext(contract, preparationStore, reviewedSnapshotPath, builderClaims);
+      const commandObservations = retainedQaCommandObservations(opts.recovery.projectDir, opts.recovery.runId, opts.ticket.id, qaCommandOutputExcerptsAllowed(opts.ticket.id));
+      instruction += `\n${qaHostGraphFact(opts.recovery.projectDir)}\n`;
+      instruction += finalReviewContractContext(contract, preparationStore, reviewedSnapshotPath, builderClaims, commandObservations);
       instruction += `\n${renderVerificationContract(contract)}\n${COVERAGE_INSTRUCTIONS}\nCoverage binding: ${JSON.stringify({ phase: "qa", runId: opts.recovery.runId, workId: opts.ticket.id, contractDigest: contract.contentDigest, revision: contract.revision, sourceDigest: source.digest, attemptId: attempt.attemptId, sessionId: handle.sessionIdentity().sessionId })}`;
     }
     const originalInstruction = instruction;
@@ -1787,8 +1809,9 @@ function finishV2Pass(opts: IsolatedQaOptions, adapter: BuilderAdapter, detail: 
       const contractHead = db.qaPreparationStore().head(binding.runId, binding.ticketId, admission.requirementsDigest);
       if (!contractHead.digest || contractHead.state !== "ready") throw new Error("Final coverage requires the current ready contract");
       const contract = db.qaPreparationStore().contract(contractHead.digest);
-      const coverage = parseContractCoverage(binding.lastResponse ?? "");
-      const errors = validateContractCoverage(contract, coverage, { phase: "qa", sourceDigest: binding.sourceStateDigest, inputBasisDigest: binding.reviewBasisDigest, attemptId: binding.reviewAttemptId, sessionId: binding.sessionRef.sessionId });
+      const coverageBinding = { phase: "qa" as const, sourceDigest: binding.sourceStateDigest, inputBasisDigest: binding.reviewBasisDigest, attemptId: binding.reviewAttemptId, sessionId: binding.sessionRef.sessionId };
+      const coverage = bindCoverageHostFields(parseContractCoverage(binding.lastResponse ?? ""), contract, coverageBinding);
+      const errors = validateContractCoverage(contract, coverage, coverageBinding);
       if (errors.length) throw new Error(`Final QA coverage incomplete: ${errors.join("; ")}`);
       const coverageDigest = db.qaPreparationStore().putArtifact("final-coverage", coverage);
       contractCoverage = { version: 1, contractDigest: contract.contentDigest, revision: contract.revision, coverageDigest, attemptId: binding.reviewAttemptId, sessionId: binding.sessionRef.sessionId };

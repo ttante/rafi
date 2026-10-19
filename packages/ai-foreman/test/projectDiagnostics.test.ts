@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -117,4 +117,14 @@ test("project collection supports setup before any build without fabricating a r
     assert.match(buildManagerProjectPacket(report, "How do I set up tickets?").prompt, /projectState/);
   }
   finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("project diagnostics explain QA preparation configuration before a build exists", () => {
+  const root = temp();
+  try {
+    writeFileSync(join(root, "rafi-config.yaml"), "appName: Test\ntimezone: UTC\nstack: { frontend: '', backend: node, database: '', cloud: '', packageManager: pnpm }\nflags: { hasFrontend: false, usesAI: false, runsInCloud: false }\nharness: { targets: [codex], qa: true }\nagent_files: { mode: overwrite, codex: ./AGENTS.md, claude: ./CLAUDE.md }\nagents: {}\nskills: {}\nqa_preparation: true\n", "utf8");
+    const report = collectManagerProjectDiagnostics(root).report;
+    assert.equal(report.projectState?.qaPreparation?.mode, "enforce");
+    assert.match(report.projectState?.qaPreparation?.detail ?? "", /requires a ticket contract/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -3,17 +3,19 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { stringify } from "yaml";
-import type { StructuredPlanV1 } from "rafi-spec";
+import { ticketPopulationProposalV1Schema, zodIssues, type StructuredPlanV1 } from "rafi-spec";
 import { WorkflowDb, WORKFLOW_DB_FILE } from "./workflowDb.js";
 import { cmdRender, cmdValidate } from "./tickets/commands.js";
-import { loadTickets, validateTicketDefs } from "./tickets/ticketLoader.js";
+import { loadTickets, RISK_ROLLBACK_REQUIRED, validateTicketDefs } from "./tickets/ticketLoader.js";
 import type { TicketDef } from "./tickets/ticketSchema.js";
 import { normalizeDeliveryConfig, validateDeliveryConfig, type DeliveryConfig } from "./tickets/delivery.js";
 import { loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
 import { StateDb } from "./tickets/stateDb.js";
+import { ticketDefinitionDigest } from "./tickets/riskWaivers.js";
 
 export interface TicketSliceProposal {
   qa_preparation?: TicketDef["qa_preparation"];
+  documentation?: TicketDef["documentation"];
   slice_ref: string;
   title: string; area: string; priority: TicketDef["priority"]; size: TicketDef["size"]; risk: TicketDef["risk"];
   summary: string; acceptance: string[]; required_tests: string[]; likely_files: string[];
@@ -23,22 +25,117 @@ export interface TicketSliceProposal {
 export interface TicketPopulationProposalV1 { version: 1; plan_id: string; revision: number; tickets: TicketSliceProposal[]; retirements: string[] }
 export const TICKET_POPULATION_PROPOSAL_START = "RAFI_TICKET_POPULATION_PROPOSAL_START";
 export const TICKET_POPULATION_PROPOSAL_END = "RAFI_TICKET_POPULATION_PROPOSAL_END";
-export interface MaterializedTicketPopulation { tickets: TicketDef[]; delivery: DeliveryConfig; retirements: string[]; sliceToTicket: Map<string, string> }
+export interface PopulationRiskWaiver { ticketId: string; reason: string; actor: string }
+export interface MaterializedTicketPopulation { tickets: TicketDef[]; delivery: DeliveryConfig; retirements: string[]; sliceToTicket: Map<string, string>; riskWaivers?: PopulationRiskWaiver[] }
+export type PopulationBranchStrategy = "current" | "batch" | "branch-per-ticket";
+
+function additiveAbsenceRequirement(text: string): boolean {
+  return [
+    /\bslice alone\b/i,
+    /\bwithout\b.*\b(?:present|implemented|enabled)\b/i,
+    /\bonly\b.*\bown\b.*\btest files?\b/i,
+    /\bonly\b.*\btest files?\b.*\bpresent\b/i,
+  ].some((pattern) => pattern.test(text));
+}
+
+function additiveIndependenceIssues(
+  ticket: TicketSliceProposal,
+  plannedSlice: StructuredPlanV1["slices"][number] | undefined,
+  currentBranch: boolean,
+): string[] {
+  if (!currentBranch || !plannedSlice) return [];
+
+  const approvedRequirements = new Set([
+    ...plannedSlice.acceptance,
+    ...plannedSlice.required_tests,
+  ].map((item) => item.trim()));
+
+  return [...ticket.acceptance, ...ticket.required_tests]
+    .filter(additiveAbsenceRequirement)
+    .filter((item) => !approvedRequirements.has(item.trim()))
+    .map(() =>
+      `ticket ${ticket.slice_ref} adds a sibling-absence requirement; use positive own-slice checks against the shared baseline`,
+    );
+}
+
+/** A recoverable, proposal-local validation failure. Callers can ask Ticket Maker
+ * to repair only the listed tickets instead of discarding the whole interview. */
+export class TicketPopulationValidationError extends Error {
+  readonly repairableRiskTicketIds: string[];
+  readonly repairableRiskSliceRefs: string[];
+  readonly onlyRepairableRiskFailures: boolean;
+  constructor(message: string, repairableRiskTicketIds: string[], repairableRiskSliceRefs: string[], onlyRepairableRiskFailures: boolean) {
+    super(message);
+    this.name = "TicketPopulationValidationError";
+    this.repairableRiskTicketIds = repairableRiskTicketIds;
+    this.repairableRiskSliceRefs = repairableRiskSliceRefs;
+    this.onlyRepairableRiskFailures = onlyRepairableRiskFailures;
+  }
+}
+
+/** Reject a correction that attempts to turn a risk-note repair into a new plan. */
+export function assertRiskPlanOnlyCorrection(
+  previous: TicketPopulationProposalV1,
+  corrected: TicketPopulationProposalV1,
+  permittedSliceRefs: string[],
+): void {
+  const permitted = new Set(permittedSliceRefs);
+  if (previous.version !== corrected.version || previous.plan_id !== corrected.plan_id || previous.revision !== corrected.revision || JSON.stringify(previous.retirements) !== JSON.stringify(corrected.retirements)) {
+    throw new Error("Ticket Maker correction changed proposal identity or retirements; only rollback fields may be corrected");
+  }
+  const before = new Map(previous.tickets.map(ticket => [ticket.slice_ref, ticket]));
+  if (before.size !== corrected.tickets.length) throw new Error("Ticket Maker correction changed ticket mappings; only rollback fields may be corrected");
+  for (const ticket of corrected.tickets) {
+    const original = before.get(ticket.slice_ref);
+    if (!original) throw new Error("Ticket Maker correction changed ticket mappings; only rollback fields may be corrected");
+    const originalComparable = { ...original, rollback: undefined };
+    const correctedComparable = { ...ticket, rollback: undefined };
+    if (stableJson(originalComparable) !== stableJson(correctedComparable)) throw new Error(`Ticket Maker correction changed fields other than rollback for ${ticket.slice_ref}`);
+    if (!permitted.has(ticket.slice_ref)) {
+      if (ticket.rollback !== original.rollback) throw new Error(`Ticket Maker correction changed rollback for unaffected ticket ${ticket.slice_ref}`);
+    }
+  }
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
 
 export function extractTicketPopulationProposal(output: string): TicketPopulationProposalV1 {
   const start = output.lastIndexOf(TICKET_POPULATION_PROPOSAL_START); const end = output.lastIndexOf(TICKET_POPULATION_PROPOSAL_END);
   if (start < 0 || end <= start) throw new Error(`ticket-maker output is missing ${TICKET_POPULATION_PROPOSAL_START}/${TICKET_POPULATION_PROPOSAL_END}`);
   const raw = output.slice(start + TICKET_POPULATION_PROPOSAL_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  try { return JSON.parse(raw) as TicketPopulationProposalV1; } catch (error) { throw new Error(`ticket-maker proposal is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch (error) { throw new Error(`ticket-maker proposal is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
+  const validated = ticketPopulationProposalV1Schema.safeParse(parsed);
+  if (!validated.success) throw new Error(`ticket-maker proposal contract validation failed:\n${zodIssues(validated.error).map((issue) => `- ${issue}`).join("\n")}`);
+  return validated.data;
 }
 
-export function validateTicketPopulationProposal(proposal: TicketPopulationProposalV1, plan: StructuredPlanV1, existing: TicketDef[]): string[] {
+export function validateTicketPopulationProposal(proposal: TicketPopulationProposalV1, plan: StructuredPlanV1, existing: TicketDef[], options: { branchStrategy?: PopulationBranchStrategy } = {}): string[] {
   const issues: string[] = [];
+  const contract = ticketPopulationProposalV1Schema.safeParse(proposal);
+  const contractIssues = contract.success ? [] : zodIssues(contract.error);
   if (proposal.version !== 1 || proposal.plan_id !== plan.plan_id || proposal.revision !== plan.revision) issues.push("proposal plan identity does not match the approved structured plan");
   const planned = new Set(plan.slices.map((slice) => slice.slice_ref)); const mapped = new Set<string>();
   for (const ticket of proposal.tickets) {
-    const depth = plan.slices.find(slice => slice.slice_ref === ticket.slice_ref)?.qa_preparation;
+    const plannedSlice = plan.slices.find(slice => slice.slice_ref === ticket.slice_ref);
+    issues.push(...additiveIndependenceIssues(
+      ticket,
+      plannedSlice,
+      options.branchStrategy !== undefined
+        ? options.branchStrategy === "current"
+        : plan.slices.length > 1 && plan.delivery_units.some(unit => unit.branch_mode === "current"),
+    ));
+    const depth = plannedSlice?.qa_preparation;
     if (ticket.qa_preparation && (!depth || canonicalContractJson(ticket.qa_preparation) !== canonicalContractJson(depth))) issues.push(`ticket-maker cannot override planner QA depth for ${ticket.slice_ref}`);
+    const documentation = plannedSlice?.documentation ?? { required: false, targets: [], criteria: [] };
+    if (ticket.documentation && canonicalContractJson(ticket.documentation) !== canonicalContractJson(documentation)) issues.push(`ticket-maker cannot override planner documentation policy for ${ticket.slice_ref}`);
     if (!planned.has(ticket.slice_ref)) issues.push(`unknown slice mapping ${ticket.slice_ref}`);
     if (mapped.has(ticket.slice_ref)) issues.push(`duplicate slice mapping ${ticket.slice_ref}`); else mapped.add(ticket.slice_ref);
     for (const dep of ticket.depends_on) if (!planned.has(dep)) issues.push(`slice ${ticket.slice_ref} depends on unknown slice ${dep}`);
@@ -46,11 +143,16 @@ export function validateTicketPopulationProposal(proposal: TicketPopulationPropo
   for (const ref of planned) if (!mapped.has(ref)) issues.push(`missing ticket mapping for slice ${ref}`);
   const expectedRetirements = existing.filter((ticket) => ticket.plan_ref?.plan_id === plan.plan_id && !planned.has(ticket.plan_ref.slice_ref) && ticket.plan_ref.revision < plan.revision).map((ticket) => ticket.id).sort();
   if (JSON.stringify([...proposal.retirements].sort()) !== JSON.stringify(expectedRetirements)) issues.push(`retirements must exactly match removed populated slices: ${expectedRetirements.join(",") || "none"}`);
-  return issues;
+  return [...new Set([...contractIssues, ...issues])];
 }
 
-export function materializeTicketPopulation(proposal: TicketPopulationProposalV1, plan: StructuredPlanV1, existing: TicketDef[]): MaterializedTicketPopulation {
-  const issues = validateTicketPopulationProposal(proposal, plan, existing); if (issues.length) throw new Error(issues.join("; "));
+export function materializeTicketPopulation(
+  proposal: TicketPopulationProposalV1,
+  plan: StructuredPlanV1,
+  existing: TicketDef[],
+  options: { waiveRiskTicketIds?: string[]; waiverReason?: string; waiverActor?: string; branchStrategy?: PopulationBranchStrategy } = {},
+): MaterializedTicketPopulation {
+  const issues = validateTicketPopulationProposal(proposal, plan, existing, { branchStrategy: options.branchStrategy }); if (issues.length) throw new Error(issues.join("; "));
   const byPlanSlice = new Map(existing.filter((ticket) => ticket.plan_ref).map((ticket) => [`${ticket.plan_ref!.plan_id}:${ticket.plan_ref!.slice_ref}`, ticket]));
   const reserved = new Set(existing.map((ticket) => ticket.id)); const sliceToTicket = new Map<string, string>();
   for (const slice of proposal.tickets) {
@@ -64,6 +166,7 @@ export function materializeTicketPopulation(proposal: TicketPopulationProposalV1
       title: slice.title, area: slice.area, priority: slice.priority, size: slice.size, risk: slice.risk,
       depends_on: slice.depends_on.map((ref) => sliceToTicket.get(ref)!), summary: slice.summary,
       acceptance: [...slice.acceptance], required_tests: [...slice.required_tests], likely_files: [...slice.likely_files],
+      documentation: structuredClone(slice.documentation ?? plan.slices.find(item => item.slice_ref === slice.slice_ref)?.documentation ?? { required: false, targets: [], criteria: [] }),
       rollback: slice.rollback, notes: slice.notes, plan_ref: { plan_id: plan.plan_id, revision: plan.revision, slice_ref: slice.slice_ref },
       source_refs: (plan.slices.find((item) => item.slice_ref === slice.slice_ref)?.source_refs ?? slice.source_refs)?.map((ref) => ({
         source: ref.source_id, item: ref.item ?? "document", source_id: ref.source_id, fingerprint: ref.fingerprint,
@@ -73,18 +176,45 @@ export function materializeTicketPopulation(proposal: TicketPopulationProposalV1
   });
   const ownedIds = new Set(materialized.map((ticket) => ticket.id));
   const tickets = [...existing.filter((ticket) => !ownedIds.has(ticket.id)), ...materialized].sort((a, b) => a.order - b.order);
+  const branchMode = options.branchStrategy === "current" ? "current" : options.branchStrategy === "batch" ? "shared" : options.branchStrategy === "branch-per-ticket" ? "per-ticket" : undefined;
   const delivery: DeliveryConfig = normalizeDeliveryConfig({
     version: 1, plan: { plan_id: plan.plan_id, revision: plan.revision },
     units: plan.delivery_units.map((unit) => ({
-      id: unit.id, tickets: unit.slice_refs.map((ref) => sliceToTicket.get(ref)), branch_mode: unit.branch_mode,
-      completion: unit.completion, provider: unit.provider, pr_ready: unit.pr_ready, merge_method: unit.merge_method,
+      id: unit.id, tickets: unit.slice_refs.map((ref) => sliceToTicket.get(ref)), branch_mode: branchMode ?? unit.branch_mode,
+      completion: options.branchStrategy === "current" ? "none" : unit.completion,
+      provider: options.branchStrategy === "current" ? "local" : unit.provider, pr_ready: options.branchStrategy === "current" ? false : unit.pr_ready, merge_method: unit.merge_method,
       cleanup: unit.cleanup, depends_on: unit.depends_on, dependency_mode: unit.dependency_mode,
     })),
-    stacks: plan.stacks.map((stack) => ({ id: stack.stack_id, name: stack.name, units: stack.units, status: "planned" })),
+    stacks: options.branchStrategy === "current" ? [] : plan.stacks.map((stack) => ({ id: stack.stack_id, name: stack.name, units: stack.units, status: "planned" })),
   });
-  const validation = [...validateTicketDefs(tickets).map((issue) => `${issue.path}: ${issue.message}`), ...validateDeliveryConfig(delivery, tickets).map((issue) => `${issue.path}: ${issue.message}`)];
-  if (validation.length) throw new Error(`materialized ticket population is invalid:\n${validation.map((issue) => `- ${issue}`).join("\n")}`);
-  return { tickets, delivery, retirements: [...proposal.retirements], sliceToTicket };
+  const ticketValidation = validateTicketDefs(tickets);
+  const deliveryValidation = validateDeliveryConfig(delivery, tickets);
+  const validation = [...ticketValidation.map((issue) => `${issue.path}: ${issue.message}`), ...deliveryValidation.map((issue) => `${issue.path}: ${issue.message}`)];
+  if (validation.length) {
+    const riskTicketIds = ticketValidation
+      .filter((issue) => issue.code === RISK_ROLLBACK_REQUIRED)
+      .map((issue) => issue.path.match(/^tickets\[([^\]]+)\]/)?.[1])
+      .filter((id): id is string => Boolean(id));
+    const waiverIds = [...new Set(options.waiveRiskTicketIds ?? [])].sort();
+    const allRiskIds = [...new Set(riskTicketIds)].sort();
+    const waiverIsExact = JSON.stringify(waiverIds) === JSON.stringify(allRiskIds);
+    if (waiverIsExact && allRiskIds.length > 0 && typeof options.waiverReason === "string" && options.waiverReason.trim()) {
+      const remaining = validation.filter((issue) => !ticketValidation.some((ticketIssue) => ticketIssue.code === RISK_ROLLBACK_REQUIRED && `${ticketIssue.path}: ${ticketIssue.message}` === issue));
+      if (!remaining.length) {
+        return {
+          tickets, delivery, retirements: [...proposal.retirements], sliceToTicket,
+          riskWaivers: allRiskIds.map(ticketId => ({ ticketId, reason: options.waiverReason!.trim(), actor: options.waiverActor?.trim() || "operator" })),
+        };
+      }
+    }
+    throw new TicketPopulationValidationError(
+      `materialized ticket population is invalid:\n${validation.map((issue) => `- ${issue}`).join("\n")}`,
+      riskTicketIds,
+      tickets.filter(ticket => riskTicketIds.includes(ticket.id)).map(ticket => ticket.plan_ref?.slice_ref).filter((ref): ref is string => Boolean(ref)),
+      riskTicketIds.length > 0 && validation.length === riskTicketIds.length,
+    );
+  }
+  return { tickets, delivery, retirements: [...proposal.retirements], sliceToTicket, riskWaivers: [] };
 }
 
 export function authorizeTicketRetirements(retirements: string[], input: { interactiveConfirmed?: boolean; authorizedIds?: string[]; computerRun?: boolean }): void {
@@ -129,6 +259,11 @@ export function applyTicketPopulation(projectDir: string, materialized: Material
         const at = now.toISOString();
         db.ensureSyntheticLegacyGroup(previousTickets as Array<TicketDef & Record<string, unknown>>, now);
         for (const ticket of materialized.tickets) if (!db.getState(ticket.id)) db.upsertState(ticket.id, { status: "planned", updated_by: "rafi tickets populate" }, at);
+        for (const waiver of materialized.riskWaivers ?? []) {
+          const ticket = materialized.tickets.find((item) => item.id === waiver.ticketId);
+          if (!ticket) throw new Error(`risk waiver references unknown materialized ticket ${waiver.ticketId}`);
+          db.upsertTicketRiskWaiver({ ticket_id: ticket.id, definition_digest: ticketDefinitionDigest(ticket), reason: waiver.reason, waived_by: waiver.actor, waived_at: at });
+        }
         for (const id of materialized.retirements) {
           const prior = db.getState(id); if (prior?.status === "done") continue;
           db.upsertState(id, { status: "obsolete", completed_at: at, updated_by: "rafi tickets populate" }, at);
@@ -141,7 +276,7 @@ export function applyTicketPopulation(projectDir: string, materialized: Material
           ticket_id: null,
           run_id: actualRunId!,
           completed_at: at,
-          payload_json: JSON.stringify({ transactionId: tx.transactionId, tickets: materialized.tickets.map((ticket) => ticket.id) }),
+          payload_json: JSON.stringify({ transactionId: tx.transactionId, tickets: materialized.tickets.map((ticket) => ticket.id), riskWaivers: (materialized.riskWaivers ?? []).map((waiver) => waiver.ticketId) }),
         });
       });
     } finally { db.close(); }

@@ -105,6 +105,14 @@ export interface OperationReceipt {
   payload_json: string;
 }
 
+export interface TicketRiskWaiver {
+  ticket_id: string;
+  definition_digest: string;
+  reason: string;
+  waived_at: string;
+  waived_by: string | null;
+}
+
 export interface TicketGroupValidationIssue {
   code: "missing-membership" | "multiple-membership" | "unknown-member" | "empty-group" | "sequence-corruption" | "reused-id" | "snapshot-corruption" | "receipt-without-group";
   message: string;
@@ -274,6 +282,14 @@ CREATE TABLE IF NOT EXISTS ticket_group_sequence_ledger (
   allocated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ticket_risk_waivers (
+  ticket_id TEXT PRIMARY KEY,
+  definition_digest TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  waived_at TEXT NOT NULL,
+  waived_by TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_ticket_state_status ON ticket_state(status);
 CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket_id ON ticket_events(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ticket_events_timestamp ON ticket_events(timestamp);
@@ -344,6 +360,22 @@ export class StateDb {
     const m = new Map<string, TicketState>();
     for (const row of rows) m.set(row.ticket_id, row);
     return m;
+  }
+
+  getTicketRiskWaiver(ticketId: string, definitionDigest: string): TicketRiskWaiver | undefined {
+    if (!this.hasTable("ticket_risk_waivers")) return undefined;
+    return this.db.prepare("SELECT * FROM ticket_risk_waivers WHERE ticket_id=? AND definition_digest=?").get(ticketId, definitionDigest) as TicketRiskWaiver | undefined;
+  }
+
+  upsertTicketRiskWaiver(waiver: TicketRiskWaiver): void {
+    if (this.readOnly) throw new Error("ticket risk waivers cannot be changed in read-only mode");
+    this.db.prepare(`INSERT INTO ticket_risk_waivers(ticket_id,definition_digest,reason,waived_at,waived_by)
+      VALUES(@ticket_id,@definition_digest,@reason,@waived_at,@waived_by)
+      ON CONFLICT(ticket_id) DO UPDATE SET definition_digest=excluded.definition_digest,reason=excluded.reason,waived_at=excluded.waived_at,waived_by=excluded.waived_by`).run(waiver);
+  }
+
+  private hasTable(name: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
   }
 
   deleteState(ticketId: string): void {

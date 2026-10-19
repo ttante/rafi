@@ -55,6 +55,7 @@ export const DEFAULT_CONFIG: ForemanConfig = {
       "git checkout",
       "git restore",
       "git stash",
+      "rafi qa-rehearse-rollback",
       "ls",
       "cat ",
       "mkdir ",

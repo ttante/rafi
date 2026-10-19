@@ -5,7 +5,12 @@ const contractAjv = new Ajv({ allErrors: true });
 const candidateSchema = contractAjv.compile(qaContractCandidateV1Schema);
 const assessmentSchema = contractAjv.compile(qaSemanticAssessmentV1Schema);
 const challengeSchema = contractAjv.compile(qaChallengeReceiptV1Schema);
+function schemaIssues(errors: typeof candidateSchema.errors): string[] {
+  return (errors ?? []).map(error => `${error.instancePath || "/"} ${error.message}${error.keyword === "additionalProperties" ? `: ${String(error.params.additionalProperty)}` : error.keyword === "required" ? `: ${String(error.params.missingProperty)}` : ""}`);
+}
 import { createHash } from "node:crypto";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, sep } from "node:path";
 import type { QaContractCandidateV1, QaVerificationContractV1, QaSemanticAssessmentV1, QaChallengeReceiptV1, ContractInputRef, RequirementRef } from "rafi-spec";
 import { canonicalJson } from "./qaProtocolV2.js";
 import { depthObligations, validateDepthDecision } from "./qaPreparationPolicy.js";
@@ -41,14 +46,49 @@ export function allocateStableCheckIds(candidate: QaContractCandidateV1): QaCont
     const fingerprint = fingerprintFor(check.id), occurrence = counts.get(fingerprint) ?? 0;
     counts.set(fingerprint, occurrence + 1); mapping.set(check.id, `check-${fingerprint.slice(0, 24)}-${occurrence}`);
   }
-  const replace = (id: string): string => { const replacement = mapping.get(id); if (!replacement) throw new Error(`Unknown proposed check reference ${id}`); return replacement; };
+  // A provider may copy a host-assigned ID from an earlier draft into a
+  // baseline or repair response.  Treat an already allocated ID as
+  // idempotently normalized; never remap it through the provider-name map.
+  const allocatedIds = new Set(mapping.values());
+  const replace = (id: string): string => {
+    const replacement = mapping.get(id);
+    if (replacement) return replacement;
+    if (allocatedIds.has(id)) return id;
+    throw new Error(`Unknown proposed check reference ${id}; valid proposed check IDs: ${[...proposed.keys()].join(", ")}; valid allocated check IDs: ${[...allocatedIds].join(", ")}`);
+  };
+  // Rewrite exact provider-generated check identifiers in provider-authored prose as
+  // well as structured references. Never rewrite approved requirements, paths,
+  // commands, or generic IDs such as "check" that may also be ordinary words.
+  const proseIds = [...mapping.keys()].filter(id => id.startsWith("check-")).sort((a, b) => b.length - a.length);
+  const prosePattern = proseIds.length ? new RegExp(`(^|[^A-Za-z0-9_-])(${proseIds.map(id => id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![A-Za-z0-9_-])`, "g") : undefined;
+  const rewrite = (text: string): string => prosePattern ? text.replace(prosePattern, (_match, prefix: string, id: string) => `${prefix}${replace(id)}`) : text;
   for (const check of draft.checks) { check.id = replace(check.id); check.dependsOnChecks = check.dependsOnChecks.map(replace); }
   for (const row of draft.coverage) row.checkIds = row.checkIds.map(replace);
   for (const observation of draft.baseline) if (observation.checkId) observation.checkId = replace(observation.checkId);
-  for (const concern of draft.unresolved) concern.checkIds = concern.checkIds.map(replace);
+  for (const check of draft.checks) {
+    check.expectedBehavior = rewrite(check.expectedBehavior); check.expectedEvidence = check.expectedEvidence.map(rewrite);
+    if (check.expectedBaseline) check.expectedBaseline = rewrite(check.expectedBaseline);
+    if (check.applicability.predicate) check.applicability.predicate = rewrite(check.applicability.predicate);
+    check.applicability.requiredEvidence = check.applicability.requiredEvidence.map(rewrite);
+    for (const method of check.verification) { method.expectedOutcome = rewrite(method.expectedOutcome); if (method.steps) method.steps = method.steps.map(rewrite); }
+  }
+  for (const observation of draft.baseline) { observation.procedure = rewrite(observation.procedure); observation.relevance = rewrite(observation.relevance); observation.expectedTransition = rewrite(observation.expectedTransition); if (observation.predicateEvidence) observation.predicateEvidence = observation.predicateEvidence.map(rewrite); }
+  for (const evidence of draft.preparationEvidence) evidence.analysis = rewrite(evidence.analysis);
+  for (const concern of draft.unresolved) { concern.checkIds = concern.checkIds.map(replace); concern.reason = rewrite(concern.reason); concern.nextAction = rewrite(concern.nextAction); }
   return draft;
 }
 export function inventoryDigest(requirements: RequirementRef[]): string { return contractDigest("qa-requirement-inventory", requirements); }
+
+/** Derive a missing baseline binding only from an explicit, unique check prerequisite reference. */
+export function bindUniqueBaselineCheckIds(candidate: QaContractCandidateV1): QaContractCandidateV1 {
+  const draft = structuredClone(candidate);
+  for (const observation of draft.baseline) {
+    if (observation.checkId) continue;
+    const matches = draft.checks.filter(check => check.prerequisiteRefs.includes(observation.id));
+    if (matches.length === 1) observation.checkId = matches[0]!.id;
+  }
+  return draft;
+}
 export function authoritativeInventory(ticket: TicketDef, checklist: string[], inputs: ContractInputRef[]): RequirementRef[] {
   const result: RequirementRef[] = [];
   for (const [kind, entries] of [["acceptance", ticket.acceptance], ["required_tests", ticket.required_tests], ["checklist", checklist]] as const) {
@@ -67,17 +107,63 @@ export function authoritativeInventory(ticket: TicketDef, checklist: string[], i
 export function parsePreparationArtifact<T>(text: string, tag: string, maximum = 2 * 1024 * 1024): T {
   if (Buffer.byteLength(text) > maximum) throw new Error("QA preparation response exceeds size limit");
   const start = `${tag}_START`, end = `${tag}_END`;
-  if (text.split(start).length !== 2 || text.split(end).length !== 2) throw new Error(`Expected exactly one ${tag} artifact`);
-  const from = text.indexOf(start) + start.length, to = text.indexOf(end);
-  if (to < from) throw new Error("Malformed preparation artifact envelope");
-  return JSON.parse(text.slice(from, to).trim()) as T;
+  // Marker names can appear inline in provider prose or in a quoted repair
+  // instruction. Only a standalone marker line is an envelope boundary.
+  // This keeps the parser strict about malformed envelopes without treating
+  // explanatory text as a second/truncated artifact.
+  const markerOffsets = (marker: string): number[] => {
+    const offsets: number[] = [];
+    const pattern = new RegExp(`^[ \\t]*${marker}[ \\t]*$`, "gm");
+    for (let match = pattern.exec(text); match; match = pattern.exec(text)) offsets.push(match.index);
+    return offsets;
+  };
+  const starts = markerOffsets(start), ends = markerOffsets(end);
+  if (!starts.length || starts.length !== ends.length) throw new Error(`Expected exactly one ${tag} artifact`);
+  const artifacts = starts.map((at, index) => {
+    const from = at + start.length, to = ends[index]!;
+    if (to < from) throw new Error("Malformed preparation artifact envelope");
+    return text.slice(from, to).trim();
+  });
+  if (artifacts.length > 1) {
+    const normalized = artifacts.map(artifact => canonicalContractJson(JSON.parse(artifact)));
+    if (normalized.some(artifact => artifact !== normalized[0])) throw new Error(`Expected exactly one unambiguous ${tag} artifact`);
+  }
+  return JSON.parse(artifacts[0]!) as T;
+}
+/** Capture safe absolute snapshot paths before the disposable snapshot is removed. */
+export function mapSnapshotWorkingDirectories(text: string, snapshotPath: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  try {
+    const draft = parsePreparationArtifact<QaContractCandidateV1>(text, "RAFI_QA_CANDIDATE");
+    const root = realpathSync(snapshotPath);
+    for (const check of draft.checks ?? []) for (const method of check.verification ?? []) {
+      if (typeof method.cwd !== "string" || !isAbsolute(method.cwd)) continue;
+      try {
+        const target = realpathSync(method.cwd);
+        const path = relative(root, target);
+        if (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path) && statSync(target).isDirectory()) result[method.cwd] = path || ".";
+      } catch { /* Missing or inaccessible paths remain invalid. */ }
+    }
+  } catch { /* Parsing and validation report malformed provider responses. */ }
+  return result;
+}
+/** Providers sometimes repeat an absolute disposable-snapshot path from an earlier
+ * conversation.  That path is host-owned and must not enter the durable contract;
+ * normalize only the bounded QA snapshot naming convention to stable relative
+ * locations before parsing the provider draft. */
+export function normalizeSnapshotPaths(text: string): string {
+  return text
+    .replace(/(?:\/(?:private\/var|var|tmp)(?:\/[^\s"']+)*\/)?rafi-qa-[^\/\s"']+\/scratch(?=[\/"'\s}]|$)/g, "scratch")
+    .replace(/(?:\/(?:private\/var|var|tmp)(?:\/[^\s"']+)*\/)?rafi-qa-[^\/\s"']+(?=[\/"'\s}]|$)/g, ".");
 }
 export function validateCandidate(candidate: QaContractCandidateV1, inventory: RequirementRef[], resolveEquivalent?: EquivalentAuthorityResolver): string[] {
-  if (!candidateSchema(candidatePayload(candidate))) return (candidateSchema.errors ?? []).map(error => `${error.instancePath} ${error.message}`);
+  if (!candidateSchema(candidatePayload(candidate))) return schemaIssues(candidateSchema.errors);
   const issues = validateDepthDecision(candidate.depthDecision);
   if (candidate.version !== 1 || !candidate.contractId || !candidate.runId || !candidate.workId || !candidate.admissionDigest || !Number.isSafeInteger(candidate.revision) || candidate.revision < 1) issues.push("Invalid contract identity");
   for (const field of ["inputs", "baseline", "requirements", "checks", "coverage", "preparationEvidence", "unresolved"] as const) if (!Array.isArray(candidate[field])) issues.push(`Missing ${field} array`);
   if (issues.length) return issues;
+  if (candidate.documentation && (!Array.isArray(candidate.documentation.targets) || !Array.isArray(candidate.documentation.criteria))) issues.push("Invalid documentation policy");
+  if (candidate.documentation?.required && (!candidate.documentation.targets.length || !candidate.documentation.criteria.length)) issues.push("Documentation policy requires explicit targets and criteria");
   const unique = (items: Array<{ id: string }>, label: string): Set<string> => {
     const ids = new Set<string>(); for (const item of items) { if (!item.id || ids.has(item.id)) issues.push(`Duplicate/missing ${label} ID ${item.id}`); ids.add(item.id); } return ids;
   };
@@ -90,7 +176,10 @@ export function validateCandidate(candidate: QaContractCandidateV1, inventory: R
     if (req.authority === "proposed" && req.obligation === "mandatory") issues.push(`Proposed scope cannot be mandatory ${req.id}`);
     const rows = candidate.coverage.filter(row => row.requirementId === req.id);
     if (rows.length !== 1 || !rows[0]!.checkIds.length || rows[0]!.dispositionRef) issues.push(`Requirement lacks concrete coverage ${req.id}`);
-    for (const id of rows[0]?.checkIds ?? []) if (!checks.has(id) || !candidate.checks.find(check => check.id === id)?.requirementRefs.includes(req.id)) issues.push(`Invalid coverage ${req.id}/${id}`);
+    for (const id of rows[0]?.checkIds ?? []) {
+      if (!checks.has(id)) issues.push(`Invalid coverage ${req.id}/${id}: unknown check ID`);
+      else if (!candidate.checks.find(check => check.id === id)?.requirementRefs.includes(req.id)) issues.push(`Invalid coverage ${req.id}/${id}: that check's requirementRefs must include ${req.id}`);
+    }
     if (req.obligation === "mandatory" && !(rows[0]?.checkIds ?? []).some(id => candidate.checks.find(check => check.id === id)?.obligation === "mandatory")) issues.push(`Mandatory requirement only covered by advisory checks ${req.id}`);
   }
   for (const row of candidate.coverage) if (!requirements.has(row.requirementId)) issues.push(`Unknown coverage requirement ${row.requirementId}`);
@@ -119,18 +208,23 @@ export function validateCandidate(candidate: QaContractCandidateV1, inventory: R
   const visit = (id: string): void => { if (active.has(id)) { issues.push(`Check dependency cycle ${id}`); return; } if (visited.has(id)) return; active.add(id); for (const dep of candidate.checks.find(check => check.id === id)?.dependsOnChecks ?? []) visit(dep); active.delete(id); visited.add(id); };
   for (const id of checks) visit(id);
   for (const obligation of depthObligations(candidate.depthDecision.level)) if (!candidate.preparationEvidence.some(evidence => evidence.obligation === obligation && evidence.analysis?.trim() && evidence.evidenceDigest && evidence.operationId && evidence.sessionId && evidence.references.length)) issues.push(`Missing depth evidence ${obligation}`);
-  if (candidate.unresolved.some(concern => concern.material)) issues.push("Unresolved material concern");
+  for (const concern of candidate.unresolved.filter(item => item.material).slice(0, 5)) issues.push(`Unresolved material concern: ${concern.reason.slice(0, 500)}${concern.nextAction ? `; next action: ${concern.nextAction.slice(0, 300)}` : ""}`);
+  if (candidate.unresolved.filter(item => item.material).length > 5) issues.push("Additional material concerns are retained in the preparation record");
   return [...new Set(issues)];
 }
 export function validateAssessment(candidate: QaContractCandidateV1, assessment: QaSemanticAssessmentV1, authorSessionId: string): string[] {
   const validator = "approach" in assessment ? challengeSchema : assessmentSchema;
-  if (!validator(assessment)) return (validator.errors ?? []).map(error => `${error.instancePath} ${error.message}`);
+  if (!validator(assessment)) return schemaIssues(validator.errors);
   const issues: string[] = [];
   if (assessment.version !== 1 || assessment.draftPayloadDigest !== draftDigest(candidate) || assessment.inventoryDigest !== inventoryDigest(candidate.requirements) || assessment.policyVersion !== candidate.depthDecision.policyVersion) issues.push("Assessment does not bind the exact draft/inventory/policy");
   if (!assessment.operationId || !assessment.sessionId || assessment.sessionId === authorSessionId || assessment.authorSessionId !== authorSessionId) issues.push("Assessment lacks independent authorship");
   for (const req of candidate.requirements) if (!assessment.assessedRequirementIds?.includes(req.id)) issues.push(`Requirement not semantically assessed ${req.id}`);
   for (const obligation of depthObligations(candidate.depthDecision.level)) if (!assessment.assessedObligations?.includes(obligation)) issues.push(`Obligation not assessed ${obligation}`);
-  if (!Array.isArray(assessment.concerns) || assessment.concerns.some(concern => concern.material)) issues.push("Semantic concerns unresolved");
+  if (!Array.isArray(assessment.concerns)) issues.push("Semantic concerns unresolved");
+  else {
+    for (const concern of assessment.concerns.filter(item => item.material).slice(0, 5)) issues.push(`Semantic concerns unresolved: ${concern.reason.slice(0, 500)}${concern.nextAction ? `; next action: ${concern.nextAction.slice(0, 300)}` : ""}`);
+    if (assessment.concerns.filter(item => item.material).length > 5) issues.push("Additional semantic concerns are retained in the preparation record");
+  }
   return issues;
 }
 export function assembleContract(candidate: QaContractCandidateV1, inventory: RequirementRef[], assessment: QaSemanticAssessmentV1, authorSessionId: string, challenge?: QaChallengeReceiptV1, resolveEquivalent?: EquivalentAuthorityResolver): QaVerificationContractV1 {
@@ -151,6 +245,7 @@ export function verifyContractDigest(contract: QaVerificationContractV1): void {
   if (contentDigest !== contractDigest("qa-contract-content", body) || contract.draftPayloadDigest !== draftDigest(contract)) throw new Error("Corrupt verification contract");
 }
 export function renderVerificationContract(contract: QaVerificationContractV1): string {
-  return [`Verification contract ${contract.contractId}, revision ${contract.revision}`, `Work: ${contract.workId}; digest: ${contract.contentDigest}`, `Depth: ${contract.depthDecision.level}: ${contract.depthDecision.rationale}`,
+  const documentation = contract.documentation ?? { required: false, targets: [], criteria: [] };
+  return [`Verification contract ${contract.contractId}, revision ${contract.revision}`, `Work: ${contract.workId}; digest: ${contract.contentDigest}`, `Depth: ${contract.depthDecision.level}: ${contract.depthDecision.rationale}`, `Documentation required: ${documentation.required ? "yes" : "no"}${documentation.required ? `; targets: ${documentation.targets.join(", ")}; criteria: ${documentation.criteria.join("; ")}` : ""}`,
     ...contract.checks.map(check => [`${check.id}: ${check.obligation}; ${check.timing}; ${check.applicability.kind}`, check.expectedBehavior, check.applicability.predicate ?? "Always applicable", `Evidence: ${check.expectedEvidence.join("; ")}`, ...check.verification.map(method => JSON.stringify(method))].join("\n"))].join("\n\n");
 }

@@ -75,6 +75,53 @@ export interface StateInspectResult {
   valid: boolean;
 }
 
+export interface BuildProjectIdentityStatus {
+  currentRoot: string;
+  storedRoot?: string;
+  matches: boolean;
+  recoveryDatabasePresent: boolean;
+}
+
+/** Read the immutable root binding without opening a normal workflow writer. */
+export function inspectBuildProjectIdentity(projectDir: string): BuildProjectIdentityStatus {
+  const root = realpathSync(projectDir);
+  const path = join(root, WORKFLOW_DB_FILE);
+  if (!existsSync(path)) return { currentRoot: root, matches: true, recoveryDatabasePresent: false };
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  try {
+    if (!tableExists(db, "build_project_identity")) return { currentRoot: root, matches: true, recoveryDatabasePresent: true };
+    const row = db.prepare("SELECT canonical_root FROM build_project_identity WHERE singleton=1").get() as { canonical_root: string } | undefined;
+    if (!row) return { currentRoot: root, matches: true, recoveryDatabasePresent: true };
+    return { currentRoot: root, storedRoot: row.canonical_root, matches: row.canonical_root === root, recoveryDatabasePresent: true };
+  } finally { db.close(); }
+}
+
+/**
+ * Explicitly adopt copied local build state at its new canonical project root.
+ * This is intentionally separate from ordinary workflow writers and records an
+ * immutable audit row before changing the binding.
+ */
+export function rebindBuildProjectIdentity(projectDir: string): BuildProjectIdentityStatus {
+  const status = inspectBuildProjectIdentity(projectDir);
+  if (!status.recoveryDatabasePresent || !status.storedRoot || status.matches) return status;
+  assertNoLiveLease(status.currentRoot, "rebind copied local state");
+  const path = join(status.currentRoot, WORKFLOW_DB_FILE);
+  const db = new Database(path, { fileMustExist: true });
+  try {
+    db.function("rafi_writer_protocol", () => 4);
+    db.transaction(() => {
+      db.exec("CREATE TABLE IF NOT EXISTS build_project_rebindings(sequence INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,previous_root TEXT NOT NULL,new_root TEXT NOT NULL,rebound_at TEXT NOT NULL)");
+      for (const action of ["INSERT", "UPDATE", "DELETE"]) db.exec(`CREATE TRIGGER IF NOT EXISTS rebinding_protocol_${action} BEFORE ${action} ON build_project_rebindings BEGIN SELECT CASE WHEN rafi_writer_protocol()<>4 THEN RAISE(ABORT,'incompatible project rebinding writer') END; END`);
+      for (const action of ["UPDATE", "DELETE"]) db.exec(`CREATE TRIGGER IF NOT EXISTS rebinding_immutable_${action} BEFORE ${action} ON build_project_rebindings BEGIN SELECT RAISE(ABORT,'Project rebinding history is immutable'); END`);
+      const identity = db.prepare("SELECT project_id,canonical_root FROM build_project_identity WHERE singleton=1").get() as { project_id: string; canonical_root: string };
+      if (identity.canonical_root !== status.storedRoot) throw new Error("project identity changed before rebinding; inspect and retry");
+      db.prepare("INSERT INTO build_project_rebindings(project_id,previous_root,new_root,rebound_at) VALUES(?,?,?,?)").run(identity.project_id, identity.canonical_root, status.currentRoot, new Date().toISOString());
+      db.prepare("UPDATE build_project_identity SET canonical_root=? WHERE singleton=1").run(status.currentRoot);
+    })();
+    return inspectBuildProjectIdentity(status.currentRoot);
+  } finally { db.close(); }
+}
+
 interface ArchiveEntry {
   path: string;
   data: string;

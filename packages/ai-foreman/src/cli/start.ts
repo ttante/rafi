@@ -33,8 +33,11 @@ import { ensureBuildRuntimeReadyForCommand } from "./runtimeAuthPrompt.js";
 import type { AgentRuntime } from "../runtimeAuth.js";
 import { resolveAgentForProject } from "./runtimeSelection.js";
 import { isTicketsInitialized, loadTicketsConfig, resolveTicketPaths } from "../tickets/config.js";
-import { loadTickets } from "../tickets/ticketLoader.js";
+import { hasRollbackOrMitigationPlan, loadTickets } from "../tickets/ticketLoader.js";
 import { StateDb } from "../tickets/stateDb.js";
+import type { TicketState } from "../tickets/stateDb.js";
+import { ticketDefinitionDigest } from "../tickets/riskWaivers.js";
+import type { TicketDef } from "../tickets/ticketSchema.js";
 import { applySharedDeliveryBranch, applySizeBranchPolicy, buildBranchAuditInstruction, buildBranchPlan, parseAuditDependencies } from "../branch/planner.js";
 import { collectBaseWorktreeDirtyPaths, currentGitRef, ensureCleanBaseWorktree, generatedTrackerDirtyPaths } from "../branch/git.js";
 import { captureDirtyBaseline } from "../branch/dirtyBaseline.js";
@@ -42,8 +45,9 @@ import { formatGitHubFailure, preflightGh } from "../branch/github.js";
 import { preflightGlab } from "../branch/gitlab.js";
 import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
 import { branchPlanLogMetadata, presentBranchPlan } from "../branch/presentation.js";
-import { buildRunSessionBinding, checkpointBuildRun, completeBuildRun, createBuildRun, currentBranchRecoveryTicket, currentBranchTicketProgress, recoveryExecutionTickets, finishRecoveredTicketScope, heartbeatBuildRun, persistBuildSession, persistCurrentBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
+import { branchTicketScopeProgress, buildRunSessionBinding, checkpointBuildRun, completeBuildRun, createBuildRun, currentBranchRecoveryTicket, currentBranchTicketProgress, recoveryExecutionTickets, finishBranchTicketScope, finishRecoveredTicketScope, heartbeatBuildRun, persistBuildSession, persistCurrentBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
 import type { AutonomyProfile, BuildRunRecordV2, BuildRunRecordV3, ProviderSessionRefV1, ResolvedAgentSettings, SessionStrategy } from "rafi-spec";
+import { parseProviderContract, qaRemediationProposalV1Schema } from "rafi-spec";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
 import { parse as parseYaml } from "yaml";
 import {
@@ -62,6 +66,8 @@ import { WorkflowDb, readCurrentWorkflowLease } from "../workflowDb.js";
 import { makeLogPath as makeRoleLogPath, readOnlyPermissionConfig, runRoleInstruction } from "../agentRun.js";
 import type { QaNonconvergenceContext, QaNonconvergenceDecision, QaReportRecoveryHandler, QaSessionHandle } from "../qaReview.js";
 import { eligibleTickets, evaluateTicketEligibility } from "../tickets/eligibility.js";
+import { globallyEligibleTickets } from "../tickets/eligibility.js";
+import { cmdValidate } from "../tickets/commands.js";
 import { BUILTIN_BRANCH_PREFIX, validateBranchPrefix } from "../branch/prefix.js";
 import { captureCurrentWorkflowSessionIdentity, CurrentWorkflowChangedError, CurrentWorkflowGuardAdapter } from "../branch/currentGuard.js";
 import { ContinuityAdapter, ContinuityRecoveryRequiredError, SessionUnavailableContinuityError } from "../continuity.js";
@@ -72,7 +78,7 @@ import { SessionUnavailableError } from "../adapters/sessionFailure.js";
 import { resolveProviderSessionAvailability } from "../sessionAvailability.js";
 import { ObservabilityStore, RunObserver } from "../observability.js";
 import { loadProjectAutonomyConfig, resolveAutonomyPolicy, resolveQaEnablement } from "../recoveryPolicy.js";
-import { loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "../qaRecovery.js";
+import { canonicalizeQaRecoveryRequirements, loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "../qaRecovery.js";
 import { qaDigest, type HandoffAcceptanceReceiptV2, type ProviderSessionRefV2 } from "../qaProtocolV2.js";
 import { acceptQaRuntimeHandoff, describeQaRuntimeHandle, frozenQaRuntimeSettings, type QaRuntimeMetadata } from "../qaRuntime.js";
 
@@ -91,7 +97,7 @@ function pendingQaRecoveryPacket(projectDir: string, runId: string, ticketId?: s
     if (pending.length > 1 && !ticketId) throw new Error(`run ${runId} has multiple pending QA recovery packets; select one with --ticket`);
     const selected = ticketId ? pending.find((item) => item.ticketId === ticketId) : pending[0];
     if (!selected || selected.pendingAction === "resolved") return undefined;
-    const packet = loadQaRecoveryPacket(selected.packetPath);
+    const packet = canonicalizeQaRecoveryRequirements(loadQaRecoveryPacket(selected.packetPath));
     const state = db.qaRecoveryHead(runId, packet.manifest.ticketId);
     if (!state || packet.manifest.packetDigest !== state.packetDigest || packet.manifest.runId !== runId
       || packet.manifest.ticketId !== state.ticketId || packet.manifest.packetId !== state.packetId
@@ -447,6 +453,65 @@ export function validateStartOptions(opts: Record<string, any>, requireCount: bo
   if (opts.launchToken && !opts.preparationRun && !opts.recoverRun) throw new Error("Launch token requires a preparation or recovery run");
 }
 
+/** A current waiver is an already-recorded decision: surface it, never demand a second start-time approval. */
+function warnRiskPlanWaivers(projectDir: string, ticketIds: readonly string[]): void {
+  if (!ticketIds.length || !isTicketsInitialized(projectDir)) return;
+  const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);
+  const definitions = new Map(loadTickets(paths.tickets).map((ticket) => [ticket.id, ticket]));
+  const db = new StateDb(paths.stateDb, { readOnly: true });
+  try {
+    const waived = ticketIds.filter((id) => {
+      const ticket = definitions.get(id);
+      return ticket && ticket.risk !== "Low" && !hasRollbackOrMitigationPlan(ticket.rollback)
+        && Boolean(db.getTicketRiskWaiver(id, ticketDefinitionDigest(ticket)));
+    });
+    if (waived.length) console.warn(`foreman: warning: ${waived.join(", ")} have explicitly waived missing rollback or mitigation plans.`);
+  } finally { db.close(); }
+}
+
+/** Preserve the distinction between a staged handoff and an unattempted acceptance. */
+export function recordHandoffAcceptanceNotAttempted(
+  projectDir: string,
+  runId: string,
+  role: "builder" | "qa",
+  generation: number,
+  stage: string,
+  detail: string,
+): void {
+  const db = new WorkflowDb(projectDir);
+  try {
+    db.appendContinuityEvent({
+      runId,
+      role: "host",
+      kind: "handoff_acceptance_not_attempted",
+      payload: { generation, role, stage, detail },
+      authoritativeStateRevision: db.continuityHead(runId, role)?.authoritativeStateRevision ?? 0,
+    });
+  } finally { db.close(); }
+}
+
+/** Default start selection is deliberately the same eligibility model users see in the ticket queue. */
+export function selectDefaultExecutionTickets(
+  tickets: TicketDef[],
+  states: Map<string, TicketState>,
+  implementationLimit: number,
+  steps: number,
+  delivery?: DeliveryConfig,
+): string[] {
+  return globallyEligibleTickets({ tickets, states, implementationLimit, delivery }).slice(0, steps).map((ticket) => ticket.id);
+}
+
+/** Fail before runtime/provider admission when canonical ticket data is unsafe. */
+export function assertStartTicketPreflight(projectDir: string): void {
+  const validation = cmdValidate(projectDir);
+  const errors = validation.issues.filter((issue) => issue.severity === "error");
+  const warnings = validation.issues.filter((issue) => issue.severity === "warn");
+  for (const issue of warnings) console.warn(`foreman: warning: ${issue.message}`);
+  if (errors.length) {
+    throw new Error(`ticket validation must be resolved before starting:\n${errors.map((issue) => `- ${issue.message}`).join("\n")}\nRun \`rafi tickets validate\` after repair to confirm readiness.`);
+  }
+}
+
 /** Validate generated established recovery before reserving execution authority. */
 export function validateRecoveryArguments(args: readonly string[], projectDir: string): void {
   if (args[0] !== "start" || canonicalProject(args[1] ?? "") !== canonicalProject(projectDir)) throw new Error("Recovery arguments belong to another project");
@@ -559,6 +624,13 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       const recoveryRecord = opts.recoverRun ? readBuildRuns(cwd).find((run) => run.runId === opts.recoverRun) : undefined;
       let dirtyWork = recoveryRecord?.runDecisions?.dirtyWork;
       if (opts.recoverRun && !recoveryRecord) fail(`recoverable build run not found: ${opts.recoverRun}`);
+      // Both current-branch and branch delivery runs share this gate. A
+      // recovery resumes a previously admitted scope and is deliberately not
+      // reclassified by later tracker edits.
+      if (!recoveryRecord && isTicketsInitialized(cwd)) {
+        try { assertStartTicketPreflight(cwd); }
+        catch (err) { fail(err instanceof Error ? err.message : String(err)); }
+      }
       const autonomyProfile = opts.autonomy as AutonomyProfile | undefined;
       if (autonomyProfile && !["supervised", "balanced", "unattended"].includes(autonomyProfile)) fail("--autonomy must be supervised, balanced, or unattended");
       const supervisedInvocationId = recoveryRecord?.runId ?? opts.preparationRun ?? supervisedRunId() ?? (process.env.RAFI_DETACHED_SUPERVISOR_RUN || undefined) ?? randomUUID();
@@ -724,7 +796,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         ? requestedTicketIds.length > 0
           ? requestedTicketIds
           : branchDefaults.branchMode && recoveryRecord
-            ? [...recoveryRecord.tickets]
+            ? branchTicketScopeProgress(cwd, recoveryRecord)?.remaining ?? [...recoveryRecord.tickets]
             : recoveryRecord ? [currentBranchRecoveryTicket(cwd, recoveryRecord)].filter((ticket): ticket is string => ticket !== undefined) : []
         : [];
       if (recoveryRecord && continueTickets.some(ticket => !recoveryRecord.tickets.includes(ticket))) fail("Recovery ticket is outside the saved run scope");
@@ -1208,7 +1280,12 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         const recoveryMode = String(opts.recoveryMode ?? "");
         const effectiveSessionId = recoveryMode && recoveryMode !== "exact-session" ? undefined : sessionId;
         let adapter = await createRecoveringBuilder(builderCwd, effectiveSessionId, effectiveSessionId ? sessionRef : undefined);
-        if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "builder" && activeContinuityRunId === recoveryRecord?.runId) {
+        // The persisted recovery record is the authority for the staged
+        // handoff's run. During QA-only recovery the active continuity ID is
+        // assigned later than adapter construction, so gating acceptance on
+        // that transient variable can silently skip the acceptance branch and
+        // leave the staged generation pending until the post-run guard fails.
+        if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "builder" && recoveryRecord?.runId) {
           const service = new HandoffService(cwd);
           const staged = service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration);
           const accepted = await service.acceptStagedWithRecovery(
@@ -1507,10 +1584,25 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         // compatibility caller still supplies the previous raw ID.
         const effectiveSessionId = undefined;
         void sessionId;
-        let adapter = await createRecoveringQa(qaCwd, effectiveSessionId);
+        let adapter: BuilderAdapter;
+        try {
+          adapter = await createRecoveringQa(qaCwd, effectiveSessionId);
+        } catch (error) {
+          // A staged QA handoff is intentionally preserved when the successor
+          // cannot reach a validated session (for example, host runtime
+          // preparation fails). Record the exact pre-acceptance boundary so a
+          // later recovery can distinguish "not attempted" from a rejected
+          // acknowledgement without weakening the acceptance gate.
+          if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "qa" && recoveryRecord?.runId) {
+            const detail = error instanceof Error ? error.message : String(error);
+            recordHandoffAcceptanceNotAttempted(cwd, recoveryRecord.runId, "qa", pendingHandoffGeneration, "qa-runtime-preparation", detail);
+            log.write("handoff-acceptance-not-attempted", { role: "qa", generation: pendingHandoffGeneration, stage: "qa-runtime-preparation", detail });
+          }
+          throw error;
+        }
         let explicitRecoveryAccepted = false;
         let handoffReceipt: QaSessionHandle["handoffReceipt"] = { kind: "initial" };
-        if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "qa" && activeContinuityRunId === recoveryRecord?.runId) {
+        if (pendingHandoffGeneration !== undefined && pendingHandoffRole === "qa" && recoveryRecord?.runId) {
           const service = new HandoffService(cwd);
           const staged = service.loadStaged(recoveryRecord!.runId, pendingHandoffGeneration);
           const accepted = await service.acceptStagedWithRecovery(
@@ -1667,7 +1759,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
                 cumulativeTotalTokens: nativeUsage.totalTokens, authoritativeCostUsd: nativeUsage.authoritativeCostUsd,
               } } : {}),
               compactionCount, compactMaximum: settings.compact_maximum ?? 10,
-              resources: [{ label: "frozen-qa-action", content: frozenAction, authoritative: true, purpose: "Frozen QA action across the session boundary" }, ...(recovery ? recovery.resources.map((resource) => ({
+              resources: [{ label: "frozen-qa-action", content: frozenAction, authoritative: true, purpose: "Frozen QA action across the session boundary" }, ...(recovery ? recovery.resources.filter((resource) => resource.requiredForRecovery).map((resource) => ({
                 label: resource.label, digest: resource.digest, authoritative: true, requiredForRecovery: resource.requiredForRecovery,
                 mediaType: resource.mediaType, path: resource.path, purpose: resource.purpose, bytes: resource.bytes,
               })) : [])],
@@ -1769,14 +1861,27 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         if (continueTickets.length > 0) {
           const sessions = findResumableBranchSessions(join(cwd, ".foreman"));
           const sessionByTicket = new Map(sessions.map((session) => [session.ticket, session]));
+          const historicalReader = new WorkflowReader(cwd);
+          let historicalSessionTickets: Set<string>;
+          try { historicalSessionTickets = new Set(historicalReader.branchResumeSessions(false).map((session) => session.ticket)); }
+          finally { historicalReader.close(); }
           const nodes: BranchPlanNode[] = [];
+          const freshTicketIds: string[] = [];
           for (const ticketId of continueTickets) {
             const session = sessionByTicket.get(ticketId);
             if (!session) {
-              fail([
-                `no resumable branch session found for ticket ${ticketId}`,
-                branchContinueTicketHelp(cwd),
-              ].join("\n"));
+              const ticketState = states.get(ticketId)?.status ?? "planned";
+              if (opts.resume || !recoveryRecord || recoveryRecord.branchMode !== "per-ticket" || historicalSessionTickets.has(ticketId) || !["planned", "next"].includes(ticketState)) {
+                fail([
+                  `no resumable branch session found for ticket ${ticketId}`,
+                  branchContinueTicketHelp(cwd),
+                ].join("\n"));
+              }
+              // This ticket has no prior branch/session evidence and remains in a
+              // not-started tracker state. It is new work within the already
+              // admitted original scope, not an interrupted session to replay.
+              freshTicketIds.push(ticketId);
+              continue;
             }
             const ticket = ticketById.get(ticketId);
             if (!ticket) fail(`ticket ${ticketId} no longer exists in .tickets/tickets.yaml`);
@@ -1798,6 +1903,20 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
               deliveryUnitId: session.deliveryUnitId,
               deliveryUnitFinal: session.deliveryUnitFinal,
             });
+          }
+          if (freshTicketIds.length) {
+            const fresh = buildBranchPlan(tickets, states, {
+              steps: freshTicketIds.length,
+              baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch ?? currentGitRef(cwd),
+              branchPrefix,
+              maxBranchDepth,
+              rootBaseBranches: branchDefaults.rootBaseBranches,
+              ticketIds: freshTicketIds,
+            });
+            if (fresh.issues.some(issue => issue.blocking) || fresh.nodes.length !== freshTicketIds.length || fresh.nodes.some(node => !freshTicketIds.includes(node.ticket.id))) {
+              fail(`remaining branch tickets are not runnable as fresh approved work: ${fresh.issues.filter(issue => issue.blocking).map(issue => issue.message).join("; ") || "planner did not return the exact remaining scope"}`);
+            }
+            nodes.push(...fresh.nodes);
           }
           plan = {
             baseRef: nodes[0]?.baseRef ?? ((opts.base as string | undefined) ?? currentGitRef(cwd)),
@@ -1873,6 +1992,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           stacked: selectedStacks.length > 0,
           resumed: continueTickets.length > 0 || Boolean(recoveryRecord),
         });
+        warnRiskPlanWaivers(cwd, plan.nodes.map((node) => node.ticket.id));
         log.write("branch-plan", {
           ...branchPlanLogMetadata(plan, branchPresentation),
           ...(auditDependencyCount === undefined ? {} : { auditDependencyCount }),
@@ -2126,7 +2246,10 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
             : `foreman: inspect recovery with: ${formatRecoveryCommand(cwd)}`);
           process.exit(2);
         }
-        if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted; recovery mode was not substituted`);
+        if (pendingHandoffGeneration !== undefined) {
+          throw new HandoffRecoveryPausedError(recoveryRecord?.runId ?? invocationRunId, pendingHandoffGeneration,
+            `Recovery handoff generation ${pendingHandoffGeneration} was not consumed; the staged handoff remains available for a subsequent validated recovery`);
+        }
         clearInterval(branchHeartbeat);
         if (selectedStacks.length) {
           let allComplete = true;
@@ -2147,9 +2270,9 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           console.log(allComplete ? "foreman: stack publication complete; delivery is awaiting_review (no merges were attempted)" : "foreman: partial stack prefix published; resume point is preserved");
         }
         masterRun = withRunLocalAcceptedRuntimes(masterRun);
-        masterRun = summaries.every((row) => row.buildStatus === "done")
-          ? completeBuildRun(cwd, masterRun)
-          : releaseBuildLease(cwd, checkpointBuildRun(cwd, masterRun, "branch-run-interrupted", { status: "recoverable" }), "recoverable");
+        // A targeted QA recovery returns one completed summary. Reconcile the
+        // original admitted scope before declaring the master run complete.
+        masterRun = finishBranchTicketScope(cwd, masterRun, summaries.every((row) => row.buildStatus === "done") ? "branch-partial-scope-complete" : "branch-run-interrupted");
         activeObserver?.finish(masterRun.status, observationSummaryMetadata(cwd, masterRun, qaEnabled, capturedBranchBuilder.make, summaries.find(row => row.pr?.url)));
         observabilityStore?.closeLogFile(logPath, masterRun.status);
         observabilityStore?.enforceLimits();
@@ -2188,11 +2311,16 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       }
 
       if (!recoveryRecord && isTicketsInitialized(cwd)) {
-        const paths = resolveTicketPaths(loadTicketsConfig(cwd), cwd);
+        const ticketsConfig = loadTicketsConfig(cwd);
+        const paths = resolveTicketPaths(ticketsConfig, cwd);
         const state = new StateDb(paths.stateDb);
         try {
-          executionTickets = executionTickets ?? loadTickets(paths.tickets).filter(ticket => !["done", "canceled", "cancelled", "obsolete"].includes(state.getState(ticket.id)?.status ?? "planned")).sort((a, b) => a.order - b.order).slice(0, steps).map(ticket => ticket.id);
+          if (!executionTickets) {
+            executionTickets = selectDefaultExecutionTickets(loadTickets(paths.tickets), state.getAllStates(), ticketsConfig.implementationLimit, steps, deliveryConfig);
+            if (!executionTickets.length) fail("no eligible tickets are available to start; run `rafi tickets queue` to inspect blockers");
+          }
         } finally { state.close(); }
+        warnRiskPlanWaivers(cwd, executionTickets);
       }
       if (grantedNetwork || opts.builderApprovals) console.log(`foreman: requested Builder shell capabilities: network ${grantedNetwork ? "approved for this build" : "off"}; approvals ${opts.builderApprovals ? "per operation" : "never"}. Effective permissions will be verified with the provider.`);
       const ready = await ensureBuildRuntimeReadyForCommand(cwd, agent, { build: readinessOwner, durable: { projectDir: cwd, runId: activeContinuityRunId ?? invocationRunId, scopeRevision: buildScopeRevision(cwd, approvalConsequences) }, timeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
@@ -2441,7 +2569,14 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           const qa = await (activeObserver
             ? activeObserver.span("qa_recovery", "Exact QA-only recovery", () => foreman.completePendingQaRecovery(ticketId))
             : foreman.completePendingQaRecovery(ticketId));
-          if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted`);
+          if (pendingHandoffGeneration !== undefined) {
+            // QA can stop before allocating a provider session (for example
+            // when host prerequisites are unavailable). Keep the staged
+            // handoff recoverable and report that boundary explicitly; do not
+            // turn an unattempted acceptance into a terminal build failure.
+            throw new HandoffRecoveryPausedError(buildRun.runId, pendingHandoffGeneration,
+              `QA handoff generation ${pendingHandoffGeneration} was not consumed because QA stopped before session acceptance; the handoff remains staged for recovery`);
+          }
           if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
           buildRun = qa.outcome === "passed" || qa.outcome === "waived"
             ? finishRecoveredTicketScope(cwd, buildRun, "qa-recovery-complete")
@@ -2533,7 +2668,10 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         };
         const batch = () => foreman.runBatch(steps, trackerRelPath, onTicketStart, preferredTicket, executionTickets);
         const result = await (activeObserver ? activeObserver.span("builder_work", "Builder and QA batch", batch) : batch());
-        if (pendingHandoffGeneration !== undefined) throw new Error(`recovery handoff generation ${pendingHandoffGeneration} for ${pendingHandoffRole} was not accepted; recovery mode was not substituted`);
+        if (pendingHandoffGeneration !== undefined) {
+          throw new HandoffRecoveryPausedError(buildRun.runId, pendingHandoffGeneration,
+            `Recovery handoff generation ${pendingHandoffGeneration} was not consumed; the staged handoff remains available for a subsequent validated recovery`);
+        }
         if (foreman.builderSessionId()) buildRun = persistBuildSession(cwd, buildRun, "builder", foreman.builderAdapter().sessionRef?.() ?? foreman.builderSessionId()!);
         if (foreman.qaSessionId()) buildRun = persistBuildSession(cwd, buildRun, "qa", foreman.qaSessionRef() ?? foreman.qaSessionId()!);
         buildRun = buildRun.tickets.length && isTicketsInitialized(cwd)
@@ -2815,8 +2953,10 @@ export function createQaNonconvergenceHandler(projectDir: string, noninteractive
         if (run.turn.result.isError || run.turn.status.kind !== "plan_complete") throw new Error(`Planner remediation failed: ${run.turn.status.error ?? run.turn.result.text.slice(0, 500)}`);
         const match = /RAFI_QA_REMEDIATION_START\s*([\s\S]*?)\s*RAFI_QA_REMEDIATION_END/.exec(run.turn.result.text);
         if (!match) throw new Error("Planner remediation did not return the required structured proposal");
-        const proposal = JSON.parse(match[1]!.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")) as { summary?: string; fix_instructions?: string[] };
-        if (!proposal.summary || !Array.isArray(proposal.fix_instructions) || !proposal.fix_instructions.every((item) => typeof item === "string")) throw new Error("Planner remediation proposal is malformed");
+        let parsed: unknown;
+        try { parsed = JSON.parse(match[1]!.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); }
+        catch (error) { throw new Error(`Planner remediation proposal is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
+        const proposal = parseProviderContract(qaRemediationProposalV1Schema, parsed, "RAFI_QA_REMEDIATION");
         console.log(`\nPlanner remediation: ${proposal.summary}\n${proposal.fix_instructions.map((item) => `- ${item}`).join("\n")}`);
         const decision = await ask(`QA remediation approval ${revision}: ${JSON.stringify(proposal)}`, [{ id: "approve", label: "Approve" }, { id: "revise", label: "Revise" }, { id: "cancel", label: "Return to choices" }], () => select({ message: "Use this remediation for a new Builder fix session?", options: [
           { value: "approve", label: "Approve (Recommended)" }, { value: "revise", label: "Discuss/revise" }, { value: "cancel", label: "Cancel and return to choices" },

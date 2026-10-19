@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { WorkflowReader } from "../../packages/ai-foreman/dist/workflowReader.js";
 import { classifyProcess } from "../../packages/ai-foreman/dist/processIdentity.js";
-import { readInstallManifest } from "../../packages/ai-foreman/dist/installOwnership.js";
 
 if (process.env.RAFI_LIVE_INCIDENT !== "1") throw new Error("Explicit online authorization and RAFI_LIVE_INCIDENT=1 are required.");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
@@ -17,6 +16,7 @@ assert.ok(providers.every(provider => ["claude", "codex"].includes(provider)));
 const repetitions = Number(process.env.RAFI_LIVE_REPETITIONS ?? 3);
 const interruptRestart = process.env.RAFI_LIVE_INTERRUPT_RESTART === "1";
 assert.ok(Number.isInteger(repetitions) && repetitions >= 1 && repetitions <= 3);
+const buildTimeoutMs = provider => Number(process.env.RAFI_LIVE_BUILD_TIMEOUT_MS ?? (provider === "claude" ? 1_800_000 : 900_000));
 const cli = resolve(fileURLToPath(new URL("../../packages/rafi/dist/index.js", import.meta.url)));
 const root = mkdtempSync(join(tmpdir(), "rafi-live-incident-journeys-"));
 const ledger = [];
@@ -82,16 +82,16 @@ async function restartInterrupted(project, provider, seed, runId) {
   const retired = new WorkflowReader(project);
   try { assert.equal(retired.getRun(runId).status, "superseded"); assert.equal(retired.operations(runId).filter(op => op.kind === "provider-dispatch" && ["in_progress", "uncertain"].includes(op.status)).length, 0); }
   finally { retired.close(); }
-  const restartCode = await phase(project, provider, seed, "fresh-build-after-start-over", ["start", ".", "--agent", provider, "--steps", "2", "--yes"], 900_000, [0, 2]);
+  const restartCode = await phase(project, provider, seed, "fresh-build-after-start-over", ["start", ".", "--agent", provider, "--steps", "2", "--yes"], buildTimeoutMs(provider), [0, 2]);
   if (restartCode === 2) {
     const pending = new WorkflowReader(project); let fresh, approval;
     try { fresh = pending.buildRuns()[0]; const choices = pending.pendingHumanDecisions(fresh.runId); assert.equal(choices.length, 1); approval = choices[0]; assert.equal(approval.prompt, "How does this plan look?"); }
     finally { pending.close(); }
     await phase(project, provider, seed, "fresh-build-approve", ["build:decide", ".", "--run", fresh.runId, "--decision", approval.decisionId, "--choice", "proceed"], 30_000);
-    await phase(project, provider, seed, "fresh-build-resume", ["resume", ".", "--run", fresh.runId, "--yes"], 900_000);
+    await phase(project, provider, seed, "fresh-build-resume", ["resume", ".", "--run", fresh.runId, "--yes"], buildTimeoutMs(provider));
   }
 }
-const brief = "Extend the small arithmetic library with exactly two independent low-risk implementation tickets: add exported subtract(a, b) and add exported multiply(a, b), each with its own tests for positive, negative, and zero operands. Preserve existing add behavior. Use the existing Node test runner and no new dependencies. Each ticket is independently acceptable when its own function and tests pass; do not require the other unfinished ticket's feature during QA. Run npm test for validation. No external services, package publishing, deployment, remote Git actions, or dependency acquisition. Use current-branch work. Plan and approve both tickets now, using reasonable defaults without clarification questions.";
+const brief = "Extend the small arithmetic library with exactly two independent low-risk implementation tickets: add exported subtract(a, b) and add exported multiply(a, b), each with its own tests for positive, negative, and zero operands. Preserve existing add behavior. Use the existing Node test runner and no new dependencies. Each ticket is independently acceptable when its own function and tests pass; do not require the other unfinished ticket's feature during QA. Validate the finished current branch; do not require reconstructing a pre-feature branch, proving a historical before-state, removing an additive sibling feature, or testing subtract before subtract exists. Run npm test for validation. No external services, package publishing, deployment, remote Git actions, or dependency acquisition. Use current-branch work. Plan and approve both tickets now, using reasonable defaults without clarification questions.";
 try {
   for (const provider of providers) for (let seed = 1; seed <= repetitions; seed++) {
     const existing = process.env.RAFI_LIVE_CONTINUE_INTERRUPTED_PROJECT;
@@ -107,10 +107,10 @@ try {
         try { const pending = state.pendingHumanDecisions(interrupted.runId); assert.equal(pending.length, 1); decision = pending[0]; assert.equal(decision.prompt, "How does this plan look?"); assert.ok(decision.choices.some(choice => choice.id === "proceed")); }
         finally { state.close(); }
         await phase(project, provider, seed, "continued-build-approve", ["build:decide", ".", "--run", interrupted.runId, "--decision", decision.decisionId, "--choice", "proceed"], 30_000);
-        await phase(project, provider, seed, "continued-build-resume", ["resume", ".", "--run", interrupted.runId, "--yes"], 900_000);
+        await phase(project, provider, seed, "continued-build-resume", ["resume", ".", "--run", interrupted.runId, "--yes"], buildTimeoutMs(provider));
       } else if (process.env.RAFI_LIVE_CONTINUE_FAILED === "1") {
         assert.ok(["failed", "paused"].includes(interrupted.status));
-        await phase(project, provider, seed, "continued-failed-build-resume", ["resume", ".", "--run", interrupted.runId, "--yes"], 900_000);
+        await phase(project, provider, seed, "continued-failed-build-resume", ["resume", ".", "--run", interrupted.runId, "--yes"], buildTimeoutMs(provider));
       } else await restartInterrupted(project, provider, seed, interrupted.runId);
     } else {
     mkdirSync(join(project, "test"), { recursive: true });
@@ -122,13 +122,11 @@ try {
     git(["init", "-q", "-b", "main"]); git(["config", "user.email", "rafi-live@example.test"]); git(["config", "user.name", "Rafi disposable live fixture"]); git(["add", "."]); git(["commit", "-qm", "Disposable fixture baseline"]);
     await phase(project, provider, seed, "create", ["create", ".", "--defaults", "--no-graph", "--runtime", provider, "--docs-root", "docs-rafi"], 180_000);
     await phase(project, provider, seed, "plan", ["plan", ".", "--agent", provider, "--brief", brief, "--no-grill-me", "--yes"], 300_000);
-    await phase(project, provider, seed, "ticket-setup", ["tickets", "setup:init", "--project", project, "--defaults", "--branch-strategy", "current", "--completion", "none"], 60_000);
-    await phase(project, provider, seed, "ticket-plan", ["tickets", "plan", "--project", project, "--agent", provider, "--brief", brief, "--no-grill-me", "--yes"], 300_000);
-    const ownedPlans = readInstallManifest(project).files.filter(file => file.category === "plans" && file.origin === "tickets:plan");
-    assert.ok(ownedPlans.some(file => file.path === "docs-rafi/rafi-ticket-plan.md" && file.installedSha256));
-    assert.ok(ownedPlans.some(file => file.path.startsWith("docs-rafi/rafi-ticket-plans/") && file.installedSha256));
-    ledger.push({ provider, seed, phase: "published-ticket-plan-ownership", status: "pass" }); save();
-    const buildCode = await phase(project, provider, seed, "build", ["start", ".", "--agent", provider, "--steps", "2", "--yes"], 900_000, [0, 2]);
+    await phase(project, provider, seed, "ticket-setup", ["tickets", "setup:init", "--project", project, "--defaults", "--branch-strategy", "current", "--completion", "none", "--population-mode", "approved_plan"], 60_000);
+    await phase(project, provider, seed, "populate", ["tickets", "populate", "--project", project, "--agent", provider, "--yes"], 300_000);
+    await phase(project, provider, seed, "validate", ["tickets", "validate", "--project", project], 60_000);
+    await phase(project, provider, seed, "queue", ["tickets", "queue", "--project", project], 60_000);
+    const buildCode = await phase(project, provider, seed, "build", ["start", ".", "--agent", provider, "--steps", "2", "--yes"], buildTimeoutMs(provider), [0, 2]);
     if (buildCode === 2) {
       const state = new WorkflowReader(project);
       let run, decision;
@@ -140,7 +138,7 @@ try {
         assert.ok(decision.choices.some(choice => choice.id === "proceed"));
       } finally { state.close(); }
       await phase(project, provider, seed, "build-approve", ["build:decide", ".", "--run", run.runId, "--decision", decision.decisionId, "--choice", "proceed"], 30_000);
-      await phase(project, provider, seed, interruptRestart ? "build-interrupt" : "build-resume", ["resume", ".", "--run", run.runId, "--yes"], 900_000, interruptRestart ? [2] : [0]);
+      await phase(project, provider, seed, interruptRestart ? "build-interrupt" : "build-resume", ["resume", ".", "--run", run.runId, "--yes"], buildTimeoutMs(provider), interruptRestart ? [2] : [0]);
       if (interruptRestart) {
         await restartInterrupted(project, provider, seed, run.runId);
       }

@@ -18,7 +18,9 @@ import { processStartIdentity } from "../../ai-foreman/dist/processIdentity.js";
 
 function fixture() {
   const root=mkdtempSync(join(tmpdir(),"rafi-multiticket-resume-"));
-  writeFileSync(join(root,"rafi-config.yaml"),stringify(buildProjectConfig(defaultAnswers())));
+  // This recovery fixture models an assignment created before QA preparation.
+  const config=buildProjectConfig(defaultAnswers()); config.qa_preparation=false;
+  writeFileSync(join(root,"rafi-config.yaml"),stringify(config));
   cmdInit(root,{});
   const tickets=[1,2,3,4,5,6,7,8].map(order=>({id:`T00${order}`,order,title:`Feature ${order}`,area:"tests",priority:"P2",size:"XS",risk:"Low",depends_on:[],summary:`Feature ${order}`,acceptance:[`Feature ${order} works`],required_tests:[],likely_files:[`feature${order}.txt`],notes:"Fixture"}));
   writeFileSync(join(root,".tickets/tickets.yaml"),stringify({tickets}));

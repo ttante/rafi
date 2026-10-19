@@ -23,6 +23,11 @@ export interface RequirementRef {
   obligation: "mandatory" | "advisory"; origin: "explicit" | "derived" | "invariant" | "proposed" | "advisory";
   authority: "approved" | "invariant" | "proposed"; conflict?: string;
 }
+export interface DocumentationPolicyV1 {
+  required: boolean;
+  targets: string[];
+  criteria: string[];
+}
 export interface VerificationMethod {
   kind: "command" | "procedure"; argv?: string[]; steps?: string[]; cwd: string;
   fixtures: string[]; expectedOutcome: string; runtime: string; timeoutMs: number;
@@ -54,6 +59,7 @@ export interface QaContractCandidateV1 {
   version: 1; contractId: string; revision: number; predecessorDigest?: string;
   runId: string; workId: string; admissionDigest: string; depthDecision: QaPreparationDepthDecisionV1;
   inputs: ContractInputRef[]; baseline: BaselineObservationRef[]; requirements: RequirementRef[];
+  documentation?: DocumentationPolicyV1;
   checks: VerificationCheckV1[]; coverage: RequirementCoverageRef[]; preparationEvidence: PreparationEvidenceRef[];
   unresolved: UnresolvedConcern[]; createdAt: string;
 }

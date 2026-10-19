@@ -32,8 +32,8 @@ import { HandoffService } from "ai-foreman/handoffs.js";
 import { createRoleBuilder, readOnlyPermissionConfig } from "ai-foreman/agent-run.js";
 import { continuityInstruction, parseContinuityDelta } from "ai-foreman/continuity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
-import { createQaRecoveryPacket, loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "ai-foreman/qa-recovery.js";
-import type { BuildRecoveryDecisionReceipt, BuildRecoveryMode, BuildRunRecordV2, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
+import { canonicalizeQaRecoveryRequirements, createQaRecoveryPacket, loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "ai-foreman/qa-recovery.js";
+import type { BuildRecoveryDecisionReceipt, BuildRecoveryMode, BuildRunRecordV2, ContinuityDelta, ProviderSessionRefV1, ResolvedAgentSettings } from "rafi-spec";
 import { assertLifecycleForCommand, detectProjectLifecycle } from "./lifecycle.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
 import type { RecoveryOutcome } from "./startRecovery.js";
@@ -276,7 +276,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
           throw new Error(`--ticket ${String(opts.ticket)} conflicts with pending QA recovery ticket${pendingRecoveryHeads.length === 1 ? ` ${pendingRecoveryHeads[0].ticketId}` : "s"}`);
         }
         if (selectedHead && selectedHead.pendingAction !== "resolved") {
-          const packet = loadQaRecoveryPacket(selectedHead.packetPath);
+          const packet = canonicalizeQaRecoveryRequirements(loadQaRecoveryPacket(selectedHead.packetPath));
           const pending = recoveryDb.qaRecoveryHead(selected.runId, packet.manifest.ticketId);
           if (!pending || packet.manifest.runId !== selected.runId || packet.manifest.ticketId !== pending.ticketId
             || packet.manifest.packetId !== pending.packetId || packet.manifest.packetDigest !== pending.packetDigest
@@ -324,6 +324,10 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
             pendingQaProtocolRevision = qaHead.revision;
           }
         }
+        // Canonicalizing a historical packet is an intentional, durable
+        // pre-handoff migration.  Subsequent stale-state protection must bind
+        // the revision it just published, not the pre-migration snapshot.
+        recoveryVersion = recoveryStateVersion(recoveryDb, selected.runId);
       } finally { recoveryDb.close(); }
       const effectiveTicket = pendingQaProtocolTicket ?? (opts.ticket ? String(opts.ticket) : selected.branchMode === "current" ? currentBranchRecoveryTicket(root, selected) : undefined);
       if (effectiveTicket && !selected.tickets.includes(effectiveTicket)) throw new Error(`Recovery ticket ${effectiveTicket} is outside the saved run scope`);
@@ -415,12 +419,21 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       const mutationLease = db.acquireLease(selected.runId);
       let launchAuthority: ReturnType<WorkflowDb["admitLeasedBuild"]> | undefined;
       let handoffGeneration: number | undefined;
+      // An interrupted QA turn has no accepted QA session binding yet. Its
+      // dispatch intent is nevertheless a validated, immutable predecessor
+      // identity. Capture it before reconciliation retires the unknown
+      // dispatch, then use it only to bind the fresh handoff provenance.
+      let reconciledQaPredecessorSessionRef: ProviderSessionRefV1 | undefined;
       let receipt!: BuildRecoveryDecisionReceipt;
       try {
       if (recoveryStateVersion(db, selected.runId) !== recoveryVersion) throw new Error("Recovery state changed while the resume decision was being prepared; inspect and retry the current revision");
       if (role === "qa" && pendingQaProtocolTicket && db.unresolvedRoleDispatches(selected.runId, "qa").length) {
         if (mode !== "fresh-with-handoff") throw new Error("An interrupted QA review requires a fresh immutable review and validated handoff");
-        try { db.reconcileInterruptedQaDispatch(selected.runId, pendingQaProtocolTicket); }
+        try {
+          const dispatchRefs = qaDispatchPredecessorRefs(db, selected.runId);
+          const reconciled = db.reconcileInterruptedQaDispatch(selected.runId, pendingQaProtocolTicket);
+          if (reconciled) reconciledQaPredecessorSessionRef = dispatchRefs;
+        }
         catch (error) {
           commandOpts.onOutcome?.("paused"); process.exitCode = 2;
           console.log(`rafi resume: QA recovery is paused: ${(error as Error).message}. Work and unknown receipts are preserved; restore process visibility or inspect this build, then retry. No new provider work started.`);
@@ -495,7 +508,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
           role,
           reason: mode === "guided-recovery" ? "guided recovery produced a repaired cumulative checkpoint" : "explicit fresh-with-handoff recovery decision",
           predecessorSessionId: sessionId,
-          predecessorSessionRef: role === "builder" ? projection.sessionCandidateRef : selected.sessionBindings?.filter((ref) => ref.role === "qa").at(-1),
+          predecessorSessionRef: role === "builder" ? projection.sessionCandidateRef : reconciledQaPredecessorSessionRef ?? selected.sessionBindings?.filter((ref) => ref.role === "qa").at(-1),
           roleState: { projection, mutationScope: effectiveTicket ? [effectiveTicket] : selected.tickets, runWideTickets: selected.tickets,
             ...(frozenQaAction ? { frozenQaAction } : {}),
             ...(qaRecoveryPacket ? { recoveryPacketDigest: qaRecoveryPacket.manifest.packetDigest, reviewedStateDigest: qaRecoveryPacket.manifest.reviewedStateDigest } : {}) },
@@ -505,7 +518,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
             label: "frozen-qa-action", authoritative: true, requiredForRecovery: true,
             purpose: "Frozen fresh QA action across the recovery session boundary",
             content: frozenQaAction,
-          }] : []), ...(qaRecoveryPacket ? qaRecoveryPacket.manifest.resources.map((resource) => ({
+          }] : []), ...(qaRecoveryPacket ? qaRecoveryPacket.manifest.resources.filter((resource) => resource.requiredForRecovery).map((resource) => ({
             label: resource.path, digest: resource.digest, authoritative: true, requiredForRecovery: resource.requiredForRecovery,
             mediaType: resource.mediaType, path: resource.path, purpose: resource.purpose, bytes: resource.bytes,
           })) : [])],
@@ -798,6 +811,26 @@ function selectByFlags(projectDir:string,runs: RecoverableRun[], opts: Record<st
 }
 
 function digest(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+
+/**
+ * The unknown QA dispatch is the only predecessor identity available before a
+ * first QA handoff has been accepted.  It is captured before reconciliation
+ * changes its journal state; reconciliation independently verifies every
+ * binding against the frozen review before this value can be staged.
+ */
+function qaDispatchPredecessorRefs(db: WorkflowDb, runId: string): ProviderSessionRefV1 {
+  const refs = db.unresolvedRoleDispatches(runId, "qa").map(dispatch =>
+    (dispatch.intent as { sessionRef?: ProviderSessionRefV1 }).sessionRef,
+  );
+  if (!refs.length || refs.some((ref): ref is undefined => !ref)) {
+    throw new Error("Interrupted QA dispatch has no scoped predecessor identity; inspect this build before continuing");
+  }
+  const unique = new Map(refs.map(ref => [JSON.stringify(ref), ref]));
+  if (unique.size !== 1) {
+    throw new Error("Interrupted QA dispatch has ambiguous predecessor identities; inspect this build before continuing");
+  }
+  return unique.values().next().value!;
+}
 
 /**
  * A crashed host may leave both an unfinished assignment and an unfinished

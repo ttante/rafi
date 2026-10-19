@@ -10,7 +10,8 @@ export const FINAL_QA_ROLE_SUFFIX = "You are an independent QA reviewer. Do not 
 export function finalQaRoleInstructions(rules: string): string { return `${rules}\n\n${FINAL_QA_ROLE_SUFFIX}`; }
 
 export function loadQaPreparationPolicy(projectDir: string) {
-  return resolveQaPreparationConfig(loadRafiConfigObject(projectDir)?.qa_preparation);
+  const config = loadRafiConfigObject(projectDir);
+  return resolveQaPreparationConfig(config?.qa_preparation, config?.qa_preparation_shadow === true, config?.qa_preparation_wall_time_ms);
 }
 /** Resolve only explicit rule/skill content; never project secrets or mutable .rafi state. */
 export function resolveEffectiveQaConfiguration(projectDir: string, settings: Pick<ResolvedAgentSettings, "make">) {
