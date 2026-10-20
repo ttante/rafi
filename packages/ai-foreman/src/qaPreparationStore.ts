@@ -271,6 +271,13 @@ export class QaPreparationStore {
     if (!row) throw new Error("Missing immutable preparation artifact"); const value = this.decode(row.record_json);
     if (contractDigest(`artifact-${kind}`, value) !== digest) throw new Error("Corrupt preparation artifact"); return value;
   }
+  artifacts(kind: string): Array<{ digest: string; value: unknown }> {
+    return (this.db.prepare("SELECT digest,record_json FROM qa_contract_artifacts WHERE kind=? ORDER BY digest").all(kind) as Array<{ digest: string; record_json: string }>).map(row => {
+      const value = this.decode(row.record_json);
+      if (contractDigest(`artifact-${kind}`, value) !== row.digest) throw new Error("Corrupt preparation artifact");
+      return { digest: row.digest, value };
+    });
+  }
   head(runId: string, workId: string, admissionDigest: string): { digest?: string; generation: number; state: PreparationState; detail?: string } {
     const row = this.db.prepare("SELECT digest,generation,state,detail FROM qa_contract_heads WHERE run_id=? AND work_id=? AND admission_digest=?").get(runId, workId, admissionDigest) as ReturnType<QaPreparationStore["head"]> | undefined;
     return row ? { ...row, digest: row.digest ?? undefined, detail: row.detail && this.projectDir && !graphDerivedAllowed(this.db, this.projectDir, bytesDigest(row.detail)) ? "Graph-derived preparation detail withheld; source-based recovery required" : row.detail ?? undefined } : { generation: 0, state: "preparation-required" };

@@ -1545,6 +1545,8 @@ export interface BuildRecoveryDecisionReceipt {
   requestedSuccessor?: { agent?: "claude" | "codex"; model?: string };
   /** Invocation-scoped policy for implementation-plan reviews in the resumed process. */
   planUpdateApproval: "auto" | "review";
+  /** Why the plan-update policy is trusted; omitted on legacy receipts. */
+  planUpdateApprovalSource?: "explicit-yes" | "explicit-choice";
   decidedAt: string;
 }
 

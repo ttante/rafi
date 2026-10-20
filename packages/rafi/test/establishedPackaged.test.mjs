@@ -23,7 +23,7 @@ for(const mode of ['supervised','direct','detached']) test(`packaged established
     }else{copyFileSync(fixture,join(bin,'codex'));chmodSync(join(bin,'codex'),0o755);}
     process.env.PATH=bin+delimiter+priorPath;if(process.platform==='win32')process.env.Path=process.env.PATH;
     let run=createBuildRun({repositoryRoot:root,tickets:[],builder:{role:'builder',source:'project',make:'codex',model:'default',reasoning:'high',fast:false}});
-    run=saveBuildRun(root,{...run,recoveryDecision:{version:1,mode:'fresh-recovery-only',runId:run.runId,tickets:[],role:'builder',authoritativeStateDigest:'fixture',settings:run.builder.settings,worktree:root,planUpdateApproval:'auto',decidedAt:new Date().toISOString()}});
+    run=saveBuildRun(root,{...run,recoveryDecision:{version:1,mode:'fresh-recovery-only',runId:run.runId,tickets:[],role:'builder',authoritativeStateDigest:'fixture',settings:run.builder.settings,worktree:root,planUpdateApproval:'auto',planUpdateApprovalSource:'explicit-yes',decidedAt:new Date().toISOString()}});
     run=releaseBuildLease(root,run,'recoverable');db=new WorkflowDb(root);
     const args=['start',root,'--steps','1','--agent','codex','--yes','--no-qa','--recover-run',run.runId,...(mode==='direct'?['--no-supervisor']:mode==='detached'?['--detach']:[])];
     const authority=db.acquireBuildRecoveryAdmission(run.runId);const launch=db.reserveBuildLaunch(authority,'coordinator',launchDigest(args),'registered-v2');db.dispatchBuildLaunch(authority,launch.token);

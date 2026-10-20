@@ -40,6 +40,35 @@ import type { RecoveryOutcome } from "./startRecovery.js";
 
 export type RecoverableRun = BuildRunRecordV2 & { active: boolean; ownership?: "live" | "dead" | "unknown"; ownershipReason?: string; cleanupOnly?: boolean };
 
+/** Reconcile only a supervisor whose recorded owner is already proven dead. */
+export function reconcileStaleSupervisor(db: WorkflowDb, selected: Pick<RecoverableRun, "runId" | "active" | "ownership">): boolean {
+  const staleSupervisor = db.supervisorState(selected.runId);
+  if (selected.active || selected.ownership !== "dead" || staleSupervisor?.status !== "running" || !staleSupervisor.pid) return false;
+  const unresolved = [
+    ...db.unresolvedRoleDispatches(selected.runId, "builder"),
+    ...db.unresolvedRoleDispatches(selected.runId, "qa"),
+  ];
+  db.putSupervisorState(selected.runId, {
+    ...staleSupervisor,
+    status: "stopped",
+    pid: undefined,
+    workerPid: undefined,
+    heartbeatAt: new Date().toISOString(),
+  });
+  db.transition(selected.runId, {
+    status: "paused",
+    checkpoint: unresolved.length ? "uncertain-worker-dispatch" : "unexpected-supervisor-exit",
+    event: "stale_supervisor_reconciled",
+    payload: {
+      supervisorPid: staleSupervisor.pid,
+      supervisorGeneration: staleSupervisor.generation,
+      unresolvedDispatches: unresolved.map(item => item.idempotencyKey),
+      reason: "recorded supervisor was independently verified dead before recovery",
+    },
+  });
+  return true;
+}
+
 export interface BuildResumeCommandOptions {
   onOutcome?: (outcome: RecoveryOutcome) => void;
   chooseInterruptedRecovery?: (reason: string) => Promise<"restart-current" | "cancel">;
@@ -249,6 +278,9 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       recoveryAuthority = reconciliationDb.acquireBuildRecoveryAdmission(selected.runId);
       const reconciliationLease = reconciliationDb.acquireLease(selected.runId);
       try {
+        if (reconcileStaleSupervisor(reconciliationDb, selected)) {
+          console.log(`rafi resume: reconciled stale supervisor for ${selected.runId}; no provider turn was replayed`);
+        }
         recoverPendingQaRecoveryPublications(root, selected.runId);
         if (!opts.inspect && !await servicePendingHumanDecisions({ projectDir: root, runId: selected.runId, tickets: opts.ticket ? [String(opts.ticket)] : selected.tickets, scopeRevision: buildScopeRevision(root), prompt: commandOpts.resolveHumanDecision })) return;
       }
@@ -405,8 +437,10 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       if (mode === "exact-session" && guidedAvailable) { db.close(); throw new Error("This continuity checkpoint needs guided reconstruction before a fresh Builder can continue. Run rafi resume interactively to choose guided recovery, or keep files with rafi build:start-over --action restart-current."); }
       if ((opts.agent || opts.model) && mode === "exact-session") { db.close(); throw new Error("--agent and --model are accepted only for fresh recovery modes"); }
       let planUpdateApproval: "auto" | "review";
+      let planUpdateApprovalSource: "explicit-yes" | "explicit-choice";
       try {
         planUpdateApproval = await resolvePlanUpdateApproval(opts, commandOpts.resolvePlanUpdateApproval);
+        planUpdateApprovalSource = opts.yes ? "explicit-yes" : "explicit-choice";
       } catch (error) {
         db.close();
         throw error;
@@ -545,6 +579,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         ...(projection.sessionAvailability ? { sessionAvailability: projection.sessionAvailability } : {}),
         ...((opts.agent || opts.model) ? { requestedSuccessor: { ...(opts.agent ? { agent: String(opts.agent) as "claude" | "codex" } : {}), ...(opts.model ? { model: String(opts.model) } : {}) } } : {}),
         planUpdateApproval,
+        planUpdateApprovalSource,
         decidedAt: new Date().toISOString(),
       };
       db.recordRecoveryDecision(receipt);

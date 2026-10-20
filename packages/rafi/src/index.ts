@@ -68,6 +68,7 @@ import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
 import { offerStartRecovery } from "./startRecovery.js";
 import { buildUninstallCleanupCommand, buildUninstallCommand, buildUninstallRestoreCommand, interpretUninstallInstruction } from "./uninstall.js";
+import { buildAuditCommand } from "./audit.js";
 import { createGitignoreModeFromSelection, updateCreateGitignore, type CreateGitignoreMode } from "./gitignore.js";
 import { CURRENT_BRANCH_WORK_MODE_LABEL, workModeConsequences, workModeLabel } from "./workMode.js";
 import { assertLifecycleForCommand } from "./lifecycle.js";
@@ -1129,6 +1130,11 @@ program.addCommand(buildManagerCommand({ resolveProject: (project) => {
       ? `no ${RAFI_CONFIG_FILE} found in explicit project directory ${where}`
       : `no Rafi project found from ${where}; expected ${RAFI_CONFIG_FILE} in this directory or an ancestor`);
   }
+  return discovered.root;
+} }));
+program.addCommand(buildAuditCommand({ resolveProject: (project) => {
+  const discovered = project ? resolveExplicitRafiProject(project) : findNearestRafiProject(process.cwd());
+  if (!discovered) throw new Error(project ? `no Rafi project found at ${resolve(project)}` : "no Rafi project found from cwd");
   return discovered.root;
 } }));
 program.addCommand(buildUninstallCommand({ interpret: interpretUninstallInstruction }));

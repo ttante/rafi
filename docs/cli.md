@@ -149,6 +149,8 @@ Commands:
                                                       local state bundles.
   manager [options] [project]                         Consult on setup, planning, tickets, builds,
                                                       and QA, including before the first build.
+  audit [options] [project]                           Inspect one retained build run with bounded,
+                                                      read-only audit evidence.
   uninstall [options] [project]                       Preview and safely remove selected
                                                       project-local Rafi material.
   uninstall:restore [options] <recoveryId> [project]  Restore files from an indefinite
@@ -774,6 +776,8 @@ Options:
   --branch-prefix <prefix>             branch name prefix for ticket branches
   --show-session-cost                  show authoritative cost or trustworthy cumulative session
                                        tokens for Builder and QA
+  --audit-logging <mode>                host-owned audit logging (off | summary | trace) (default:
+                                        "summary")
   --hide-session-cost                  hide session cost/token usage for Builder and QA
   --auto-compact-threshold <percent>   initial Builder context compaction threshold (1-99)
   --max-branch-depth <n>               maximum selected branch stack depth (default: "5")

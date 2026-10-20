@@ -20,7 +20,7 @@ import { qaDigest, type QaTurnIntentV2 } from "ai-foreman/qa-protocol-v2.js";
 import { HandoffService } from "ai-foreman/handoffs.js";
 import { assertQaRecoveryHandoffInventory } from "../../ai-foreman/dist/qaReview.js";
 import type { BuildRunRecordV2 } from "rafi-spec";
-import { buildBuildResumeCommand } from "../src/buildResume.js";
+import { buildBuildResumeCommand, reconcileStaleSupervisor } from "../src/buildResume.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 
 function createBuildRun(input:Parameters<typeof createUnadmittedBuildRun>[0]) {
@@ -182,7 +182,31 @@ test("build:resume converts a recoverable run into an exact-session start", asyn
       "--fast",
     ]);
     assert.equal(readBuildRuns(dir).find((candidate) => candidate.runId === run.runId)?.recoveryDecision?.planUpdateApproval, "auto");
+    assert.equal(readBuildRuns(dir).find((candidate) => candidate.runId === run.runId)?.recoveryDecision?.planUpdateApprovalSource, "explicit-yes");
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale supervisor reconciliation pauses the run without replaying dispatch", () => {
+  const dir = initializedProject();
+  let db: WorkflowDb | undefined;
+  try {
+    let run = createUnadmittedBuildRun({ repositoryRoot: dir, tickets: [], builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
+    run = releaseBuildLease(dir, run, "recoverable");
+    db = new WorkflowDb(dir);
+    const admission = db.acquireBuildRecoveryAdmission(run.runId);
+    const lease = db.acquireLease(run.runId);
+    db.putSupervisorState(run.runId, { ...(db.supervisorState(run.runId) ?? { status: "starting", generation: 0, workerGeneration: 0, checkpointRestarts: 0, runRestarts: 0 }), status: "running", pid: 999999, processStart: "dead-fixture", generation: 1 });
+    assert.equal(reconcileStaleSupervisor(db, { runId: run.runId, active: false, ownership: "dead" }), true);
+    assert.equal(db.supervisorState(run.runId)?.status, "stopped");
+    assert.equal(db.getRun(run.runId)?.status, "paused");
+    assert.equal(db.getRun(run.runId)?.checkpoint, "unexpected-supervisor-exit");
+    assert.equal(db.events(run.runId).at(-1)?.type, "stale_supervisor_reconciled");
+    db.releaseLease(lease);
+    db.releaseBuildAdmission(admission);
+  } finally {
+    db?.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -615,6 +639,7 @@ test("build:resume without an approval flag records the interactive review choic
 
     assert.equal(invoked.includes("--yes"), false);
     assert.equal(readBuildRuns(dir).find((candidate) => candidate.runId === run.runId)?.recoveryDecision?.planUpdateApproval, "review");
+    assert.equal(readBuildRuns(dir).find((candidate) => candidate.runId === run.runId)?.recoveryDecision?.planUpdateApprovalSource, "explicit-choice");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

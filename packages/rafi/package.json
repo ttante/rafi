@@ -26,6 +26,7 @@
   "files": [
     "dist",
     "README.md",
+    "AUDIT_REPORTING.md",
     "LICENSE"
   ],
   "scripts": {

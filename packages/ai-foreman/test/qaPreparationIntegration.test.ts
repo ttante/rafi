@@ -151,7 +151,7 @@ for (const scenario of ["isolated", "qa-only", "isolated-baseline", "qa-only-bas
           reviews++; assert.ok(instruction.includes("Expired tokens return unauthorized"));
           // Generate claims solely from what the actual QA provider receives;
           // host fixture access used to mask the missing baseline context.
-          const context = JSON.parse(instruction.split("Full structured review context:\n")[1]!.split("\n")[0]!) as { contract: typeof f.contract; baselineEvidence: Array<{ digest: string; artifact: { procedure: string; result: string } }>; builderClaims: Array<{ operationId: string }> };
+          const context = JSON.parse(instruction.split("Full structured review context:\n")[1]!.split("\n")[0]!) as { contract: typeof f.contract; baselineEvidence: Array<{ digest: string; artifact: { procedure: string; result: string } }>; builderClaims: Array<{ operationId: string; implementationResponse?: { digest: string; response: string } }> };
           const resource = instruction.match(/Complete retained QA context: (.*)\n/)![1]!;
           assert.deepEqual(JSON.parse(readFileSync(resource, "utf8")), context);
           assert.ok(resource.startsWith(realpathSync(cwd) + "/"));

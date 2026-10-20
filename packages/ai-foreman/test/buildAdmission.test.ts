@@ -338,7 +338,7 @@ for (const mode of ["supervised", "direct", "detached"]) test(`established recov
   const bin = join(root, "bin"); mkdirSync(bin);
   copyFileSync(fileURLToPath(new URL("fixtures/build-stall-codex.cjs", import.meta.url)), join(bin, "codex")); chmodSync(join(bin, "codex"), 0o755);
   let run = createBuildRun({ repositoryRoot: root, tickets: [], builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "high", fast: false } });
-  run = saveBuildRun(root, { ...run, recoveryDecision: { version: 1, mode: "fresh-recovery-only", runId: run.runId, tickets: [], role: "builder", authoritativeStateDigest: "fixture", settings: run.builder!.settings, worktree: root, planUpdateApproval: "auto", decidedAt: new Date().toISOString() } });
+  run = saveBuildRun(root, { ...run, recoveryDecision: { version: 1, mode: "fresh-recovery-only", runId: run.runId, tickets: [], role: "builder", authoritativeStateDigest: "fixture", settings: run.builder!.settings, worktree: root, planUpdateApproval: "auto", planUpdateApprovalSource: "explicit-yes", decidedAt: new Date().toISOString() } });
   run = releaseBuildLease(root, run, "recoverable");
   const args = ["start", root, "--steps", "1", "--agent", "codex", "--yes", "--no-qa", "--recover-run", run.runId, ...(mode === "direct" ? ["--no-supervisor"] : mode === "detached" ? ["--detach"] : [])];
   const db = new WorkflowDb(root);

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { candidate, assessment, digest } from "./qaPreparationFixtures.js";
-import { allocateStableCheckIds, assembleContract, bindUniqueBaselineCheckIds, contractDigest, draftDigest, parsePreparationArtifact, renderVerificationContract, validateAssessment, validateCandidate, verifyContractDigest } from "../src/qaVerificationContract.js";
+import { allocateStableCheckIds, assembleContract, bindUniqueBaselineCheckIds, contractDigest, draftDigest, parsePreparationArtifact, renderVerificationContract, rewriteProviderHostScopeChecks, validateAssessment, validateCandidate, verifyContractDigest } from "../src/qaVerificationContract.js";
 import { validateDepthDecision, depthObligations, resolveQaPreparationConfig } from "../src/qaPreparationPolicy.js";
 import { normalizeAssessmentMetadata } from "../src/qaPreparation.js";
 
@@ -56,6 +56,30 @@ test("baseline check IDs are repaired only from a unique explicit prerequisite",
   const ambiguous = structuredClone(draft);
   ambiguous.checks.push({ ...ambiguous.checks[0]!, id: "second-check" });
   assert.equal(bindUniqueBaselineCheckIds(allocateStableCheckIds(ambiguous)).baseline[0]!.checkId, "");
+});
+
+test("host scope bookkeeping is collapsed without losing requirement coverage", () => {
+  const draft = candidate();
+  draft.checks[0]!.expectedBehavior = "List every changed file and compare unchanged files with the baseline";
+  draft.checks[0]!.expectedEvidence = ["Complete changed path inventory"];
+  draft.checks.push({ ...draft.checks[0]!, id: "scope-check", expectedBehavior: "List every changed-path file and compare unchanged files with the baseline", expectedEvidence: ["Complete changed-path list"], requirementRefs: ["req"] });
+  draft.coverage[0]!.checkIds = ["check", "scope-check"];
+  const normalized = rewriteProviderHostScopeChecks(bindUniqueBaselineCheckIds(allocateStableCheckIds(draft)), "host-preimplementation-source");
+  assert.equal(normalized.checks.length, 1);
+  assert.deepEqual(normalized.checks[0]!.requirementRefs, ["req"]);
+  assert.deepEqual(normalized.coverage[0]!.checkIds, [normalized.checks[0]!.id]);
+  assert.equal(normalized.checks[0]!.applicability.decisionOwner, "host");
+  assert.equal(normalized.checks[0]!.prerequisiteRefs.includes("host-preimplementation-source"), true);
+  assert.match(normalized.checks[0]!.expectedBehavior, /Rafi compares/);
+});
+
+test("ordinary product scope checks are not rewritten as host bookkeeping", () => {
+  const draft = candidate();
+  draft.checks[0]!.expectedBehavior = "The public token export remains within the approved product scope";
+  draft.checks[0]!.expectedEvidence = ["Inspect the exported API and its focused regression test"];
+  const normalized = rewriteProviderHostScopeChecks(bindUniqueBaselineCheckIds(allocateStableCheckIds(draft)), "host-preimplementation-source");
+  assert.equal(normalized.checks[0]!.applicability.decisionOwner, "qa");
+  assert.equal(normalized.checks[0]!.expectedBehavior, draft.checks[0]!.expectedBehavior);
 });
 
 test("assessment removes only non-authoritative provider timestamps and names other unexpected properties", () => {

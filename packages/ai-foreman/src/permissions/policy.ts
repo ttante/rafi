@@ -79,6 +79,17 @@ export class PermissionPolicy {
     if (hitEscalate) {
       return { decision: "escalate", reason: `command matches "${hitEscalate}"` };
     }
+    // Permit only the bounded exit-status wrapper needed to retain explicit
+    // evidence for an already allow-listed project test.  The base command is
+    // still parsed by the restricted grammar; this does not grant arbitrary
+    // shell sequencing, expansion, or output redirection.
+    const exitCapture = /^\s*(.+?)\s+2>&1\s*;\s*echo\s+(?:"EXIT_CODE=\$\?"|'EXIT_CODE=\$\?'|EXIT_CODE=\$\?)\s*$/.exec(command);
+    if (exitCapture) {
+      const reason = classifySupportedShellForm(exitCapture[1]!, this.cwd, executionCwd, this.config.allowBash);
+      return reason
+        ? { decision: "escalate", reason: `exit-code capture base command rejected: ${reason}` }
+        : { decision: "allow", reason: "bounded exit-code capture for an allowed project test" };
+    }
     const entry = process.env.RAFI_REHEARSAL_CLI_ENTRY;
     const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
     const launchingRehearsal = entry && isAbsolute(entry) && !/[\r\n\0]/.test(entry)

@@ -33,6 +33,8 @@ function additiveAbsenceRequirement(text: string): boolean {
   return [
     /\bslice alone\b/i,
     /\bwithout\b.*\b(?:present|implemented|enabled)\b/i,
+    /\bwithout\b.*\btest\/\S+/i,
+    /\bwithout\b.*\bthe\s+\S+\s+export\b/i,
     /\bonly\b.*\bown\b.*\btest files?\b/i,
     /\bonly\b.*\btest files?\b.*\bpresent\b/i,
   ].some((pattern) => pattern.test(text));

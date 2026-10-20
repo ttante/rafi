@@ -117,8 +117,14 @@ export function loadConfig(path = "foreman.yaml"): ForemanConfig {
       ...(raw.notifications ?? {}),
     } as NotificationsConfig,
     qa: { ...DEFAULT_CONFIG.qa, ...(raw.qa ?? {}) } as QaConfig,
-    observability: { ...DEFAULT_CONFIG.observability, ...(raw.observability ?? {}) } as ObservabilityConfig,
+    observability: normalizeObservabilityConfig({ ...DEFAULT_CONFIG.observability, ...(raw.observability ?? {}) } as ObservabilityConfig),
   };
+}
+
+function normalizeObservabilityConfig(config: ObservabilityConfig): ObservabilityConfig {
+  if (config.enabled === false) return { ...config, mode: "off" };
+  if (config.mode === "off") return { ...config, enabled: false };
+  return config;
 }
 
 function validateConfig(raw: unknown, path: string): asserts raw is {
@@ -161,13 +167,14 @@ function validateConfig(raw: unknown, path: string): asserts raw is {
 function validateObservability(value: unknown, path: string): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path}: observability must be an object`);
   const input = value as Record<string, unknown>;
-  const keys = ["enabled", "sample_interval_seconds", "detail_retention_days", "log_retention_days", "detail_soft_limit_mb", "detail_hard_limit_mb", "log_limit_mb"] as const;
+  const keys = ["enabled", "mode", "sample_interval_seconds", "detail_retention_days", "log_retention_days", "detail_soft_limit_mb", "detail_hard_limit_mb", "log_limit_mb"] as const;
   for (const key of Object.keys(input)) if (!(keys as readonly string[]).includes(key)) throw new Error(`${path}: unknown observability setting ${key}`);
   if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw new Error(`${path}: observability.enabled must be a boolean`);
-  for (const key of keys.filter((key) => key !== "enabled")) {
+  if (input.mode !== undefined && !["off", "summary", "trace"].includes(String(input.mode))) throw new Error(`${path}: observability.mode must be off, summary, or trace`);
+  for (const key of keys.filter((key) => key !== "enabled" && key !== "mode")) {
     if (input[key] !== undefined && (!Number.isInteger(input[key]) || Number(input[key]) <= 0)) throw new Error(`${path}: observability.${key} must be a positive integer`);
   }
-  const merged = { ...DEFAULT_OBSERVABILITY_CONFIG, ...input } as ObservabilityConfig;
+  const merged = { ...DEFAULT_OBSERVABILITY_CONFIG, ...input, ...(input.enabled === false && input.mode === undefined ? { mode: "off" } : {}), ...(input.mode === "off" && input.enabled === undefined ? { enabled: false } : {}) } as ObservabilityConfig;
   if (merged.detail_soft_limit_mb >= merged.detail_hard_limit_mb) throw new Error(`${path}: observability.detail_soft_limit_mb must be less than detail_hard_limit_mb`);
 }
 

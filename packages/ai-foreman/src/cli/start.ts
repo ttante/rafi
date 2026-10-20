@@ -76,7 +76,7 @@ import { HandoffAcceptanceError, HandoffLoopError, HandoffRecoveryPausedError, H
 import { captureWorkspaceIdentity, createProviderSessionRef, resolveUniqueSessionBinding } from "../sessionIdentity.js";
 import { SessionUnavailableError } from "../adapters/sessionFailure.js";
 import { resolveProviderSessionAvailability } from "../sessionAvailability.js";
-import { ObservabilityStore, RunObserver } from "../observability.js";
+import { ObservabilityStore, RunObserver, type ObservabilityMode } from "../observability.js";
 import { loadProjectAutonomyConfig, resolveAutonomyPolicy, resolveQaEnablement } from "../recoveryPolicy.js";
 import { canonicalizeQaRecoveryRequirements, loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "../qaRecovery.js";
 import { qaDigest, type HandoffAcceptanceReceiptV2, type ProviderSessionRefV2 } from "../qaProtocolV2.js";
@@ -451,6 +451,19 @@ export function validateStartOptions(opts: Record<string, any>, requireCount: bo
   if (opts.preparationRun && opts.recoverRun) throw new Error("Preparation and established recovery run modes are mutually exclusive");
   if (opts.preparationRun && !opts.launchToken) throw new Error("Preparation launch requires both run and token");
   if (opts.launchToken && !opts.preparationRun && !opts.recoverRun) throw new Error("Launch token requires a preparation or recovery run");
+  if (opts.auditLogging !== undefined && !["off", "summary", "trace"].includes(String(opts.auditLogging))) throw new Error("--audit-logging must be off, summary, or trace");
+}
+
+export function resolveAuditLoggingMode(cli: unknown, configured: unknown, environment = process.env.RAFI_AUDIT_LOGGING): ObservabilityMode {
+  const value = cli ?? configured ?? environment ?? "summary";
+  if (!["off", "summary", "trace"].includes(String(value))) throw new Error("audit logging must be off, summary, or trace");
+  return String(value) as ObservabilityMode;
+}
+
+function configuredAuditLoggingMode(path: string): ObservabilityMode | undefined {
+  if (!existsSync(path)) return undefined;
+  const raw = parseYaml(readFileSync(path, "utf8")) as { observability?: { mode?: unknown } } | undefined;
+  return raw?.observability?.mode === undefined ? undefined : resolveAuditLoggingMode(undefined, raw.observability.mode, undefined);
 }
 
 /** A current waiver is an already-recorded decision: surface it, never demand a second start-time approval. */
@@ -574,6 +587,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
     .option("--base <ref>", "base ref for root ticket branches (default: current branch or HEAD)")
     .option("--branch-prefix <prefix>", "branch name prefix for ticket branches")
     .option("--show-session-cost", "show authoritative cost or trustworthy cumulative session tokens for Builder and QA")
+    .option("--audit-logging <mode>", "host-owned audit logging (off | summary | trace)", "summary")
     .option("--hide-session-cost", "hide session cost/token usage for Builder and QA")
     .option("--auto-compact-threshold <percent>", "initial Builder context compaction threshold (1-99)")
     .option("--max-branch-depth <n>", "maximum selected branch stack depth", "5")
@@ -666,6 +680,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       const readinessOwner = { project: cwd, runId: supervisedInvocationId, authority: localBuildAuthority(cwd)! };
       const autoApprovePlanUpdates = recoveryRecord
         ? recoveryRecord.recoveryDecision?.planUpdateApproval === "auto"
+          && (recoveryRecord.recoveryDecision.planUpdateApprovalSource === "explicit-yes" || recoveryRecord.recoveryDecision.planUpdateApprovalSource === "explicit-choice")
         : Boolean(opts.yes);
       if (opts.recoveryMode) {
         const allowed = ["exact-session", "fresh-with-handoff", "fresh-recovery-only", "guided-recovery"];
@@ -888,6 +903,8 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         : selectedNewTicket ? [selectedNewTicket] : undefined;
 
       const config = loadConfig(join(cwd, "foreman.yaml"));
+      const auditLogging = resolveAuditLoggingMode(command.getOptionValueSource("auditLogging") === "cli" ? opts.auditLogging : undefined, configuredAuditLoggingMode(join(cwd, "foreman.yaml")));
+      const observabilityConfig = { ...config.observability, mode: auditLogging, enabled: auditLogging !== "off" };
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const logPath = join(cwd, ".foreman", `${stamp}.jsonl`);
       const log = new Log(logPath);
@@ -902,8 +919,8 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       if (qaResolution.deprecationWarning) console.error(`rafi: warning: ${qaResolution.deprecationWarning}`);
       const invocationRunId = supervisedInvocationId;
       let observabilityStore: ObservabilityStore | undefined;
-      if (config.observability.enabled) {
-        try { observabilityStore = new ObservabilityStore(cwd, { config: config.observability }); }
+      if (observabilityConfig.enabled) {
+        try { observabilityStore = new ObservabilityStore(cwd, { config: observabilityConfig }); }
         catch (error) { console.error(`rafi: observability unavailable; build will continue: ${String(error).replace(/\s+/g, " ").slice(0, 300)}`); }
       }
       let activeObserver = observabilityStore ? new RunObserver(observabilityStore, invocationRunId) : undefined;
@@ -2278,7 +2295,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         observabilityStore?.enforceLimits();
         observabilityStore?.maintainLogs(cwd);
         observabilityStore?.close();
-        pruneRecoveryTelemetryAtCompletion(cwd, config.observability.detail_retention_days);
+        pruneRecoveryTelemetryAtCompletion(cwd, observabilityConfig.detail_retention_days);
         activeObserver = undefined;
         process.off("exit", finishObservationOnExit);
 
@@ -2688,7 +2705,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         observabilityStore?.enforceLimits();
         observabilityStore?.maintainLogs(cwd);
         observabilityStore?.close();
-        pruneRecoveryTelemetryAtCompletion(cwd, config.observability.detail_retention_days);
+        pruneRecoveryTelemetryAtCompletion(cwd, observabilityConfig.detail_retention_days);
         activeObserver = undefined;
         process.off("exit", finishObservationOnExit);
 

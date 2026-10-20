@@ -69,6 +69,20 @@ test("read-only QA can run dedicated Node tests without enabling arbitrary Node 
   }
 });
 
+test("allows explicit exit-code capture only around an already allowed project test", () => {
+  for (const command of [
+    'node --test test/multiply.test.mjs 2>&1; echo "EXIT_CODE=$?"',
+    "node --test test/multiply.test.mjs 2>&1; echo 'EXIT_CODE=$?'",
+    "npm test 2>&1; echo EXIT_CODE=$?",
+  ]) assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command } }).decision, "allow", command);
+  for (const command of [
+    'node --test test/multiply.test.mjs 2>&1; echo "EXIT_CODE=$?"; rm -rf src',
+    'node --test ../outside.test.mjs 2>&1; echo "EXIT_CODE=$?"',
+    'node --test test/multiply.test.mjs 2>&1; echo "OTHER=$?"',
+    'node arbitrary.mjs 2>&1; echo "EXIT_CODE=$?"',
+  ]) assert.equal(readOnlyPolicy.classify({ toolName: "Bash", input: { command } }).decision, "escalate", command);
+});
+
 test("read-only Node test paths and globs reject symlinks outside the project", { skip: process.platform === "win32" }, () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-node-tests-scope-"));
   try {

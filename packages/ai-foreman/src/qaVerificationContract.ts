@@ -89,6 +89,43 @@ export function bindUniqueBaselineCheckIds(candidate: QaContractCandidateV1): Qa
   }
   return draft;
 }
+
+/**
+ * The host owns the before/after path comparison. Providers may still draft a
+ * check that asks them to enumerate every changed file, which turns host
+ * bookkeeping into a Builder obligation. Replace only that explicit shape;
+ * ordinary product-scope checks remain provider-authored and unchanged.
+ */
+export function rewriteProviderHostScopeChecks(candidate: QaContractCandidateV1, baselineId: string): QaContractCandidateV1 {
+  const draft = structuredClone(candidate);
+  const hostScope = (check: QaContractCandidateV1["checks"][number]): boolean => {
+    const text = [check.expectedBehavior, ...check.expectedEvidence, ...check.verification.flatMap(method => [method.expectedOutcome, ...(method.steps ?? []), ...(method.argv ?? [])])].join(" ").toLowerCase();
+    return /\b(?:complete|full|all|every)\s+(?:changed|modified|touched)[ -](?:path|paths|file|files)\b/.test(text)
+      || /\b(?:changed|modified|touched)[ -](?:path|paths|file|files)\s+(?:inventory|list|manifest)\b/.test(text)
+      || /\bunchanged[- ]files?\s+(?:comparison|check|verification)\b/.test(text)
+      || /\bpath\s+manifest\b.{0,80}\b(?:compare|comparison|unchanged|scope)\b/.test(text);
+  };
+  const matches = draft.checks.filter(hostScope);
+  if (!matches.length) return draft;
+  const primary = matches[0]!;
+  const mergedRequirements = [...new Set(matches.flatMap(check => check.requirementRefs))];
+  const mergedPrerequisites = [...new Set([...primary.prerequisiteRefs, baselineId])];
+  primary.requirementRefs = mergedRequirements;
+  primary.origin = "invariant";
+  primary.expectedBehavior = "Rafi compares the final product paths with the host-captured preimplementation baseline and rejects unauthorized product changes.";
+  primary.obligation = "mandatory";
+  primary.timing = "postimplementation";
+  primary.applicability = { kind: "unconditional", decisionOwner: "host", requiredEvidence: [baselineId] };
+  primary.verification = [{ kind: "procedure", steps: ["Rafi performs the host-owned before/after product-path comparison, excluding approved bookkeeping and bounded evidence paths."], cwd: ".", fixtures: [], runtime: "Rafi host", timeoutMs: 30_000, expectedOutcome: "Only approved product changes are present; unauthorized, destructive, protected, or requirement-relevant changes are rejected." }];
+  primary.expectedEvidence = ["Rafi host-owned postimplementation scope comparison bound to the retained preimplementation baseline."];
+  primary.prerequisiteRefs = mergedPrerequisites;
+  const removed = new Set(matches.slice(1).map(check => check.id));
+  draft.checks = draft.checks.filter(check => !removed.has(check.id));
+  for (const row of draft.coverage) row.checkIds = row.checkIds.map(id => removed.has(id) ? primary.id : id).filter((id, index, ids) => ids.indexOf(id) === index);
+  for (const check of draft.checks) check.dependsOnChecks = check.dependsOnChecks.map(id => removed.has(id) ? primary.id : id).filter((id, index, ids) => ids.indexOf(id) === index);
+  for (const concern of draft.unresolved) concern.checkIds = concern.checkIds.map(id => removed.has(id) ? primary.id : id).filter((id, index, ids) => ids.indexOf(id) === index);
+  return draft;
+}
 export function authoritativeInventory(ticket: TicketDef, checklist: string[], inputs: ContractInputRef[]): RequirementRef[] {
   const result: RequirementRef[] = [];
   for (const [kind, entries] of [["acceptance", ticket.acceptance], ["required_tests", ticket.required_tests], ["checklist", checklist]] as const) {

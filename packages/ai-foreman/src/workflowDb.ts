@@ -3,6 +3,7 @@ import { canonicalJson } from "./qaProtocolV2.js";
 import { resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
 import { registerGraphDerived, graphDerivedAllowed, currentGraphDerivedAccess, type GraphDerivedAccess } from "./graph/derived.js";
 import { bindCoverageHostFields, parseContractCoverage, validateContractCoverage } from "./qaContractCoverage.js";
+import { applyHostQaComparison, findHostQaCheck, hostComparisonDigestFromCoverage, hostQaComparisonV1Schema } from "./hostQaComparison.js";
 import { QaPreparationStore, migrateQaPreparation, migrateQaPreparationGuards } from "./qaPreparationStore.js";
 import { GraphStore, migrateGraphStore } from "./graph/storage.js";
 import { reconcileWork, type BuildOwnershipRepairV1 } from "./buildWorkReconciliation.js";
@@ -2219,7 +2220,7 @@ export class WorkflowDb {
     const receipts = this.db.prepare("SELECT receipt_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND source_state_digest=? AND review_basis_digest=? AND status='completed'").all(input.runId, input.ticketId, input.sourceStateDigest, input.reviewBasisDigest) as Array<{ receipt_json: string }>;
     const receipt = receipts.map(row => parseJson(row.receipt_json) as QaTurnReceiptV2).find(row => qaDigest("turn-receipt", row) === input.turnReceiptDigest && row.terminalEventObserved);
     const response = receipt?.cleanedResponseDigest ? this.getEvidence(receipt.cleanedResponseDigest) : undefined;
-    const retainedCoverage = receipt && response
+    const retainedProviderCoverage = receipt && response
       ? bindCoverageHostFields(parseContractCoverage(response.toString()), contract, {
         phase: "qa",
         sourceDigest: input.sourceStateDigest,
@@ -2228,7 +2229,17 @@ export class WorkflowDb {
         sessionId: binding.sessionId,
       })
       : undefined;
-    if (!receipt || !retainedCoverage || canonicalJson(retainedCoverage) !== canonicalJson(coverage)) throw new Error("Coverage is not bound to the retained terminal review receipt");
+    let retainedCoverage = retainedProviderCoverage;
+    const hostCheck = findHostQaCheck(contract);
+    if (hostCheck) {
+      const hostDigest = hostComparisonDigestFromCoverage(coverage, hostCheck.id);
+      if (!hostDigest) throw new Error("Coverage is missing the host-owned comparison artifact reference");
+      const hostResult = hostQaComparisonV1Schema.parse(store.artifact(hostDigest, "host-qa-comparison"));
+      retainedCoverage = retainedProviderCoverage
+        ? applyHostQaComparison(retainedProviderCoverage, contract, hostResult, hostDigest, this.projectDir)
+        : undefined;
+    }
+    if (!receipt || !retainedCoverage || canonicalJson(retainedCoverage) !== canonicalJson(coverage)) throw new Error("Coverage is not bound to the retained terminal review receipt and authorized host augmentation");
   }
 
   issueQaPassCertificate(input: Omit<QaPassCertificateV2, "version" | "certificateId" | "unresolvedReportCount" | "issuedAt">, now = new Date()): QaPassCertificateV2 {

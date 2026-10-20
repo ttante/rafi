@@ -17,9 +17,11 @@ import type {
 
 export const OBSERVABILITY_DB_FILE = ".rafi/observability.sqlite3";
 export const OBSERVABILITY_SCHEMA_VERSION = 2 as const;
+export type ObservabilityMode = "off" | "summary" | "trace";
 
 export interface ObservabilityConfig {
   enabled: boolean;
+  mode: ObservabilityMode;
   sample_interval_seconds: number;
   detail_retention_days: number;
   log_retention_days: number;
@@ -30,6 +32,7 @@ export interface ObservabilityConfig {
 
 export const DEFAULT_OBSERVABILITY_CONFIG: ObservabilityConfig = {
   enabled: true,
+  mode: "summary",
   sample_interval_seconds: 60,
   detail_retention_days: 30,
   log_retention_days: 30,
@@ -117,7 +120,7 @@ export class ObservabilityStore {
     this.db.pragma("foreign_keys = ON");
     this.migrate();
     this.backfillBuildSnapshots();
-    this.summaryOnly = this.meta("summary_only") === "1";
+    this.summaryOnly = this.config.mode === "summary" || this.meta("summary_only") === "1";
   }
 
   close(): void { if (this.db.open) this.db.close(); }

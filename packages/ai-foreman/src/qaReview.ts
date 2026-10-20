@@ -38,6 +38,7 @@ import {
   validateManualQaReport, validateQaRecoveryAcknowledgement, type QaRecoveryPacket, type QaRecoveryPacketInput, type QaRecoveryPendingAction,
 } from "./qaRecovery.js";
 import { canonicalJson, createQaFindingRefs, qaDigest, type FrozenQaSourceStateV2, type HandoffAcceptanceReceiptV2, type QaConfinementV2, type QaReviewBasisV2, type QaTurnIntentV2, type QaTurnReceiptV2 } from "./qaProtocolV2.js";
+import { applyHostQaComparison, createHostQaComparison, findHostQaCheck } from "./hostQaComparison.js";
 
 export interface QaStreamState {
   sessionId?: string;
@@ -1515,11 +1516,26 @@ function beginV2Review(
       if (effective.digest !== contract.inputs.find(input => input.kind === "rules")?.digest || handle.effectiveRoleInstructions !== finalQaRoleInstructions(effective.qaRules) || canonicalJson(handle.skills.map(skill => ({ name: skill.name, path: skill.path, content: skill.content, digest: skill.digest }))) !== canonicalJson(effective.skills.map(skill => ({ name: skill.name, path: skill.path, content: skill.content, digest: sha(skill.content) })))) throw new Error("Actual final QA rules/skills differ from the frozen canonical contract configuration");
       const expected = contract.inputs.find(input => input.kind === "checklist");
       if (expected?.digest !== contractDigest("input-checklist", checklist)) throw new Error("Final QA checklist differs from delivered contract");
+      const needsHistoricalEvidence = contract.checks.some(check => /red|test.?first|ordering|historical/i.test(JSON.stringify(check)));
       const builderClaims = db.operations(opts.recovery.runId).flatMap(operation => {
         const intent = operation.intent as { workId?: string; contractDigest?: string };
-        const result = operation.result as { coverageDigest?: string; binding?: { sourceDigest?: string } } | undefined;
+        const result = operation.result as { coverageDigest?: string; implementationDigest?: string; binding?: { sourceDigest?: string } } | undefined;
         return operation.kind === "builder-coverage" && operation.status === "confirmed" && intent.workId === opts.ticket.id && intent.contractDigest === contract.contentDigest && result?.binding?.sourceDigest === source.digest && result.coverageDigest
-          ? [{ operationId: operation.idempotencyKey, digest: result.coverageDigest, coverage: preparationStore.artifact(result.coverageDigest, "builder-coverage") }] : [];
+          ? [{
+            operationId: operation.idempotencyKey,
+            digest: result.coverageDigest,
+            coverage: preparationStore.artifact(result.coverageDigest, "builder-coverage"),
+            ...(needsHistoricalEvidence && result.implementationDigest ? {
+              // The response is already host-retained by finishBuildAssignment.
+              // Expose only this bounded, contract-relevant excerpt to the
+              // independent reviewer; do not retain or disclose all Builder
+              // output globally.
+              implementationResponse: {
+                digest: result.implementationDigest,
+                response: db.getEvidence(result.implementationDigest)?.toString() ?? "unavailable",
+              },
+            } : {}),
+          }] : [];
       });
       const commandObservations = retainedQaCommandObservations(opts.recovery.projectDir, opts.recovery.runId, opts.ticket.id, qaCommandOutputExcerptsAllowed(opts.ticket.id));
       instruction += `\n${qaHostGraphFact(opts.recovery.projectDir)}\n`;
@@ -1810,7 +1826,13 @@ function finishV2Pass(opts: IsolatedQaOptions, adapter: BuilderAdapter, detail: 
       if (!contractHead.digest || contractHead.state !== "ready") throw new Error("Final coverage requires the current ready contract");
       const contract = db.qaPreparationStore().contract(contractHead.digest);
       const coverageBinding = { phase: "qa" as const, sourceDigest: binding.sourceStateDigest, inputBasisDigest: binding.reviewBasisDigest, attemptId: binding.reviewAttemptId, sessionId: binding.sessionRef.sessionId };
-      const coverage = bindCoverageHostFields(parseContractCoverage(binding.lastResponse ?? ""), contract, coverageBinding);
+      const providerCoverage = bindCoverageHostFields(parseContractCoverage(binding.lastResponse ?? ""), contract, coverageBinding);
+      const hostComparison = findHostQaCheck(contract)
+        ? createHostQaComparison({ db, projectDir: binding.projectDir, worktree: opts.builderWorktree, runId: binding.runId, ticket: opts.ticket, contract, reviewAttemptId: binding.reviewAttemptId, reviewBasisDigest: binding.reviewBasisDigest })
+        : undefined;
+      const coverage = hostComparison
+        ? applyHostQaComparison(providerCoverage, contract, hostComparison.result, hostComparison.resultDigest, binding.projectDir)
+        : providerCoverage;
       const errors = validateContractCoverage(contract, coverage, coverageBinding);
       if (errors.length) throw new Error(`Final QA coverage incomplete: ${errors.join("; ")}`);
       const coverageDigest = db.qaPreparationStore().putArtifact("final-coverage", coverage);

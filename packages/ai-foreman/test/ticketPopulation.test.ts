@@ -67,6 +67,17 @@ test("population rejects provider-invented sibling-absence requirements", () => 
   );
 });
 
+test("population rejects sibling absence phrased as removing a test file or export", () => {
+  const invalid = structuredClone(proposal);
+  invalid.tickets[1]!.acceptance = [
+    "npm test passes without test/subtract.test.mjs or the subtract export",
+  ];
+  assert.throws(
+    () => materializeTicketPopulation(invalid, plan, [old], { branchStrategy: "current" }),
+    /adds a sibling-absence requirement/,
+  );
+});
+
 test("population preserves explicitly approved absence requirements", () => {
   const approved = structuredClone(plan);
   const requirement = "verify the feature is absent before enabling the migration";

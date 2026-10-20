@@ -18,7 +18,7 @@ import { WorkflowDb } from "./workflowDb.js";
 import { createRoleBuilder, readOnlyPermissionConfig } from "./agentRun.js";
 import { captureBuildSource, assertBuildAssignmentReconciled, BuildAssignmentRejected } from "./buildAssignment.js";
 import { createDisposableQaSnapshotAsync } from "./qaSnapshot.js";
-import { allocateStableCheckIds, authoritativeInventory, bindUniqueBaselineCheckIds, contractDigest, mapSnapshotWorkingDirectories, normalizeSnapshotPaths, renderVerificationContract } from "./qaVerificationContract.js";
+import { allocateStableCheckIds, authoritativeInventory, bindUniqueBaselineCheckIds, contractDigest, mapSnapshotWorkingDirectories, normalizeSnapshotPaths, renderVerificationContract, rewriteProviderHostScopeChecks } from "./qaVerificationContract.js";
 import { loadQaPreparationPolicy, resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
 import { prepareVerificationContract } from "./qaPreparation.js";
 import { qaHostGraphFact } from "./qaHostFacts.js";
@@ -127,7 +127,7 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
       provider: builder.agent,
       store, now: Date.now, hostFacts: `${qaHostGraphFact(projectDir)}\n${deliveryFact}\nHost-owned baseline fact: Rafi captured the complete preimplementation per-file path manifest and will perform the exact unchanged-file and scope comparison. Its digest is ${preimplementationPathManifestDigest}. Do not require the provider to receive or reproduce the raw manifest; cite the retained host-preimplementation-source observation and assess the host comparison result instead. Do not author a provider-executed check for Rafi's host postimplementation path manifest, complete changed-path inventory, or unchanged-file comparison; Rafi performs that comparison outside the provider snapshot. Ordinary approved product paths, exports, and tests are not a material QA concern merely because the provider cannot prove whether they were present before implementation; Rafi owns that comparison. Do not reconstruct or disclose the full baseline. For current-branch additive tickets, a provider-authored or inferred request to test the branch with an already-completed sibling feature removed is not an applicable requirement when the approved scope says not to remove or reconstruct that sibling; verify the ticket's own behavior and tests against the shared baseline instead. Treat sibling-absence testing as binding only when the user explicitly approved that absence requirement. Escalate only an actual host-observed out-of-scope, destructive, protected-file, or requirement-relevant change.`,
       normalizeDraft: (draft, response) => {
-        const normalized = bindUniqueBaselineCheckIds(allocateStableCheckIds(draft));
+        const normalized = rewriteProviderHostScopeChecks(bindUniqueBaselineCheckIds(allocateStableCheckIds(draft)), hostBaseline.id);
         if (!normalized.baseline.some(observation => observation.id === hostBaseline.id)) normalized.baseline.unshift(structuredClone(hostBaseline));
         for (const check of normalized.checks) for (const method of check.verification) {
           if (response.workspacePaths && Object.hasOwn(response.workspacePaths, method.cwd)) method.cwd = response.workspacePaths[method.cwd]!;

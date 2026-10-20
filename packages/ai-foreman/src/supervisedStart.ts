@@ -228,12 +228,30 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
   const stopInt = () => { stopRequestSource = "parent-SIGINT"; supervisor.requestStop(); };
   const stopTerm = () => { stopRequestSource = "parent-SIGTERM"; supervisor.requestStop(); };
   process.once("SIGINT", stopInt); process.once("SIGTERM", stopTerm);
+  let supervisorCompleted = false;
+  const recordUnexpectedSupervisorExit = (code: number): void => {
+    if (supervisorCompleted) return;
+    try {
+      const state = db.supervisorState(runId);
+      const run = db.getRun(runId);
+      if (!state || state.pid !== process.pid || state.status !== "running" || !run || ["completed", "cancelled", "superseded"].includes(run.status)) return;
+      db.putSupervisorState(runId, { ...state, status: "failed", pid: undefined, workerPid: undefined, heartbeatAt: new Date().toISOString() });
+      db.transitionSupervisor(runId, state.workerGeneration, {
+        status: "paused",
+        checkpoint: "supervisor-process-exit",
+        event: "supervisor_process_exit",
+        payload: { exitCode: code, lastCheckpoint: run.checkpoint, generation: state.generation },
+      });
+    } catch { /* Exit handlers must not mask the original process termination. */ }
+  };
+  const onProcessExit = (code: number): void => recordUnexpectedSupervisorExit(code);
+  process.once("exit", onProcessExit);
   try {
     const outcome = await supervisor.run();
     if (outcome.kind === "failed") { exitCode ||= 1; console.error(`rafi: ${outcome.detail}`); }
     else if (outcome.kind === "waiting_for_human") exitCode ||= 2;
   }
-  finally { process.off("SIGINT", stopInt); process.off("SIGTERM", stopTerm); db.close(); }
+  finally { supervisorCompleted = true; process.off("SIGINT", stopInt); process.off("SIGTERM", stopTerm); process.off("exit", onProcessExit); db.close(); }
   process.exitCode = exitCode;
   return true;
 }
