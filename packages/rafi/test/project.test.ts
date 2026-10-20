@@ -241,7 +241,7 @@ test("QA preparation defaults on, supports the public booleans, and accepts lega
     assert.equal(configured.qa_preparation_shadow, mode === "shadow" ? true : undefined);
     assert.deepEqual(configured.tickets, base.tickets);
   }
-  assert.deepEqual(migrateQaPreparationConfiguration({ qa_preparation: { mode: "enforce", wallTimeMs: [300000, 600000, 1200000, 1800000, 2800000] } }), { qa_preparation: true, qa_preparation_wall_time_ms: [300000, 600000, 1200000, 1800000, 2800000] });
+  assert.deepEqual(migrateQaPreparationConfiguration({ qa_preparation: { mode: "enforce", wallTimeMs: [600000, 1200000, 2400000, 3600000, 5400000] } }), { qa_preparation: true, qa_preparation_wall_time_ms: [600000, 1200000, 2400000, 3600000, 5400000] });
   assert.throws(() => normalizeProjectConfig({ ...base, qa_preparation: { mode: "automatic" } }), /mode/);
   assert.throws(() => normalizeProjectConfig({ ...base, qa_preparation: { mode: "enforce", wallTimeMs: [300000, 300000, 300000, 300000, 300000] } }), /ceilings/);
 });
