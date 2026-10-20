@@ -22,7 +22,7 @@ test("publication CAS rejects a stale owner, expired budget and conflicting revi
   try {
     migrateQaPreparation(db); const draft = candidate(); const contract = assembleContract(draft, draft.requirements, assessment(draft), "author"); store.ensureBudget("run", "T1", digest, 2, 0); store.putArtifact("semantic-assessment", assessment(draft)); store.retainProgress(store.budget("run", "T1", digest)!, "inventory", draft.requirements);
     assert.throws(() => store.publish(contract, 1, 1), /Stale/);
-    assert.throws(() => store.publish(contract, 0, 600000), /Expired/);
+    assert.throws(() => store.publish(contract, 0, 1200000), /Expired/);
     store.publish(contract, 0, 1); assert.equal(store.head("run", "T1", digest).digest, contract.contentDigest);
     assert.throws(() => store.publish(contract, 0, 2), /Stale/);
     assert.deepEqual(store.contract(contract.contentDigest), contract);
@@ -33,7 +33,7 @@ test("escalation raises the ceiling from original start and does not allocate a 
   try {
     const budget = store.ensureBudget("run", "T1", digest, 2, 1000);
     store.reviseDepth(budget, candidate(5).depthDecision);
-    assert.equal(store.budget("run", "T1", digest)!.deadlineMs, 2701000);
+    assert.equal(store.budget("run", "T1", digest)!.deadlineMs, 5401000);
     assert.equal(store.budget("run", "T1", digest)!.startMs, 1000);
   } finally { db.close(); }
 });
