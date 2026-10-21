@@ -67,10 +67,26 @@ function matchesScope(candidate: string, patterns: string[]): boolean {
   });
 }
 
+function isHostQaCheck(check: QaVerificationContractV1["checks"][number]): boolean {
+    const text = `${check.expectedBehavior} ${check.expectedEvidence.join(" ")} ${check.applicability.requiredEvidence.join(" ")}`;
+    const hostScopeEvidence = check.applicability.requiredEvidence.some(evidence => /host[- ]owned.*scope comparison/i.test(evidence));
+    const scopeSemantics = /scope/i.test(text) && /comparison/i.test(text) && /baseline|protected|approved scope|product changes/i.test(text);
+    return !/documentation/i.test(text)
+      && (hostScopeEvidence || (check.applicability.decisionOwner === "host" && (/Rafi compares the final product paths/i.test(check.expectedBehavior) || scopeSemantics)));
+}
+
 export function findHostQaCheck(contract: QaVerificationContractV1): QaVerificationContractV1["checks"][number] | undefined {
+  return contract.checks.find(isHostQaCheck);
+}
+
+function findHostQaChecks(contract: QaVerificationContractV1): QaVerificationContractV1["checks"] {
+  return contract.checks.filter(isHostQaCheck);
+}
+
+function findHostDocumentationCheck(contract: QaVerificationContractV1): QaVerificationContractV1["checks"][number] | undefined {
   return contract.checks.find(check => check.applicability.decisionOwner === "host"
-    && check.applicability.requiredEvidence.includes("host-preimplementation-source")
-    && /Rafi compares the final product paths/i.test(check.expectedBehavior));
+    && /documentation/i.test(check.expectedBehavior)
+    && /documentation/i.test(check.expectedEvidence.join(" ")));
 }
 
 function findAssignment(db: Pick<WorkflowDb, "operations">, runId: string, ticketId: string, baselineDigest: string): RetainedAssignment | undefined {
@@ -165,18 +181,38 @@ export function createHostQaComparison(input: {
 export function applyHostQaComparison(coverage: QaContractCoverageV1, contract: QaVerificationContractV1, result: HostQaComparisonV1, resultDigest: string, projectDir: string): QaContractCoverageV1 {
   const parsed = hostQaComparisonV1Schema.parse(result);
   if (parsed.contractDigest !== contract.contentDigest || parsed.contractRevision !== contract.revision || parsed.runId !== contract.runId || parsed.ticketId !== contract.workId || parsed.finalSourceDigest !== coverage.sourceDigest || parsed.reviewAttemptId !== coverage.attemptId || parsed.reviewBasisDigest !== coverage.inputBasisDigest) throw new Error("Host QA comparison is not bound to the current contract, review, or source");
-  const check = findHostQaCheck(contract);
-  if (!check) throw new Error("Host QA comparison contract check is missing");
+  const checks = findHostQaChecks(contract);
+  if (!checks.length) throw new Error("Host QA comparison contract check is missing");
   const copy = structuredClone(coverage);
-  const row = {
-    checkId: check.id,
-    applicability: "applicable" as const,
-    predicateEvidence: ["Rafi host-owned scope comparison executed against the retained baseline."],
-    outcome: parsed.status === "passed" ? "passed" as const : parsed.status === "failed" ? "failed" as const : "blocked" as const,
-    evidence: [resultEvidence(resultDigest, projectDir, parsed.finalSourceDigest, parsed.status, parsed.reason)],
-  };
-  const index = copy.checks.findIndex(item => item.checkId === check.id);
-  if (index < 0) copy.checks.push(row); else copy.checks[index] = row;
+  for (const check of checks) {
+    const row = {
+      checkId: check.id,
+      applicability: "applicable" as const,
+      predicateEvidence: ["Rafi host-owned scope comparison executed against the retained baseline."],
+      outcome: parsed.status === "passed" ? "passed" as const : parsed.status === "failed" ? "failed" as const : "blocked" as const,
+      evidence: [resultEvidence(resultDigest, projectDir, parsed.finalSourceDigest, parsed.status, parsed.reason)],
+    };
+    const index = copy.checks.findIndex(item => item.checkId === check.id);
+    if (index < 0) copy.checks.push(row); else copy.checks[index] = row;
+  }
+  const documentationCheck = findHostDocumentationCheck(contract);
+  if (documentationCheck && contract.documentation?.required === false) {
+    const documentationRow = {
+      checkId: documentationCheck.id,
+      applicability: "applicable" as const,
+      predicateEvidence: ["The admitted contract explicitly sets documentation.required to false."],
+      outcome: "passed" as const,
+      evidence: [{
+        procedure: "Rafi host-owned evaluation of the admitted documentation policy",
+        cwd: projectDir,
+        runtime: "Rafi host",
+        sourceDigest: parsed.finalSourceDigest,
+        reference: `host-qa-documentation:${contract.contentDigest}`,
+      }],
+    };
+    const documentationIndex = copy.checks.findIndex(item => item.checkId === documentationCheck.id);
+    if (documentationIndex < 0) copy.checks.push(documentationRow); else copy.checks[documentationIndex] = documentationRow;
+  }
   return copy;
 }
 

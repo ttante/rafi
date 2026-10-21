@@ -18,8 +18,10 @@ test("coverage instructions explain the real schema and flat host binding", () =
   assert.match(COVERAGE_INSTRUCTIONS, /predicateEvidence as an array/);
   assert.match(COVERAGE_INSTRUCTIONS, /exact host-supplied sourceDigest/);
   assert.match(COVERAGE_INSTRUCTIONS, /reference to that observation's exact evidenceDigest/);
-  assert.match(COVERAGE_INSTRUCTIONS, /run every applicable mandatory check/);
-  assert.match(COVERAGE_INSTRUCTIONS, /not leave such a check as not-run/);
+  assert.match(COVERAGE_INSTRUCTIONS, /run every other applicable mandatory check/);
+  assert.match(COVERAGE_INSTRUCTIONS, /not leave such a provider-owned check as not-run/);
+  assert.match(COVERAGE_INSTRUCTIONS, /host-owned.*Rafi.*not-run/i);
+  assert.match(COVERAGE_INSTRUCTIONS, /do not block or fail QA/);
   assert.match(COVERAGE_INSTRUCTIONS, /"required":\["version","phase","runId"/);
 });
 test("generic success and incomplete mandatory results never pass contract coverage", () => {

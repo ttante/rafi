@@ -21,7 +21,7 @@ import { qaReportDigest } from "../src/qaRecovery.js";
 import { createProviderSessionRef } from "../src/sessionIdentity.js";
 import type { BuilderAdapter } from "../src/adapters/types.js";
 
-function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compiled = false, tracker = false, publish = true, baseline = false) {
+function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compiled = false, tracker = false, publish = true, baseline = false, rotateCoverageSession = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "qa-workflow-contract-"))), workspace = branch ? join(root, "branch") : root;
   mkdirSync(workspace, { recursive: true }); writeFileSync(join(workspace, "product.txt"), "baseline");
   if (compiled) {
@@ -43,14 +43,14 @@ function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compil
   }
   const review = assessment(draft), contract = assembleContract(draft, draft.requirements, review, "author");
   const budget = store.ensureBudget("run", workId, admission.requirementsDigest, 2, Date.now()); store.putArtifact("semantic-assessment", review); store.retainProgress(budget, "inventory", draft.requirements); if (publish) store.publish(contract, 0, Date.now());
-  let sequence = 0, turns = 0, failCoverage = false;
-  const adapter: BuilderAdapter = { agent: "claude", sessionId: () => "actual-builder", sessionRef: () => createProviderSessionRef({ provider: "claude", sessionId: "actual-builder", role: "builder", stream: "builder", generation: 1, cwd: workspace, configRoot: root, source: "observed" }), events: async function* () {}, close: async () => {},
+  let sequence = 0, turns = 0, failCoverage = false, sessionId = "actual-builder";
+  const adapter: BuilderAdapter = { agent: "claude", sessionId: () => sessionId, sessionRef: () => createProviderSessionRef({ provider: "claude", sessionId, role: "builder", stream: "builder", generation: 1, cwd: workspace, configRoot: root, source: "observed" }), events: async function* () {}, close: async () => {},
     contractCapabilities: () => ({ sameSessionAcceptance: true, nativeCompactionBarrier: true }), contractCompactionSequence: () => sequence, enableContractEnforcement: () => {}, acceptContractDelivery: () => {},
     sendTurn: async (instruction, policy) => {
       turns++; assert.equal(policy?.responseOnly, true);
       let value: unknown, tag: string;
       if (policy?.purpose === "contract-acceptance") { tag = "RAFI_QA_ACCEPTANCE"; value = { workId, revision: contract.revision, digest: contract.contentDigest, missingSections: [] }; }
-      else { tag = "RAFI_QA_COVERAGE"; const binding = JSON.parse(instruction.split("Exact coverage binding: ")[1]!.split("\n")[0]!); assert.equal(binding.attemptId.length > 0, true); assert.equal(binding.sessionId, "actual-builder"); assert.equal(binding.sourceDigest, captureBuildSource(workspace).digest); assert.equal(binding.inputBasisDigest.length, 64); value = { ...coverage(contract), ...binding, checks: [{ ...coverage(contract).checks[0]!, outcome: failCoverage ? "not-run" : "passed", evidence: [{ procedure: "Inspect regression result", cwd: workspace, runtime: "node20", sourceDigest: binding.sourceDigest, reference: "retained-output" }] }] }; }
+      else { tag = "RAFI_QA_COVERAGE"; if (rotateCoverageSession) { sequence++; sessionId = `actual-builder-compacted-${sequence}`; } const binding = JSON.parse(instruction.split("Exact coverage binding: ")[1]!.split("\n")[0]!); assert.equal(binding.attemptId.length > 0, true); assert.equal(binding.sessionId, "actual-builder"); assert.equal(binding.sourceDigest, captureBuildSource(workspace).digest); assert.equal(binding.inputBasisDigest.length, 64); value = { ...coverage(contract), ...binding, checks: [{ ...coverage(contract).checks[0]!, outcome: failCoverage ? "not-run" : "passed", evidence: [{ procedure: "Inspect regression result", cwd: workspace, runtime: "node20", sourceDigest: binding.sourceDigest, reference: "retained-output" }] }] }; }
       return { text: `${tag}_START\n${JSON.stringify(value)}\n${tag}_END`, isError: false, costUsd: 0, numTurns: 1 };
     } };
   return { root, workspace, db, store, contract, admission, adapter, workId, ticket, compact: () => { sequence++; }, turns: () => turns, blockedClaims: () => { failCoverage = true; }, cleanup: () => { db.close(); rmSync(root, { recursive: true, force: true }); } };
@@ -71,6 +71,18 @@ for (const [kind, branch] of [["ticket", false], ["ticket", true], ["synthetic",
     await collectBuilderContractCoverage(f.root, "run", f.workId, f.workspace, f.adapter, assignment.operationId, assignment.instruction, response);
     assert.equal(finishBuildAssignment(f.root, assignment, response, { kind: "done", ticket: f.workId }), undefined);
     const before = f.turns(); await collectBuilderContractCoverage(f.root, "run", f.workId, f.workspace, f.adapter, assignment.operationId, assignment.instruction, response); assert.equal(f.turns(), before);
+    assert.equal(f.store.metrics("run").started, 1);
+  } finally { f.cleanup(); }
+});
+
+test("Builder coverage accepts a host-observed provider compaction without accepting source drift", async () => {
+  const f = fixture("ticket", false, false, false, true, false, true);
+  try {
+    await deliverVerificationContract(f.contract, f.store, f.adapter, f.workspace, f.root, "Context");
+    const assignment = beginBuildAssignment(f.root, "run", f.workId, f.workspace, "Implement", undefined, f.adapter);
+    writeFileSync(join(f.workspace, "product.txt"), "implemented");
+    const response = { text: `STEP_STATUS: done | ticket="${f.workId}"`, isError: false, numTurns: 1, costUsd: 0, turnId: "implementation-turn" };
+    await collectBuilderContractCoverage(f.root, "run", f.workId, f.workspace, f.adapter, assignment.operationId, assignment.instruction, response);
     assert.equal(f.store.metrics("run").started, 1);
   } finally { f.cleanup(); }
 });

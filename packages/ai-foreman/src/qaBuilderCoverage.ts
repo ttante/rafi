@@ -23,7 +23,7 @@ async function collectBuilderContractCoverageOwned(projectDir: string, runId: st
     const session = actualContractSession(adapter, workspace, projectDir);
     const contract = assertContractReceipt(store, runId, workId, admission.requirementsDigest, session, adapter);
     const source = captureBuildSource(workspace);
-    const binding = { phase: "builder" as const, sourceDigest: source.digest, inputBasisDigest: contractDigest("builder-input-basis", { operationId, instruction, contractDigest: contract.contentDigest }), attemptId: operationId, sessionId: session.sessionId };
+    let binding = { phase: "builder" as const, sourceDigest: source.digest, inputBasisDigest: contractDigest("builder-input-basis", { operationId, instruction, contractDigest: contract.contentDigest }), attemptId: operationId, sessionId: session.sessionId };
     const eventId = `builder-coverage:${operationId}`;
     const existing = db.operation(eventId);
     if (existing) {
@@ -43,7 +43,16 @@ async function collectBuilderContractCoverageOwned(projectDir: string, runId: st
       const responseDigest = db.putEvidence("qa", response.rawResponse ?? response.text);
       db.updateOperation(eventId, "uncertain", { result: { responseDigest } });
       if (response.isError || response.failure) throw new Error("Builder coverage provider failed; retained response requires reconciliation");
-      if (JSON.stringify(actualContractSession(adapter, workspace, projectDir)) !== JSON.stringify(session) || captureBuildSource(workspace).digest !== source.digest) throw new Error("Builder coverage changed session or product source");
+      const afterSession = actualContractSession(adapter, workspace, projectDir);
+      const sameScopedSession = afterSession.provider === session.provider
+        && afterSession.workspace === session.workspace
+        && afterSession.configRoot === session.configRoot
+        && (afterSession.sessionId === session.sessionId || afterSession.compactionSequence > session.compactionSequence);
+      if (!sameScopedSession || captureBuildSource(workspace).digest !== source.digest) throw new Error("Builder coverage changed session or product source");
+      // A provider may compact while producing this response-only evidence.
+      // Bind the retained coverage to the host-observed post-compaction session
+      // while continuing to reject unscoped session changes and source edits.
+      binding = { ...binding, sessionId: afterSession.sessionId };
       const coverage = bindCoverageHostFields(parseContractCoverage(response.text), contract, binding);
       bindHostOwnedBuilderFacts(db, coverage, contract, hostObservations, initialSourceDigest, source.digest, workId, projectDir);
       const errors = validateContractCoverage(contract, coverage, binding, false);
