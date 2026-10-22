@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { stringify } from "yaml";
 
 import { AuthorizedForeman as Foreman } from "./helpers/workAdmission.js";
+import { parseStepStatus } from "../src/foreman.js";
 import { Log } from "../src/log.js";
 import { cmdBlock, cmdInit, cmdUpdate } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
@@ -531,6 +532,28 @@ test("every follow-up Builder dispatch re-enters the safe boundary", async () =>
   } finally {
     rmSync(dir, { recursive: true });
   }
+});
+
+test("workflow completion can preserve a valid response with trailing commentary", async () => {
+  const dir = makeTmpDir();
+  try {
+    const builder = new FakeBuilder(['proposal\nSTEP_STATUS: done | summary="ready"\nprovider notes']);
+    const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir);
+    const result = await foreman.runInstruction("prepare the proposal", {
+      completion: text => {
+        const status = parseStepStatus(text, { requireFinalLine: false });
+        return status.kind === "done" ? status : undefined;
+      },
+    });
+    assert.equal(result.status.kind, "done");
+    assert.equal(builder.instructions.length, 1);
+    assert.match(result.result.text, /provider notes/);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("strict STEP_STATUS parsing still rejects trailing commentary by default", () => {
+  assert.equal(parseStepStatus('STEP_STATUS: done\nnotes').kind, "unknown");
+  assert.equal(parseStepStatus("STEP_STATUS: done\nnotes", { requireFinalLine: false }).kind, "done");
 });
 
 for (const mode of ["pending", "answered", "stale", "outside", "run-wide"] as const) test(`recovery decision eligibility: ${mode}`, async () => {

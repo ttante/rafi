@@ -1,12 +1,14 @@
 /** Approved, opt-in public CLI journeys. Provider-free package tests remain separate. */
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, openSync, closeSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync, openSync, closeSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { WorkflowReader } from "../../packages/ai-foreman/dist/workflowReader.js";
 import { classifyProcess } from "../../packages/ai-foreman/dist/processIdentity.js";
+import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
+import { LIVE_INCIDENT_BRIEF } from "./incident-brief.mjs";
 
 if (process.env.RAFI_LIVE_INCIDENT !== "1") throw new Error("Explicit online authorization and RAFI_LIVE_INCIDENT=1 are required.");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
@@ -18,9 +20,31 @@ const interruptRestart = process.env.RAFI_LIVE_INTERRUPT_RESTART === "1";
 assert.ok(Number.isInteger(repetitions) && repetitions >= 1 && repetitions <= 3);
 const buildTimeoutMs = provider => Number(process.env.RAFI_LIVE_BUILD_TIMEOUT_MS ?? (provider === "claude" ? 1_800_000 : 900_000));
 const cli = resolve(fileURLToPath(new URL("../../packages/rafi/dist/index.js", import.meta.url)));
-const root = mkdtempSync(join(tmpdir(), "rafi-live-incident-journeys-"));
+function sourceFiles(directory) {
+  const files = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...sourceFiles(path));
+    else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(path);
+  }
+  return files.sort();
+}
+function verifyBuildFreshness() {
+  const packages = ["spec", "ai-foreman", "rafi"];
+  const sources = packages.flatMap(name => sourceFiles(resolve(fileURLToPath(new URL("../../packages/" + name + "/src", import.meta.url)))));
+  const newestSource = Math.max(...sources.map(path => statSync(path).mtimeMs));
+  const entrypoints = packages.map(name => resolve(fileURLToPath(new URL("../../packages/" + name + "/dist/index.js", import.meta.url))));
+  const oldestEntrypoint = Math.min(...entrypoints.map(path => statSync(path).mtimeMs));
+  if (oldestEntrypoint < newestSource) throw new Error("Generated dist is older than TypeScript source; run npm run build before the live canary");
+  const sourceDigest = createHash("sha256").update(sources.map(path => path + "\0" + readFileSync(path)).join("\0")).digest("hex");
+  return { sourceDigest, newestSource: new Date(newestSource).toISOString(), oldestEntrypoint: new Date(oldestEntrypoint).toISOString(), verifiedAt: new Date().toISOString() };
+}
+const build = verifyBuildFreshness();
+const liveWorkspace = createLiveWorkspace("rafi-live-incident-journeys-");
+const root = liveWorkspace.evidenceRoot;
+const workspaceRoot = liveWorkspace.workspaceRoot;
 const ledger = [];
-const save = () => writeFileSync(join(root, "ledger.json"), JSON.stringify({ profile: "online-only CLI journeys", providers, repetitions, deadline: new Date(deadline).toISOString(), ledger }, null, 2));
+const save = () => writeFileSync(join(root, "ledger.json"), JSON.stringify({ profile: "online-only CLI journeys", providers, repetitions, deadline: new Date(deadline).toISOString(), evidenceRoot: root, providerWorkspaceRoot: workspaceRoot, build, ledger }, null, 2));
 console.log(`Public CLI journey evidence: ${root}`); save();
 async function phase(project, provider, seed, name, args, limitMs, expectedCodes = [0]) {
   const remaining = deadline - Date.now(); if (remaining <= 0) throw new Error("Authorized online deadline reached");
@@ -91,14 +115,14 @@ async function restartInterrupted(project, provider, seed, runId) {
     await phase(project, provider, seed, "fresh-build-resume", ["resume", ".", "--run", fresh.runId, "--yes"], buildTimeoutMs(provider));
   }
 }
-const brief = "Extend the small arithmetic library with exactly two independent low-risk implementation tickets: add exported subtract(a, b) and add exported multiply(a, b), each with its own tests for positive, negative, and zero operands. Preserve existing add behavior. Use the existing Node test runner and no new dependencies. Each ticket is independently acceptable when its own function and tests pass; do not require the other unfinished ticket's feature during QA. Validate the finished current branch; do not require reconstructing a pre-feature branch, proving a historical before-state, removing an additive sibling feature, or testing subtract before subtract exists. Run npm test for validation. No external services, package publishing, deployment, remote Git actions, or dependency acquisition. Use current-branch work. Plan and approve both tickets now, using reasonable defaults without clarification questions.";
+const brief = LIVE_INCIDENT_BRIEF;
 try {
   for (const provider of providers) for (let seed = 1; seed <= repetitions; seed++) {
     const existing = process.env.RAFI_LIVE_CONTINUE_INTERRUPTED_PROJECT;
-    const project = existing ? resolve(existing) : join(root, `${provider}-${seed}`);
+    const project = existing ? resolve(existing) : liveProjectPath(workspaceRoot, `${provider}-${seed}`);
     if (existing) {
       assert.equal(repetitions, 1); assert.equal(providers.length, 1);
-      assert.ok(project.startsWith(resolve(tmpdir()) + "/rafi-live-incident-journeys-") || project.startsWith("/private" + resolve(tmpdir()) + "/rafi-live-incident-journeys-"));
+      assert.ok(project.startsWith(workspaceRoot + "/") || /\/rafi-live-incident-journeys-[^/]+\/(?:claude|codex)-\d+$/.test(project), "Continuation must use a disposable live provider workspace");
       assert.equal(JSON.parse(readFileSync(join(project, "package.json"), "utf8")).name, "rafi-live-arithmetic-fixture");
       const reader = new WorkflowReader(project); let interrupted;
       try { interrupted = reader.buildRuns()[0]; assert.ok(interrupted); } finally { reader.close(); }

@@ -8,7 +8,7 @@ import { riskNoteRepairProposalV1Schema, zodIssues } from "rafi-spec";
 import { select, text, confirm, isCancel, multiselect } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
-import { Foreman } from "../foreman.js";
+import { Foreman, parseStepStatus, type StepStatus } from "../foreman.js";
 import type { EffortLevel } from "../adapters/types.js";
 import { printEvents } from "./events.js";
 import {
@@ -100,6 +100,18 @@ import { hasRollbackOrMitigationPlan } from "../tickets/ticketLoader.js";
 let nestedTicketCommandDepth = 0;
 class TicketInterviewCancelled extends Error {}
 function cancelTicketInterview(): never { throw new TicketInterviewCancelled("ticket interview cancelled"); }
+
+/**
+ * Ticket Maker may append an explanatory note after its machine envelope.
+ * Preserve a schema-valid proposal before Foreman's strict generic marker
+ * repair path replaces the response with a status-only correction.
+ */
+export function acceptTicketPopulationCompletion(text: string): StepStatus | undefined {
+  try { extractTicketPopulationProposal(text); }
+  catch { return undefined; }
+  const status = parseStepStatus(text, { requireFinalLine: false });
+  return status.kind === "done" || status.kind === "plan_complete" ? status : undefined;
+}
 function fail(msg: string): never {
   if (nestedTicketCommandDepth > 0) throw new Error(msg);
   console.error(`foreman tickets: ${msg}`);
@@ -263,7 +275,7 @@ Output one JSON object between ${TICKET_POPULATION_PROPOSAL_START} and ${TICKET_
 {"version":1,"plan_id":"approved plan ID","revision":1,"tickets":[{"slice_ref":"slc_low","title":"...","area":"...","priority":"P1","size":"S","risk":"Low","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"documentation":{"required":false,"targets":[],"criteria":[]},"depends_on":[],"rollback":null,"notes":null},{"slice_ref":"slc_medium","title":"...","area":"...","priority":"P1","size":"S","risk":"Medium","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"documentation":{"required":false,"targets":[],"criteria":[]},"depends_on":["slc_low"],"rollback":"Disable the feature flag, restore the previous handler, and verify the affected error rate returns to baseline.","notes":null}],"retirements":["exact existing ticket ID"]}
 Triple-check that every approved slice appears exactly once.
 
-End with exactly one marker line as the final non-empty line:
+End with exactly one marker line as the final non-empty line; do not append notes or commentary after it:
 STEP_STATUS: done | summary="populated Foreman tickets from existing project ticket sources"
 or
 STEP_STATUS: blocked | reason="why ticket population cannot proceed"`;
@@ -1519,7 +1531,10 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     if (contextSources.length) {
       console.log(`foreman tickets: context sources ${contextSources.join(" ")}`);
     }
-    let turn = await foreman.runInstruction(buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc));
+    let turn = await foreman.runInstruction(
+      buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc),
+      { completion: acceptTicketPopulationCompletion },
+    );
     planningRecord = checkpointInterview(dir, planningRecord, { runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() }, decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text } });
 
     log.write("ticket-populate", {

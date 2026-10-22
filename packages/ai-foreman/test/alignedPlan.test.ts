@@ -43,6 +43,9 @@ test("configured review standards drive titles, body sections, and QA checklist 
   for (const item of build.validation_checklist) assert.match(body, new RegExp(item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   const handoff = buildQaReviewHandoff(definition, "implemented", "abc123", ["custom project check"]);
   assert.match(handoff, /Project validation checklist: custom project check/);
+  assert.match(handoff, /one shell command per Bash call/);
+  assert.match(handoff, /Rafi owns baseline/);
+  assert.match(handoff, /Do not use shell sequencing/);
 });
 
 test("setup requirement selection keeps chosen defaults and adds unique custom requirements", () => {

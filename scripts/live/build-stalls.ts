@@ -1,8 +1,7 @@
 /** Opt-in build-stall canaries. Every build uses a disposable repository. */
 import { createHash } from "node:crypto";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify } from "yaml";
@@ -12,6 +11,7 @@ import { DEFAULT_AUTONOMY_CONFIG, validateAutonomyConfig } from "../../packages/
 import { WorkflowReader } from "../../packages/ai-foreman/src/workflowReader.js";
 import { WorkflowDb } from "../../packages/ai-foreman/src/workflowDb.js";
 import { collectManagerDiagnostics } from "../../packages/ai-foreman/src/diagnostics.js";
+import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
 
 if (process.env.RAFI_LIVE_BUILD_STALLS !== "1") throw new Error("Set RAFI_LIVE_BUILD_STALLS=1 only after authorizing provider usage.");
 const samples = Number(process.env.RAFI_LIVE_SAMPLES ?? "5");
@@ -22,7 +22,9 @@ const providers = (process.env.RAFI_LIVE_PROVIDERS ?? "claude,codex").split(",")
 if (!providers.length || providers.some(value => value !== "claude" && value !== "codex") || new Set(providers).size !== providers.length) {
   throw new Error("RAFI_LIVE_PROVIDERS must be a comma-separated, non-repeating list of claude and/or codex");
 }
-const root = mkdtempSync(join(tmpdir(), "rafi-live-build-stalls-"));
+const liveWorkspace = createLiveWorkspace("rafi-live-build-stalls-");
+const root = liveWorkspace.evidenceRoot;
+const workspaceRoot = liveWorkspace.workspaceRoot;
 const workspace = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const results: unknown[] = [];
 const versions: Record<string, unknown> = { hostDigest: createHash("sha256").update(["cli/start.js", "supervisedStart.js", "adapters/codex.js", "adapters/claude.js", "foreman.js"].map(path => readFileSync(join(workspace, "packages/ai-foreman/dist", path), "utf8")).join("\n")).digest("hex") };
@@ -41,7 +43,7 @@ process.on("SIGINT", () => requestShutdown("SIGINT"));
 process.on("SIGTERM", () => requestShutdown("SIGTERM"));
 
 async function run(provider: "codex" | "claude", scenario: string, sample: number) {
-  const dir = join(root, `${provider}-${scenario}-${sample}`); mkdirSync(dir);
+  const dir = liveProjectPath(workspaceRoot, `${provider}-${scenario}-${sample}`); mkdirSync(dir);
   execFileSync("git", ["init", "-q", dir]);
   cmdInit(dir, { appName: "Build stall canary", timezone: "UTC" });
   writeFileSync(join(dir, "package.json"), JSON.stringify({ private: true, type: "module", scripts: { test: "node --test sum.test.js" } }));

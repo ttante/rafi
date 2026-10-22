@@ -12,6 +12,11 @@ pnpm build
 export RAFI_LIVE_DEADLINE="2026-10-16T20:00:00Z" # a short, approved deadline
 ```
 
+`incident-journeys.mjs` also verifies that every package entrypoint in
+`dist/` is newer than the TypeScript source tree and records a source digest
+and the freshness timestamps in its evidence ledger. If that check fails,
+rebuild with `npm run build` (or `pnpm build`) before starting a canary.
+
 All runs must use disposable projects. Never point a canary at a user project,
 publish packages, push Git changes, or run multiple provider canaries against
 the same account/session concurrently. Retain evidence outside the project

@@ -33,6 +33,26 @@ test("assessment does not block on expected pre-builder absence of postimplement
   review.concerns = [{ reason: "The required export and test file are missing before implementation.", requirementIds: ["req"], checkIds: ["check"], material: true, owner: "qa", nextAction: "Implement the export and test file, then rerun the focused test." }];
   assert.equal(normalizeExpectedFutureAssessment(review, draft).concerns[0]?.material, false);
 });
+test("assessment does not block on a stale covered check reference in provider prose", () => {
+  const draft = candidate();
+  const review = assessment(draft);
+  review.concerns = [{
+    reason: "Aggregate check-1 cites check-old, which is not in the declared check IDs or its dependsOnChecks; the reference can be removed because the acceptance item is already covered.",
+    requirementIds: ["req"], checkIds: ["check"], material: true, owner: "qa",
+    nextAction: "Remove the stale reference; the acceptance item is already covered."
+  }];
+  assert.equal(normalizeExpectedFutureAssessment(review, draft).concerns[0]?.material, false);
+});
+test("assessment does not block on invented sibling absence checks", () => {
+  const draft = candidate();
+  const review = assessment(draft);
+  review.concerns = [{
+    reason: "The check asserts that index.mjs has no multiply export, but a completed sibling may already be present on the current branch.",
+    requirementIds: ["req"], checkIds: ["check"], material: true, owner: "qa",
+    nextAction: "Revise the check so the subtract test imports only subtract and references no multiply symbol; drop the absence requirement."
+  }];
+  assert.equal(normalizeExpectedFutureAssessment(review, draft).concerns[0]?.material, false);
+});
 function depthLabels(review: QaContractCandidateV1 | ReturnType<typeof assessment>): string[] {
   return (review as ReturnType<typeof assessment>).assessedObligations.map(item => typeof item === "string" ? item : String((item as { obligation: string }).obligation));
 }

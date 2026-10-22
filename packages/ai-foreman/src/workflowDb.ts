@@ -3,7 +3,9 @@ import { canonicalJson } from "./qaProtocolV2.js";
 import { resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
 import { registerGraphDerived, graphDerivedAllowed, currentGraphDerivedAccess, type GraphDerivedAccess } from "./graph/derived.js";
 import { bindCoverageHostFields, parseContractCoverage, validateContractCoverage } from "./qaContractCoverage.js";
-import { applyHostQaComparison, findHostQaCheck, hostComparisonDigestFromCoverage, hostQaComparisonV1Schema } from "./hostQaComparison.js";
+import { findHostQaCheck, hostComparisonDigestFromCoverage, hostQaComparisonV1Schema } from "./hostQaComparison.js";
+import { findGraphQaChecks, hostGraphApplicabilityDigestFromCoverage, hostGraphApplicabilityV1Schema } from "./hostGraphApplicability.js";
+import { applyHostQaAugmentations } from "./hostQaAugmentation.js";
 import { QaPreparationStore, migrateQaPreparation, migrateQaPreparationGuards } from "./qaPreparationStore.js";
 import { GraphStore, migrateGraphStore } from "./graph/storage.js";
 import { reconcileWork, type BuildOwnershipRepairV1 } from "./buildWorkReconciliation.js";
@@ -133,6 +135,7 @@ export function heartbeatCurrentWorkflowLease(projectDir: string, lease: Project
   if (!existsSync(path)) throw new Error("workflow recovery database not found");
   const db = new Database(path, { fileMustExist: true });
   db.function("rafi_protocol_v3", () => 1);
+  db.pragma("busy_timeout = 5000");
   registerHandbackWriter(db);
   try {
     const at = now.toISOString();
@@ -364,6 +367,10 @@ export class WorkflowDb {
     registerHandbackWriter(this.db);
     registerQaGraphJournalWriter(this.db);
     if (!readinessAccess) this.db.pragma("journal_mode = WAL");
+    // Short-lived coordinator/worker writes can overlap with a heartbeat or
+    // another durable transition. Let SQLite wait for the owning transaction
+    // instead of immediately surfacing SQLITE_BUSY to the supervisor.
+    this.db.pragma("busy_timeout = 5000");
     this.db.pragma("synchronous = FULL");
     this.db.pragma("foreign_keys = ON");
     try {
@@ -2209,8 +2216,6 @@ export class WorkflowDb {
     if (!attempt || attempt.runId !== input.runId || attempt.ticketId !== input.ticketId || attempt.sourceDigest !== input.sourceStateDigest || attempt.reviewNumber !== this.qaTicketHead(input.runId, input.ticketId).reviewNumber) throw new Error("Coverage review attempt is stale or foreign");
     const coverage = store.artifact<import("rafi-spec").QaContractCoverageV1>(binding.coverageDigest, "final-coverage");
     for (const check of contract.checks) for (const method of check.verification) if (method.equivalentAuthorityId && !store.equivalentResolver()(method.equivalentAuthorityId, contract, check, method, input.sourceStateDigest)) throw new Error("Equivalent verification authority is stale or foreign");
-    const errors = validateContractCoverage(contract, coverage, { phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest, attemptId: binding.attemptId, sessionId: binding.sessionId });
-    if (errors.length) throw new Error(errors.join("; "));
     const initialTurns = this.db.prepare("SELECT intent_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND review_number=? AND source_state_digest=? AND review_basis_digest=?").all(input.runId, input.ticketId, attempt.reviewNumber, input.sourceStateDigest, input.reviewBasisDigest) as Array<{ intent_json: string }>;
     const initial = initialTurns.map(row => parseJson(row.intent_json) as QaTurnIntentV2).find(turn => turn.slot === "initial");
     if (!initial || initial.providerSession.sessionId !== binding.sessionId) throw new Error("Coverage lacks the actual fresh review dispatch identity");
@@ -2230,15 +2235,29 @@ export class WorkflowDb {
       })
       : undefined;
     let retainedCoverage = retainedProviderCoverage;
+    let retainedHostComparison: { result: import("./hostQaComparison.js").HostQaComparisonV1; resultDigest: string } | undefined;
     const hostCheck = findHostQaCheck(contract);
     if (hostCheck) {
       const hostDigest = hostComparisonDigestFromCoverage(coverage, hostCheck.id);
       if (!hostDigest) throw new Error("Coverage is missing the host-owned comparison artifact reference");
       const hostResult = hostQaComparisonV1Schema.parse(store.artifact(hostDigest, "host-qa-comparison"));
-      retainedCoverage = retainedProviderCoverage
-        ? applyHostQaComparison(retainedProviderCoverage, contract, hostResult, hostDigest, this.projectDir)
-        : undefined;
+      retainedHostComparison = { result: hostResult, resultDigest: hostDigest };
     }
+    const graphCheck = findGraphQaChecks(contract)[0];
+    if (graphCheck) {
+      const graphDigest = hostGraphApplicabilityDigestFromCoverage(coverage, graphCheck.id);
+      if (!graphDigest) throw new Error("Coverage is missing the host-owned Graphify applicability artifact reference");
+      const graphResult = hostGraphApplicabilityV1Schema.parse(store.artifact(graphDigest, "host-graph-applicability"));
+      const retainedHostGraph = { result: graphResult, resultDigest: graphDigest };
+      retainedCoverage = retainedCoverage
+        ? applyHostQaAugmentations({ coverage: retainedCoverage, contract, projectDir: this.projectDir, hostComparison: retainedHostComparison, hostGraph: retainedHostGraph })
+        : undefined;
+    } else if (retainedCoverage && retainedHostComparison) {
+      retainedCoverage = applyHostQaAugmentations({ coverage: retainedCoverage, contract, projectDir: this.projectDir, hostComparison: retainedHostComparison });
+    }
+    if (!retainedCoverage) throw new Error("Coverage lacks the retained terminal review receipt and authorized host augmentation");
+    const errors = validateContractCoverage(contract, coverage, { phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest, attemptId: binding.attemptId, sessionId: binding.sessionId });
+    if (errors.length) throw new Error(errors.join("; "));
     if (!receipt || !retainedCoverage || canonicalJson(retainedCoverage) !== canonicalJson(coverage)) throw new Error("Coverage is not bound to the retained terminal review receipt and authorized host augmentation");
   }
 

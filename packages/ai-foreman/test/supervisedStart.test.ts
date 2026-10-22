@@ -10,6 +10,42 @@ import { WorkflowDb } from "../src/workflowDb.js";
 import { WorkflowReader } from "../src/workflowReader.js";
 import { processStartIdentity } from "../src/processIdentity.js";
 import { DEFAULT_AUTONOMY_CONFIG } from "../src/recoveryPolicy.js";
+import { persistWithBoundedRetry } from "../src/supervisor.js";
+
+test("supervisor heartbeat persistence retries transient failures without overlapping work", async () => {
+  let calls = 0;
+  let active = 0;
+  let maximumActive = 0;
+  const waits: number[] = [];
+  const result = await persistWithBoundedRetry(() => {
+    active++;
+    maximumActive = Math.max(maximumActive, active);
+    calls++;
+    if (calls < 3) { active--; throw new Error("database is locked"); }
+    active--;
+  }, async milliseconds => { waits.push(milliseconds); });
+  assert.deepEqual(result, { ok: true, attempts: 3 });
+  assert.equal(maximumActive, 1);
+  assert.deepEqual(waits, [100, 200]);
+});
+
+test("supervisor heartbeat persistence fails closed after its bounded retry budget", async () => {
+  let calls = 0;
+  const result = await persistWithBoundedRetry(() => { calls++; throw new Error("ownership changed"); }, async () => {}, 2);
+  assert.equal(result.ok, false);
+  assert.equal(result.attempts, 1);
+  assert.equal(calls, 1);
+});
+
+test("signal stop causes preserve actor and source distinctions", async () => {
+  const { DurableSupervisor } = await import("../src/supervisor.js");
+  const { resolveAutonomyPolicy } = await import("../src/recoveryPolicy.js");
+  const causes: Array<{ cause: string; source: string; actor: string }> = [];
+  const supervisor = new DurableSupervisor({ projectDir: mkdtempSync(join(tmpdir(), "rafi-stop-cause-")), runId: "run", policy: resolveAutonomyPolicy(undefined), checkpoint: () => "work", onStopRequested: cause => causes.push(cause), spawnWorker: () => ({ result: Promise.resolve({ kind: "stopped" as const }), stop() {} }) });
+  supervisor.requestStop("user-sigint");
+  supervisor.requestStop("parent-sigterm");
+  assert.deepEqual(causes.map(cause => [cause.cause, cause.source, cause.actor]), [["user-sigint", "signal", "user"], ["parent-sigterm", "signal", "parent"]]);
+});
 
 for (const mode of ["current", "question", "branch", "dirty-preserve", "dirty-include", "crash", "preparation-crash", "detached", "parent-death", "cancel", "competing", "hung-worker"] as const) test(`actual supervised CLI ${mode}`, { timeout: 30000 }, async t => {
   const crash = mode === "crash";
@@ -223,6 +259,9 @@ for (const uncertain of [false, true]) test(`numeric worker failure persists ${u
     assert.equal(db.getRun("run")?.status, uncertain ? "paused" : "failed");
     assert.equal(db.getRun("run")?.checkpoint, uncertain ? "worker-reconciliation-required" : "worker-failed");
     assert.equal(db.unresolvedRoleDispatches("run", "builder").length, uncertain ? 1 : 0);
+    assert.equal(db.supervisorState("run")?.stopCause?.cause, "worker-exit");
+    const event = [...db.events("run")].reverse().find(item => item.type === "worker_exit_recorded");
+    assert.equal((event?.payload as { cause?: { cause?: string } } | undefined)?.cause?.cause, "worker-exit");
   } finally { db.close(); }
 });
 

@@ -6,12 +6,10 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -26,12 +24,13 @@ import {
   runTodoAppChecks,
   runTtyJourney,
 } from "./live-interview-harness.mjs";
+import { createLiveWorkspace } from "./live/workspace.mjs";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
 const appFixture = join(root, "test", "fixtures", "live-todo-app");
 const planFixture = join(root, "test", "fixtures", "live-ticket-plan");
 const requirements = join(planFixture, "REQUIREMENTS.md");
-const workdir = mkdtempSync(join(tmpdir(), "rafi-live-ticket-plan-"));
+const workdir = createLiveWorkspace("rafi-live-ticket-plan-").workspaceRoot;
 const repo = join(workdir, "todo-app");
 const transcript = join(workdir, "ticket-plan-interview.typescript");
 const composeProject = `rafi_live_ticket_plan_${Date.now()}_${process.pid}`.replace(/[^a-z0-9_]/gi, "_");

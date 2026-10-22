@@ -1,14 +1,16 @@
 /** Opt-in native control evidence; no application mutation or paid model turn. */
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaudeAdapter } from "../../packages/ai-foreman/src/adapters/claude.js";
 import { resolveExecutablePath } from "../../packages/ai-foreman/src/runtimeReadiness.js";
+import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
 if (process.env.RAFI_LIVE_COMPACTION !== "1") throw new Error("Explicit online authorization is required");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
 if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error("Authorized deadline is required");
-const root = mkdtempSync(join(tmpdir(), "rafi-live-compaction-"));
+const liveWorkspace = createLiveWorkspace("rafi-live-compaction-");
+const root = liveWorkspace.evidenceRoot;
+const workspaceRoot = liveWorkspace.workspaceRoot;
 console.log(`Compaction control evidence: ${root}`);
 const controls: unknown[] = [];
 const outcomes: unknown[] = [];
@@ -16,7 +18,7 @@ const variants = process.env.RAFI_LIVE_COMPACTION_COMPARE_LAUNCH === "1" ? ["run
 const save = () => writeFileSync(join(root, "controls.json"), JSON.stringify({ deadline: new Date(deadline).toISOString(), controls, outcomes }, null, 2));
 for (const variant of variants) {
   if (Date.now() >= deadline - 60_000) throw new Error("Insufficient authorized time for control probe and cleanup");
-  const cwd = join(root, variant); mkdirSync(cwd);
+  const cwd = liveProjectPath(workspaceRoot, variant); mkdirSync(cwd);
   let runtimeExecutable: string | undefined;
   if (variant === "launch") {
     const executable = resolveExecutablePath("claude");

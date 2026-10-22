@@ -8,10 +8,10 @@
  */
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
 import { stringify } from "yaml";
 import Database from "better-sqlite3";
 import { cmdUpdate } from "../../packages/ai-foreman/src/tickets/commands.js";
@@ -27,7 +27,9 @@ assert.equal(new Set(providers).size, providers.length, "providers must not repe
 
 const workspace = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const cli = join(workspace, "packages/rafi/dist/index.js");
-const root = mkdtempSync(join(tmpdir(), "rafi-live-branch-scope-"));
+const liveWorkspace = createLiveWorkspace("rafi-live-branch-scope-");
+const root = liveWorkspace.evidenceRoot;
+const workspaceRoot = liveWorkspace.workspaceRoot;
 const ledger: Array<Record<string, unknown>> = [];
 const save = () => writeFileSync(join(root, "ledger.json"), JSON.stringify({ root, deadline: new Date(deadline).toISOString(), providers, ledger }, null, 2));
 save();
@@ -122,7 +124,7 @@ function assertComplete(project: string, runId: string) {
 
 try {
   for (const provider of providers) {
-    const project = join(root, provider); mkdirSync(project);
+    const project = liveProjectPath(workspaceRoot, provider); mkdirSync(project);
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: project });
     execFileSync("git", ["config", "user.name", "Rafi live canary"], { cwd: project });
     execFileSync("git", ["config", "user.email", "rafi-live@example.test"], { cwd: project });

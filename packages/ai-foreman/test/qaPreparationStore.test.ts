@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import { candidate, assessment, storeFixture, digest } from "./qaPreparationFixtures.js";
 import { assembleContract } from "../src/qaVerificationContract.js";
-import { migrateQaPreparation } from "../src/qaPreparationStore.js";
+import { QaPreparationStore, migrateQaPreparation } from "../src/qaPreparationStore.js";
 import { resolveQaPreparationConfig } from "../src/qaPreparationPolicy.js";
 
 test("logical budgets survive retry, generation change and downtime without resetting reservations", () => {
@@ -35,6 +36,47 @@ test("escalation raises the ceiling from original start and does not allocate a 
     store.reviseDepth(budget, candidate(5).depthDecision);
     assert.equal(store.budget("run", "T1", digest)!.deadlineMs, 5401000);
     assert.equal(store.budget("run", "T1", digest)!.startMs, 1000);
+  } finally { db.close(); }
+});
+
+test("provider depth ids are scoped to the admitted run and admission", () => {
+  const db = new Database(":memory:"); db.pragma("foreign_keys = ON");
+  db.exec("CREATE TABLE workflow_runs(run_id TEXT PRIMARY KEY); INSERT INTO workflow_runs VALUES('run'),('successor');");
+  migrateQaPreparation(db);
+  const policy = resolveQaPreparationConfig({ mode: "enforce" });
+  const makeStore = (runId: string) => {
+    const store = new QaPreparationStore(db, owner => { if (owner !== runId) throw new Error("Foreign owner"); });
+    store.freezePolicy(runId, policy); return store;
+  };
+  try {
+    const first = makeStore("run"), second = makeStore("successor");
+    const firstBudget = first.ensureBudget("run", "T1", digest, 2, 1000);
+    const reused = candidate(2).depthDecision;
+    first.reviseDepth(firstBudget, reused);
+    const secondAdmission = "b".repeat(64);
+    const secondAdmissionBudget = first.ensureBudget("run", "T1", secondAdmission, 2, 1000);
+    assert.doesNotThrow(() => first.reviseDepth(secondAdmissionBudget, reused));
+    const secondBudget = second.ensureBudget("successor", "T1", digest, 2, 1000);
+    assert.doesNotThrow(() => second.reviseDepth(secondBudget, reused));
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM qa_depth_decisions WHERE decision_id=?").get(reused.decisionId) as { count: number }).count, 3);
+    const conflicting = { ...reused, rationale: "Different admitted work content" };
+    assert.throws(() => second.reviseDepth(secondBudget, conflicting), /Conflicting planner depth identity/);
+    assert.doesNotThrow(() => first.reviseDepth(firstBudget, reused));
+  } finally { db.close(); }
+});
+
+test("legacy global depth decision table migrates without losing evidence", () => {
+  const db = new Database(":memory:"); db.pragma("foreign_keys = ON");
+  db.exec("CREATE TABLE workflow_runs(run_id TEXT PRIMARY KEY); INSERT INTO workflow_runs VALUES('run'); CREATE TABLE qa_depth_decisions(decision_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,work_id TEXT NOT NULL,record_json TEXT NOT NULL)");
+  const stored = candidate(2).depthDecision;
+  db.prepare("INSERT INTO qa_depth_decisions VALUES(?,?,?,?)").run(stored.decisionId, "run", "T1", JSON.stringify(stored));
+  try {
+    migrateQaPreparation(db);
+    assert.doesNotThrow(() => migrateQaPreparation(db));
+    const columns = db.prepare("PRAGMA table_info(qa_depth_decisions)").all() as Array<{ name: string }>;
+    assert.ok(columns.some(column => column.name === "admission_digest"));
+    const row = db.prepare("SELECT decision_id,run_id,work_id,admission_digest,record_json FROM qa_depth_decisions").get() as { decision_id: string; run_id: string; work_id: string; admission_digest: string; record_json: string };
+    assert.deepEqual(row, { decision_id: stored.decisionId, run_id: "run", work_id: "T1", admission_digest: "legacy:run:T1", record_json: JSON.stringify(stored) });
   } finally { db.close(); }
 });
 

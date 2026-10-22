@@ -32,4 +32,5 @@ test("Claude results retain tool identity, classify uncertainty, and coalesce du
   assert.equal(diagnostic?.isError, true);
   assert.equal(typeof diagnostic?.outputDigest, "string");
   assert.equal("outputSummary" in (diagnostic ?? {}), false);
+  assert.equal(diagnostic?.completionKnown, false);
 });

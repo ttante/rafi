@@ -105,7 +105,7 @@ test("current-branch plan-only resume is retried before QA", async t => {
 test("approved unchanged scope starts automatically, but a material ticket change needs approval even with yes", async t => {
   const { createHash } = await import("node:crypto");
   const { mkdirSync } = await import("node:fs");
-  const { approvedBuildScope, requiresBuildApproval, createBuildApprovalGate } = await import("../src/buildApproval.js");
+  const { approvedBuildScope, requiresBuildApproval, createBuildApprovalGate, planApprovalBinding, validatePlanApprovalBinding } = await import("../src/buildApproval.js");
   const dir = fixture(t);
   cmdInit(dir, { appName: "Test", timezone: "UTC" });
   const ticket = { id: "T001", order: 1, title: "Implement", area: "test", priority: "P1", size: "S", risk: "Low", summary: "work", acceptance: ["works"], required_tests: ["tests"], likely_files: [], depends_on: [], plan_ref: { plan_id: "plan", revision: 1, slice_ref: "slice" } };
@@ -124,6 +124,12 @@ test("approved unchanged scope starts automatically, but a material ticket chang
   state.createTicketGroup({ origin: "ticket-populate", operationId: "populate", members: [{ ticketId: "T001", definition: ticket, validatedAt: new Date().toISOString() }] });
   state.close();
   assert.equal(approvedBuildScope(dir, ["T001"]).approved, true);
+  const binding = planApprovalBinding(dir, ["T001"]);
+  assert.deepEqual(validatePlanApprovalBinding(dir, ["T001"], binding), { valid: true });
+  assert.equal(validatePlanApprovalBinding(dir, ["T002"], binding).valid, false, "a binding cannot authorize a different ticket set");
+  writeFileSync(join(dir, "docs/rafi-plan.json"), JSON.stringify({ ...plan, revision: 2, content_digest: plan.content_digest }));
+  assert.equal(validatePlanApprovalBinding(dir, ["T001"], binding).valid, false, "a changed plan cannot reuse an old binding");
+  writeFileSync(join(dir, "docs/rafi-plan.json"), JSON.stringify(plan));
   assert.equal(requiresBuildApproval(dir, ["T001"], false), false);
   assert.equal(requiresBuildApproval(dir, ["T001"], true, { branch_strategy: "branch-per-ticket" }), true);
   assert.equal(requiresBuildApproval(dir, ["T001"], false, { branch_strategy: "current" }), false);

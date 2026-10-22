@@ -1,8 +1,7 @@
 /** Opt-in authenticated canaries. Only disposable projects are modified. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ClaudeAdapter } from "../../packages/ai-foreman/src/adapters/claude.js";
 import { CodexAdapter } from "../../packages/ai-foreman/src/adapters/codex.js";
@@ -12,11 +11,14 @@ import { PermissionPolicy } from "../../packages/ai-foreman/src/permissions/poli
 import { DEFAULT_CONFIG } from "../../packages/ai-foreman/src/config.js";
 import type { BuilderAdapter, BuilderAdapterOptions } from "../../packages/ai-foreman/src/adapters/types.js";
 import type { ContinuityDelta } from "rafi-spec";
+import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
 
 if (process.env.RAFI_LIVE_RECOVERY !== "1") throw new Error("Explicit provider authorization and RAFI_LIVE_RECOVERY=1 are required.");
 const providers = (process.env.RAFI_LIVE_PROVIDERS ?? "claude,codex").split(",");
 if (providers.some(provider => !["claude", "codex"].includes(provider))) throw new Error("Unknown provider");
-const root = mkdtempSync(join(tmpdir(), "rafi-live-recovery-"));
+const liveWorkspace = createLiveWorkspace("rafi-live-recovery-");
+const root = liveWorkspace.evidenceRoot;
+const workspaceRoot = liveWorkspace.workspaceRoot;
 console.log(`Live evidence: ${root}`);
 const startedAt = Date.now();
 const deadline = Math.min(startedAt + 3 * 60 * 60_000, process.env.RAFI_LIVE_DEADLINE ? Date.parse(process.env.RAFI_LIVE_DEADLINE) : startedAt + Number(process.env.RAFI_LIVE_BUDGET_MS ?? 3 * 60 * 60_000));
@@ -24,7 +26,7 @@ if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error("Inval
 const records: unknown[] = [];
 const save = () => writeFileSync(join(root, "results.json"), JSON.stringify({ profile: "both", providers, model: "provider default", startedAt: new Date(startedAt).toISOString(), deadline: new Date(deadline).toISOString(), records }, null, 2));
 function fixture(name: string): string {
-  const dir = join(root, name); mkdirSync(join(dir, "src"), { recursive: true });
+  const dir = liveProjectPath(workspaceRoot, name); mkdirSync(join(dir, "src"), { recursive: true });
   writeFileSync(join(dir, "sentinel.txt"), "PRESERVE_THIS\n");
   execFileSync("git", ["init", "-q"], { cwd: dir });
   return dir;

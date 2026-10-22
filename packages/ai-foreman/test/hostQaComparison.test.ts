@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applyHostQaComparison, hostQaComparisonV1Schema } from "../src/hostQaComparison.js";
+import { applyHostQaAugmentations } from "../src/hostQaAugmentation.js";
 import type { QaContractCoverageV1, QaVerificationContractV1 } from "rafi-spec";
 
 const hash = (char: string) => char.repeat(64);
@@ -65,6 +66,27 @@ test("host augmentation recognizes the admitted baseline-bound scope check wordi
   assert.equal(augmented.checks.find(row => row.checkId === "host-scope")?.outcome, "passed");
 });
 
+test("host augmentation replaces provider-owned changed-product-path checks", () => {
+  const { contract, coverage } = fixture();
+  contract.checks = [{
+    id: "provider-scope",
+    requirementRefs: [],
+    origin: "explicit",
+    expectedBehavior: "Changed product paths outside bookkeeping and evidence exclusions are limited to index.mjs and test/multiply.test.mjs.",
+    obligation: "mandatory",
+    timing: "postimplementation",
+    applicability: { kind: "unconditional", decisionOwner: "qa", requiredEvidence: ["Host-retained scope observation"] },
+    verification: [],
+    expectedEvidence: ["Host-retained scope observation result"],
+    prerequisiteRefs: [],
+    dependsOnChecks: [],
+  }];
+  coverage.checks = [{ checkId: "provider-scope", applicability: "applicable", predicateEvidence: [], outcome: "failed", evidence: [] }];
+  const result = hostQaComparisonV1Schema.parse({ version: 1, runId: "run", ticketId: "T001", assignmentId: "assignment", contractDigest: hash("c"), contractRevision: 1, reviewAttemptId: "attempt", reviewBasisDigest: hash("a"), baselineSourceDigest: hash("b"), finalSourceDigest: hash("f"), scopeBasisDigest: hash("d"), status: "passed", changedPaths: [], unauthorizedPaths: [], deletedPaths: [], protectedPaths: [], reason: "passed", comparedAt: "2026-01-01T00:00:00.000Z" });
+  const augmented = applyHostQaComparison(coverage, contract, result, hash("e"), "/project");
+  assert.equal(augmented.checks[0]!.outcome, "passed");
+});
+
 test("host augmentation replaces every matching host-owned scope or safety row", () => {
   const { contract, coverage } = fixture();
   contract.checks.push({
@@ -85,6 +107,25 @@ test("host augmentation replaces every matching host-owned scope or safety row",
   const augmented = applyHostQaComparison(coverage, contract, result, hash("e"), "/project");
   assert.equal(augmented.checks.find(row => row.checkId === "host-scope")?.outcome, "passed");
   assert.equal(augmented.checks.find(row => row.checkId === "host-safety")?.outcome, "passed");
+});
+
+test("host augmentation accepts retained successful test command exit status", () => {
+  const { contract, coverage } = fixture();
+  contract.checks = [{ ...contract.checks[1]!, id: "npm-test", verification: [{ kind: "command", argv: ["npm", "test"], cwd: ".", fixtures: [], expectedOutcome: "exit 0", runtime: "npm", timeoutMs: 30_000 }] }];
+  coverage.checks = [{ checkId: "npm-test", applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] }];
+  const augmented = applyHostQaAugmentations({ coverage, contract, projectDir: "/project", commandObservations: [{ spanId: "span-1", kind: "npm-test", outcome: "completed", exitCode: 0 }] });
+  assert.equal(augmented.checks[0]!.outcome, "passed");
+  assert.equal(augmented.checks[0]!.evidence[0]!.reference, "host-command-span:span-1");
+});
+
+test("host augmentation binds the exact retained baseline evidence digest", () => {
+  const { contract, coverage } = fixture();
+  contract.checks[1]!.timing = "preimplementation";
+  contract.baseline = [{ id: "ordinary-baseline", checkId: "ordinary", sourceDigest: hash("b"), phase: "preimplementation-investigation", runtime: "node20", procedure: "Check ordinary", observedAt: "2026-01-01T00:00:00Z", status: "passed", evidenceDigest: hash("g"), relevance: "Regression baseline", expectedTransition: "Remains valid" }];
+  const result = applyHostQaAugmentations({ coverage, contract, projectDir: "." });
+  const baseline = contract.baseline[0]!;
+  assert.ok(baseline);
+  assert.ok(result.checks.find(check => check.checkId === "ordinary")!.evidence.some(evidence => evidence.reference === baseline.evidenceDigest));
 });
 
 test("host result rejects a different review binding", () => {

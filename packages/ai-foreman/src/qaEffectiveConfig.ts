@@ -7,7 +7,12 @@ import { loadTicketSetupConfigWithDefaults, loadRafiConfigObject } from "./ticke
 import { resolveQaPreparationConfig } from "./qaPreparationPolicy.js";
 import { contractDigest } from "./qaVerificationContract.js";
 export const FINAL_QA_ROLE_SUFFIX = "You are an independent QA reviewer. Do not edit source, tickets, configuration, or project documentation. You may run tests and create only harmless ignored caches or coverage output.";
-export function finalQaRoleInstructions(rules: string): string { return `${rules}\n\n${FINAL_QA_ROLE_SUFFIX}`; }
+export const QA_COMMAND_DISCIPLINE = [
+  "QA command discipline: issue one shell command per Bash call. Prefer the Read tool for source inspection and the configured project test command for verification.",
+  "Do not use shell sequencing or scaffolding such as ;, ||, redirects, command substitution, echo exit markers, temporary baseline copies, cp, cmp, or mkdir. Do not reconstruct or compare preimplementation files; Rafi owns baseline, path-scope, unchanged-file, and byte-identity comparisons.",
+  "If a command is denied by policy, do not retry the same denied command or wrap it in another compound command. Use a permitted equivalent that tests the same product behavior and record any limitation truthfully.",
+].join(" ");
+export function finalQaRoleInstructions(rules: string): string { return `${rules}\n\n${QA_COMMAND_DISCIPLINE}\n\n${FINAL_QA_ROLE_SUFFIX}`; }
 
 export function loadQaPreparationPolicy(projectDir: string) {
   const config = loadRafiConfigObject(projectDir);

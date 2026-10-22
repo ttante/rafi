@@ -1,7 +1,7 @@
 /** Opt-in real-provider progression/resume acceptance. No reset/start-over path. */
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, openSync, closeSync, existsSync, readdirSync, renameSync, realpathSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync, openSync, closeSync, existsSync, readdirSync, renameSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,7 @@ import { loadTickets } from "../../packages/ai-foreman/dist/tickets/ticketLoader
 import { resolveProviderSessionAvailability } from "../../packages/ai-foreman/dist/sessionAvailability.js";
 import { recoverableBuildRuns } from "../../packages/ai-foreman/dist/buildRuns.js";
 import { captureCurrentWorkflowSessionIdentity } from "../../packages/ai-foreman/dist/branch/currentGuard.js";
+import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
 
 if (process.env.RAFI_LIVE_MULTITICKET !== "1") throw new Error("Explicit online authorization and RAFI_LIVE_MULTITICKET=1 required");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
@@ -24,11 +25,12 @@ assert.ok(providers.every(p => ["claude", "codex"].includes(p)));
 assert.ok(scenarios.every(s => ["consecutive", "graceful", "abrupt", "qa", "qa-continuation", "qa-fix", "qa-fix-clean", "qa-fix-final", "boundary"].includes(s)));
 const ticketCount = scenario => scenario.startsWith("qa-fix") || scenario === "qa-continuation" || process.env.RAFI_LIVE_FOCUSED_FIVE === "1" && ["qa","boundary"].includes(scenario) ? 5 : 8;
 const cli = resolve(fileURLToPath(new URL("../../packages/rafi/dist/index.js", import.meta.url)));
-const root = process.env.RAFI_LIVE_EVIDENCE ? resolve(process.env.RAFI_LIVE_EVIDENCE) : mkdtempSync(join(tmpdir(), "rafi-live-multiticket-"));
-assert.ok(root.includes("/rafi-live-multiticket-"), "Disposable evidence root only");
-mkdirSync(root, { recursive: true });
+const liveWorkspace = createLiveWorkspace("rafi-live-multiticket-", { evidenceRoot: process.env.RAFI_LIVE_EVIDENCE });
+const root = liveWorkspace.evidenceRoot;
+const workspaceRoot = liveWorkspace.workspaceRoot;
+if (process.env.RAFI_LIVE_EVIDENCE) assert.ok(root.includes("/rafi-live-multiticket-"), "Disposable evidence root only");
 const ledger = existsSync(join(root, "ledger.json")) ? JSON.parse(readFileSync(join(root, "ledger.json"), "utf8")).ledger : [];
-const save = () => writeFileSync(join(root, "ledger.json"), JSON.stringify({ profile: "online-only multi-ticket and same-build resume", providers, scenarios, deadline: new Date(deadline).toISOString(), ledger }, null, 2));
+const save = () => writeFileSync(join(root, "ledger.json"), JSON.stringify({ profile: "online-only multi-ticket and same-build resume", providers, scenarios, deadline: new Date(deadline).toISOString(), evidenceRoot: root, providerWorkspaceRoot: workspaceRoot, ledger }, null, 2));
 const features = ["subtract", "multiply", "divide", "modulo", "power", "clamp", "sum", "mean"];
 const brief = [
   "Extend this private arithmetic library with exactly EIGHT distinct substantive implementation tickets, one per exported function, in this order:",
@@ -194,7 +196,7 @@ async function finalAssertions(project, provider, scenario, interruption) {
 async function seedReviewedFocusedFixture(baseline,provider,scenario){
   assert.equal(ledger.some(row=>row.provider===provider && row.scenario===scenario && row.phase==="build-start"),false,"Never seed definitions after a build has started");
   await phase(baseline,provider,"setup","ticket-setup",["tickets","setup:init","--project",baseline,"--defaults","--branch-strategy","current","--completion","none","--population-mode","approved_plan"],60_000);
-  const source=join(root,"codex-qa-continuation");
+  const source=liveProjectPath(workspaceRoot,"codex-qa-continuation");
   const ticketPath=resolveTicketPaths(loadTicketsConfig(source),source).tickets;
   const approved=loadTickets(ticketPath).sort((a,b)=>a.order-b.order);
   assert.equal(approved.length,5);
@@ -210,7 +212,7 @@ try {
     const count=ticketCount(scenario), scenarioBrief=count===8?brief:focusedBrief;
     // Recovery databases are project-bound. Each native journey is initialized
     // at its final canonical path; never clone a DB into another project.
-    const baseline = join(root, scenario === "consecutive" ? `${provider}-planned` : `${provider}-${scenario}`);
+    const baseline = liveProjectPath(workspaceRoot, scenario === "consecutive" ? `${provider}-planned` : `${provider}-${scenario}`);
     if(process.env.RAFI_LIVE_ASSERT_ONLY==="1") assert.ok(existsSync(baseline),"Assert-only mode never creates a fixture or starts a provider");
     if (!existsSync(baseline)) {
       mkdirSync(join(baseline, "test"), { recursive: true }); mkdirSync(join(baseline, "src"));

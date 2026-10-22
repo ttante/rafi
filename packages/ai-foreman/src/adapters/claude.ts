@@ -776,7 +776,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       const outputDigest = createHash("sha256").update(text).digest("hex");
       // Persist only correlation metadata. The result text can contain source
       // paths, command output, or credentials and must not enter lifecycle logs.
-      this.opts.onLifecycleTrace?.({ phase: "provider-tool-result", at: new Date().toISOString(), sessionId: this._sessionId, providerTurnId: this.activeProviderTurnId, toolCallId: callId, toolName: call?.name ?? "unidentified tool", classification: status, resultReason, isError: failed, outputDigest, rawOutputBytes: Buffer.byteLength(text) });
+      this.opts.onLifecycleTrace?.({ phase: "provider-tool-result", at: new Date().toISOString(), sessionId: this._sessionId, providerTurnId: this.activeProviderTurnId, toolCallId: callId, toolName: call?.name ?? "unidentified tool", classification: status, resultReason, isError: failed, outputDigest, rawOutputBytes: Buffer.byteLength(text), completionKnown: status !== "unknown" });
       if (status === "unknown") {
         if (this.unknownToolResults.get(callId) === outputDigest) continue;
         this.unknownToolResults.set(callId, outputDigest);

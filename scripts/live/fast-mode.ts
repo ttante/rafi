@@ -1,20 +1,22 @@
 /** Opt-in live fast-mode canaries; no tools and only disposable directories. */
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { ClaudeAdapter } from "../../packages/ai-foreman/src/adapters/claude.js";
 import { CodexAdapter } from "../../packages/ai-foreman/src/adapters/codex.js";
 import type { BuilderAdapterOptions } from "../../packages/ai-foreman/src/adapters/types.js";
+import { createLiveWorkspace } from "./workspace.mjs";
 
 if (process.env.RAFI_LIVE_FAST_MODE !== "1") throw new Error("Set RAFI_LIVE_FAST_MODE=1 after authorizing live provider usage.");
-const root = mkdtempSync(join(tmpdir(), "rafi-live-fast-mode-"));
+const liveWorkspace = createLiveWorkspace("rafi-live-fast-mode-");
+const root = liveWorkspace.evidenceRoot;
+const workspaceRoot = liveWorkspace.workspaceRoot;
 console.log(`Live artifacts: ${root}`);
 const results: unknown[] = [];
 const providers = (process.env.RAFI_LIVE_PROVIDERS ?? "claude,codex").split(",");
 if (providers.some(provider => !["claude", "codex"].includes(provider))) throw new Error("Unknown live provider");
 const input = "Reply exactly FAST_MODE_OK. Do not use tools, inspect files, or run commands.";
-const options: BuilderAdapterOptions = { cwd: root, configRoot: root, fast: true, permission: async () => ({ behavior: "deny", message: "Live canary forbids tools" }), sandboxMode: "read-only", preparationTimeoutMs: 60_000, rpcTimeoutMs: 30_000, turnDeadlineMs: 120_000, providerIdleTimeoutMs: 60_000 };
+const options: BuilderAdapterOptions = { cwd: workspaceRoot, configRoot: workspaceRoot, fast: true, permission: async () => ({ behavior: "deny", message: "Live canary forbids tools" }), sandboxMode: "read-only", preparationTimeoutMs: 60_000, rpcTimeoutMs: 30_000, turnDeadlineMs: 120_000, providerIdleTimeoutMs: 60_000 };
 const save = () => writeFileSync(join(root, "results.json"), JSON.stringify(results, null, 2));
 try {
   if (providers.includes("claude")) {

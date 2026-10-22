@@ -1,18 +1,20 @@
 /** Native auto-allow routing reproduction/retest in disposable projects. */
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { ClaudeAdapter } from "../../packages/ai-foreman/src/adapters/claude.js";
+import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
 if (process.env.RAFI_LIVE_RECOVERY !== "1") throw new Error("Explicit live authorization required");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
 if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error("Approved deadline is missing or expired");
-const root = mkdtempSync(join(tmpdir(), "rafi-live-policy-routing-"));
+const liveWorkspace = createLiveWorkspace("rafi-live-policy-routing-");
+const root = liveWorkspace.evidenceRoot;
+const workspaceRoot = liveWorkspace.workspaceRoot;
 console.log(`Permission evidence: ${root}`);
 const records: unknown[] = [];
 try {
   for (const hostAllows of [false, true]) {
-    const project = join(root, hostAllows ? "host-allow" : "host-deny"); mkdirSync(join(project, ".claude"), { recursive: true });
+    const project = liveProjectPath(workspaceRoot, hostAllows ? "host-allow" : "host-deny"); mkdirSync(join(project, ".claude"), { recursive: true });
     writeFileSync(join(project, ".claude", "settings.json"), JSON.stringify({ permissions: { allow: ["Bash"] } }));
     const requests: string[] = [];
     const events: unknown[] = [];

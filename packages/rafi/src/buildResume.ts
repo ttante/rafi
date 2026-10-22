@@ -1,5 +1,5 @@
 import { sendRoleGraphTurn } from "ai-foreman/agent-run.js";
-import { buildScopeRevision } from "ai-foreman/build-approval.js";
+import { buildScopeRevision, planApprovalBinding } from "ai-foreman/build-approval.js";
 import { HumanDecisionCancelled, servicePendingHumanDecisions } from "ai-foreman/human-decision.js";
 import { addBuildRecoveryOptions } from "./buildRecoveryOptions.js";
 import { ResumeSpawnError, resumeExitCode, type ResumeLaunchResult, type ResumeLaunchContext } from "./resumeLauncher.js";
@@ -33,7 +33,7 @@ import { createRoleBuilder, readOnlyPermissionConfig } from "ai-foreman/agent-ru
 import { continuityInstruction, parseContinuityDelta } from "ai-foreman/continuity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import { canonicalizeQaRecoveryRequirements, createQaRecoveryPacket, loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "ai-foreman/qa-recovery.js";
-import type { BuildRecoveryDecisionReceipt, BuildRecoveryMode, BuildRunRecordV2, ContinuityDelta, ProviderSessionRefV1, ResolvedAgentSettings } from "rafi-spec";
+import { stopCause, type BuildRecoveryDecisionReceipt, type BuildRecoveryMode, type BuildRunRecordV2, type ContinuityDelta, type ProviderSessionRefV1, type ResolvedAgentSettings } from "rafi-spec";
 import { assertLifecycleForCommand, detectProjectLifecycle } from "./lifecycle.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
 import type { RecoveryOutcome } from "./startRecovery.js";
@@ -54,6 +54,7 @@ export function reconcileStaleSupervisor(db: WorkflowDb, selected: Pick<Recovera
     pid: undefined,
     workerPid: undefined,
     heartbeatAt: new Date().toISOString(),
+    stopCause: stopCause({ cause: unresolved.length ? "worker-reconciliation-required" : "supervisor-process-exit", source: "reconciliation", actor: "supervisor", runId: selected.runId, supervisorGeneration: staleSupervisor.generation, workerGeneration: staleSupervisor.workerGeneration, pid: staleSupervisor.pid, processStart: staleSupervisor.processStart, checkpoint: unresolved.length ? "uncertain-worker-dispatch" : "unexpected-supervisor-exit", at: new Date().toISOString(), requested: false, detail: "Recorded supervisor ownership was independently verified dead before recovery" }),
   });
   db.transition(selected.runId, {
     status: "paused",
@@ -63,6 +64,7 @@ export function reconcileStaleSupervisor(db: WorkflowDb, selected: Pick<Recovera
       supervisorPid: staleSupervisor.pid,
       supervisorGeneration: staleSupervisor.generation,
       unresolvedDispatches: unresolved.map(item => item.idempotencyKey),
+      cause: stopCause({ cause: unresolved.length ? "worker-reconciliation-required" : "supervisor-process-exit", source: "reconciliation", actor: "supervisor", runId: selected.runId, supervisorGeneration: staleSupervisor.generation, workerGeneration: staleSupervisor.workerGeneration, pid: staleSupervisor.pid, processStart: staleSupervisor.processStart, checkpoint: unresolved.length ? "uncertain-worker-dispatch" : "unexpected-supervisor-exit", at: new Date().toISOString(), requested: false, detail: "Stale reconciliation preserved durable history and did not replay provider work" }),
       reason: "recorded supervisor was independently verified dead before recovery",
     },
   });
@@ -561,12 +563,16 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         handoffDigest = staged.lineage.manifestDigest;
       }
       launchAuthority = db.admitLeasedBuild(mutationLease);
+      const executionTickets = requestedRecoveryTicket || pendingQaProtocolTicket
+        ? [String(opts.ticket)]
+        : [...selected.progress.remainingTickets.length ? selected.progress.remainingTickets : selected.tickets];
+      const boundPlanApproval = planApprovalBindingOrUndefined(root, executionTickets);
       receipt = {
         version: 1,
         mode,
         runId: selected.runId,
         tickets: [...selected.tickets],
-        executionTickets: requestedRecoveryTicket || pendingQaProtocolTicket ? [String(opts.ticket)] : [...selected.progress.remainingTickets.length ? selected.progress.remainingTickets : selected.tickets],
+        executionTickets,
         role,
         ...(head ? { checkpointDigest: head.digest } : {}),
         ...(handoffDigest ? { handoffDigest } : {}),
@@ -580,6 +586,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         ...((opts.agent || opts.model) ? { requestedSuccessor: { ...(opts.agent ? { agent: String(opts.agent) as "claude" | "codex" } : {}), ...(opts.model ? { model: String(opts.model) } : {}) } } : {}),
         planUpdateApproval,
         planUpdateApprovalSource,
+        ...(boundPlanApproval ? { planApproval: { ...boundPlanApproval, approvedAt: new Date().toISOString() } } : {}),
         decidedAt: new Date().toISOString(),
       };
       db.recordRecoveryDecision(receipt);
@@ -665,6 +672,11 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       }
       if (continueQueuedQa) await buildBuildResumeCommand(commandOpts).parseAsync(continueQueuedQa, { from: "user" });
     }));
+}
+
+function planApprovalBindingOrUndefined(root: string, tickets: readonly string[]) {
+  try { return planApprovalBinding(root, tickets); }
+  catch { return undefined; }
 }
 
 function recoveryStateVersion(db: WorkflowDb, runId: string): string {

@@ -71,8 +71,9 @@ function isHostQaCheck(check: QaVerificationContractV1["checks"][number]): boole
     const text = `${check.expectedBehavior} ${check.expectedEvidence.join(" ")} ${check.applicability.requiredEvidence.join(" ")}`;
     const hostScopeEvidence = check.applicability.requiredEvidence.some(evidence => /host[- ]owned.*scope comparison/i.test(evidence));
     const scopeSemantics = /scope/i.test(text) && /comparison/i.test(text) && /baseline|protected|approved scope|product changes/i.test(text);
+    const changedProductPaths = /changed product paths/i.test(text) && /host[- ]retained|baseline|bookkeeping|evidence exclusions/i.test(text);
     return !/documentation/i.test(text)
-      && (hostScopeEvidence || (check.applicability.decisionOwner === "host" && (/Rafi compares the final product paths/i.test(check.expectedBehavior) || scopeSemantics)));
+      && (hostScopeEvidence || changedProductPaths || (check.applicability.decisionOwner === "host" && (/Rafi compares the final product paths/i.test(check.expectedBehavior) || scopeSemantics)));
 }
 
 export function findHostQaCheck(contract: QaVerificationContractV1): QaVerificationContractV1["checks"][number] | undefined {

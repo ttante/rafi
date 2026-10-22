@@ -577,6 +577,10 @@ function startOverSourceDigest(root: string): string {
     const absolute = join(root, path);
     const stat = lstatSync(absolute);
     hash.update(JSON.stringify([path, stat.mode])).update("\0");
+    // Git reports an untracked nested repository as its directory path. The
+    // parent repository does not own the nested repository's files, so hash
+    // the directory identity without trying to read it as a file.
+    if (stat.isDirectory()) continue;
     hash.update(stat.isSymbolicLink() ? readlinkSync(absolute) : readFileSync(absolute)).update("\0");
   }
   return hash.digest("hex");

@@ -82,12 +82,45 @@ export function inventoryDigest(requirements: RequirementRef[]): string { return
 /** Derive a missing baseline binding only from an explicit, unique check prerequisite reference. */
 export function bindUniqueBaselineCheckIds(candidate: QaContractCandidateV1): QaContractCandidateV1 {
   const draft = structuredClone(candidate);
+  const proposedIds = new Set(draft.checks.map(check => check.id));
   for (const observation of draft.baseline) {
-    if (observation.checkId) continue;
+    // A correction may copy a stable check ID from an earlier draft. Repair
+    // that stale binding from the observation's unique prerequisite instead
+    // of sending it through stable-ID allocation as if it were current.
+    if (observation.checkId && proposedIds.has(observation.checkId)) continue;
     const matches = draft.checks.filter(check => check.prerequisiteRefs.includes(observation.id));
     if (matches.length === 1) observation.checkId = matches[0]!.id;
   }
   return draft;
+}
+
+/** Ensure the host-owned scope invariant survives providers that omit or rename it. */
+export function ensureHostScopeCheck(candidate: QaContractCandidateV1, baselineId: string): QaContractCandidateV1 {
+  const copy = structuredClone(candidate);
+  const hasHostScope = copy.checks.some(check => check.applicability.decisionOwner === "host"
+    && /scope comparison|product paths|preimplementation baseline/i.test(`${check.expectedBehavior} ${check.expectedEvidence.join(" ")} ${check.applicability.requiredEvidence.join(" ")}`));
+  if (hasHostScope) return copy;
+  // Every contract check must trace to at least one authoritative requirement.
+  // The host scope invariant is cross-cutting rather than provider-authored, so
+  // bind it to the first approved requirement when a provider omitted the
+  // invariant entirely. This keeps the invariant structurally valid without
+  // inventing a new requirement outside the authoritative inventory.
+  const scopeRequirement = copy.requirements[0]?.id;
+  if (!scopeRequirement) throw new Error("Cannot add host scope check without an authoritative requirement");
+  copy.checks.push({
+    id: "host-scope",
+    requirementRefs: [scopeRequirement],
+    origin: "invariant",
+    expectedBehavior: "Rafi compares the final product paths with the host-captured preimplementation baseline and rejects unauthorized product changes.",
+    obligation: "mandatory",
+    timing: "postimplementation",
+    applicability: { kind: "unconditional", decisionOwner: "host", requiredEvidence: [baselineId] },
+    verification: [{ kind: "procedure", steps: ["Rafi performs the host-owned before/after product-path comparison, excluding approved bookkeeping and bounded evidence paths."], cwd: ".", fixtures: [], runtime: "Rafi host", timeoutMs: 30_000, expectedOutcome: "Only approved product changes are present; unauthorized, destructive, protected, or requirement-relevant changes are rejected." }],
+    expectedEvidence: ["Rafi host-owned postimplementation scope comparison bound to the retained preimplementation baseline."],
+    prerequisiteRefs: [baselineId],
+    dependsOnChecks: [],
+  });
+  return copy;
 }
 
 /**
@@ -103,7 +136,8 @@ export function rewriteProviderHostScopeChecks(candidate: QaContractCandidateV1,
     return /\b(?:complete|full|all|every)\s+(?:changed|modified|touched)[ -](?:path|paths|file|files)\b/.test(text)
       || /\b(?:changed|modified|touched)[ -](?:path|paths|file|files)\s+(?:inventory|list|manifest)\b/.test(text)
       || /\bunchanged[- ]files?\s+(?:comparison|check|verification)\b/.test(text)
-      || /\bpath\s+manifest\b.{0,80}\b(?:compare|comparison|unchanged|scope)\b/.test(text);
+      || /\bpath\s+manifest\b.{0,80}\b(?:compare|comparison|unchanged|scope)\b/.test(text)
+      || (check.applicability.decisionOwner === "host" && /scope.{0,80}comparison|comparison.{0,80}scope|product paths?.{0,100}baseline/.test(text));
   };
   const matches = draft.checks.filter(hostScope);
   if (!matches.length) return draft;

@@ -108,6 +108,19 @@ test("dirty work on a pushed branch is classified as unexpected and must be move
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("start-over inventory tolerates untracked nested repositories", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-start-over-nested-repo-"));
+  try {
+    git(dir, ["init", "-b", "main"]); git(dir, ["config", "user.email", "test@example.test"]); git(dir, ["config", "user.name", "Test"]);
+    writeFileSync(join(dir, "app.txt"), "baseline\n"); git(dir, ["add", "app.txt"]); git(dir, ["commit", "-m", "baseline"]);
+    mkdirSync(join(dir, "nested"));
+    git(join(dir, "nested"), ["init", "-b", "main"]);
+    writeFileSync(join(dir, "nested", "app.txt"), "nested\n");
+    let run = createBuildRun({ repositoryRoot: dir, tickets: ["T001"], baseRef: "main" }); run = releaseBuildLease(dir, run, "recoverable");
+    assert.doesNotThrow(() => inventoryBuildStartOver(dir, { ...run, active: false }));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 import { stringify } from "yaml";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 import { StateDb } from "../../ai-foreman/dist/tickets/stateDb.js";

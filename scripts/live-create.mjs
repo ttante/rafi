@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /** Authenticated, opt-in end-to-end acceptance journey for `rafi create`. */
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -15,10 +14,11 @@ import {
   runTodoAppChecks,
   runTtyJourney,
 } from "./live-interview-harness.mjs";
+import { createLiveWorkspace } from "./live/workspace.mjs";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
 const fixture = join(root, "test", "fixtures", "live-todo-app");
-const workdir = mkdtempSync(join(tmpdir(), "rafi-live-create-"));
+const workdir = createLiveWorkspace("rafi-live-create-").workspaceRoot;
 const requestedRuntimes = process.env.RAFI_LIVE_RUNTIMES?.split(",").map((value) => value.trim()).filter(Boolean);
 const runtimes = requestedRuntimes?.length ? requestedRuntimes : ["claude", "codex"];
 if (runtimes.some((runtime) => runtime !== "claude" && runtime !== "codex")) {

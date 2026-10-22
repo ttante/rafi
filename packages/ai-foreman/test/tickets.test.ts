@@ -34,6 +34,7 @@ import {
   resolvePopulationMode,
   resolvePopulationPlan,
   resolvePopulateSources,
+  acceptTicketPopulationCompletion,
 } from "../src/cli/tickets.js";
 import { loadTicketsConfig } from "../src/tickets/config.js";
 import { applyImportedItems } from "../src/tickets/importer.js";
@@ -552,6 +553,39 @@ test("populate preserves slice independence without inventing sibling-absence re
   assert.match(instruction, /Preserve additive-slice independence without inventing an absence test/);
   assert.match(instruction, /shared approved baseline/);
   assert.match(instruction, /unless the approved plan explicitly requires sibling absence testing/);
+});
+
+test("ticket population preserves a valid proposal when notes follow the status marker", () => {
+  const proposal = {
+    version: 1,
+    plan_id: "pln_test",
+    revision: 1,
+    tickets: [{
+      slice_ref: "slc_test",
+      title: "Test ticket",
+      area: "core",
+      priority: "P1",
+      size: "S",
+      risk: "Low",
+      summary: "test",
+      acceptance: ["works"],
+      required_tests: ["test"],
+      likely_files: [],
+      documentation: { required: false, targets: [], criteria: [] },
+      depends_on: [],
+      rollback: null,
+      notes: null,
+    }],
+    retirements: [],
+  };
+  const response = [
+    "RAFI_TICKET_POPULATION_PROPOSAL_START",
+    JSON.stringify(proposal),
+    "RAFI_TICKET_POPULATION_PROPOSAL_END",
+    'STEP_STATUS: done | summary="populated"',
+    "provider notes",
+  ].join("\n");
+  assert.equal(acceptTicketPopulationCompletion(response)?.kind, "done");
 });
 
 test("exhausted risk-plan correction gives an exact retry without unrelated doctor guidance", () => {

@@ -21,7 +21,7 @@ export function migrateQaPreparation(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS qa_preparation_policy(run_id TEXT PRIMARY KEY REFERENCES workflow_runs(run_id),record_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS qa_preparation_budgets(id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),work_id TEXT NOT NULL,admission_digest TEXT NOT NULL,record_json TEXT NOT NULL,UNIQUE(run_id,work_id,admission_digest));
-    CREATE TABLE IF NOT EXISTS qa_depth_decisions(decision_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),work_id TEXT NOT NULL,record_json TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS qa_depth_decisions(decision_id TEXT NOT NULL,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),work_id TEXT NOT NULL,admission_digest TEXT NOT NULL,record_json TEXT NOT NULL,PRIMARY KEY(decision_id,run_id,work_id,admission_digest));
     CREATE TABLE IF NOT EXISTS qa_preparation_attempts(operation_id TEXT PRIMARY KEY,budget_id TEXT NOT NULL REFERENCES qa_preparation_budgets(id),state TEXT NOT NULL,intent_json TEXT NOT NULL,result_json TEXT);
     CREATE TABLE IF NOT EXISTS qa_preparation_progress(budget_id TEXT NOT NULL REFERENCES qa_preparation_budgets(id),stage TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(budget_id,stage));
     CREATE TABLE IF NOT EXISTS qa_verification_contracts(digest TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),work_id TEXT NOT NULL,admission_digest TEXT NOT NULL,revision INTEGER NOT NULL,record_json TEXT NOT NULL,UNIQUE(run_id,work_id,admission_digest,revision));
@@ -31,6 +31,7 @@ export function migrateQaPreparation(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS qa_contract_artifacts(digest TEXT PRIMARY KEY,kind TEXT NOT NULL,record_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS qa_preparation_events(event_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),work_id TEXT NOT NULL,kind TEXT NOT NULL,record_json TEXT NOT NULL);
   `);
+  migrateQaDepthDecisions(db);
   for (const table of ["qa_preparation_policy", "qa_depth_decisions", "qa_verification_contracts", "qa_contract_check_history", "qa_contract_receipts", "qa_contract_artifacts", "qa_preparation_events"]) {
     for (const action of ["UPDATE", "DELETE"]) db.exec(`CREATE TRIGGER IF NOT EXISTS preparation_immutable_${table}_${action} BEFORE ${action} ON ${table} BEGIN SELECT RAISE(ABORT,'Preparation authority and evidence are immutable'); END`);
   }
@@ -42,6 +43,35 @@ export function migrateQaPreparation(db: Database.Database): void {
     const expression = scope.replaceAll("ROW", action === "DELETE" ? "OLD" : "NEW");
     db.exec(`CREATE TRIGGER IF NOT EXISTS preparation_owner_${table}_${action} BEFORE ${action} ON ${table} BEGIN SELECT CASE WHEN rafi_qa_preparation_owner(${expression})<>1 THEN RAISE(ABORT,'Original preparation owner required') END; END`);
   }
+}
+
+/** Provider decision ids are scoped to the admitted preparation, not global. */
+function migrateQaDepthDecisions(db: Database.Database): void {
+  const columns = db.prepare("PRAGMA table_info(qa_depth_decisions)").all() as Array<{ name: string }>;
+  if (!columns.length || columns.some(column => column.name === "admission_digest")) return;
+  db.transaction(() => {
+    for (const action of ["INSERT", "UPDATE", "DELETE"]) {
+      db.exec(`DROP TRIGGER IF EXISTS preparation_immutable_qa_depth_decisions_${action}`);
+      db.exec(`DROP TRIGGER IF EXISTS preparation_owner_qa_depth_decisions_${action}`);
+      db.exec(`DROP TRIGGER IF EXISTS preparation_lease_qa_depth_decisions_${action}`);
+    }
+    db.exec("CREATE TABLE qa_depth_decisions_scoped(decision_id TEXT NOT NULL,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),work_id TEXT NOT NULL,admission_digest TEXT NOT NULL,record_json TEXT NOT NULL,PRIMARY KEY(decision_id,run_id,work_id,admission_digest))");
+    db.exec("INSERT INTO qa_depth_decisions_scoped(decision_id,run_id,work_id,admission_digest,record_json) SELECT decision_id,run_id,work_id,COALESCE(NULLIF(json_extract(record_json,'$.admissionDigest'),''),'legacy:' || run_id || ':' || work_id),record_json FROM qa_depth_decisions");
+    db.exec("DROP TABLE qa_depth_decisions");
+    db.exec("ALTER TABLE qa_depth_decisions_scoped RENAME TO qa_depth_decisions");
+    for (const action of ["INSERT", "UPDATE", "DELETE"]) {
+      const row = action === "DELETE" ? "OLD" : "NEW";
+      db.exec(`CREATE TRIGGER preparation_immutable_qa_depth_decisions_${action} BEFORE ${action} ON qa_depth_decisions BEGIN SELECT RAISE(ABORT,'Preparation authority and evidence are immutable'); END`);
+      const ownerRow = action === "DELETE" ? "OLD" : "NEW";
+      db.exec(`CREATE TRIGGER preparation_owner_qa_depth_decisions_${action} BEFORE ${action} ON qa_depth_decisions BEGIN SELECT CASE WHEN rafi_qa_preparation_owner(${ownerRow}.run_id)<>1 THEN RAISE(ABORT,'Original preparation owner required') END; END`);
+      const leaseRun = ownerRow;
+      db.exec(`CREATE TRIGGER preparation_lease_qa_depth_decisions_${action} BEFORE ${action} ON qa_depth_decisions
+        WHEN (EXISTS(SELECT 1 FROM build_admission) OR rafi_build_writer_run()<>'' OR EXISTS(SELECT 1 FROM build_runtime_runs WHERE run_id=${leaseRun}.run_id))
+        AND NOT EXISTS(SELECT 1 FROM build_admission WHERE json_extract(record_json,'$.token')=rafi_build_writer_token() AND (json_extract(record_json,'$.runId')=${leaseRun}.run_id OR EXISTS(SELECT 1 FROM build_child_runs WHERE child=${leaseRun}.run_id AND parent=json_extract(record_json,'$.runId'))))
+        AND NOT (NOT EXISTS(SELECT 1 FROM build_admission) AND EXISTS(SELECT 1 FROM project_lease WHERE owner=rafi_build_lease_owner() AND generation=rafi_build_lease_generation() AND run_id=${leaseRun}.run_id))
+        BEGIN SELECT RAISE(ABORT,'Preparation requires the original durable lease generation'); END`);
+    }
+  })();
 }
 /** Tagged enforcing authority also fences older callers that omit new fields. */
 export function migrateQaPreparationGuards(db: Database.Database): void {
@@ -210,11 +240,10 @@ export class QaPreparationStore {
       current.level = decision.level;
       current.deadlineMs = Math.max(current.deadlineMs, current.startMs + current.policy.wallTimeMs[decision.level - 1]!);
       this.saveBudget(current);
-      const prior = this.read<QaPreparationDepthDecisionV1>("qa_depth_decisions", "decision_id", decision.decisionId);
-      const priorScope = this.db.prepare("SELECT run_id,work_id FROM qa_depth_decisions WHERE decision_id=?").get(decision.decisionId) as { run_id: string; work_id: string } | undefined;
-      if (priorScope && (priorScope.run_id !== budget.runId || priorScope.work_id !== budget.workId)) throw new Error("Planner depth identity belongs to another admitted work");
+      const priorRow = this.db.prepare("SELECT record_json FROM qa_depth_decisions WHERE decision_id=? AND run_id=? AND work_id=? AND admission_digest=?").get(decision.decisionId, budget.runId, budget.workId, budget.admissionDigest) as { record_json: string } | undefined;
+      const prior = priorRow ? this.decode(priorRow.record_json) as QaPreparationDepthDecisionV1 : undefined;
       if (prior && this.protectedJson(prior) !== this.protectedJson(decision)) throw new Error("Conflicting planner depth identity");
-      this.db.prepare("INSERT INTO qa_depth_decisions VALUES(?,?,?,?) ON CONFLICT(decision_id) DO NOTHING").run(decision.decisionId, budget.runId, budget.workId, this.protectedJson(decision));
+      this.db.prepare("INSERT INTO qa_depth_decisions VALUES(?,?,?,?,?) ON CONFLICT(decision_id,run_id,work_id,admission_digest) DO NOTHING").run(decision.decisionId, budget.runId, budget.workId, budget.admissionDigest, this.protectedJson(decision));
     });
   }
   retainProgress(budget: LogicalPreparationBudget, stage: string, value: unknown): void {

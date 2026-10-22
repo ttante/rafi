@@ -1,6 +1,6 @@
 import { withGraphDerivedAccess } from "./graph/derived.js";
 import { dispatchWithGraphAccess } from "./graph/session.js";
-import { finalQaRoleInstructions, resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
+import { finalQaRoleInstructions, QA_COMMAND_DISCIPLINE, resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
 import { COVERAGE_INSTRUCTIONS, bindCoverageHostFields, parseContractCoverage, validateContractCoverage } from "./qaContractCoverage.js";
 import { contractDigest, renderVerificationContract } from "./qaVerificationContract.js";
 import { finalReviewContractContext } from "./qaContractDelivery.js";
@@ -38,7 +38,10 @@ import {
   validateManualQaReport, validateQaRecoveryAcknowledgement, type QaRecoveryPacket, type QaRecoveryPacketInput, type QaRecoveryPendingAction,
 } from "./qaRecovery.js";
 import { canonicalJson, createQaFindingRefs, qaDigest, type FrozenQaSourceStateV2, type HandoffAcceptanceReceiptV2, type QaConfinementV2, type QaReviewBasisV2, type QaTurnIntentV2, type QaTurnReceiptV2 } from "./qaProtocolV2.js";
-import { applyHostQaComparison, createHostQaComparison, findHostQaCheck } from "./hostQaComparison.js";
+import { createHostQaComparison, findHostQaCheck } from "./hostQaComparison.js";
+import { createHostGraphApplicability, findGraphQaChecks } from "./hostGraphApplicability.js";
+import { applyHostQaAugmentations } from "./hostQaAugmentation.js";
+import { qaUnresolvedToolDecision, recordQaUnresolvedTools } from "./qaToolRecovery.js";
 
 export interface QaStreamState {
   sessionId?: string;
@@ -879,6 +882,12 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
         responseProtocolError = `invalid QA response contract after blocker recovery: ${responseContract.errors.join("; ")}`;
       }
     }
+    const unresolvedDecision = qaUnresolvedToolDecision(opts.recovery.projectDir, opts.recovery.runId, opts.ticket.id, qaEvents);
+    if (unresolvedDecision.action !== "none") {
+      recordQaUnresolvedTools(opts.recovery.projectDir, opts.recovery.runId, opts.ticket.id, qaEvents);
+      if (unresolvedDecision.action === "retry") return retryFreshQaReview(opts, "unresolved-provider-tool", unresolvedDecision.detail, (recoverySnapshot ?? snapshot).frozenState);
+      return pauseQaReview(opts, "unresolved-provider-tool", unresolvedDecision.detail, (recoverySnapshot ?? snapshot).frozenState);
+    }
     opts.state.reviews += 1; opts.state.sessionId = qa.sessionId(); opts.state.sessionRef = qa.sessionRef?.();
     const reviewedSnapshot = recoverySnapshot ?? snapshot;
     const changes = await withActivityPhase("checking QA file changes", () => reviewedSnapshot.qaChanges());
@@ -1051,6 +1060,7 @@ export function buildQaReviewHandoff(ticket: TicketDef, builderSummary: string, 
     `Project validation checklist: ${validationChecklist.join("; ")}`,
     `Prior authoritative QA/report and Builder-remediation history: ${history.length ? JSON.stringify(boundedQaHistory(history)) : "(none; perform a complete first review)"}`,
     `Failure report JSON Schema: ${JSON.stringify(qaFailureReportV1Schema)}`,
+    QA_COMMAND_DISCIPLINE,
     `A failing response must use exactly:\n${QA_FAILURE_REPORT_START}\n{...valid QaFailureReportV1 JSON...}\n${QA_FAILURE_REPORT_END}\nSTEP_STATUS: qa_fail | issues="short plain-text synopsis"`,
     "Be very thorough. Don't leave anything out. Make sure all required fields are added. Triple check your work to ensure nothing is left out and all required fields are added and populated correctly.",
     "Do not change source, configuration, documentation, tickets, or control files. Only ignored cache, coverage, and build output is allowed.",
@@ -1830,9 +1840,11 @@ function finishV2Pass(opts: IsolatedQaOptions, adapter: BuilderAdapter, detail: 
       const hostComparison = findHostQaCheck(contract)
         ? createHostQaComparison({ db, projectDir: binding.projectDir, worktree: opts.builderWorktree, runId: binding.runId, ticket: opts.ticket, contract, reviewAttemptId: binding.reviewAttemptId, reviewBasisDigest: binding.reviewBasisDigest })
         : undefined;
-      const coverage = hostComparison
-        ? applyHostQaComparison(providerCoverage, contract, hostComparison.result, hostComparison.resultDigest, binding.projectDir)
-        : providerCoverage;
+      const hostGraph = findGraphQaChecks(contract).length
+        ? createHostGraphApplicability({ projectDir: binding.projectDir, runId: binding.runId, ticketId: binding.ticketId, contract, reviewAttemptId: binding.reviewAttemptId, reviewBasisDigest: binding.reviewBasisDigest, sourceDigest: binding.sourceStateDigest, store: db.qaPreparationStore() })
+        : undefined;
+      const commandObservations = retainedQaCommandObservations(opts.recovery.projectDir, opts.recovery.runId, opts.ticket.id, false);
+      const coverage = applyHostQaAugmentations({ coverage: providerCoverage, contract, projectDir: binding.projectDir, hostComparison, hostGraph, commandObservations });
       const errors = validateContractCoverage(contract, coverage, coverageBinding);
       if (errors.length) throw new Error(`Final QA coverage incomplete: ${errors.join("; ")}`);
       const coverageDigest = db.qaPreparationStore().putArtifact("final-coverage", coverage);

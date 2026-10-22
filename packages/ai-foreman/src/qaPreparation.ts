@@ -61,11 +61,24 @@ export function normalizeExpectedFutureAssessment<T extends QaSemanticAssessment
   const copy = structuredClone(assessment);
   const checks = new Map(candidate.checks.map(check => [check.id, check]));
   copy.concerns = copy.concerns.map(concern => {
+    // A provider can report a stale check identity copied into descriptive
+    // prose from an earlier draft.  The host has already validated the
+    // structured check/coverage/dependency references; when the assessor also
+    // says the referenced acceptance item is already covered, this is a
+    // non-material labeling defect rather than an unresolved contract gap.
+    // Keep the concern in the retained assessment, but do not block Builder.
+    const staleCoveredReference = /not in the declared check IDs or its dependsOnChecks/i.test(concern.reason)
+      && /reference can be removed|already covered/i.test(`${concern.reason} ${concern.nextAction}`)
+      && concern.checkIds.length > 0
+      && concern.checkIds.every(id => checks.has(id));
+    if (concern.material && staleCoveredReference) return { ...concern, material: false };
     if (!concern.material || !concern.checkIds.length || !concern.checkIds.every(id => checks.get(id)?.timing === "postimplementation")) return concern;
     const expectedFutureAbsence = /\b(absent|missing|not (?:yet )?(?:implemented|present|available)|could not find|not found|does not exist|fails? with)\b/i.test(concern.reason)
       && /\b(?:before|pre[- ]?builder|not yet)\b/i.test(concern.reason)
       && /\b(?:implement|add|create|rerun|re-?run|builder|after implementation)\b/i.test(concern.nextAction);
-    return expectedFutureAbsence ? { ...concern, material: false } : concern;
+    const inventedSiblingAbsence = /\b(?:no|without|absen[ct]|missing)\s+(?:the\s+)?[a-z0-9_-]+\s+export\b|\b(?:sibling|other)\s+(?:feature|slice)\s+(?:absen[ct]|removed|present)\b/i.test(concern.reason)
+      && /\b(?:own|imports? only|no [a-z0-9_-]+ symbol|drop|remove)\b/i.test(concern.nextAction);
+    return expectedFutureAbsence || inventedSiblingAbsence ? { ...concern, material: false } : concern;
   });
   return copy;
 }
@@ -366,7 +379,7 @@ export async function prepareVerificationContract(initial: QaContractCandidateV1
       if ((!normalized.assessedRequirementIds || normalized.assessedRequirementIds.length === 0) && fallback?.assessedRequirementIds?.length) normalized.assessedRequirementIds = [...fallback.assessedRequirementIds];
       return normalized as T;
     };
-    let assessmentResponse = retainedAssessment?.draftPayloadDigest === draftDigest(candidate) ? undefined : await run("assess", "assessment", `Independent semantic assessment in a fresh conversation. Assess each original requirement and selected-depth obligation; identify omissions, conflicts, practical verification gaps, accidental scope, and unsupported dispositions. Treat Rafi-owned bookkeeping paths (.tickets, .rafi, generated docs/configuration, and agent instructions) as expected host changes. Scope concerns must be evaluated against approved product paths and ticket requirements; do not require an exact full-worktree status listing. Future Builder actions are not preparation failures: when an approved requirement specifies test-first ordering, a migration, rollback rehearsal, or other implementation-time sequence, represent it as a mandatory postimplementation check requiring retained Builder evidence. Do not mark the absence of that future evidence before Builder starts as a material concern, and do not demand that preparation reproduce historical order. Only report a material concern when the contract cannot state an actionable postimplementation check or when an already-required preimplementation fact is missing. Return RAFI_QA_ASSESSMENT_START/END with QaSemanticAssessmentV1 (schema: ${JSON.stringify(qaPreparationDepthDecisionV1Schema)}). The concerns field is an array of objects, never strings; every concern object must have exactly these six fields and no others: {reason:string, requirementIds:string[], checkIds:string[], material:boolean, owner:string, nextAction:string}. Do not use legacy fields such as severity, evidence, title, message, category, or resolution. Use concerns: [] only when all issues are resolved. assessedRequirementIds MUST contain every ID in this exact list, even when a requirement is host-owned or has no concern: ${JSON.stringify(candidate.requirements.map(requirement => requirement.id))}. Put every individually assessed required obligation label in assessedObligations, using the exact labels below; do not combine labels or claim to have assessed anything you did not assess. Required obligation labels: ${JSON.stringify(depthObligations(candidate.depthDecision.level))}. Bind exactly ${JSON.stringify(binding)}.\nPrior independent concerns requiring concrete resolution evidence: ${JSON.stringify(targetedConcerns)}\nOriginal inventory:\n${JSON.stringify(inventory)}\nDraft:\n${JSON.stringify(candidate)}`);
+    let assessmentResponse = retainedAssessment?.draftPayloadDigest === draftDigest(candidate) ? undefined : await run("assess", "assessment", `Independent semantic assessment in a fresh conversation. Assess each original requirement and selected-depth obligation; identify omissions, conflicts, practical verification gaps, accidental scope, and unsupported dispositions. Treat Rafi-owned bookkeeping paths (.tickets, .rafi, generated docs/configuration, and agent instructions) as expected host changes. Scope concerns must be evaluated against approved product paths and ticket requirements; do not require an exact full-worktree status listing. Future Builder actions are not preparation failures: when an approved requirement specifies test-first ordering, a migration, rollback rehearsal, or other implementation-time sequence, represent it as a mandatory postimplementation check requiring retained Builder evidence. Do not mark the absence of that future evidence before Builder starts as a material concern, and do not demand that preparation reproduce historical order. If a concern's only next action is to inspect, compare, run, or otherwise produce evidence for a check that is already declared with postimplementation timing, set that concern material:false; it is an actionable future check, not a preparation blocker. Only report a material concern when the contract cannot state an actionable postimplementation check or when an already-required preimplementation fact is missing. Return RAFI_QA_ASSESSMENT_START/END with QaSemanticAssessmentV1 (schema: ${JSON.stringify(qaPreparationDepthDecisionV1Schema)}). The concerns field is an array of objects, never strings; every concern object must have exactly these six fields and no others: {reason:string, requirementIds:string[], checkIds:string[], material:boolean, owner:string, nextAction:string}. Do not use legacy fields such as severity, evidence, title, message, category, or resolution. Use concerns: [] only when all issues are resolved. assessedRequirementIds MUST contain every ID in this exact list, even when a requirement is host-owned or has no concern: ${JSON.stringify(candidate.requirements.map(requirement => requirement.id))}. Put every individually assessed required obligation label in assessedObligations, using the exact labels below; do not combine labels or claim to have assessed anything you did not assess. Required obligation labels: ${JSON.stringify(depthObligations(candidate.depthDecision.level))}. Bind exactly ${JSON.stringify(binding)}.\nPrior independent concerns requiring concrete resolution evidence: ${JSON.stringify(targetedConcerns)}\nOriginal inventory:\n${JSON.stringify(inventory)}\nDraft:\n${JSON.stringify(candidate)}`);
     let assessed = assessmentResponse
       ? await parsedContract<QaSemanticAssessmentV1>(assessmentResponse, "RAFI_QA_ASSESSMENT", validateAssessmentContract, "QA semantic assessment", (value, response) => normalizeAssessment(value, response))
       : { value: retainedAssessment!, response: undefined };
@@ -374,6 +387,11 @@ export async function prepareVerificationContract(initial: QaContractCandidateV1
     // session identity, but it cannot prove or safely author the builder's ID.
     assessed.value.authorSessionId = binding.authorSessionId;
     for (let repair = 0; assessmentResponse && repair < 3; repair++) {
+      // Apply host-owned current-branch applicability normalization before
+      // semantic validation. Otherwise an assessor's material sibling-absence
+      // concern is rejected before the host can downgrade that non-binding
+      // concern to an auditable, non-material observation.
+      assessed.value = normalizeExpectedFutureAssessment(assessed.value, candidate);
       const semanticIssues = validateAssessment(candidate, assessed.value, authorSessionId);
       if (!semanticIssues.length) break;
       if (repair === 2) throw new Error(semanticIssues.join("; "));

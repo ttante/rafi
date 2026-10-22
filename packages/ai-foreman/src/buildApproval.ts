@@ -97,6 +97,50 @@ export function buildScopeRevision(projectDir: string, consequences?: Record<str
   return createHash("sha256").update(JSON.stringify([contents, consequences])).digest("hex");
 }
 
+export interface PlanApprovalBinding {
+  planDigest: string;
+  ticketSetDigest: string;
+  ticketDefinitionsDigest: string;
+  scopeRevision: string;
+  workflowConsequenceDigest: string;
+}
+
+/** Compute the exact host-owned inputs covered by a recovery plan approval. */
+export function planApprovalBinding(projectDir: string, ticketIds: readonly string[], consequences?: Record<string, unknown>): PlanApprovalBinding {
+  const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);
+  const all = loadTickets(paths.tickets);
+  const selected = ticketIds.map(id => all.find(ticket => ticket.id === id));
+  if (selected.some(ticket => !ticket)) throw new Error("plan approval cannot bind a missing ticket definition");
+  const config = parse(readFileSync(join(projectDir, "rafi-config.yaml"), "utf8")) as Record<string, unknown>;
+  const docsRoot = (config.docs as { root?: string } | undefined)?.root ?? "docs";
+  const plan = JSON.parse(readFileSync(join(projectDir, docsRoot, "rafi-plan.json"), "utf8"));
+  const planDigest = createHash("sha256").update(canonical({ ...plan, content_digest: "" })).digest("hex");
+  const db = new WorkflowDb(projectDir);
+  try {
+    const approved = db.completedPlanApprovals().some(receipt => {
+      const decision = receipt.decisionReceipt as { planDigest?: unknown } | undefined;
+      return receipt.planId === plan.plan_id && receipt.revision === plan.revision
+        && receipt.digest === planDigest && decision?.planDigest === planDigest;
+    });
+    if (!approved) throw new Error("current plan has no matching completed host approval");
+  } finally { db.close(); }
+  const ticketSetDigest = createHash("sha256").update(canonical([...ticketIds].sort())).digest("hex");
+  const ticketDefinitionsDigest = createHash("sha256").update(canonical(selected.map(ticket => material(ticket!)).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))))).digest("hex");
+  const workflow = { build: (config.tickets as { build?: unknown } | undefined)?.build ?? {}, consequences: consequences ?? {} };
+  const workflowConsequenceDigest = createHash("sha256").update(canonical(workflow)).digest("hex");
+  return { planDigest, ticketSetDigest, ticketDefinitionsDigest, scopeRevision: buildScopeRevision(projectDir, consequences), workflowConsequenceDigest };
+}
+
+export function validatePlanApprovalBinding(projectDir: string, ticketIds: readonly string[], approval: PlanApprovalBinding, consequences?: Record<string, unknown>): { valid: true } | { valid: false; reason: string } {
+  try {
+    const current = planApprovalBinding(projectDir, ticketIds, consequences);
+    for (const key of ["planDigest", "ticketSetDigest", "ticketDefinitionsDigest", "scopeRevision", "workflowConsequenceDigest"] as const) {
+      if (current[key] !== approval[key]) return { valid: false, reason: `${key} changed` };
+    }
+    return { valid: true };
+  } catch (error) { return { valid: false, reason: `approval inputs unavailable: ${String(error)}` }; }
+}
+
 /** Reuse a decision only while its source and consequences remain unchanged. */
 export function createBuildApprovalGate(projectDir: string, ticketIds: readonly string[] | undefined, explicitYes: boolean, consequences: Record<string, unknown> | undefined, requestApproval: () => Promise<void>): () => Promise<void> {
   let approvedRevision: string | undefined;

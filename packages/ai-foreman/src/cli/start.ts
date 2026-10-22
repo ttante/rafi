@@ -11,7 +11,7 @@ import { captureFrozenQaSource } from "../qaSnapshot.js";
 import { finishStartAdmission, superviseStart, supervisedRunId } from "../supervisedStart.js";
 import { assertBuildAssignmentReconciled, isInterruptedBuilderRecovery, assertInterruptedSourceSnapshot } from "../buildAssignment.js";
 import { durableHumanDecision, HumanDecisionRequired, HumanDecisionCancelled, servicePendingHumanDecisions } from "../humanDecision.js";
-import { requiresBuildApproval, buildScopeRevision, createBuildApprovalGate } from "../buildApproval.js";
+import { requiresBuildApproval, buildScopeRevision, createBuildApprovalGate, validatePlanApprovalBinding } from "../buildApproval.js";
 import { Command, Option } from "commander";
 import { accent, error, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
 import { resolve, join, relative } from "node:path";
@@ -682,6 +682,16 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         ? recoveryRecord.recoveryDecision?.planUpdateApproval === "auto"
           && (recoveryRecord.recoveryDecision.planUpdateApprovalSource === "explicit-yes" || recoveryRecord.recoveryDecision.planUpdateApprovalSource === "explicit-choice")
         : Boolean(opts.yes);
+      const recoveryTickets = recoveryRecord?.recoveryDecision?.executionTickets ?? recoveryRecord?.tickets ?? [];
+      // Empty-scope recovery is used by established/supervisor lifecycle
+      // recovery fixtures and has no ticket plan to bind. Ticket-bearing
+      // recovery remains fail-closed on an exact current-plan approval.
+      if (recoveryRecord && autoApprovePlanUpdates && recoveryTickets.length > 0) {
+        const decision = recoveryRecord.recoveryDecision;
+        if (!decision?.planApproval) fail("saved --yes approval has no exact plan binding; rerun rafi build:resume --yes to approve the current plan");
+        const approvalCheck = validatePlanApprovalBinding(cwd, recoveryTickets, decision.planApproval);
+        if (!approvalCheck.valid) fail(`saved --yes approval is stale (${approvalCheck.reason}); rerun rafi build:resume --yes before provider work`);
+      }
       if (opts.recoveryMode) {
         const allowed = ["exact-session", "fresh-with-handoff", "fresh-recovery-only", "guided-recovery"];
         if (!allowed.includes(String(opts.recoveryMode))) fail(`unknown frozen recovery mode ${String(opts.recoveryMode)}`);

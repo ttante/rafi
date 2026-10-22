@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { hostname } from "node:os";
 import { DurableSupervisor } from "./supervisor.js";
 import { WorkflowDb } from "./workflowDb.js";
-import type { ResolvedAutonomyPolicy } from "rafi-spec";
+import { stopCause, type ResolvedAutonomyPolicy, type StopCause } from "rafi-spec";
 import { classifyProcess, processStartIdentity } from "./processIdentity.js";
 import { cancelOwnedRuntimeProbes } from "./runtimeReadiness.js";
 
@@ -45,8 +45,9 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
         durable.atomic(() => {
           const owner = durable.supervisorState(runId);
           if (owner?.workerGeneration !== Number(process.env.RAFI_BUILD_WORKER_GENERATION) || owner.workerPid !== process.pid) return;
-          durable.transition(runId, { status: "paused", checkpoint: "orphaned-worker", event: "supervisor_disconnected", payload: { workerPid: process.pid } });
-          durable.putSupervisorState(runId, { ...owner, status: "stopping" });
+          const cause = stopCause({ cause: "worker-disconnect", source: "worker", actor: "worker", runId, supervisorGeneration: owner.generation, workerGeneration: owner.workerGeneration, pid: process.pid, processStart: processStartIdentity(), checkpoint: "orphaned-worker", at: new Date().toISOString(), requested: false, detail: "Worker IPC disconnected before the supervisor acknowledged shutdown" });
+          durable.transition(runId, { status: "paused", checkpoint: "orphaned-worker", event: "supervisor_disconnected", payload: { workerPid: process.pid, cause } });
+          durable.putSupervisorState(runId, { ...owner, status: "stopping", stopCause: cause });
         });
       } catch (error) { console.error(`rafi: could not persist orphaned-worker checkpoint: ${String(error)}`); }
       finally { state?.close(); }
@@ -110,9 +111,10 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
   db.ensureRun(runId, "build");
   db.freezeAutonomyPolicy(runId, policy);
   let exitCode = 2;
-  let stopRequestSource: string | undefined;
+  let stopRequestCause: StopCause | undefined;
   const supervisor = new DurableSupervisor({ projectDir, runId, policy, admission: localBuildAuthority(projectDir),
     checkpoint: () => db.getRun(runId)?.checkpoint ?? "preparing",
+    onStopRequested: cause => { stopRequestCause = cause; },
     spawnWorker: generation => {
       let authority = localBuildAuthority(projectDir)!;
       if (db.buildAdmission()?.token !== authority.token) {
@@ -154,7 +156,7 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
         try { process.kill(process.platform === "win32" ? child.pid! : -child.pid!, "SIGTERM"); } catch { /* exited */ }
       };
       const heartbeatTimeout = policy.runtimeDeadlines?.heartbeat_ms ?? 120_000;
-      const watchdog = setInterval(() => { if (Date.now() - lastHeartbeat > heartbeatTimeout) { stopRequestSource = "heartbeat-timeout"; stop(); } }, Math.min(5_000, Math.max(25, heartbeatTimeout / 4)));
+      const watchdog = setInterval(() => { if (Date.now() - lastHeartbeat > heartbeatTimeout) { stopRequestCause = stopCause({ cause: "heartbeat-timeout", source: "heartbeat", actor: "supervisor", runId, supervisorGeneration: generation, workerGeneration: generation, checkpoint: db.getRun(runId)?.checkpoint ?? "unknown", at: new Date().toISOString(), requested: true, detail: `worker heartbeat exceeded ${heartbeatTimeout}ms` }); stop(); } }, Math.min(5_000, Math.max(25, heartbeatTimeout / 4)));
       watchdog.unref();
       child.on("message", message => { if (message && typeof message === "object" && "kind" in message && message.kind === "rafi-worker-heartbeat") lastHeartbeat = Date.now(); });
       child.on("message", message => {
@@ -179,7 +181,14 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
           exitCode = code ?? 2;
           try {
           const exitState = db.getRun(runId);
-          if (exitState) db.transitionSupervisor(runId, generation, { checkpoint: exitState.checkpoint, event: "worker_exit", payload: { code, signal, stopRequested: stopping, source: stopRequestSource ?? "unknown", at: new Date().toISOString(), generation } });
+          const exitCause = stopRequestCause ?? stopCause({ cause: "worker-exit", source: "worker", actor: "worker", runId, supervisorGeneration: generation, workerGeneration: generation, pid: child.pid, processStart: child.pid ? processStartIdentity(child.pid) : undefined, checkpoint: exitState?.checkpoint ?? "unknown", at: new Date().toISOString(), requested: false, detail: signal ? `worker exited from ${signal}` : `worker exited with code ${code ?? "unknown"}` });
+          if (exitState) db.transitionSupervisor(runId, generation, { checkpoint: exitState.checkpoint, event: "worker_exit", payload: {
+            code, signal, stopRequested: stopping, cause: exitCause,
+            // Preserve the historical diagnostic field while consumers migrate
+            // to the closed StopCause contract.
+            source: exitCause.cause === "parent-sigterm" ? "parent-SIGTERM" : exitCause.cause === "user-sigint" ? "user-SIGINT" : exitCause.cause === "heartbeat-timeout" ? "heartbeat-timeout" : exitCause.cause,
+            at: new Date().toISOString(), generation,
+          } });
           // Durable records are authoritative even when the worker never sent IPC.
           const deadline = Date.now() + 5000;
           const owned = db.readinessProcesses(runId).filter(row => {
@@ -204,14 +213,36 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
             const workerQuiescent = await ownedGroupIsQuiescent(child.pid!);
             const preparationReconciled = canRestartPreparation(db, runId);
             if (!stopping && readinessQuiescent && workerQuiescent && preparationReconciled) {
-              db.transitionSupervisor(runId, generation, { status: "paused", checkpoint: "preparation-reconciled", event: "worker_preparation_reconciled", payload: { generation, signal, noImplementationAuthority: true } });
+              const preparationCause = stopCause({
+                cause: "worker-exit", source: "worker", actor: "worker", runId,
+                supervisorGeneration: generation, workerGeneration: generation,
+                pid: child.pid, processStart: child.pid ? processStartIdentity(child.pid) : undefined,
+                checkpoint: "preparation-reconciled", at: new Date().toISOString(), requested: false,
+                detail: "Worker exited before acquiring implementation authority; owned process group is quiescent",
+              });
+              db.transitionSupervisor(runId, generation, { status: "paused", checkpoint: "preparation-reconciled", event: "worker_preparation_reconciled", payload: { generation, signal, noImplementationAuthority: true, cause: preparationCause } });
               resolve({ kind: "crashed", detail: "Preparation worker exited before acquiring implementation authority; owned process group is quiescent" });
               return;
             }
             // Process death does not establish that remote side effects stopped.
             // Never replay an unacknowledged provider action automatically.
             const uncertain = [...db.unresolvedRoleDispatches(runId, "builder"), ...db.unresolvedRoleDispatches(runId, "qa")];
-            db.transitionSupervisor(runId, generation, { status: "paused", checkpoint: uncertain.length ? "uncertain-worker-dispatch" : "worker-interrupted", event: "worker_reconciliation_required", payload: { generation, signal, uncertainDispatches: uncertain.map(item => item.idempotencyKey), readinessWasActive, readinessQuiescent, workerQuiescent, preparationReconciled, readinessCleanup, readinessOwnershipVerified: [...readinessChildren.values()].every(value => value !== "unavailable") } });
+            const reconciliationCause = stopCause({
+              ...(stopRequestCause ?? { runId, supervisorGeneration: generation, workerGeneration: generation }),
+              cause: "worker-reconciliation-required",
+              source: "reconciliation",
+              actor: "supervisor",
+              runId,
+              supervisorGeneration: generation,
+              workerGeneration: generation,
+              pid: child.pid,
+              processStart: child.pid ? processStartIdentity(child.pid) : undefined,
+              checkpoint: uncertain.length ? "uncertain-worker-dispatch" : "worker-interrupted",
+              at: new Date().toISOString(),
+              requested: false,
+              detail: "Worker stopped before all owned work had a durable terminal outcome",
+            });
+            db.transitionSupervisor(runId, generation, { status: "paused", checkpoint: uncertain.length ? "uncertain-worker-dispatch" : "worker-interrupted", event: "worker_reconciliation_required", payload: { generation, signal, cause: reconciliationCause, uncertainDispatches: uncertain.map(item => item.idempotencyKey), readinessWasActive, readinessQuiescent, workerQuiescent, preparationReconciled, readinessCleanup, readinessOwnershipVerified: [...readinessChildren.values()].every(value => value !== "unavailable") } });
             resolve({ kind: "waiting_for_human" });
           } else {
             const state = db.getRun(runId);
@@ -225,8 +256,8 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
       return { pid: child.pid, result, stop };
     },
   });
-  const stopInt = () => { stopRequestSource = "parent-SIGINT"; supervisor.requestStop(); };
-  const stopTerm = () => { stopRequestSource = "parent-SIGTERM"; supervisor.requestStop(); };
+  const stopInt = () => { supervisor.requestStop("user-sigint"); };
+  const stopTerm = () => { supervisor.requestStop("parent-sigterm"); };
   process.once("SIGINT", stopInt); process.once("SIGTERM", stopTerm);
   let supervisorCompleted = false;
   const recordUnexpectedSupervisorExit = (code: number): void => {
@@ -235,12 +266,13 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
       const state = db.supervisorState(runId);
       const run = db.getRun(runId);
       if (!state || state.pid !== process.pid || state.status !== "running" || !run || ["completed", "cancelled", "superseded"].includes(run.status)) return;
-      db.putSupervisorState(runId, { ...state, status: "failed", pid: undefined, workerPid: undefined, heartbeatAt: new Date().toISOString() });
+      const cause = stopCause({ cause: "supervisor-process-exit", source: "supervisor", actor: "supervisor", runId, supervisorGeneration: state.generation, workerGeneration: state.workerGeneration, pid: process.pid, processStart: state.processStart, checkpoint: run.checkpoint, at: new Date().toISOString(), requested: false, detail: `supervisor exited with code ${code}` });
+      db.putSupervisorState(runId, { ...state, status: "failed", pid: undefined, workerPid: undefined, heartbeatAt: new Date().toISOString(), stopCause: cause });
       db.transitionSupervisor(runId, state.workerGeneration, {
         status: "paused",
         checkpoint: "supervisor-process-exit",
         event: "supervisor_process_exit",
-        payload: { exitCode: code, lastCheckpoint: run.checkpoint, generation: state.generation },
+        payload: { exitCode: code, lastCheckpoint: run.checkpoint, generation: state.generation, cause },
       });
     } catch { /* Exit handlers must not mask the original process termination. */ }
   };

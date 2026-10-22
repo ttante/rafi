@@ -22,6 +22,8 @@ test("coverage instructions explain the real schema and flat host binding", () =
   assert.match(COVERAGE_INSTRUCTIONS, /not leave such a provider-owned check as not-run/);
   assert.match(COVERAGE_INSTRUCTIONS, /host-owned.*Rafi.*not-run/i);
   assert.match(COVERAGE_INSTRUCTIONS, /do not block or fail QA/);
+  assert.match(COVERAGE_INSTRUCTIONS, /host-retained tool event's exitCode/);
+  assert.match(COVERAGE_INSTRUCTIONS, /must not create an echo wrapper/);
   assert.match(COVERAGE_INSTRUCTIONS, /"required":\["version","phase","runId"/);
 });
 test("generic success and incomplete mandatory results never pass contract coverage", () => {
@@ -40,6 +42,16 @@ test("host coverage binding omits null optional limitations without changing evi
   assert.equal(bound.checks[0]!.outcome, "passed");
   assert.deepEqual(validateContractCoverage(contract, bound, binding), []);
 });
+test("host coverage binding canonicalizes applicability copied into outcome", () => {
+  const draft = candidate(); draft.checks[0]!.applicability = { kind: "conditional", predicate: "Optional feature enabled", decisionOwner: "host", requiredEvidence: ["configuration"] };
+  const contract = assembleContract(draft, draft.requirements, assessment(draft), "author"), result = coverage(contract);
+  result.checks[0]!.applicability = "not-applicable";
+  result.checks[0]!.predicateEvidence = ["Inspected configuration: optional feature disabled"];
+  (result.checks[0]!.outcome as string) = "not-applicable";
+  const bound = bindCoverageHostFields(result, contract, binding);
+  assert.equal(bound.checks[0]!.outcome, "not-run");
+  assert.deepEqual(validateContractCoverage(contract, bound, binding, false), []);
+});
 test("conditional mandatory checks need predicate evidence; advisory checks stay visible without blocking", () => {
   const draft = candidate(); draft.checks[0]!.applicability = { kind: "conditional", predicate: "Token auth enabled", decisionOwner: "qa", requiredEvidence: ["configuration"] };
   const contract = assembleContract(draft, draft.requirements, assessment(draft), "author");
@@ -51,4 +63,10 @@ test("conditional mandatory checks need predicate evidence; advisory checks stay
   assert.match(validateContractCoverage(contract, result, binding).join(), /predicate/);
   result.checks[0]!.predicateEvidence = ["Inspected auth config: token authentication enabled"];
   assert.deepEqual(validateContractCoverage(contract, result, binding), []);
+});
+test("host-owned conditional checks defer predicate evidence to host augmentation", () => {
+  const draft = candidate(); draft.checks[0]!.applicability = { kind: "conditional", predicate: "Rafi-managed Graphify is adopted and enabled", decisionOwner: "host", requiredEvidence: ["Host-owned Graphify applicability observation"] };
+  const contract = assembleContract(draft, draft.requirements, assessment(draft), "author");
+  const result = coverage(contract); result.checks[0]!.applicability = "applicable"; result.checks[0]!.outcome = "not-run"; result.checks[0]!.predicateEvidence = [];
+  assert.doesNotMatch(validateContractCoverage(contract, result, binding).join(";"), /Conditional applicability requires predicate evidence/);
 });

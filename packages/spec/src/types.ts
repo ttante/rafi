@@ -1,3 +1,5 @@
+import type { StopCause } from "./stopCause.js";
+
 /**
  * Rafi neutral schema — the shapes that the `special-agents` library and the
  * `ai-foreman` runtime must agree on. Authoring inputs (rule packs, skills,
@@ -266,6 +268,7 @@ export interface SupervisorState {
   checkpointRestarts: number;
   runRestarts: number;
   stopRequestedAt?: string;
+  stopCause?: StopCause;
 }
 
 /** How Rafi should handle existing root instruction files. */
@@ -1547,6 +1550,15 @@ export interface BuildRecoveryDecisionReceipt {
   planUpdateApproval: "auto" | "review";
   /** Why the plan-update policy is trusted; omitted on legacy receipts. */
   planUpdateApprovalSource?: "explicit-yes" | "explicit-choice";
+  /** Exact host-validated inputs covered by this approval. */
+  planApproval?: {
+    planDigest: string;
+    ticketSetDigest: string;
+    ticketDefinitionsDigest: string;
+    scopeRevision: string;
+    workflowConsequenceDigest: string;
+    approvedAt: string;
+  };
   decidedAt: string;
 }
 

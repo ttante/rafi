@@ -68,6 +68,12 @@ export interface StepStatus {
   error?: string;
 }
 
+/**
+ * Workflow-specific completion is opt-in. Callers may preserve a valid
+ * structured response before the generic strict STEP_STATUS repair path runs.
+ */
+export type InstructionCompletion = (text: string) => StepStatus | undefined;
+
 /** Compare Builder product state without Rafi's own tracker bookkeeping. */
 function builderProductDigest(source: ReturnType<typeof captureBuildSource>, hostOwnedPaths: string[]): string {
   const ignored = new Set(hostOwnedPaths.map(path => path.replace(/\\/g, "/").replace(/^\.\//, "")));
@@ -100,7 +106,7 @@ const QUESTION_HINTS = [
  * Pull the STEP_STATUS marker out of a turn's final text.
  * Format: `STEP_STATUS: <kind> | key="value" key="value"`.
  */
-export function parseStepStatus(text: string): StepStatus {
+export function parseStepStatus(text: string, options: { requireFinalLine?: boolean } = {}): StepStatus {
   const markerLines = text.split(/\r?\n/).filter((line) => /^\s*STEP_STATUS:/.test(line));
   const markerCount = markerLines.length;
   if (markerCount > 1) {
@@ -109,13 +115,14 @@ export function parseStepStatus(text: string): StepStatus {
   const lines = text.trimEnd().split(/\r?\n/).filter((line) => line.trim().length > 0);
   const last = lines[lines.length - 1] ?? "";
   if (!last.includes("STEP_STATUS:")) {
-    if (markerCount === 1) {
+    if (markerCount === 1 && options.requireFinalLine !== false) {
       return { kind: "unknown", error: "STEP_STATUS marker was not the final non-empty line" };
     }
-    return { kind: "unknown" };
+    if (markerCount === 0) return { kind: "unknown" };
   }
 
-  const match = last.match(
+  const marker = options.requireFinalLine === false ? markerLines[0]?.trim() ?? "" : last;
+  const match = marker.match(
     /^STEP_STATUS:\s*(done|blocked|plan_complete|needs_input|qa_pass|qa_fail)\b\s*(?:\|\s*(.*))?$/i,
   );
   if (!match) {
@@ -474,15 +481,17 @@ export class Foreman {
     adapter: BuilderAdapter,
     instruction: string,
     mode: "builder" | "qa" = "builder",
+    completion?: InstructionCompletion,
   ): Promise<{ result: TurnResult; status: StepStatus }> {
     return this.projectDir
-      ? withGraphSessionAccess(this.projectDir, adapter, () => this.doTurnWithOwned(adapter, instruction, mode))
-      : this.doTurnWithOwned(adapter, instruction, mode);
+      ? withGraphSessionAccess(this.projectDir, adapter, () => this.doTurnWithOwned(adapter, instruction, mode, completion))
+      : this.doTurnWithOwned(adapter, instruction, mode, completion);
   }
   private async doTurnWithOwned(
     adapter: BuilderAdapter,
     instruction: string,
     mode: "builder" | "qa" = "builder",
+    completion?: InstructionCompletion,
   ): Promise<{ result: TurnResult; status: StepStatus }> {
     const ticket = mode === "builder" ? this.currentTicketId : undefined;
     const hostToolObservations: HostBuilderToolObservation[] = [];
@@ -524,6 +533,10 @@ export class Foreman {
     let result = await send(instruction, turnPolicy);
     await this.observeBuilderNative(adapter);
     let status = parseStepStatus(result.text);
+    if (!result.isError && !result.failure) {
+      const completed = completion?.(result.text);
+      if (completed) return { result, status: completed };
+    }
     if (ticket && validateBuildAssignment(ticket, status)) return { result, status };
     if (result.isError || result.failure) return { result: { ...result, isError: true }, status };
     if (status.kind === "unknown") {
@@ -633,6 +646,10 @@ export class Foreman {
         await this.observeBuilderNative(adapter);
         if (result.isError || result.failure) return { result: { ...result, isError: true }, status: { kind: "blocked", reason: result.text } };
         status = parseStepStatus(result.text);
+        if (completion) {
+          const completed = completion(result.text);
+          if (completed) return { result, status: completed };
+        }
         if (ticket && validateBuildAssignment(ticket, status)) return { result, status };
       }
 
@@ -707,8 +724,9 @@ export class Foreman {
   /** Send one custom instruction through the same needs_input loop as a batch turn. */
   async runInstruction(
     instruction: string,
+    options: { completion?: InstructionCompletion } = {},
   ): Promise<{ result: TurnResult; status: StepStatus }> {
-    return this.doTurn(instruction);
+    return this.doTurnWith(this.builder, instruction, "builder", options.completion);
   }
 
   /** Ask an already-active role session to propose choices for its reported blocker. */
