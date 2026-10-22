@@ -6,6 +6,14 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+## @rafi-ai/cli 0.9.29 / ai-foreman 1.7.29 / special-agents 0.8.18 / rafi-spec 0.8.18 - 2026-10-22
+
+- Improve supervised restart/recovery behavior, QA contract coverage, host-retained evidence, and provider-process diagnostics.
+- Bumped `rafi-spec` to `0.8.18`.
+- Bumped `special-agents` to `0.8.18` with its exact `rafi-spec@0.8.18` dependency.
+- Bumped `ai-foreman` to `1.7.29` with its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.9.29` with its exact `ai-foreman@1.7.29`, `rafi-spec@0.8.18`, and `special-agents@0.8.18` dependencies.
+
 ## @rafi-ai/cli 0.9.26 / ai-foreman 1.7.26 - 2026-10-16
 
 - Strengthen Builder/QA recovery, provider-session continuity, activity reporting, handoff handling, ticket recovery, and reset behavior.
