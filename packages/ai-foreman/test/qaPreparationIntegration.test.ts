@@ -1,16 +1,20 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy } from "../src/structuredOperation.js";
+import { workReportOutput, qaVerdictOutput } from "rafi-spec";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { Foreman } from "../src/foreman.js";
 import { Log } from "../src/log.js";
 import { cmdInit } from "../src/tickets/commands.js";
 import { saveTickets } from "../src/tickets/ticketLoader.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { candidate, assessment, coverage, digest } from "./qaPreparationFixtures.js";
-import { assembleContract, contractDigest } from "../src/qaVerificationContract.js";
+import { assembleContract, contractDigest, ensureHostScopeCheck } from "../src/qaVerificationContract.js";
 import { resolveQaPreparationConfig } from "../src/qaPreparationPolicy.js";
 import { resolveEffectiveQaConfiguration } from "../src/qaEffectiveConfig.js";
 import { deliverVerificationContract } from "../src/qaContractDelivery.js";
@@ -21,7 +25,7 @@ import { qaReportDigest } from "../src/qaRecovery.js";
 import { createProviderSessionRef } from "../src/sessionIdentity.js";
 import type { BuilderAdapter } from "../src/adapters/types.js";
 
-function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compiled = false, tracker = false, publish = true, baseline = false, rotateCoverageSession = false) {
+function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compiled = false, tracker = false, publish = true, baseline = false, rotateCoverageSession = false, hostScope = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "qa-workflow-contract-"))), workspace = branch ? join(root, "branch") : root;
   mkdirSync(workspace, { recursive: true }); writeFileSync(join(workspace, "product.txt"), "baseline");
   if (compiled) {
@@ -30,6 +34,7 @@ function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compil
   }
   const ticket = { id: "T1", order: 1, title: "Token expiry", area: "core", priority: "P2", size: "S", risk: "Low", summary: "Reject expired token", acceptance: ["Reject expired token"], required_tests: [], depends_on: [], rollback: "Revert token guard", notes: "Preserve exact boundary", likely_files: ["product.txt"] } as import("../src/tickets/ticketSchema.js").TicketDef;
   if (tracker) { cmdInit(root, {}); saveTickets(join(root, ".tickets/tickets.yaml"), [ticket]); }
+  if (hostScope) { execFileSync("git", ["init", "-q", root]); execFileSync("git", ["add", "."], { cwd: root }); execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: root }); }
   const db = new WorkflowDb(root); db.ensureRun("run"); db.qaPreparationStore().freezePolicy("run", resolveQaPreparationConfig({ mode: "enforce" }));
   const workId = kind === "synthetic" ? `synthetic:${randomUUID()}` : "T1";
   const admission = db.admitWork({ runId: "run", workId, kind, ...(kind === "ticket" ? { ticketId: workId } : {}), definition: { ...ticket, id: workId }, approvalId: "approved", scopeRevision: "r1", provenance: { userTurn: "Implement the approved behavior", reason: "Explicit test authorization" } });
@@ -41,6 +46,15 @@ function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compil
     const evidenceDigest = store.putArtifact("baseline-observation", { procedure: "Verify baseline readiness", result: "ready" });
     draft.baseline = [{ id: "baseline-ready", checkId: "check", applicability: "applicable", sourceDigest: digest, phase: "preimplementation-investigation", runtime: "node20", procedure: "Verify baseline readiness", observedAt: new Date().toISOString(), status: "passed", evidenceDigest, relevance: "prerequisite", expectedTransition: "Remains ready" }];
   }
+  if (hostScope) {
+    const before = captureBuildSource(workspace), id = "host-preimplementation-source";
+    draft.inputs.push({ id: "preimplementation-source", kind: "baseline", reference: "host source", digest: before.digest, authority: "inspected-context", revision: "current", availability: "available" });
+    draft.baseline.push({ id, sourceDigest: before.digest, phase: "preimplementation-investigation", runtime: "Rafi host", procedure: "Retain the source baseline", observedAt: new Date().toISOString(), status: "passed", evidenceDigest: store.putArtifact("baseline-observation", before), relevance: "source scope", expectedTransition: "Only approved changes" });
+    Object.assign(draft, ensureHostScopeCheck(draft, id));
+    db.planOperation({ runId: "run", idempotencyKey: "host-context-assignment", kind: "builder-work", intent: { ticketId: workId, before } });
+    db.updateOperation("host-context-assignment", "in_progress");
+    db.updateOperation("host-context-assignment", "confirmed", { result: { after: before } });
+  }
   const review = assessment(draft), contract = assembleContract(draft, draft.requirements, review, "author");
   const budget = store.ensureBudget("run", workId, admission.requirementsDigest, 2, Date.now()); store.putArtifact("semantic-assessment", review); store.retainProgress(budget, "inventory", draft.requirements); if (publish) store.publish(contract, 0, Date.now());
   let sequence = 0, turns = 0, failCoverage = false, sessionId = "actual-builder";
@@ -51,7 +65,8 @@ function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compil
       let value: unknown, tag: string;
       if (policy?.purpose === "contract-acceptance") { tag = "RAFI_QA_ACCEPTANCE"; value = { workId, revision: contract.revision, digest: contract.contentDigest, missingSections: [] }; }
       else { tag = "RAFI_QA_COVERAGE"; if (rotateCoverageSession) { sequence++; sessionId = `actual-builder-compacted-${sequence}`; } const binding = JSON.parse(instruction.split("Exact coverage binding: ")[1]!.split("\n")[0]!); assert.equal(binding.attemptId.length > 0, true); assert.equal(binding.sessionId, "actual-builder"); assert.equal(binding.sourceDigest, captureBuildSource(workspace).digest); assert.equal(binding.inputBasisDigest.length, 64); value = { ...coverage(contract), ...binding, checks: [{ ...coverage(contract).checks[0]!, outcome: failCoverage ? "not-run" : "passed", evidence: [{ procedure: "Inspect regression result", cwd: workspace, runtime: "node20", sourceDigest: binding.sourceDigest, reference: "retained-output" }] }] }; }
-      return { text: `${tag}_START\n${JSON.stringify(value)}\n${tag}_END`, isError: false, costUsd: 0, numTurns: 1 };
+      const payload = tag === "RAFI_QA_COVERAGE" ? { checks: (value as any).checks.map((row: any) => ({ ...row, evidence: row.evidence.map(({ sourceDigest, ...evidence }: any) => evidence) })) } : value;
+      return nativeFixtureTurn(policy, sessionId, payload);
     } };
   return { root, workspace, db, store, contract, admission, adapter, workId, ticket, compact: () => { sequence++; }, turns: () => turns, blockedClaims: () => { failCoverage = true; }, cleanup: () => { db.close(); rmSync(root, { recursive: true, force: true }); } };
 }
@@ -67,11 +82,31 @@ for (const [kind, branch] of [["ticket", false], ["ticket", true], ["synthetic",
     assert.throws(() => f.db.planOperation({ runId: "run", idempotencyKey: "older-caller-without-binding", kind: "build-assignment", intent: { ticketId: f.workId, requirementsDigest: f.admission.requirementsDigest } }), /tagged actual-session contract delivery/);
     const assignment = beginBuildAssignment(f.root, "run", f.workId, f.workspace, "Implement", undefined, f.adapter);
     writeFileSync(join(f.workspace, "product.txt"), "implemented");
-    const response = { text: `STEP_STATUS: done | ticket="${f.workId}"`, isError: false, numTurns: 1, costUsd: 0, turnId: "implementation-turn" };
+    const response = nativeFixtureTurn(nativePolicy(workReportOutput), "actual-builder", { disposition: "modified", evidence: ["Implemented source"], coverage: null, graphMaintenance: null });
     await collectBuilderContractCoverage(f.root, "run", f.workId, f.workspace, f.adapter, assignment.operationId, assignment.instruction, response);
     assert.equal(finishBuildAssignment(f.root, assignment, response, { kind: "done", ticket: f.workId }), undefined);
     const before = f.turns(); await collectBuilderContractCoverage(f.root, "run", f.workId, f.workspace, f.adapter, assignment.operationId, assignment.instruction, response); assert.equal(f.turns(), before);
     assert.equal(f.store.metrics("run").started, 1);
+  } finally { f.cleanup(); }
+});
+
+test("enforced Builder coverage persists host-observed test lifecycle metadata", async () => {
+  const f = fixture();
+  try {
+    await deliverVerificationContract(f.contract, f.store, f.adapter, f.workspace, f.root, "Complete authorized context");
+    const assignment = beginBuildAssignment(f.root, "run", f.workId, f.workspace, "Implement", undefined, f.adapter);
+    const initial = captureBuildSource(f.workspace).digest;
+    writeFileSync(join(f.workspace, "product.txt"), "implemented");
+    const final = captureBuildSource(f.workspace).digest;
+    const observations = [
+      { kind: "node-test" as const, sequence: 0, startedAt: "2026-10-23T00:00:00.000Z", completedAt: "2026-10-23T00:00:01.000Z", outcome: "failed", exitCode: 1, sourceDigest: initial, testPath: "test/product.test.ts" },
+      { kind: "node-test" as const, sequence: 1, startedAt: "2026-10-23T00:00:02.000Z", completedAt: "2026-10-23T00:00:03.000Z", outcome: "completed", exitCode: 0, sourceDigest: final, testPath: "test/product.test.ts" },
+    ];
+    const response = nativeFixtureTurn(nativePolicy(workReportOutput), "actual-builder", { disposition: "modified", evidence: ["Implemented source"], coverage: null, graphMaintenance: null });
+    await collectBuilderContractCoverage(f.root, "run", f.workId, f.workspace, f.adapter, assignment.operationId, assignment.instruction, response, observations, initial);
+    const result = f.db.operation(`builder-coverage:${assignment.operationId}`)?.result as { hostObservationDigest?: string } | undefined;
+    assert.ok(result?.hostObservationDigest);
+    assert.deepEqual(JSON.parse(f.db.getEvidence(result.hostObservationDigest!)!.toString("utf8")), { version: 1, kind: "host-builder-tool-observations", workId: f.workId, operationId: assignment.operationId, observations });
   } finally { f.cleanup(); }
 });
 
@@ -81,7 +116,7 @@ test("Builder coverage accepts a host-observed provider compaction without accep
     await deliverVerificationContract(f.contract, f.store, f.adapter, f.workspace, f.root, "Context");
     const assignment = beginBuildAssignment(f.root, "run", f.workId, f.workspace, "Implement", undefined, f.adapter);
     writeFileSync(join(f.workspace, "product.txt"), "implemented");
-    const response = { text: `STEP_STATUS: done | ticket="${f.workId}"`, isError: false, numTurns: 1, costUsd: 0, turnId: "implementation-turn" };
+    const response = nativeFixtureTurn(nativePolicy(workReportOutput), "actual-builder", { disposition: "modified", evidence: ["Implemented source"], coverage: null, graphMaintenance: null });
     await collectBuilderContractCoverage(f.root, "run", f.workId, f.workspace, f.adapter, assignment.operationId, assignment.instruction, response);
     assert.equal(f.store.metrics("run").started, 1);
   } finally { f.cleanup(); }
@@ -93,7 +128,7 @@ test("completed Builder marker without durable coverage is rejected and its sour
     await deliverVerificationContract(f.contract, f.store, f.adapter, f.workspace, f.root, "Context");
     const assignment = beginBuildAssignment(f.root, "run", f.workId, f.workspace, "Implement", undefined, f.adapter);
     const rejection = finishBuildAssignment(f.root, assignment, { text: 'STEP_STATUS: done | ticket="T1"', isError: false, costUsd: 0, numTurns: 1 }, { kind: "done", ticket: "T1" });
-    assert.match(rejection!, /coverage/); assert.equal(f.db.operation(assignment.operationId)?.status, "confirmed");
+    assert.match(rejection!, /native result/); assert.equal(f.db.operation(assignment.operationId)?.status, "confirmed");
   } finally { f.cleanup(); }
 });
 
@@ -109,13 +144,11 @@ test("certificate issue and consumption bind immutable dispatch, terminal covera
     f.db.commitQaTurnIntent({ version: 2, operationId, runId: "run", ticketId: f.workId, reviewNumber: head.reviewNumber, sessionGeneration: 1, slot: "initial", sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, instructionDigest: f.db.putEvidence("qa", `${instruction}\nImmutable input-basis digest: ${basis.digest}. Coverage must bind this inputBasisDigest.`), intendedAt: at, providerSession: { version: 2, provider: "claude", sessionId, role: "qa", stream: "qa", generation: 1, cwd: f.workspace, configRoot: f.root, createdAt: at, validatedAt: at } }, head.revision);
     head = f.db.qaTicketHead("run", f.workId);
     const result = { ...coverage(f.contract), workId: f.workId, sourceDigest, inputBasisDigest: basis.digest, attemptId, sessionId }; result.checks[0]!.evidence[0]!.sourceDigest = sourceDigest;
-    // Provider-controlled binding fields may be stale or wrong. The host
-    // binds them before storing coverage; certificate validation must compare
-    // against that normalized representation, not the raw provider claims.
-    const providerResult = { ...structuredClone(result), phase: "builder" as const, sourceDigest: "b".repeat(64), inputBasisDigest: "c".repeat(64), attemptId: "provider-attempt", sessionId: "provider-session" };
-    providerResult.checks[0]!.evidence[0]!.sourceDigest = providerResult.sourceDigest;
-    const response = `RAFI_QA_COVERAGE_START\n${JSON.stringify(providerResult)}\nRAFI_QA_COVERAGE_END\nSTEP_STATUS: qa_pass`;
-    const responseDigest = f.db.putEvidence("qa", response), receipt = { version: 2 as const, operationId, dispatch: "completed" as const, providerTurnId: "native-turn", terminalEventObserved: true, sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, rawResponseDigest: responseDigest, cleanedResponseDigest: responseDigest, completedAt: at }; f.db.finishQaTurn(receipt);
+    // Native claims contain no provider-authored host bindings.
+    const claims = { checks: result.checks.map(row => ({ ...row, evidence: row.evidence.map(({ sourceDigest, ...evidence }) => evidence) })) };
+    const native = nativeFixtureTurn(nativePolicy(qaVerdictOutput, { dispatchId: operationId }), sessionId, { kind: "passed", coverage: claims, verifiedInstructionIds: [] });
+    const responseDigest = f.db.putEvidence("qa", "Presentation only"), structuredResponseDigest = f.db.putEvidence("qa", JSON.stringify(native.structured));
+    const receipt = { version: 2 as const, operationId, dispatch: "completed" as const, providerTurnId: "native-turn", terminalEventObserved: true, sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, rawResponseDigest: responseDigest, cleanedResponseDigest: responseDigest, structuredResponseDigest, completedAt: at }; f.db.finishQaTurn(receipt);
     const input = { runId: "run", ticketId: f.workId, qaRevision: head.revision + 1, sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, turnReceiptDigest: qaDigest("turn-receipt", receipt) };
     assert.throws(() => f.db.commitQaPassAttempt(attemptId, input, "Generic pass", head.revision), /tagged contract coverage/); assert.equal(f.db.qaReviewAttempt(attemptId)?.status, "started");
     const binding = { version: 1 as const, revision: 1, contractDigest: f.contract.contentDigest, coverageDigest: f.store.putArtifact("final-coverage", result), attemptId, sessionId };
@@ -125,16 +158,16 @@ test("certificate issue and consumption bind immutable dispatch, terminal covera
   } finally { f.cleanup(); }
 });
 
-for (const scenario of ["isolated", "qa-only", "isolated-baseline", "qa-only-baseline", "stale-qa-only", "missing-qa-only", "changed-scope-qa-only"] as const) test(`canonical contract-bound final review/recovery: ${scenario}`, async () => {
+for (const scenario of ["isolated", "isolated-host-comparison", "isolated-foreign-instruction", "qa-only", "isolated-baseline", "qa-only-baseline", "stale-qa-only", "missing-qa-only", "changed-scope-qa-only"] as const) test(`canonical contract-bound final review/recovery: ${scenario}`, async () => {
   const qaOnly = !scenario.startsWith("isolated"), blocked = scenario.startsWith("stale") || scenario.startsWith("missing") || scenario.startsWith("changed");
   const { execFileSync } = await import("node:child_process");
   const { AsyncQueue } = await import("../src/util/asyncQueue.js");
   const { runIsolatedQa } = await import("../src/qaReview.js");
   const { describeQaRuntimeHandle } = await import("../src/qaRuntime.js");
   const { finalQaRoleInstructions } = await import("../src/qaEffectiveConfig.js");
-  const f = fixture("ticket", false, true, qaOnly, scenario !== "missing-qa-only", scenario.endsWith("baseline")); let reviews = 0;
+  const f = fixture("ticket", false, true, qaOnly, scenario !== "missing-qa-only", scenario.endsWith("baseline"), false, scenario === "isolated-host-comparison"); let reviews = 0;
   try {
-    execFileSync("git", ["init", "-q", f.root]); execFileSync("git", ["add", "."], { cwd: f.root }); execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: f.root });
+    if (scenario !== "isolated-host-comparison") { execFileSync("git", ["init", "-q", f.root]); execFileSync("git", ["add", "."], { cwd: f.root }); execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: f.root }); }
     if (scenario === "isolated-baseline") {
       const sourceDigest = captureBuildSource(f.workspace).digest;
       const claim = { ...coverage(f.contract), phase: "builder", sourceDigest };
@@ -142,7 +175,11 @@ for (const scenario of ["isolated", "qa-only", "isolated-baseline", "qa-only-bas
       for (const [id, boundSource] of [["current-claims", sourceDigest], ["stale-claims", digest]]) {
         f.db.planOperation({ runId: "run", idempotencyKey: id!, kind: "builder-coverage", intent: { workId: f.workId, contractDigest: f.contract.contentDigest } });
         f.db.updateOperation(id!, "in_progress");
-        f.db.updateOperation(id!, "confirmed", { result: { coverageDigest, binding: { sourceDigest: boundSource } } });
+        const reportEvidence = Array.from({ length: 40 }, (_, index) => `Observed source fact ${index}: ${"detail ".repeat(20)}`);
+        reportEvidence.push("rule compliance: verified; token: absent");
+        const nativeReport = nativeFixtureTurn(nativePolicy(workReportOutput), "retained-builder", { disposition: "modified", evidence: reportEvidence, coverage: null, graphMaintenance: null });
+        const implementationDigest = f.db.putEvidence("qa", Buffer.from(JSON.stringify({ structured: nativeReport.structured, rawResponse: "Presentation is not the report" })));
+        f.db.updateOperation(id!, "confirmed", { result: { coverageDigest, implementationDigest, binding: { sourceDigest: boundSource } } });
       }
     }
     if (scenario === "stale-qa-only") f.store.setState("run", f.workId, f.admission.requirementsDigest, "amendment-required", "Authorized rules changed", f.store.head("run", f.workId, f.admission.requirementsDigest).generation);
@@ -159,19 +196,43 @@ for (const scenario of ["isolated", "qa-only", "isolated-baseline", "qa-only-bas
       sessionBoundary: async () => { throw new Error("Fresh initial review needs no replacement"); },
       createQa: async cwd => {
         const events = new AsyncQueue<import("../src/adapters/types.js").BuilderEvent>(), ref = createProviderSessionRef({ provider: "claude", sessionId: "actual-fresh-review", role: "qa", stream: "qa", generation: 0, cwd, configRoot: f.root, source: "observed", validatedAt: new Date().toISOString() });
-        const adapter: BuilderAdapter = { agent: "claude", sessionId: () => ref.sessionId, sessionRef: () => ref, events: () => events, close: async () => events.close(), sendTurn: async instruction => {
+        const adapter: BuilderAdapter = { agent: "claude", sessionId: () => ref.sessionId, sessionRef: () => ref, events: () => events, close: async () => events.close(), sendTurn: async (instruction, policy) => {
           reviews++; assert.ok(instruction.includes("Expired tokens return unauthorized"));
+          assert.match(instruction, /exact allowed list: \[\]/);
+          assert.match(instruction, /return verifiedInstructionIds: \[\]/);
+          if (scenario === "isolated-host-comparison") {
+            const observation = JSON.parse(instruction.split("Host source comparison observed before this review: ")[1]!.split("\n")[0]!);
+            assert.equal(observation.status, "passed");
+            assert.deepEqual(observation.changedPaths, { paths: [], omitted: 0 });
+            assert.equal(observation.finalSourceDigest, captureBuildSource(f.workspace).digest);
+            assert.match(observation.evidenceRef, /^host-qa-comparison-observation:/);
+            assert.equal(f.db.qaTicketHead("run", f.workId).passCertificateId, undefined);
+            assert.match(instruction, /baselineIsExactPrefix true proves every baseline byte/);
+            assert.deepEqual(observation.filePreservation, []);
+            assert.equal(observation.preservationOmitted, 0);
+          }
           // Generate claims solely from what the actual QA provider receives;
           // host fixture access used to mask the missing baseline context.
-          const context = JSON.parse(instruction.split("Full structured review context:\n")[1]!.split("\n")[0]!) as { contract: typeof f.contract; baselineEvidence: Array<{ digest: string; artifact: { procedure: string; result: string } }>; builderClaims: Array<{ operationId: string; implementationResponse?: { digest: string; response: string } }> };
+          const context = JSON.parse(instruction.split("Full structured review context:\n")[1]!.split("\n")[0]!) as { contract: typeof f.contract; baselineEvidence: Array<{ digest: string; artifact: { procedure: string; result: string } }>; builderClaims: Array<{ operationId: string; sourceDigest?: string; currentSource?: boolean; coverage?: unknown; resource?: { path: string }; implementationResponse?: { digest: string; report: unknown } }> };
           const resource = instruction.match(/Complete retained QA context: (.*)\n/)![1]!;
           assert.deepEqual(JSON.parse(readFileSync(resource, "utf8")), context);
           assert.ok(resource.startsWith(realpathSync(cwd) + "/"));
           if (scenario.endsWith("baseline")) { assert.equal(context.baselineEvidence[0]!.digest, context.contract.baseline[0]!.evidenceDigest); assert.equal(context.baselineEvidence[0]!.artifact.procedure, "Verify baseline readiness"); assert.equal(context.baselineEvidence[0]!.artifact.result, "ready"); }
-          assert.deepEqual(context.builderClaims.map(claim => claim.operationId), scenario === "isolated-baseline" ? ["current-claims"] : []);
+          const deliveredClaims = context.builderClaims.map(claim => claim.resource ? JSON.parse(readFileSync(claim.resource.path, "utf8")) : claim);
+          assert.deepEqual(deliveredClaims.map(claim => claim.operationId), scenario === "isolated-baseline" ? ["current-claims", "stale-claims"] : []);
+          if (scenario === "isolated-baseline") {
+            assert.equal(deliveredClaims[0].currentSource, true);
+            assert.ok(deliveredClaims[0].coverage);
+            assert.equal(deliveredClaims[1].currentSource, false);
+            assert.equal(deliveredClaims[1].coverage, undefined, "Historical reports cannot supply current-source coverage");
+            assert.equal(deliveredClaims[1].implementationResponse.availability, "available");
+            assert.equal(deliveredClaims[1].implementationResponse.report.payload.evidence.at(-1), "rule compliance: verified; token: absent");
+            assert.equal(deliveredClaims[1].implementationResponse.report.kind, "completed");
+            assert.equal(deliveredClaims[1].implementationResponse.rawResponse, undefined);
+          }
           const binding = JSON.parse(instruction.split("Coverage binding: ")[1]!.split("\n")[0]!); const basis = instruction.match(/Immutable input-basis digest: ([a-f0-9]{64})/)![1]!;
           const claim = { ...coverage(context.contract), ...binding, version: 1, inputBasisDigest: basis, checks: [{ ...coverage(context.contract).checks[0]!, evidence: [{ procedure: "Independent source inspection and regression output", cwd, runtime: "node20", sourceDigest: binding.sourceDigest, reference: context.contract.baseline[0]?.evidenceDigest ?? "source-inspection-evidence" }] }] };
-          const response = { text: `RAFI_QA_COVERAGE_START\n${JSON.stringify(claim)}\nRAFI_QA_COVERAGE_END\nSTEP_STATUS: qa_pass | summary="Independent verification"`, isError: false, numTurns: 1, costUsd: 0, turnId: "native-review", providerMetadata: { provider: "claude" as const, sessionId: ref.sessionId, sessionRef: ref } }; events.push({ kind: "turn-complete", turnId: response.turnId, result: response }); await new Promise(resolve => setImmediate(resolve)); return response;
+          const response = { ...nativeFixtureTurn(policy, ref.sessionId, { kind: "passed", coverage: { checks: claim.checks.map((row: any) => ({ ...row, evidence: row.evidence.map(({ sourceDigest, ...evidence }: any) => evidence) })) }, verifiedInstructionIds: scenario === "isolated-foreign-instruction" ? ["check"] : [] }), providerMetadata: { provider: "claude" as const, sessionId: ref.sessionId, sessionRef: ref } }; events.push({ kind: "turn-complete", turnId: response.turnId, result: response }); await new Promise(resolve => setImmediate(resolve)); return response;
         } };
         assert.equal((await import("node:fs")).existsSync(join(cwd, ".rafi", "compiled", "qa")), false, "Ignored compiled bundle is absent from disposable source snapshot");
         const effective = resolveEffectiveQaConfiguration(f.root, { make: "claude" });
@@ -184,6 +245,12 @@ for (const scenario of ["isolated", "qa-only", "isolated-baseline", "qa-only-bas
       assert.equal(f.store.budget("run", f.workId, f.admission.requirementsDigest)!.reservations.length, 0);
     } else {
       const result = await pending;
+      if (scenario === "isolated-foreign-instruction") {
+        assert.notEqual(result.outcome, "passed");
+        assert.match(result.detail ?? "", /foreign instruction/);
+        assert.equal(f.db.qaTicketHead("run", f.workId).passCertificateId, undefined);
+        return;
+      }
       assert.equal(result.outcome, "passed", result.detail); assert.equal(reviews, 1); assert.ok(result.passCertificateId);
       const reviewDigest = f.db.qaTicketHead("run", f.workId).reviewBasisDigest!;
       const sample = { contractDigest: f.contract.contentDigest, reviewDigest, assessor: "independent-usefulness-assessor", coverageAdequate: true, checkUsefulness: [{ checkId: "check", result: "Guided verification", observation: "The expiry expectation directed independent source inspection; no defect found is not proof of redundancy" }] };

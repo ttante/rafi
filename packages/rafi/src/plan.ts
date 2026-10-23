@@ -1,6 +1,7 @@
+import { structuredPlanOutput } from "rafi-spec";
 import { loadQaPreparationPolicy } from "ai-foreman/qa-effective-config.js";
 import { qaPreparationDepthDecisionV1Schema } from "rafi-spec";
-import { sendRoleGraphTurn, withGraphDerivedAccess } from "ai-foreman/agent-run.js";
+import { operationInstruction, operationPayload, operationResponse, operationStatus, nativePolicy, sendRoleGraphTurn, withGraphDerivedAccess } from "ai-foreman/agent-run.js";
 import { Command } from "commander";
 import {
   appendFileSync,
@@ -47,6 +48,8 @@ import {
 import { WorkflowDb, type ProjectLease } from "ai-foreman/workflow-db.js";
 import {
   extractStructuredPlanProposal,
+  normalizeStructuredPlanProposal,
+  type StructuredPlanProposalV1,
   materializeStructuredPlan,
   readAndValidateStructuredPlanPair,
   readNamedApprovedPlan,
@@ -139,7 +142,7 @@ export function buildPlanInstruction(opts: PlanInstructionOptions): string {
 
   const mode = opts.planningMode ?? "standard";
   const conversation = mode === "exhaustive"
-    ? `- Use the complete grill-me skill instructions in this same session. Explore material decision branches one question at a time. There is no arbitrary minimum question count.\n- Every grill-me question must use a machine-recognizable shape: exactly one single-select question; the first choice ends with \`(Recommended)\`; at least one meaningful alternative follows; and the exact final choice is \`Stop questions and make the plan now\`. Custom answers remain available.\n- If your runtime provides a native AskUserQuestion-style question tool, use a header beginning with \`Grill-me\`. If no native question tool is available, end the turn with \`STEP_STATUS: needs_input | question="..." choices="recommended option (Recommended)|meaningful alternative|Stop questions and make the plan now"\`.\n- If no useful user-judgment question exists, return the candidate normally. Rafi will independently verify it before approval.`
+    ? `- Use the complete grill-me skill instructions in this same session. Explore material decision branches one question at a time. There is no arbitrary minimum question count.\n- Every grill-me question must use a machine-recognizable shape: exactly one single-select question; the first choice ends with \`(Recommended)\`; at least one meaningful alternative follows; and the exact final choice is \`Stop questions and make the plan now\`. Custom answers remain available.\n- If your runtime provides a native AskUserQuestion-style question tool, use a header beginning with \`Grill-me\`. If no native question tool is available, return a needs-input result with that question and ordered choices.\n- If no useful user-judgment question exists, return the candidate normally. Rafi will independently verify it before approval.`
     : "- Use a standard focused planning conversation. Do not invoke, advertise, or claim use of grill-me.";
 
   return `You are being run by Rafi to create a ticket-maker-ready implementation plan.
@@ -155,10 +158,7 @@ ${sources}
 
 Source intake protocol:
 - Preserve every user source answer verbatim. Do not split it on spaces, commas, or plus signs.
-- You may interpret remembered pending descriptions and request a supported source by returning one JSON object (or an array) between these markers:
-${SOURCE_REQUEST_START}
-{ "type": "local|url|github|gitlab|linear|jira", "description": "exact pending description when resolving one", "label": "human label", "locator": { "...": "normalized non-secret locator fields" } }
-${SOURCE_REQUEST_END}
+- Request supported sources through a native source-request result with a requests array. Each request identifies type (local, url, github, gitlab, linear, or jira), label, normalized non-secret locator fields, and the exact pending description when resolving one.
 - For Linear and Jira, request only team/filter/site/query and environment-variable names. Never request or emit a secret.
 - Rafi retrieves requested content outside this read-only agent and resumes this same session.
 
@@ -194,8 +194,7 @@ Permissions and file rules:
 - Do not edit source files, docs, .tickets, generated artifacts, or configuration.
 - Return a structured proposal only. Rafi assigns plan, slice, and stack identities and deterministically renders Markdown at ${opts.latestPlanPath} with immutable paired history under ${opts.historyDirPath}.
 
-Inspect the repository enough to make the plan concrete. Prefer facts from files over assumptions.${mode === "standard" ? ` If a decision is genuinely blocked, ask one focused question with:
-STEP_STATUS: needs_input | question="..." choices="recommended option|alternative"` : " In exhaustive mode, use only the machine-recognizable grill-me question shape above."}
+Inspect the repository enough to make the plan concrete. Prefer facts from files over assumptions.${mode === "standard" ? ` If a decision is genuinely blocked, return one focused needs-input result with the question and meaningful choices` : " In exhaustive mode, use only the machine-recognizable grill-me question shape above."}
 
 QA preparation planning policy: ${JSON.stringify(opts.qaPreparationPolicy ?? { mode: "legacy" })}. In enforcing mode, select qa_preparation for every slice using this schema: ${JSON.stringify(qaPreparationDepthDecisionV1Schema)}. Standard is the starting policy; Focused requires cited low-risk assessment. Host risk minimums: interaction/compatibility/state/external-dependency=3; authorization/security/migration/data-integrity/concurrency/recovery/deployment=4; unresolved architecture uncertainty=5. The ticket-maker must preserve this decision.
 
@@ -207,15 +206,14 @@ Independent-slice contract:
 - If the user explicitly requires absence testing, preserve that requirement as written and make the permitted verification method concrete. Otherwise, use positive own-slice checks plus the shared project tests and combined-result validation.
 
 Output contract:
+- Every new slice must include verification_version:2 and verification_requirements. Each requirement has a stable local id, summary, timing, one or more argv/procedure methods, expected_evidence, dependencies, and applicability. Use applicability {"kind":"always"} unless execution depends on a closed host probe; the only currently allowed conditional form is {"kind":"host-executable-available","executable":"pnpm|npm|yarn|bun|node|python3|pytest|cargo|go","expected":true|false,"phase":"preimplementation|postimplementation|both"}. A fallback is a separate requirement; never describe its condition only in prose.
 - Cover the planning concepts Goal, Problem Statement, Repo Findings, Locked Decisions, Open Questions, Scope, Out Of Scope, Risks, Rollback Notes, and Ticket-Maker Guidance in the corresponding structured fields. Include a branch/batch strategy for repeated component-library work when relevant.
-- Return exactly one JSON object between ${PLAN_PROPOSAL_START} and ${PLAN_PROPOSAL_END}.
-- Shape: {"version":1,"summary":"...","assumptions":["..."],"implementation_changes":["..."],"acceptance_criteria":["..."],"test_plan":["..."],"slices":[{"local_ref":"S1","retains":"optional existing slice_ref only when revising","title":"...","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"documentation":{"required":false,"targets":[],"criteria":[]},"depends_on":["local_ref"],"source_refs":[{"source_id":"src_...","fingerprint":"64 hex characters","item":"optional item"}]}],"delivery_units":[{"id":"unit-name","slice_refs":["local_ref"],"branch_mode":"current|per-ticket|shared","completion":"pr|auto-merge|direct-merge|none","provider":"auto|github|gitlab|local","pr_ready":false,"merge_method":"squash|merge|rebase","cleanup":false,"depends_on":["unit-id"],"dependency_mode":"combine|wait|stack"}],"stacks":[{"local_ref":"STACK1","retains":"optional existing stack_id only when revising","name":"...","units":["root-unit","child-unit"]}]}.
+- Return the complete proposal in result.payload of the native structured-plan response.
 - Local refs exist only inside the proposal. Never invent plan_id, slice_ref, stack_id, revision, or digest values.
 - Every slice maps to exactly one delivery unit. Use independent non-stacked units when delivery grouping is not otherwise material.
 - Make each slice small enough for \`rafi start --steps ...\` or branch-per-ticket execution. Do not include patches or Markdown.
 
-End with exactly one marker line as the final non-empty line:
-STEP_STATUS: plan_complete | summary="created ticket-maker-ready Rafi plan"`;
+Submit one native structured-plan response. A completed result contains the full proposal and a concise summary; blocked and needs-input results preserve unfinished work.`;
 }
 
 export function buildPlanAgentRunOptions(opts: {
@@ -244,6 +242,7 @@ export function buildPlanAgentRunOptions(opts: {
     label: "rafi plan",
     logPath: opts.logPath,
     instruction: opts.instruction,
+    output: structuredPlanOutput,
     permissionConfig: readOnlyPermissionConfig(),
     sandboxMode: "read-only",
     logEvent: "rafi-plan",
@@ -339,7 +338,7 @@ export function writeValidatedPlanArtifacts(
 }
 
 export function isSuccessfulPlanStatus(kind: string): boolean {
-  return kind === "plan_complete";
+  return kind === "done";
 }
 
 export function validatePlanMarkdown(planMarkdown: string, planningMode: PlanningMode = "standard"): string[] {
@@ -696,7 +695,10 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
     let resumeSessionId = rebuildingLostContinuity ? undefined : opts.resumeSession;
     let run: RoleInstructionRunResult;
     let plan: StructuredPlanV1;
-    let repairAttempts = 0;
+    const savedCorrections = resumedInterview?.decisions.proposalCorrections ?? 0;
+    if (!Number.isSafeInteger(savedCorrections) || Number(savedCorrections) < 0 || Number(savedCorrections) > 3) throw new Error("Saved proposal correction budget is invalid; inspect the planning record before resuming");
+    let repairAttempts = Number(savedCorrections);
+    if (repairAttempts >= 3) return failPlanOutcome(projectDir, workflow, workflowRunId, workflowLease, interview, "The saved planning action exhausted its 3 semantic corrections; inspect the proposal and start a new planning action explicitly", resumeSessionId, brief, planningMode);
     const runInstruction = opts.runInstruction;
     const createPlanner = opts.createPlanner ?? createRoleBuilder;
     const inputHandler = opts.handleInput ?? handlePlanningInput;
@@ -782,6 +784,9 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
         });
       }
       lastSessionId = run.sessionId;
+      if (interview) interview = checkpointInterview(projectDir, interview, {
+        runtime: { runtime: run.runtime, model: run.model, sessionId: run.sessionId },
+      });
       workflow.transition(workflowRunId, { checkpoint: "planner-session-after", state: { sessionId: run.sessionId, runtime: run.runtime, model: run.model }, event: "planner_session" });
       const turn = run.turn;
       if (turn.result.isError) return failPlanOutcome(projectDir, workflow, workflowRunId, workflowLease, interview, "planner turn errored", run.sessionId, brief, planningMode);
@@ -793,14 +798,8 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
         return { status: "blocked", diagnostic, resumeCommand: planResumeCommand(projectDir, brief, run.sessionId, planningMode) };
       }
       if (turn.status.kind === "needs_input") {
-        if (!turn.status.question?.trim()) {
-          resumeSessionId = run.sessionId;
-          nextInstruction = planningMode === "exhaustive"
-            ? `Your needs_input marker omitted its question. Return the same single user-judgment question again using exactly: STEP_STATUS: needs_input | question="..." choices="recommended option (Recommended)|meaningful alternative|Stop questions and make the plan now". Do not inspect the repository again and do not return a proposal yet.`
-            : `Your needs_input marker omitted its question. Return the same focused question again using exactly: STEP_STATUS: needs_input | question="..." choices="recommended option|alternative". Do not inspect the repository again.`;
-          continue;
-        }
-        const input = await inputHandler({ projectDir, output: turn.result.text, question: turn.status.question, choices: turn.status.choices, registry: stagedSources, storage: selectedStorage, interactive: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY) });
+        const response = operationResponse(turn.result, structuredPlanOutput);
+        const input = await inputHandler({ projectDir, sourceRequests: response.result.kind === "source-request" ? response.result.requests : [], output: turn.result.text, question: turn.status.question, choices: turn.status.choices, registry: stagedSources, storage: selectedStorage, interactive: !opts.yes && Boolean(process.stdin.isTTY && process.stdout.isTTY) });
         stagedSources = input.registry;
         if (input.cancelled) {
           await chooseStagedSourceDisposition(projectDir, loadedSources.registry, stagedSources);
@@ -821,19 +820,21 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
         continue;
       }
       if (!isSuccessfulPlanStatus(turn.status.kind)) {
-        const diagnostic = `needs human - ${turn.status.error ?? "planner did not emit plan_complete"}`;
+        const diagnostic = `needs human - ${turn.status.error ?? "planner did not return a completed native proposal"}`;
         console.error(`rafi plan: ${diagnostic}`);
         finishPlanWorkflow(workflow, workflowRunId, workflowLease, "blocked", "planner-needs-human", { error: diagnostic.slice(0, 1000) });
         workflow = undefined;
         return { status: "blocked", diagnostic, resumeCommand: planResumeCommand(projectDir, brief, run.sessionId, planningMode) };
       }
-      const candidate = parseRepairablePlan(turn.result.text, previous, stagedSources, projectDir, selectedWorkMode);
+      const candidate = parseRepairablePlan(operationPayload<StructuredPlanProposalV1>(turn.result, structuredPlanOutput), previous, stagedSources, projectDir, selectedWorkMode);
       if (!candidate.plan) {
         if (repairAttempts >= 3) {
           const diagnostic = `planner returned invalid structured proposal after ${repairAttempts} repair attempts:\n${candidate.diagnostic}`;
           return failPlanOutcome(projectDir, workflow, workflowRunId, workflowLease, interview, diagnostic, run.sessionId, brief, planningMode);
         }
         repairAttempts += 1;
+        if (interview) interview = checkpointInterview(projectDir, interview, { decisions: { ...interview.decisions, proposalCorrections: repairAttempts } });
+        workflow.transition(workflowRunId, { checkpoint: "proposal-correction-intended", event: "proposal_semantic_correction", payload: { attempt: repairAttempts, diagnostic: candidate.diagnostic } });
         resumeSessionId = run.sessionId;
         nextInstruction = buildPlanRepairInstruction(candidate.diagnostic, repairAttempts);
         continue;
@@ -944,7 +945,7 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
         return { status: "cancelled", diagnostic: "revision feedback cancelled", resumeCommand: planResumeCommand(projectDir, brief, run.sessionId, planningMode) };
       }
       resumeSessionId = run.sessionId;
-      nextInstruction = `Revise the proposal using this user feedback: ${String(feedback)}\nReturn the complete replacement proposal using the exact ${PLAN_PROPOSAL_START}/${PLAN_PROPOSAL_END} and STEP_STATUS contract. This is the same planning work session.`;
+      nextInstruction = `Revise the proposal using this user feedback: ${String(feedback)}\nReturn the complete replacement proposal in the native structured-plan response. This is the same planning work session.`;
     }
     if (interview) {
       const drifted = outputsChanged(projectDir, interview.outputs);
@@ -1039,18 +1040,8 @@ async function runPlannerTurn(
   role: RoleBuilder,
   instruction: string,
 ): Promise<RoleInstructionRunResult["turn"]> {
-  let result = await sendRoleGraphTurn(role, instruction, "planning");
-  let status = parsePlannerStepStatus(result.text);
-  if (status.kind === "unknown") {
-    if (!status.error && plannerOutputLooksLikeQuestion(result.text)) {
-      status = { kind: "needs_input", question: lastNonEmptyLine(result.text), choices: ["Continue", "Cancel"] };
-    } else {
-      result = await sendRoleGraphTurn(role, "Protocol correction only: based on the planning work already completed, return exactly one final STEP_STATUS: plan_complete, blocked, or needs_input marker. Do not repeat tools, repository inspection, or source intake.", "planning", {responseOnly:true});
-      status = parsePlannerStepStatus(result.text);
-      if (status.kind === "unknown") status = { ...status, error: `protocol correction exhausted: ${status.error ?? "missing final marker"}` };
-    }
-  }
-  return { result, status };
+  const result = await sendRoleGraphTurn(role, `${instruction}\n\n${operationInstruction(structuredPlanOutput)}`, "planning", nativePolicy(structuredPlanOutput, { purpose: "planning" }));
+  return { result, status: operationStatus(result, structuredPlanOutput) };
 }
 
 function plannerLog(path: string): RoleBuilder["log"] {
@@ -1131,14 +1122,14 @@ function lastNonEmptyLine(text: string): string {
 }
 
 function parseRepairablePlan(
-  output: string,
+  output: StructuredPlanProposalV1,
   previous: StructuredPlanV1 | undefined,
   stagedSources: SourceRegistryConfig,
   projectDir: string,
   workMode: TicketBuildBranchStrategy,
 ): { plan?: StructuredPlanV1; diagnostic: string } {
   try {
-    const proposal = extractStructuredPlanProposal(output);
+    const proposal = normalizeStructuredPlanProposal(output);
     const branchMode = workMode === "current" ? "current" : workMode === "batch" ? "shared" : "per-ticket";
     proposal.delivery_units = proposal.delivery_units.map((unit) => ({
       ...unit,
@@ -1176,8 +1167,7 @@ Validation errors:
 ${diagnostic}
 
 ${qaRiskRepair}${sourceRepair}
-Return a complete replacement proposal only. Use the exact ${PLAN_PROPOSAL_START}/${PLAN_PROPOSAL_END} JSON envelope, preserve the required shape, and end with exactly:
-STEP_STATUS: plan_complete | summary="created ticket-maker-ready Rafi plan"`;
+Return the complete corrected proposal in result.payload of the native structured-plan response. Preserve the approved scope; this is a semantic correction of the reported defects.`;
 }
 
 function failPlanOutcome<T>(

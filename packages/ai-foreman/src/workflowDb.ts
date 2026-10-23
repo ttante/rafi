@@ -2,10 +2,12 @@ import { registerQaGraphJournalWriter, ensureQaGraphJournalGuards } from "./qaDe
 import { canonicalJson } from "./qaProtocolV2.js";
 import { resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
 import { registerGraphDerived, graphDerivedAllowed, currentGraphDerivedAccess, type GraphDerivedAccess } from "./graph/derived.js";
-import { bindCoverageHostFields, parseContractCoverage, validateContractCoverage } from "./qaContractCoverage.js";
+import { bindCoverageHostFields, validateContractCoverage } from "./qaContractCoverage.js";
 import { findHostQaCheck, hostComparisonDigestFromCoverage, hostQaComparisonV1Schema } from "./hostQaComparison.js";
 import { findGraphQaChecks, hostGraphApplicabilityDigestFromCoverage, hostGraphApplicabilityV1Schema } from "./hostGraphApplicability.js";
-import { applyHostQaAugmentations } from "./hostQaAugmentation.js";
+import { assembleFinalQaCoverage } from "./qaCoverageAssembly.js";
+import { retainedQaCommandObservations } from "./qaReviewEvidence.js";
+import { retainedHostBuilderObservations } from "./qaBuilderEvidence.js";
 import { QaPreparationStore, migrateQaPreparation, migrateQaPreparationGuards } from "./qaPreparationStore.js";
 import { GraphStore, migrateGraphStore } from "./graph/storage.js";
 import { reconcileWork, type BuildOwnershipRepairV1 } from "./buildWorkReconciliation.js";
@@ -21,7 +23,7 @@ import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
-import { validateQaFailureReport } from "rafi-spec";
+import { validateQaFailureReport, validateStructuredCandidate, qaVerdictOutput, type QaVerdictPayload, type OperationResponse } from "rafi-spec";
 import { migrateQaHandback, registerHandbackWriter, reportOccurrenceId } from "./qaHandbackMigration.js";
 import type {
   BuildRecoveryDecisionReceipt,
@@ -421,8 +423,8 @@ export class WorkflowDb {
   decisionWorkId(decision:PendingHumanDecision):string|undefined {return decisionWorkId(this.db,decision);}
   finishGuidance(ids: string[], recipient: InstructionRecipient, result: Parameters<typeof finishGuidance>[3]) { for(const id of ids)this.assertInstructionOwner(instruction(this.db,id)!.request.runId); finishGuidance(this.db, ids, recipient, result); }
   builderVerificationContext(runId:string,workId:string,sourceDigest:string) {return builderVerificationContext(this.db,runId,workId,sourceDigest);}
-  verifyBuilderGuidance(ids:string[],certificate:Parameters<typeof verifyBuilderGuidance>[2],response:string,receiptDigest:string) {for(const id of ids)this.assertInstructionOwner(instruction(this.db,id)!.request.runId);return this.atomic(()=>verifyBuilderGuidance(this.db,ids,certificate,response,receiptDigest));}
-  verifyGuidance(ids: string[], certificate: Parameters<typeof verifyGuidance>[2], response: string) { for(const id of ids)this.assertInstructionOwner(instruction(this.db,id)!.request.runId); return this.atomic(()=>verifyGuidance(this.db,ids,certificate,response)); }
+  verifyBuilderGuidance(ids:string[],certificate:Parameters<typeof verifyBuilderGuidance>[2],response:string | readonly string[],receiptDigest:string) {for(const id of ids)this.assertInstructionOwner(instruction(this.db,id)!.request.runId);return this.atomic(()=>verifyBuilderGuidance(this.db,ids,certificate,response,receiptDigest));}
+  verifyGuidance(ids: string[], certificate: Parameters<typeof verifyGuidance>[2], response: string | readonly string[]) { for(const id of ids)this.assertInstructionOwner(instruction(this.db,id)!.request.runId); return this.atomic(()=>verifyGuidance(this.db,ids,certificate,response)); }
   hasQueuedBuilderGuidance(runId:string,workId:string):boolean { return hasQueuedBuilderGuidance(this.db,runId,workId); }
   instruction(id: string) { return instruction(this.db, id); }
   assertFinalizationControls(runId: string, workId: string) { assertFinalizationControls(this.db,runId,workId); }
@@ -1559,7 +1561,14 @@ export class WorkflowDb {
       .run(next.status, next.reportDigest ?? null, json({ findingIds: next.findingIds, namespacedFindingIds: next.namespacedFindingIds, detail: next.detail }), next.updatedAt, attemptId);
     const admission = this.admittedWork(next.runId, next.ticketId);
     const turns = this.db.prepare("SELECT receipt_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND review_number=? AND status='completed'").all(next.runId, next.ticketId, next.reviewNumber) as Array<{ receipt_json: string }>;
-    const terminalBlock = turns.some(row => { const receipt = parseJson(row.receipt_json) as QaTurnReceiptV2; const response = receipt.cleanedResponseDigest && this.getEvidence(receipt.cleanedResponseDigest); return receipt.terminalEventObserved && response && /STEP_STATUS:\s*(blocked|needs_input)\b/.test(response.toString()); });
+    const terminalBlock = turns.some(row => {
+      const receipt = parseJson(row.receipt_json) as QaTurnReceiptV2;
+      const response = receipt.structuredResponseDigest && this.getEvidence(receipt.structuredResponseDigest);
+      if (!receipt.terminalEventObserved || !response) return false;
+      try { const value = validateStructuredCandidate(qaVerdictOutput, JSON.parse(response.toString())) as OperationResponse;
+        return value.result.kind === "blocked" || value.result.kind === "needs-input";
+      } catch { return false; }
+    });
     if (admission && (next.status === "passed" || next.status === "failed" || terminalBlock)) this.qaPreparationStore().metric(next.runId, next.ticketId, admission.requirementsDigest, `metric:review:${attemptId}`, "substantive-review", { status: next.status === "passed" ? "passed" : next.status === "failed" ? "failed" : "blocked", at: now.toISOString(), evidenceRefs: next.reportDigest ? [next.reportDigest] : [] });
     return next;
   }
@@ -1878,7 +1887,10 @@ export class WorkflowDb {
     return row?.receipt_json ? parseJson(row.receipt_json) as HandoffAcceptanceReceiptV2 : undefined;
   }
 
+  enableStructuredCommunication(): void { ensureQaGraphJournalGuards(this.db); }
+
   beginQaTurn(intent: QaTurnIntentV2): void {
+    if (intent.outputContract) this.enableStructuredCommunication();
     const at = intent.intendedAt;
     this.db.transaction(() => {
       const existing = this.db.prepare("SELECT intent_json FROM qa_turns WHERE operation_id=?").get(intent.operationId) as { intent_json: string } | undefined;
@@ -2224,16 +2236,16 @@ export class WorkflowDb {
     if (basis.contractBinding.transportVersion !== 1 || !dispatchedInstruction?.endsWith(envelope) || qaDigest("instruction", dispatchedInstruction.slice(0, -envelope.length)) !== basis.instructionDigest) throw new Error("Actual review dispatch differs from frozen base instruction and tagged input-basis envelope");
     const receipts = this.db.prepare("SELECT receipt_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND source_state_digest=? AND review_basis_digest=? AND status='completed'").all(input.runId, input.ticketId, input.sourceStateDigest, input.reviewBasisDigest) as Array<{ receipt_json: string }>;
     const receipt = receipts.map(row => parseJson(row.receipt_json) as QaTurnReceiptV2).find(row => qaDigest("turn-receipt", row) === input.turnReceiptDigest && row.terminalEventObserved);
-    const response = receipt?.cleanedResponseDigest ? this.getEvidence(receipt.cleanedResponseDigest) : undefined;
-    const retainedProviderCoverage = receipt && response
-      ? bindCoverageHostFields(parseContractCoverage(response.toString()), contract, {
-        phase: "qa",
-        sourceDigest: input.sourceStateDigest,
-        inputBasisDigest: input.reviewBasisDigest,
-        attemptId: binding.attemptId,
-        sessionId: binding.sessionId,
-      })
-      : undefined;
+    const response = receipt?.structuredResponseDigest ? this.getEvidence(receipt.structuredResponseDigest) : undefined;
+    if (!response || !receipt) throw new Error("Pass requires a retained native QA verdict receipt");
+    const nativeReceipt = JSON.parse(response.toString());
+    if (nativeReceipt.dispatchId !== receipt.operationId || nativeReceipt.sessionId !== binding.sessionId) throw new Error("Pass native receipt has a foreign dispatch or session");
+    const verdict = validateStructuredCandidate(qaVerdictOutput, nativeReceipt) as OperationResponse<QaVerdictPayload>;
+    if (verdict.result.kind !== "completed" || verdict.result.payload.kind !== "passed" || !verdict.result.payload.coverage) throw new Error("Pass requires complete coverage in the retained native passed verdict");
+    const retainedProviderCoverage = bindCoverageHostFields(verdict.result.payload.coverage as import("rafi-spec").QaContractCoverageV1, contract, {
+      phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest,
+      attemptId: binding.attemptId, sessionId: binding.sessionId,
+    });
     let retainedCoverage = retainedProviderCoverage;
     let retainedHostComparison: { result: import("./hostQaComparison.js").HostQaComparisonV1; resultDigest: string } | undefined;
     const hostCheck = findHostQaCheck(contract);
@@ -2243,20 +2255,28 @@ export class WorkflowDb {
       const hostResult = hostQaComparisonV1Schema.parse(store.artifact(hostDigest, "host-qa-comparison"));
       retainedHostComparison = { result: hostResult, resultDigest: hostDigest };
     }
+    const commandObservations = [
+      ...retainedQaCommandObservations(this.projectDir, input.runId, input.ticketId, false),
+      ...retainedHostBuilderObservations(this, input.runId, input.ticketId),
+    ];
     const graphCheck = findGraphQaChecks(contract)[0];
+    let retainedHostGraph: { result: import("./hostGraphApplicability.js").HostGraphApplicabilityV1; resultDigest: string } | undefined;
     if (graphCheck) {
       const graphDigest = hostGraphApplicabilityDigestFromCoverage(coverage, graphCheck.id);
       if (!graphDigest) throw new Error("Coverage is missing the host-owned Graphify applicability artifact reference");
       const graphResult = hostGraphApplicabilityV1Schema.parse(store.artifact(graphDigest, "host-graph-applicability"));
-      const retainedHostGraph = { result: graphResult, resultDigest: graphDigest };
-      retainedCoverage = retainedCoverage
-        ? applyHostQaAugmentations({ coverage: retainedCoverage, contract, projectDir: this.projectDir, hostComparison: retainedHostComparison, hostGraph: retainedHostGraph })
-        : undefined;
-    } else if (retainedCoverage && retainedHostComparison) {
-      retainedCoverage = applyHostQaAugmentations({ coverage: retainedCoverage, contract, projectDir: this.projectDir, hostComparison: retainedHostComparison });
+      retainedHostGraph = { result: graphResult, resultDigest: graphDigest };
     }
+    if (retainedCoverage) retainedCoverage = assembleFinalQaCoverage({
+      providerCoverage: retainedCoverage,
+      contract,
+      projectDir: this.projectDir,
+      commandObservations,
+      hostComparison: retainedHostComparison,
+      hostGraph: retainedHostGraph,
+    });
     if (!retainedCoverage) throw new Error("Coverage lacks the retained terminal review receipt and authorized host augmentation");
-    const errors = validateContractCoverage(contract, coverage, { phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest, attemptId: binding.attemptId, sessionId: binding.sessionId });
+    const errors = validateContractCoverage(contract, retainedCoverage, { phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest, attemptId: binding.attemptId, sessionId: binding.sessionId });
     if (errors.length) throw new Error(errors.join("; "));
     if (!receipt || !retainedCoverage || canonicalJson(retainedCoverage) !== canonicalJson(coverage)) throw new Error("Coverage is not bound to the retained terminal review receipt and authorized host augmentation");
   }

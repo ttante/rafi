@@ -1,3 +1,5 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import type { TurnPolicy, TurnResult } from "../src/adapters/types.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -278,6 +280,7 @@ test("Codex native compaction requires explicit completion and a fresh post-comp
   };
   assert.deepEqual(await a.compact(), { ok: true });
   assert.equal((await a.contextUsage())?.percentage, 4);
+  assert.equal(a.contractCompactionSequence(), 1, "manual compaction invalidates earlier contract delivery");
   await a.close();
 });
 
@@ -330,15 +333,17 @@ test("Codex automatic compaction discovers the provider window before restarting
   const internal = a as unknown as {
     usage: { maximum: number };
     ensureThread(): Promise<void>;
-    sendTurnInternal(text: string): Promise<{ isError: boolean; text: string }>;
+    sendTurnInternal(text: string, policy?: TurnPolicy): Promise<TurnResult>;
     restartForAutoCompaction(): Promise<void>;
   };
   let ensured = 0;
   let restarted = 0;
   internal.ensureThread = async () => { ensured += 1; };
-  internal.sendTurnInternal = async () => {
+  internal.sendTurnInternal = async (_text, policy) => {
+    assert.equal(policy?.output?.operation, "session-initialization");
+    assert.equal(policy?.responseOnly, true);
     internal.usage = { maximum: 200 };
-    return { isError: false, text: "context is ready" };
+    return nativeFixtureTurn(policy, "session-1", { ready: true }, "codex");
   };
   internal.restartForAutoCompaction = async () => { restarted += 1; };
   await a.prepareAutoCompaction();

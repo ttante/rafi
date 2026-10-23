@@ -23,7 +23,7 @@ export function describeQaRuntimeHandle(adapter: BuilderAdapter, metadata: QaRun
   // need the machine owner's authentication settings; Codex does not receive
   // that SDK option.
   const settingsSources = adapter.agent === "claude" ? "user" as const : "none" as const;
-  const confinementPolicy = { sandboxMode: "read-only", settingsSources, permissions: readOnlyPermissionConfig(), dependencyProjection: "read-only-symlink", scratch: "sibling-temp-directory" };
+  const confinementPolicy = { sandboxMode: "read-only", settingsSources, permissions: readOnlyPermissionConfig(), dependencyProjection: "read-only-symlink", scratch: adapter.agent === "claude" ? "adapter-owned-private-temp-directory" : "sibling-temp-directory" };
   const confinementBase = {
     version: 2 as const, sourceMode: "read-only" as const, scratchMode: "isolated" as const,
     settingsSources, networkMode: "provider-required" as const,

@@ -199,11 +199,11 @@ export function assertFinalizationControls(db:Database.Database,runId:string,wor
 export function builderVerificationContext(db:Database.Database,runId:string,workId:string,sourceDigest:string):{text:string;ids:string[]} {
   const records=(db.prepare("SELECT instruction_id FROM build_instructions WHERE run_id=? AND work_id=? ORDER BY sequence").all(runId,workId) as Array<{instruction_id:string}>).map(row=>instruction(db,row.instruction_id)!);
   const eligible=records.filter(record=>(record.request.action==="guide_builder"||record.request.action==="supersede"&&!record.deliveries.some(delivery=>delivery.recipient==="qa"))&&record.deliveries.some(delivery=>delivery.recipient==="builder"&&["acknowledged","applied"].includes(delivery.state)&&(delivery.receipt as {postSourceDigest?:string}|undefined)?.postSourceDigest===sourceDigest));
-  return {ids:eligible.map(record=>record.instructionId),text:eligible.length?"\n\nBuilder guidance awaiting independent verification on this exact source:\n"+eligible.map(record=>`Instruction ${record.instructionId}: ${record.request.text}`).join("\n")+"\nOnly for a relevant result independently established with supporting evidence, emit MANAGER_INSTRUCTION_VERIFIED: <instruction ID>. A general pass alone is insufficient.":""};
+  return {ids:eligible.map(record=>record.instructionId),text:eligible.length?"\n\nBuilder guidance awaiting independent verification on this exact source:\n"+eligible.map(record=>`Instruction ${record.instructionId}: ${record.request.text}`).join("\n")+"\nOnly for a relevant result independently established with supporting evidence, include the exact instruction ID in the native qa-verdict payload.verifiedInstructionIds array. A general pass alone is insufficient.":""};
 }
 
-export function verifyBuilderGuidance(db:Database.Database,ids:string[],certificate:{certificateId:string;sourceStateDigest:string;reviewBasisDigest:string},response:string,turnReceiptDigest:string):void {
-  const verified=new Set([...response.matchAll(/^MANAGER_INSTRUCTION_VERIFIED:\s*([A-Za-z0-9_.:-]+)\s*$/gm)].map(match=>match[1]));
+export function verifyBuilderGuidance(db:Database.Database,ids:string[],certificate:{certificateId:string;sourceStateDigest:string;reviewBasisDigest:string},response:string | readonly string[],turnReceiptDigest:string):void {
+  const verified=new Set(typeof response === "string" ? [...response.matchAll(/^MANAGER_INSTRUCTION_VERIFIED:\s*([A-Za-z0-9_.:-]+)\s*$/gm)].map(match=>match[1]) : response);
   for(const id of ids) {
     if(!verified.has(id))continue;
     const record=instruction(db,id)!;
@@ -231,7 +231,7 @@ export function reserveGuidance(db:Database.Database,runId:string,workId:string,
       if (recipient==="qa" && record.deliveries.some(delivery=>delivery.recipient==="builder") && !record.deliveries.some(delivery=>delivery.recipient==="builder"&&["acknowledged","applied","verified"].includes(delivery.state))) throw new BuildControlBoundary("Both-agent guidance is waiting for Builder's scoped response before a fresh QA review");
       selected.push(record);
     }
-    const text = instructionText + (selected.length ? "\n\nAuthorized one-use Manager guidance (mandatory requirements and findings still apply):\n"+selected.map(record=>`Instruction ${record.instructionId} (${record.textDigest}):\n${record.request.text}`).join("\n\n") + (recipient==="qa" ? "\nFor each instruction whose relevant result you independently established on this source, include MANAGER_INSTRUCTION_VERIFIED: <instruction ID> with the supporting verification evidence. A general passing review alone does not verify an unrelated instruction." : "\nReport each instruction ID whose requested action you applied, with evidence; delivery alone is not independent verification.") : "");
+    const text = instructionText + (selected.length ? "\n\nAuthorized one-use Manager guidance (mandatory requirements and findings still apply):\n"+selected.map(record=>`Instruction ${record.instructionId} (${record.textDigest}):\n${record.request.text}`).join("\n\n") + (recipient==="qa" ? "\nFor each instruction whose relevant result you independently established on this source, include the exact instruction ID in payload.verifiedInstructionIds with the supporting verification evidence. A general passing review alone does not verify an unrelated instruction." : "\nReport each instruction ID whose requested action you applied, with evidence; delivery alone is not independent verification.") : "");
     if (reserve) for (const record of selected) setDelivery(db,record.instructionId,{recipient,state:"reserved",operationId:`${operationId}:${record.instructionId}:${recipient}`,sourceDigest,instructionDigest:hash(text)});
     return {text,ids:selected.map(record=>record.instructionId)};
   }).immediate();
@@ -240,8 +240,8 @@ export function finishGuidance(db:Database.Database,ids:string[],recipient:Instr
   db.transaction(()=>{for(const id of ids){const record=instruction(db,id)!;const delivery=record.deliveries.find(delivery=>delivery.recipient===recipient)!;if(delivery.state!=="reserved")throw new Error("Instruction reservation changed");setDelivery(db,id,{...delivery,state:result.submitted===false?"rejected":result.submitted===undefined?"uncertain":result.applied?"applied":result.receipt?"acknowledged":"delivered",receipt:result.receipt});}}).immediate();
 }
 
-export function verifyGuidance(db:Database.Database,ids:string[],certificate:{certificateId:string;sourceStateDigest:string;reviewBasisDigest:string},response:string):void {
-  const verified=new Set([...response.matchAll(/^MANAGER_INSTRUCTION_VERIFIED:\s*([A-Za-z0-9_.:-]+)\s*$/gm)].map(match=>match[1]));
+export function verifyGuidance(db:Database.Database,ids:string[],certificate:{certificateId:string;sourceStateDigest:string;reviewBasisDigest:string},response:string | readonly string[]):void {
+  const verified=new Set(typeof response === "string" ? [...response.matchAll(/^MANAGER_INSTRUCTION_VERIFIED:\s*([A-Za-z0-9_.:-]+)\s*$/gm)].map(match=>match[1]) : response);
   for(const id of ids) {
     if(!verified.has(id))continue;
     const record=instruction(db,id)!;

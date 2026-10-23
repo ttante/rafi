@@ -1,6 +1,6 @@
 import { decisionBelongsToWork } from "./buildInterventions.js";
 import { evidenceRecord, type EvidenceRow, type QaEvidenceSnapshot } from "./qaEvidenceReader.js";
-import { parseQaResponseContract } from "rafi-spec";
+import { parseQaResponseContract, validateStructuredCandidate, qaVerdictOutput, type OperationResponse, type QaVerdictPayload } from "rafi-spec";
 
 export interface QaTicketTimeline {
   counters: { failedReviews: number; passedReviews: number; blockedReviews: number; interruptedReviews: number; pendingReviews: number; malformedResponses: number; corrections: number; remediationFailures: number; uncertainRemediations: number };
@@ -28,7 +28,14 @@ export function buildQaTimeline(snapshot: QaEvidenceSnapshot, workId: string): Q
     if (/correction|repair/.test(slot)) counters.corrections++;
     const bytes = typeof receipt?.cleanedResponseDigest === "string" ? snapshot.blobs.get(receipt.cleanedResponseDigest) : undefined;
     const contract = bytes ? parseQaResponseContract(bytes.toString("utf8")) : undefined;
-    const classification = contract ? contract.valid ? contract.status : "malformed" : "unavailable";
+    let classification = contract ? contract.valid ? contract.status : "malformed" : "unavailable";
+    if (typeof receipt?.structuredResponseDigest === "string") {
+      const nativeBytes = snapshot.blobs.get(receipt.structuredResponseDigest);
+      try {
+        const value = validateStructuredCandidate(qaVerdictOutput, nativeBytes ? JSON.parse(nativeBytes.toString()) : undefined) as OperationResponse<QaVerdictPayload>;
+        classification = value.result.kind === "completed" ? value.result.payload.kind === "passed" ? "qa_pass" : "qa_fail" : value.result.kind;
+      } catch { classification = nativeBytes ? "malformed" : "unavailable"; }
+    }
     if (slot === "initial" && classification === "malformed") counters.malformedResponses++;
     if (slot === "initial" && classification === "blocked") counters.blockedReviews++;
     events.push({ kind: "qa_turn", id: row.operation_id, reviewNumber: row.review_number, slot, status: row.status, classification, responseDigest: receipt?.rawResponseDigest, sequence: Number(row.review_number), order: 1 });

@@ -1,4 +1,4 @@
-import { sendRoleGraphTurn } from "ai-foreman/agent-run.js";
+import { operationPayload, operationInstruction, nativePolicy, sendRoleGraphTurn } from "ai-foreman/agent-run.js";
 import { createHash } from "node:crypto";
 import {
   createRoleBuilder,
@@ -11,9 +11,11 @@ import {
   isGrillMeProviderQuestion,
   type AnsweredProviderQuestion,
 } from "ai-foreman/provider-questions.js";
-import { grillAuditVerdictV1Schema, parseProviderContract } from "rafi-spec";
+import { operationContract, grillAuditVerdictV1Schema, parseProviderContract } from "rafi-spec";
 
 export { GRILL_ME_STOP_CHOICE } from "ai-foreman/provider-questions.js";
+
+export const grillAuditOutput = operationContract("grill-audit", grillAuditVerdictV1Schema);
 
 export const GRILL_AUDIT_START = "RAFI_GRILL_AUDIT_START";
 export const GRILL_AUDIT_END = "RAFI_GRILL_AUDIT_END";
@@ -205,17 +207,11 @@ ${JSON.stringify(input.repositoryContext, null, 2)}
 Validated candidate:
 ${JSON.stringify(input.candidate, null, 2)}
 
-Return exactly one JSON object inside these markers:
-${GRILL_AUDIT_START}
+Return the verdict in result.payload of the native grill-audit response:
 {"status":"complete","evidence":"concrete evidence that no unresolved user judgments remain"}
-${GRILL_AUDIT_END}
-
-Or, only when material user decisions are missing:
-${GRILL_AUDIT_START}
+Or, when material user decisions are missing:
 {"status":"needs_user_input","questions":[{"id":"stable-short-id","question":"one focused question","recommendation":"recommended answer","rationale":"why this is the best default","alternatives":["meaningful alternative"]}]}
-${GRILL_AUDIT_END}
-
-Rules: return one to five highest-impact questions; each has one recommendation and one to three alternatives. Do not include a stop option; Rafi adds it. Do not emit Markdown, commentary, STEP_STATUS, or any text outside the markers.`;
+Return one to five highest-impact questions, each with one recommendation and one to three alternatives. Rafi adds the stop option.`;
 }
 
 export function parseGrillAuditVerdict(output: string): GrillAuditVerdict {
@@ -270,10 +266,10 @@ export async function runIndependentGrillAudit(opts: RunGrillAuditOptions): Prom
       sandboxMode: "read-only",
       onProviderQuestion: () => { interactiveToolAttempted = true; },
     });
-    const result = await sendRoleGraphTurn(role, buildGrillAuditInstruction(opts), "planning-audit");
+    const result = await sendRoleGraphTurn(role, `${buildGrillAuditInstruction(opts)}\n\n${operationInstruction(grillAuditOutput)}`, "planning-audit", nativePolicy(grillAuditOutput, { purpose: "assessment" }));
     if (interactiveToolAttempted) throw new Error("auditor attempted an interactive question tool");
     if (result.isError) throw new Error(`auditor agent failed: ${result.text.slice(0, 300)}`);
-    const verdict = parseGrillAuditVerdict(result.text);
+    const verdict = operationPayload<GrillAuditVerdict>(result, grillAuditOutput);
     state = verdict.status === "complete"
       ? { ...state, auditStatus: "complete", evidence: verdict.evidence, pendingQuestions: [] }
       : { ...state, auditStatus: "needs_user_input", pendingQuestions: verdict.questions };
@@ -351,7 +347,7 @@ Audit answers (preserve exactly):
 ${JSON.stringify(answered, null, 2)}
 User stopped further questions: ${state.stopped ? "yes" : "no"}
 
-Return a full replacement candidate that incorporates these decisions. Preserve all other validated work. Use the original exact proposal envelope and final STEP_STATUS contract. Do not ask more grill-me questions; the one-time independent audit is complete for this exhaustive activation.`;
+Return a full replacement candidate that incorporates these decisions. Preserve all other validated work. Use the host-selected native structured operation and return the complete replacement proposal in its completed payload, with continuity at the top level. Do not append status markers or external proposal delimiters. Do not ask more grill-me questions; the one-time independent audit is complete for this exhaustive activation.`;
 }
 
 function parseAuditQuestion(value: unknown): GrillAuditQuestion {

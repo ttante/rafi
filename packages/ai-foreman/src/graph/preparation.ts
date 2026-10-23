@@ -3,6 +3,8 @@ import { OperationDeadline } from "../util/deadline.js";
 import { graphContext, sendGraphTurn } from "./turn.js";
 import { WorkflowReader } from "../workflowReader.js";
 import type { GraphExchangeV1 } from "rafi-spec";
+import type { OutputContract } from "rafi-spec";
+import { operationInstruction, nativePolicy } from "../structuredOperation.js";
 import { inheritGraphDerivedAccess, type GraphDerivedAccess } from "./derived.js";
 import { digest } from "./util.js";
 
@@ -11,6 +13,7 @@ export async function sendPreparationGraphTurn(adapter: BuilderAdapter, instruct
   phase: "planner" | "prepare" | "assess" | "challenge" | "repair";
   projectDir: string; workspace: string; accessWorkspace?: string; sourceRef: string;
   runId: string; workId: string; operationId: string; remainingMs: number;
+  output?: OutputContract;
 }) {
   const purpose = input.phase === "planner" ? "planning" : input.phase === "assess" ? "preparation-assessment"
     : input.phase === "challenge" ? "preparation-challenge" : "qa-preparation";
@@ -18,12 +21,11 @@ export async function sendPreparationGraphTurn(adapter: BuilderAdapter, instruct
     runId: input.runId, workId: input.workId, operationId: input.operationId,
     logicalTaskId: input.operationId, sourceRef: input.sourceRef, accessWorkspace: input.accessWorkspace,
   });
-  // A preparation repair may need to re-read the frozen snapshot to recover
-  // an otherwise valid artifact. Keep it confined to the read-only
-  // preparation role, but do not force responseOnly: Codex may need a
-  // read-only tool to reconstruct the retained artifact.
-  const policy = { purpose: input.phase === "planner" ? "planning" as const : "preparation" as const,
-    responseOnly: false };
+  // Semantic corrections remain a separately reserved operation. There are
+  // no automatic formatting repairs or hidden re-investigation turns.
+  const basePolicy = { purpose: input.phase === "planner" ? "planning" as const : "preparation" as const, responseOnly: false };
+  const policy = input.output ? nativePolicy(input.output, { ...basePolicy, logicalActionId: input.operationId, journalRunId: input.runId }) : basePolicy;
+  if (input.output) instruction += `\n\n${operationInstruction(input.output)}`;
   const deadline = new OperationDeadline("QA preparation graph exchange", input.remainingMs);
   let expired = false;
   const result = await deadline.run(() => sendGraphTurn(adapter, instruction, context, policy, (text, turnPolicy) => {

@@ -1,8 +1,9 @@
 import type { QaContractCoverageV1, QaVerificationContractV1 } from "rafi-spec";
 import { applyHostQaComparison, type HostQaComparisonV1 } from "./hostQaComparison.js";
 import { applyHostGraphApplicability, type HostGraphApplicabilityV1 } from "./hostGraphApplicability.js";
+import { hostTestSequenceEvidence, type HostBuilderToolObservation } from "./qaBuilderEvidence.js";
 
-type HostCommandObservation = { spanId?: string; kind?: string; outcome?: string; exitCode?: number };
+type HostCommandObservation = Partial<HostBuilderToolObservation> & { spanId?: string; kind?: string; outcome?: string; exitCode?: number };
 
 function commandObservationFor(check: QaVerificationContractV1["checks"][number], observations: HostCommandObservation[]): HostCommandObservation | undefined {
   const command = check.verification.find(method => method.kind === "command");
@@ -16,11 +17,26 @@ function applyHostCommandObservations(coverage: QaContractCoverageV1, contract: 
   const parsed = observations.filter((observation): observation is HostCommandObservation => Boolean(observation && typeof observation === "object"));
   const copy = structuredClone(coverage);
   for (const check of contract.checks) {
+    const row = copy.checks.find(item => item.checkId === check.id);
+    // Observations supplement an independently passed check; a command label or
+    // prose resemblance cannot establish the check's domain semantics.
+    if (!row || row.outcome !== "passed") continue;
+    const historical = /red|test.?first|ordering|historical/i.test(`${check.expectedBehavior} ${(check.expectedEvidence ?? []).join(" ")}`);
+    const testPath = check.verification.find(method => method.kind === "command" && method.argv?.includes("--test"))?.argv?.at(-1);
+    if (historical) {
+      const sequence = hostTestSequenceEvidence(parsed.filter((item): item is HostBuilderToolObservation => typeof item.sequence === "number" && typeof item.sourceDigest === "string" && (item.kind === "node-test" || item.kind === "npm-test")), copy.sourceDigest, testPath);
+      if (!sequence) continue;
+      row.evidence = [...(row.evidence ?? []), {
+        procedure: "Rafi host-retained ordered Builder test sequence",
+        cwd: ".",
+        runtime: "provider tool lifecycle plus host source capture",
+        sourceDigest: copy.sourceDigest,
+        reference: `host-test-sequence:${sequence.map(item => `${item.sequence}:${item.sourceDigest}`).join(",")}`,
+      }];
+      continue;
+    }
     const observation = commandObservationFor(check, parsed);
     if (!observation) continue;
-    const row = copy.checks.find(item => item.checkId === check.id);
-    if (!row || row.outcome === "failed") continue;
-    row.outcome = "passed";
     row.evidence = [...(row.evidence ?? []), {
       procedure: "Rafi host-retained command observation",
       cwd: ".",

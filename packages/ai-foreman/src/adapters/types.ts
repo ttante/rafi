@@ -65,8 +65,9 @@ export interface RuntimeFailure {
 }
 
 export interface TurnResult {
-  /** Final assistant message text — where the STEP_STATUS marker lives. */
+  /** Human display / historical transport only. Never parse for a native operation. */
   text: string;
+  structured?: import("rafi-spec").StructuredResponse;
   isError: boolean;
   numTurns: number;
   costUsd: number;
@@ -87,6 +88,8 @@ export interface TurnResult {
   turnId?: string;
   /** Deferred handback continuity validation; no hidden provider repair. */
   continuityErrors?: string[];
+  /** Validated composed continuity, never parsed from presentation text. */
+  continuity?: import("rafi-spec").ContinuityDelta;
   /** Exact instruction requested by the immediate host caller. */
   hostInstruction?: string;
   /** Exact instruction dispatched to the provider after all wrappers. */
@@ -243,7 +246,7 @@ export interface BuilderAdapter {
   configureQaContractReminder?(reminder: string, onEvent?: (event: { kind: "installed" | "compaction-observed" | "reminder-delivered" | "reminder-retained"; at: string; sessionId?: string }) => void): void;
 
   /** Send one instruction; resolves when that turn completes. */
-  sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: ProviderTurnPurpose }): Promise<TurnResult>;
+  sendTurn(text: string, policy?: TurnPolicy): Promise<TurnResult>;
   /** Synchronous observation through the event owner. Terminal precedes sendTurn resolution. */
   observeEvents?(listener: (event: BuilderEvent) => void): () => void;
   /** Commit a deferred handback checkpoint only after the host validates the turn. */
@@ -305,4 +308,22 @@ export interface BuilderAdapter {
 
   /** Shut the builder down and release resources. */
   close(): Promise<void>;
+}
+
+export interface TurnPolicy {
+  /** Host-only durable receipt owner; wrappers must forward this unchanged. */
+  journaled?: boolean;
+  journalRunId?: string;
+  journalRole?: string;
+  handback?: boolean;
+  responseOnly?: boolean;
+  logicalActionId?: string;
+  dispatchId?: string;
+  parentDispatchId?: string;
+  purpose?: ProviderTurnPurpose;
+  output?: import("rafi-spec").OutputContract;
+  /** Immutable selected provider boundary; no adapter may substitute a schema. */
+  wireContract?: import("rafi-spec").ProviderWireContract<any>;
+  /** Digest of the descriptor that rendered the exact provider instruction. */
+  renderedWireContractDigest?: string;
 }

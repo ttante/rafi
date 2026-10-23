@@ -97,8 +97,7 @@ export function bindUniqueBaselineCheckIds(candidate: QaContractCandidateV1): Qa
 /** Ensure the host-owned scope invariant survives providers that omit or rename it. */
 export function ensureHostScopeCheck(candidate: QaContractCandidateV1, baselineId: string): QaContractCandidateV1 {
   const copy = structuredClone(candidate);
-  const hasHostScope = copy.checks.some(check => check.applicability.decisionOwner === "host"
-    && /scope comparison|product paths|preimplementation baseline/i.test(`${check.expectedBehavior} ${check.expectedEvidence.join(" ")} ${check.applicability.requiredEvidence.join(" ")}`));
+  const hasHostScope = copy.checks.some(check => check.hostKind === "source-scope");
   if (hasHostScope) return copy;
   // Every contract check must trace to at least one authoritative requirement.
   // The host scope invariant is cross-cutting rather than provider-authored, so
@@ -107,8 +106,10 @@ export function ensureHostScopeCheck(candidate: QaContractCandidateV1, baselineI
   // inventing a new requirement outside the authoritative inventory.
   const scopeRequirement = copy.requirements[0]?.id;
   if (!scopeRequirement) throw new Error("Cannot add host scope check without an authoritative requirement");
+  let hostId = "host-scope";
+  while (copy.checks.some(check => check.id === hostId)) hostId += "-host";
   copy.checks.push({
-    id: "host-scope",
+    id: hostId, hostKind: "source-scope",
     requirementRefs: [scopeRequirement],
     origin: "invariant",
     expectedBehavior: "Rafi compares the final product paths with the host-captured preimplementation baseline and rejects unauthorized product changes.",
@@ -202,10 +203,10 @@ export function parsePreparationArtifact<T>(text: string, tag: string, maximum =
   return JSON.parse(artifacts[0]!) as T;
 }
 /** Capture safe absolute snapshot paths before the disposable snapshot is removed. */
-export function mapSnapshotWorkingDirectories(text: string, snapshotPath: string): Record<string, string> {
+export function mapSnapshotWorkingDirectories(text: string | Partial<QaContractCandidateV1>, snapshotPath: string): Record<string, string> {
   const result: Record<string, string> = {};
   try {
-    const draft = parsePreparationArtifact<QaContractCandidateV1>(text, "RAFI_QA_CANDIDATE");
+    const draft = typeof text === "string" ? parsePreparationArtifact<QaContractCandidateV1>(text, "RAFI_QA_CANDIDATE") : text;
     const root = realpathSync(snapshotPath);
     for (const check of draft.checks ?? []) for (const method of check.verification ?? []) {
       if (typeof method.cwd !== "string" || !isAbsolute(method.cwd)) continue;
@@ -214,6 +215,13 @@ export function mapSnapshotWorkingDirectories(text: string, snapshotPath: string
         const path = relative(root, target);
         if (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path) && statSync(target).isDirectory()) result[method.cwd] = path || ".";
       } catch { /* Missing or inaccessible paths remain invalid. */ }
+    }
+    for (const evidence of draft.preparationEvidence ?? []) for (const reference of evidence.references ?? []) {
+      if (!isAbsolute(reference.path)) continue;
+      try {
+        const target = realpathSync(reference.path), path = relative(root, target);
+        if (path && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path) && statSync(target).isFile()) result[reference.path] = path;
+      } catch { /* Unreadable/outside references are rejected during binding. */ }
     }
   } catch { /* Parsing and validation report malformed provider responses. */ }
   return result;
@@ -243,6 +251,10 @@ export function validateCandidate(candidate: QaContractCandidateV1, inventory: R
   for (const input of candidate.inputs) if (input.availability !== "available" || !/^[a-f0-9]{64}$/.test(input.digest)) issues.push(`Unavailable/invalid input ${input.id}`);
   for (const req of candidate.requirements) {
     if (!inputs.has(req.inputRef) || !req.statement?.trim() || req.digest !== contractDigest("statement", req.statement)) issues.push(`Invalid source/statement ${req.id}`);
+    if (req.verificationIntent !== undefined && req.verificationIntentDigest !== contractDigest("verification-intent-v2", req.verificationIntent)) {
+      issues.push(`Invalid V2 verification intent ${req.id}`);
+    }
+    if (req.verificationIntent === undefined && req.verificationIntentDigest !== undefined) issues.push(`Unexpected V2 verification intent digest ${req.id}`);
     if (req.conflict) issues.push(`Unresolved requirement conflict ${req.id}`);
     if (req.authority === "proposed" && req.obligation === "mandatory") issues.push(`Proposed scope cannot be mandatory ${req.id}`);
     const rows = candidate.coverage.filter(row => row.requirementId === req.id);

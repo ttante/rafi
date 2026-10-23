@@ -1,5 +1,6 @@
-import { sendRoleGraphTurn } from "ai-foreman/agent-run.js";
-import { buildScopeRevision, planApprovalBinding } from "ai-foreman/build-approval.js";
+import { guidedRecoveryOutput } from "rafi-spec";
+import { sendRoleGraphTurn, nativePolicy, operationInstruction, operationResponse } from "ai-foreman/agent-run.js";
+import { buildScopeRevision, planApprovalBinding, frozenWorkApprovalBinding } from "ai-foreman/build-approval.js";
 import { HumanDecisionCancelled, servicePendingHumanDecisions } from "ai-foreman/human-decision.js";
 import { addBuildRecoveryOptions } from "./buildRecoveryOptions.js";
 import { ResumeSpawnError, resumeExitCode, type ResumeLaunchResult, type ResumeLaunchContext } from "./resumeLauncher.js";
@@ -30,7 +31,7 @@ import {
 } from "ai-foreman/build-runs.js";
 import { HandoffService } from "ai-foreman/handoffs.js";
 import { createRoleBuilder, readOnlyPermissionConfig } from "ai-foreman/agent-run.js";
-import { continuityInstruction, parseContinuityDelta } from "ai-foreman/continuity.js";
+import { validateContinuityDelta } from "ai-foreman/continuity.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import { canonicalizeQaRecoveryRequirements, createQaRecoveryPacket, loadQaRecoveryPacket, recoverPendingQaRecoveryPublications, type QaRecoveryPacket } from "ai-foreman/qa-recovery.js";
 import { stopCause, type BuildRecoveryDecisionReceipt, type BuildRecoveryMode, type BuildRunRecordV2, type ContinuityDelta, type ProviderSessionRefV1, type ResolvedAgentSettings } from "rafi-spec";
@@ -562,11 +563,16 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         handoffGeneration = staged.manifest.generation;
         handoffDigest = staged.lineage.manifestDigest;
       }
-      launchAuthority = db.admitLeasedBuild(mutationLease);
       const executionTickets = requestedRecoveryTicket || pendingQaProtocolTicket
         ? [String(opts.ticket)]
         : [...selected.progress.remainingTickets.length ? selected.progress.remainingTickets : selected.tickets];
-      const boundPlanApproval = planApprovalBindingOrUndefined(root, executionTickets);
+      const syntheticScope = executionTickets.length > 0 && executionTickets.every(id => db.admittedWork(selected!.runId, id)?.kind === "synthetic");
+      const frozenWorkApproval = syntheticScope ? frozenWorkApprovalBinding(root, selected.runId, executionTickets) : undefined;
+      // Fail before launch rather than persisting an unusable automatic approval.
+      const boundPlanApproval = !syntheticScope && executionTickets.length
+        ? planUpdateApproval === "auto" ? planApprovalBinding(root, executionTickets) : planApprovalBindingOrUndefined(root, executionTickets)
+        : undefined;
+      launchAuthority = db.admitLeasedBuild(mutationLease);
       receipt = {
         version: 1,
         mode,
@@ -586,6 +592,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         ...((opts.agent || opts.model) ? { requestedSuccessor: { ...(opts.agent ? { agent: String(opts.agent) as "claude" | "codex" } : {}), ...(opts.model ? { model: String(opts.model) } : {}) } } : {}),
         planUpdateApproval,
         planUpdateApprovalSource,
+        ...(frozenWorkApproval ? { frozenWorkApproval } : {}),
         ...(boundPlanApproval ? { planApproval: { ...boundPlanApproval, approvedAt: new Date().toISOString() } } : {}),
         decidedAt: new Date().toISOString(),
       };
@@ -806,22 +813,26 @@ async function collectGuidedCheckpoint(input: GuidedCheckpointInput): Promise<Co
         "Treat an in-flight operation as unknown unless a durable receipt or host fact proves its result.",
         `Human guidance: ${String(guidance)}`,
         "Return a repaired cumulative state. Do not claim work or evidence that is not supported by the checkpoint, host facts, repository inspection, or human guidance.",
-        continuityInstruction(),
+        operationInstruction(guidedRecoveryOutput) + " Include a non-null continuity object.",
       ].join("\n\n") : [
         roleBoundary,
         `Human correction: ${String(guidance)}`,
         "Revise the proposed cumulative checkpoint and return it again.",
-        continuityInstruction(),
+        operationInstruction(guidedRecoveryOutput) + " Include a non-null continuity object.",
       ].join("\n\n");
       first = false;
-      const result = await sendRoleGraphTurn(recovery, prompt, "guided-recovery");
+      const result = await sendRoleGraphTurn(recovery, prompt, "guided-recovery", nativePolicy(guidedRecoveryOutput, { journalRunId: input.run.runId }));
       if (result.isError) {
         console.warn(`rafi build:resume: ${input.role} recovery turn failed; provide correction or cancel: ${result.text.slice(0, 240)}`);
         continue;
       }
-      const parsed = parseContinuityDelta(result.text);
-      if (!parsed.delta) {
-        console.warn(`rafi build:resume: recovery agent returned an invalid checkpoint (${parsed.error?.problems.join("; ")}); provide guidance to repair it`);
+      let parsed: { delta: ReturnType<typeof validateContinuityDelta> };
+      try {
+        const response = operationResponse(result, guidedRecoveryOutput);
+        if (response.result.kind !== "completed") throw new Error(`Recovery returned ${response.result.kind}`);
+        parsed = { delta: validateContinuityDelta(response.continuity) };
+      } catch (error) {
+        console.warn(`rafi build:resume: recovery checkpoint was rejected (${String(error)}); provide guidance to repair it`);
         continue;
       }
       console.log("rafi build:resume guided checkpoint candidate:");

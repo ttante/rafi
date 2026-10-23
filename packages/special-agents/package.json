@@ -33,7 +33,7 @@
     "test": "tsx --test test/*.test.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "rafi-spec": "0.8.18",
@@ -41,7 +41,7 @@
     "yaml": "^2.5.1"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@types/node": "^24.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

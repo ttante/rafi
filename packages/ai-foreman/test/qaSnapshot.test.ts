@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -62,6 +62,34 @@ test("async disposable QA snapshot reproduces tracked, staged, binary, and untra
       assert.equal(readFileSync(join(root, "tracked.txt"), "utf8"), "after\n");
       assert.ok(progress.some((entry) => entry.includes("creating independent review repository")));
       assert.ok(progress.some((entry) => entry.includes("checking QA file changes")));
+    } finally {
+      await snapshot.remove();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("async disposable QA snapshot supports an initialized repository with no commit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-qa-no-head-test-"));
+  try {
+    git(root, "init", "-q");
+    writeFileSync(join(root, ".gitignore"), "node_modules/\nvendor/\n");
+    writeFileSync(join(root, "app.txt"), "builder source\n");
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    writeFileSync(join(root, "node_modules", "tool.txt"), "runtime dependency\n");
+    mkdirSync(join(root, "vendor"), { recursive: true });
+    writeFileSync(join(root, "vendor", "runtime.txt"), "ignored runtime\n");
+
+    const snapshot = await createDisposableQaSnapshotAsync(root);
+    try {
+      assert.equal(snapshot.frozenState.head, "unavailable");
+      assert.equal(readFileSync(join(snapshot.path, "app.txt"), "utf8"), "builder source\n");
+      assert.equal(readFileSync(join(snapshot.path, "node_modules", "tool.txt"), "utf8"), "runtime dependency\n");
+      assert.equal(readFileSync(join(snapshot.path, "vendor", "runtime.txt"), "utf8"), "ignored runtime\n");
+      assert.deepEqual(await snapshot.qaChanges(), []);
+      writeFileSync(join(snapshot.path, "app.txt"), "QA changed it\n");
+      assert.deepEqual(await snapshot.qaChanges(), ["app.txt"]);
     } finally {
       await snapshot.remove();
     }

@@ -1,4 +1,5 @@
 import type { BuilderAdapter, TurnResult } from "../adapters/types.js";
+import { journalStructuredDispatch } from "../structuredOperation.js";
 import { WorkflowDb } from "../workflowDb.js";
 import { WorkflowReader } from "../workflowReader.js";
 import { canonical, bytesDigest, digest } from "./util.js";
@@ -34,12 +35,13 @@ export async function dispatchWithGraphAccess(root: string, adapter: BuilderAdap
   protect([text]);
   assertAccess();
   try {
-    const result = await withGraphDerivedAccess(grants, () => dispatch(text, policy));
+    const result = await withGraphDerivedAccess(grants, () => policy?.output && writable
+      ? journalStructuredDispatch(root, adapter, text, policy, dispatch) : dispatch(text, policy));
     // Recovery may reveal or replace the native session during dispatch. Its
     // retained history must be checked before the response leaves this boundary.
     for (const access of retainedSessionGrants(root, adapter))
       if (!grants.some(g => canonical(g) === canonical(access))) grants.push(access);
-    protect([text, result.text, result.cleanedResponse, result.rawResponse, result.providerInstruction]);
+    protect([text, result.text, result.cleanedResponse, result.rawResponse, result.providerInstruction, result.structured ? JSON.stringify(result.structured) : undefined]);
     assertAccess();
     return result;
   } finally { inheritGraphDerivedAccess(grants); protect([]); }

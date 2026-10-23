@@ -18,8 +18,8 @@ export interface GraphPendingTask {
 }
 /** A completed editing assignment plus host-observed source change is required.
  * Changed bytes alone are deliberately insufficient to establish this trigger. */
-export function queueGraphMaintenance(root: string, workspace: string, logicalTaskId: string, response: string, sourceChanged: boolean): void {
-  if (!sourceChanged || !response.split(/\r?\n/).some(line => line.trim() === GRAPH_CHANGE_SIGNAL))
+export function queueGraphMaintenance(root: string, workspace: string, logicalTaskId: string, response: string | boolean, sourceChanged: boolean): void {
+  if (!sourceChanged || !(typeof response === "boolean" ? response : response.split(/\r?\n/).some(line => line.trim() === GRAPH_CHANGE_SIGNAL)))
     return;
   const effective = loadGraphConfig(root);
   if (!effective.enabled || effective.config?.maintenance !== "selective")

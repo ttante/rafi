@@ -93,6 +93,14 @@
       "types": "./dist/workflowReader.d.ts",
       "default": "./dist/workflowReader.js"
     },
+    "./process-identity.js": {
+      "types": "./dist/processIdentity.d.ts",
+      "default": "./dist/processIdentity.js"
+    },
+    "./tickets/reset.js": {
+      "types": "./dist/tickets/reset.d.ts",
+      "default": "./dist/tickets/reset.js"
+    },
     "./ticket-history-reader.js": {
       "types": "./dist/ticketHistoryReader.d.ts",
       "default": "./dist/ticketHistoryReader.js"
@@ -295,7 +303,7 @@
     "cli"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "packageManager": "pnpm@10.2.1",
   "optionalDependencies": {
@@ -305,7 +313,7 @@
     "@clack/prompts": "^1.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
-    "better-sqlite3": "^12.10.0",
+    "better-sqlite3": "^13.0.3",
     "commander": "^12.1.0",
     "ignore": "7.0.5",
     "luxon": "^3.7.2",
@@ -319,7 +327,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/luxon": "^3.7.1",
-    "@types/node": "^20.14.0",
+    "@types/node": "^24.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

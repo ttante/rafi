@@ -29,7 +29,20 @@ function section(marker: string, content: string): string {
 
 // ── Default tracker-rules content ─────────────────────────────────────────────
 
-export function renderTrackerRules(progressDoc = "docs/ticket-progress.md"): string {
+const RAFI_TRACKER_RULES_START = "<!-- rafi:tracker-rules:start -->";
+const RAFI_TRACKER_RULES_END = "<!-- rafi:tracker-rules:end -->";
+
+const LEGACY_NATIVE_RESULT_PROTOCOL = `## Native result protocol
+When Rafi is running this project, submit the host-selected structured JSON result.
+Use its declared summary, evidence, coverage, and continuity fields; do not append separate status markers.
+Rafi binds the assigned ticket identity and controls completion after independent QA.
+Use \`foreman tickets discover\` for newly discovered work during a build run.`;
+
+function managedNativeResultProtocol(): string {
+  return `${RAFI_TRACKER_RULES_START}\n${LEGACY_NATIVE_RESULT_PROTOCOL}\n${RAFI_TRACKER_RULES_END}`;
+}
+
+function renderLegacyTrackerRules(progressDoc: string): string {
   return `# Tracker Rules
 
 ## Purpose
@@ -61,11 +74,42 @@ Use \`foreman tickets discover --summary "..." --rationale "..."\`.
 Do not manually edit generated sections of \`${progressDoc}\`.
 Use the \`foreman tickets\` commands instead.
 
-## STEP_STATUS protocol
-When Foreman is running this project, include the ticket ID in your done marker:
-  STEP_STATUS: done | ticket="T001" summary="implemented the feature"
-Use \`foreman tickets discover\` for newly discovered work during a build run.
+${LEGACY_NATIVE_RESULT_PROTOCOL}
 `;
+}
+
+export function renderTrackerRules(progressDoc = "docs/ticket-progress.md"): string {
+  return renderLegacyTrackerRules(progressDoc).replace(LEGACY_NATIVE_RESULT_PROTOCOL, managedNativeResultProtocol());
+}
+
+export type TrackerRulesMigration =
+  | { disposition: "replaced-legacy" | "updated-managed-block"; content: string }
+  | { disposition: "unchanged"; content: string };
+
+/**
+ * Upgrade only Rafi text that can be identified exactly. Historical whole-file
+ * rules are replaced only when unmodified; otherwise just an exact historical
+ * native-result section can be upgraded. User additions and altered text stay
+ * byte-for-byte intact.
+ */
+export function migrateTrackerRules(content: string, progressDoc = "docs/ticket-progress.md"): TrackerRulesMigration {
+  const current = renderTrackerRules(progressDoc);
+  if (content.trim() === renderLegacyTrackerRules(progressDoc).trim()) {
+    return { disposition: "replaced-legacy", content: current };
+  }
+  const managed = new RegExp(`${escapeRegExp(RAFI_TRACKER_RULES_START)}[\\s\\S]*?${escapeRegExp(RAFI_TRACKER_RULES_END)}`);
+  if (managed.test(content)) {
+    const next = content.replace(managed, managedNativeResultProtocol());
+    return next === content ? { disposition: "unchanged", content } : { disposition: "updated-managed-block", content: next };
+  }
+  if (content.includes(LEGACY_NATIVE_RESULT_PROTOCOL)) {
+    return { disposition: "updated-managed-block", content: content.replace(LEGACY_NATIVE_RESULT_PROTOCOL, managedNativeResultProtocol()) };
+  }
+  return { disposition: "unchanged", content };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export const DEFAULT_TRACKER_RULES = renderTrackerRules();

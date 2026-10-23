@@ -1,3 +1,4 @@
+import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
 import { runAuthorizedQa as runIsolatedQa } from "./helpers/workAdmission.js";
 import { admitFixtureWork } from "./helpers/workAdmission.js";
 // Desired invariants converted from all 26 October 2026 defect characterizations.
@@ -62,7 +63,7 @@ for (const scenario of [
       const builder: BuilderAdapter = {
         observeEvents: listener => { observers.add(listener); return () => { observers.delete(listener); }; },
         agent: "codex", sessionId: () => ref.sessionId, sessionRef: () => ref, async *events() { yield* events; }, close: async () => {},
-        sendTurn: async (prompt): Promise<TurnResult> => {
+        sendTurn: async (prompt, policy): Promise<TurnResult> => {
           prompts.push(prompt);
           if (prompt.startsWith("Continuity protocol repair only.")) {
             const text = `RAFI_CONTINUITY_DELTA: ${JSON.stringify(baselineContinuityDelta())}`;
@@ -71,7 +72,7 @@ for (const scenario of [
           if (!envelope) {
             const handoff = /QA failure handoff ID: ([a-f0-9]{64})/.exec(prompt)?.[1];
             assert.ok(handoff);
-            envelope = [START, JSON.stringify({ version: 2, handoff_id: handoff, summary: scenario === "disputed" ? "Valid finding, registry unavailable, no fix possible" : "Remediation reported", findings: [{ finding_key: refs[0]!.findingKey, raw_id: "QA-1", disposition: scenario === "disputed" ? "disputed" : "fixed", changes: ["No source change in this diagnostic fixture"], evidence: "Registry unavailable", verification: [{ check: "install", outcome: "not_run", evidence: "Registry unavailable" }] }], observations: [] }), END, 'STEP_STATUS: done | summary="reported"'].join("\n");
+            envelope = [START, JSON.stringify({ version: 3, handoff_id: handoff, summary: scenario === "disputed" ? "Valid finding, registry unavailable, no fix possible" : "Remediation reported", findings: [{ finding_key: refs[0]!.findingKey, raw_id: "QA-1", disposition: scenario === "disputed" ? "disputed" : "fixed", changes: ["No source change in this diagnostic fixture"], evidence: "Registry unavailable", verification: [{ check: "install", outcome: "not_run", evidence: "Registry unavailable" }] }], observations: [] }), END, 'STEP_STATUS: done | summary="reported"'].join("\n");
           }
           const correction = prompts.length > 1;
           if (correction && scenario === "correction-dispatch-error") throw new Error("fixture correction connection lost");
@@ -85,7 +86,10 @@ for (const scenario of [
             : correction && scenario === "trailing-brace" ? `${envelope}}` : envelope;
           if (scenario === "wrapped-valid") text = text.replace("STEP_STATUS:", `RAFI_CONTINUITY_DELTA: ${JSON.stringify(baselineContinuityDelta())}\nSTEP_STATUS:`);
           const reportedRef = scenario === "foreign-turn-metadata" ? { ...ref, sessionId: "foreign-session" } : ref;
-          const result: TurnResult = { text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: correction && (scenario === "errored-correction" || scenario === "wrapped-repair-error"), numTurns: 1, costUsd: 0, turnId: !correction && scenario === "missing-initial-turn" ? undefined : `turn-${prompts.length}`, providerMetadata: { provider: "codex", sessionId: reportedRef.sessionId, sessionRef: reportedRef }, ...(scenario === "failure-metadata" ? { failure: { runtime: "codex" as const, phase: "turn" as const, category: "network" as const, executable: "fixture", cwd: root, diagnostics: "fixture failure despite isError=false", dispatchState: "unknown" as const } } : {}) };
+          const result: TurnResult = { ...nativeFixtureFromText(policy, reportedRef.sessionId, text, "codex"), text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: correction && (scenario === "errored-correction" || scenario === "wrapped-repair-error"), numTurns: 1, costUsd: 0, turnId: !correction && scenario === "missing-initial-turn" ? undefined : policy?.dispatchId, providerMetadata: { provider: "codex", sessionId: reportedRef.sessionId, sessionRef: reportedRef }, ...(scenario === "failure-metadata" ? { failure: { runtime: "codex" as const, phase: "turn" as const, category: "network" as const, executable: "fixture", cwd: root, diagnostics: "fixture failure despite isError=false", dispatchState: "unknown" as const } } : {}) };
+          if (correctionScenarios.has(scenario) && !["prologue", "trailing-brace", "needs-input", "missing-initial-turn"].includes(scenario)) {
+            result.structured = { state: "rejected", reason: "invalid-contract", detail: "Fixture native contract violation", dispatchId: policy!.dispatchId! };
+          }
           emit({ kind: "turn-complete", result, turnId: result.turnId });
           return result;
         },
@@ -113,7 +117,7 @@ for (const scenario of [
       const elapsedMs = performance.now() - started;
       const noDispatch = scenario === "pre-dispatch-drift" || scenario === "wrong-worktree";
       const oneTurn = ["missing-initial-turn", "needs-input"].includes(scenario);
-      assert.equal(prompts.length, noDispatch ? 0 : !oneTurn && (correctionScenarios.has(scenario) || scenario === "wrapped-repair-error") ? 2 : 1);
+      assert.equal(prompts.length, noDispatch ? 0 : 1);
       assert.equal(observers.size, 0, "turn subscriptions must be released");
       const finalDb = new WorkflowDb(root);
       try {
@@ -129,7 +133,7 @@ for (const scenario of [
         }
         assert.equal(thrown, undefined);
         assert.ok(result);
-        const accepted = ["valid", "wrapped-valid", "disputed", "prologue", "restart-budget", "restart-identical-report", "replay-completed"].includes(scenario);
+        const accepted = ["valid", "wrapped-valid", "disputed", "prologue", "trailing-brace", "restart-budget", "restart-identical-report", "replay-completed"].includes(scenario);
         assert.equal(result.ok, accepted, result.detail);
         if (noDispatch) {
           assert.equal(finalDb.qaRemediationAttempts("run", ticket.id).length, 0);
@@ -147,14 +151,14 @@ for (const scenario of [
         }
         assert.equal(receipt.qaApproved, false);
         if (scenario === "initial-session-switch") assert.ok(receipt.rawResponseDigest, "rejected response must be retained");
-        if (["correction-session-switch", "foreign-turn-metadata", "initial-session-switch", "missing-initial-turn", "errored-correction", "failure-metadata", "wrapped-repair-error", "correction-dispatch-error", "correction-capture-error"].includes(scenario)) assert.equal(result.outcome, "delivery-uncertain");
-        if (scenario === "correction-capture-error") { assert.ok(receipt.rawResponseDigest); assert.match(receipt.sourceCaptureError, /git/i); }
-        if (scenario.startsWith("correction-tool-")) { assert.equal(result.ok, false); assert.match(result.detail!, /used tools/); }
-        if (scenario === "correction-source-change") assert.equal(handoff.state, "recheck-required");
-        if (scenario === "blocked" || scenario === "blocked-correction") { assert.equal(result.outcome, "blocked"); assert.match(result.detail!, /Registry DNS unavailable/); }
+        if (["foreign-turn-metadata", "initial-session-switch", "missing-initial-turn", "failure-metadata", "wrapped-repair-error"].includes(scenario)) assert.equal(result.outcome, "delivery-uncertain");
+        if (correctionScenarios.has(scenario) && !["prologue", "trailing-brace", "needs-input", "missing-initial-turn"].includes(scenario)) {
+          assert.equal(result.outcome, "response-invalid");
+          assert.equal(prompts.length, 1, "Malformed native output cannot trigger a format-repair dispatch");
+        }
+        if (scenario === "blocked") { assert.equal(result.outcome, "blocked"); assert.match(result.detail!, /Registry DNS unavailable/); }
         if (scenario === "needs-input") { assert.equal(result.outcome, "needs-input"); assert.match(result.detail!, /Which registry/); assert.equal(finalDb.pendingHumanDecisions("run").length, 1); }
-        if (scenario === "prologue") { assert.match(prompts[1]!, /first non-empty/); assert.ok(turns[0]!.parserErrors?.length); }
-        if (scenario === "trailing-brace") { assert.match(result.detail!, /malformed STEP_STATUS field near: }/); assert.equal(result.providerTurnId, "turn-2"); }
+        if (["prologue", "trailing-brace"].includes(scenario)) assert.equal(prompts.length, 1, "Presentation text has no protocol authority");
         if (accepted) { assert.equal(finalDb.qaTicketHead("run", ticket.id).state, "recheck-required"); assert.equal(result.outcome, "remediation-reported"); }
         t.diagnostic(JSON.stringify({ scenario, elapsedMs: Math.round(elapsedMs), turns: prompts.length, promptBytes: prompts.map(p => Buffer.byteLength(p)), ok: result.ok, outcome: result.outcome }));
       } finally { finalDb.close(); }
@@ -200,9 +204,9 @@ function failingQaHandle(cwd: string, reviewReport: QaFailureReportV1): QaSessio
       }
     },
     close: async () => { closed = true; wake?.(); },
-    sendTurn: async prompt => {
+    sendTurn: async (prompt, policy) => {
       const text = `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify(reviewReport)}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="Lockfile missing"`;
-      const result: TurnResult = { text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: false, numTurns: 1, costUsd: 0, turnId: "resumed-qa-turn", providerMetadata: { provider: "codex", sessionId: ref.sessionId, sessionRef: ref } };
+      const result: TurnResult = { ...nativeFixtureFromText(policy, ref.sessionId, text, "codex"), text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: false, numTurns: 1, costUsd: 0, turnId: policy?.dispatchId, providerMetadata: { provider: "codex", sessionId: ref.sessionId, sessionRef: ref } };
       queue.push({ kind: "turn-complete", result, turnId: result.turnId });
       wake?.();
       return result;

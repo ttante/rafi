@@ -1,10 +1,13 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy } from "../src/structuredOperation.js";
+import { qaVerdictOutput } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ContinuityDelta, ProviderSessionRefV1 } from "rafi-spec";
-import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/types.js";
+import type { BuilderAdapter, BuilderEvent, TurnPolicy, TurnResult } from "../src/adapters/types.js";
 import { HANDOFF_ACCEPTED, HandoffAcceptanceError, HandoffService } from "../src/handoffs.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { AsyncQueue } from "../src/util/asyncQueue.js";
@@ -22,11 +25,13 @@ class Successor implements BuilderAdapter {
     this.ref = { version: 1, provider: "codex", sessionId: "successor", role: "qa", stream: "qa", generation: 0,
       cwd: projectDir, configRoot: projectDir, source: "observed", createdAt: new Date(0).toISOString(), validatedAt: new Date(0).toISOString() };
   }
-  async sendTurn(instruction: string): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: TurnPolicy): Promise<TurnResult> {
     this.calls++;
     const reported = this.mode === "mismatch" ? { ...this.ref, sessionId: "different-session" } : this.ref;
-    const result: TurnResult = { text: acceptedText, isError: this.mode === "error", numTurns: 1, costUsd: 0,
-      turnId: `turn-${this.calls}`, hostInstruction: instruction, providerInstruction: instruction, rawResponse: acceptedText,
+    const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(instruction);
+    const native = nativeFixtureTurn(policy, this.ref.sessionId, match ? { manifestDigest: match[1], generation: Number(match[2]), missingResources: [] } : { kind: "passed", coverage: null, verifiedInstructionIds: [] }, this.agent, undefined, delta);
+    const result: TurnResult = { ...native, text: acceptedText, isError: this.mode === "error", numTurns: 1, costUsd: 0,
+      turnId: native.turnId, hostInstruction: instruction, providerInstruction: instruction, rawResponse: acceptedText,
       providerMetadata: { provider: this.agent, sessionId: reported.sessionId, sessionRef: reported } };
     if (this.mode !== "missing-terminal") this.queue.push({ kind: "turn-complete", result, turnId: result.turnId });
     else this.queue.close();
@@ -77,7 +82,7 @@ test("validated QA handoff returns the active successor with its event stream us
     const transfer = await new HandoffService(projectDir).transfer({ runId: "run", role: "qa", reason: "recover QA", compactionCount: 0, compactMaximum: 10 }, async () => successor);
     assert.equal(transfer.acceptanceReceipt?.successorSessionRef.sessionId, "successor");
     assert.equal(successor.closed, false);
-    const next = await successor.sendTurn("next review");
+    const next = await successor.sendTurn("next review", nativePolicy(qaVerdictOutput));
     const event = await successor.events()[Symbol.asyncIterator]().next();
     assert.equal(event.value?.kind, "turn-complete");
     if (event.value?.kind === "turn-complete") assert.equal(event.value.turnId, next.turnId);

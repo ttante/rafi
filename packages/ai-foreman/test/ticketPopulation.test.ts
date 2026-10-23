@@ -107,6 +107,20 @@ test("ticket-maker proposal parsing errors remain distinct from plan discovery f
   );
 });
 
+test("ticket-maker accepts a plain JSON proposal followed by STEP_STATUS", () => {
+  assert.deepEqual(
+    extractTicketPopulationProposal(`${JSON.stringify(proposal)}\nSTEP_STATUS: done | summary="populated"`),
+    proposal,
+  );
+});
+
+test("ticket-maker rejects a plain JSON proposal without STEP_STATUS", () => {
+  assert.throws(
+    () => extractTicketPopulationProposal(JSON.stringify(proposal)),
+    /ticket-maker output is missing STEP_STATUS marker/,
+  );
+});
+
 test("ticket population extraction rejects unknown fields before materialization", () => {
   const value = structuredClone(proposal) as unknown as Record<string, unknown>;
   (value.tickets as Array<Record<string, unknown>>)[0]!.provider_ticket_id = "T-provider";

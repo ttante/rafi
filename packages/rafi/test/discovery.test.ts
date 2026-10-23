@@ -1,3 +1,6 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy } from "ai-foreman/agent-run.js";
+import { discoveryOutput } from "rafi-spec";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,10 +28,15 @@ function tempDir(): string {
 }
 
 function agentResult(text: string): RoleInstructionRunResult {
+  const source = text.includes(SOURCE_REQUEST_START);
+  const start = source ? SOURCE_REQUEST_START : DISCOVERY_ENVELOPE_START;
+  const end = source ? SOURCE_REQUEST_END : DISCOVERY_ENVELOPE_END;
+  const payload = JSON.parse(text.slice(text.indexOf(start) + start.length, text.indexOf(end)).trim());
+  const result = source ? { kind: "source-request", requests: Array.isArray(payload) ? payload : [payload] } : { kind: "completed", summary: "Discovery complete", payload: { ...payload, rafi_history_confidence: { answer: "Observed source", confidence: "high", basis: "Fixture inventory" }, source_candidates: [], excluded_or_avoided_resources: [] } };
   return {
     turn: {
-      result: { text, isError: false },
-      status: { kind: "plan_complete", summary: "discovery_complete" },
+      result: { ...nativeFixtureTurn(nativePolicy(discoveryOutput), "discovery-session", undefined, "codex", result), text },
+      status: { kind: "done", summary: "discovery_complete" },
     },
     runtime: "codex",
     logPath: "test.log",
@@ -295,23 +303,22 @@ test("discovery filters source requests that violate online and avoid instructio
     yes: true,
     loadSources: () => emptyLoadedSources(),
     sourceRequestFromAnswer: () => ({}),
-    extractSourceRequests: () => {
-      if (extracted) return [];
-      extracted = true;
-      return [
-        { type: "url", label: "Remote", locator: { url: "https://example.com" } },
-        { type: "jira", label: "Jira", locator: { site: "https://example.atlassian.net", jql: "project = ENG" } },
-        { type: "local", label: "Avoided", locator: { path: "docs/foo/plan.md" } },
-        { type: "local", label: "Kept", locator: { path: "docs/bar.md" } },
-      ];
-    },
     setSourceStorage: (registry) => registry,
     saveSources: () => {},
     registerSources: async (projectDir, registry, requests) => {
       requestedTypes.push(...requests.map((request) => `${request.type}:${request.locator?.path ?? request.label}`));
       return { registry, entries: [], snapshots: [], pending: [] };
     },
-    runRole: async () => agentResult(finalOutput()),
+    runRole: async () => {
+      if (extracted) return agentResult(finalOutput());
+      extracted = true;
+      return agentResult(`${SOURCE_REQUEST_START}\n${JSON.stringify([
+        { type: "url", label: "Remote", locator: { url: "https://example.com" } },
+        { type: "jira", label: "Jira", locator: { site: "https://example.atlassian.net", jql: "project = ENG" } },
+        { type: "local", label: "Avoided", locator: { path: "docs/foo/plan.md" } },
+        { type: "local", label: "Kept", locator: { path: "docs/bar.md" } },
+      ])}\n${SOURCE_REQUEST_END}`);
+    },
   });
 
   assert.deepEqual(requestedTypes, ["local:docs/bar.md"]);

@@ -6,7 +6,7 @@ import { join, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { stringify } from 'yaml';
+import { parse, stringify } from 'yaml';
 import { WorkflowDb } from '../../ai-foreman/dist/workflowDb.js';
 import { createBuildRun, releaseBuildLease, checkpointBuildRun, readBuildRuns } from '../../ai-foreman/dist/buildRuns.js';
 import { captureFrozenQaSource } from '../../ai-foreman/dist/qaSnapshot.js';
@@ -14,12 +14,39 @@ import { cmdInit, cmdUpdate } from '../../ai-foreman/dist/tickets/commands.js';
 import { StateDb } from '../../ai-foreman/dist/tickets/stateDb.js';
 import { buildProjectConfig, defaultAnswers } from '../dist/project.js';
 
-async function resume(root, alias, runId, env, extra = []) {
+// This scenario starts after an approved plan. Seed its real durable receipt;
+// do not bypass the production approval guard to exercise interrupted work.
+function approveFixturePlan(root) {
+  const definitions = parse(readFileSync(join(root, '.tickets/tickets.yaml'), 'utf8')).tickets;
+  const plan = { version: 1, plan_id: 'interrupted-fixture-plan', revision: 1, content_digest: '', slices: definitions.map(ticket => ({ ...ticket, slice_ref: ticket.id })) };
+  const canonical = value => JSON.stringify(value, (_, child) => child && typeof child === 'object' && !Array.isArray(child) ? Object.fromEntries(Object.entries(child).sort(([a], [b]) => a.localeCompare(b))) : child);
+  plan.content_digest = createHash('sha256').update(canonical(plan)).digest('hex');
+  mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/rafi-plan.json'), JSON.stringify(plan));
+  const db = new WorkflowDb(root);
+  try {
+    const run = db.createRun({ kind: 'plan' });
+    db.transition(run.runId, { status: 'completed', checkpoint: 'approved', state: { planId: plan.plan_id, revision: plan.revision, digest: plan.content_digest, decisionReceipt: { planDigest: plan.content_digest } } });
+  } finally { db.close(); }
+}
+
+async function resume(root, alias, runId, env, extra = [], approvedPreflight = false) {
   const child = spawn(process.execPath, [fileURLToPath(new URL('../dist/index.js', import.meta.url)), alias, root, '--run', runId, '--yes', '--fresh-session', ...extra], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', data => output += data); child.stderr.on('data', data => output += data);
   const timeout = setTimeout(() => child.kill('SIGKILL'), 150000);
-  try { return { code: await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); }), output }; }
+  try {
+    const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+    if (code === 2 && !approvedPreflight) {
+      const db = new WorkflowDb(root); let pending;
+      try { pending = db.pendingHumanDecisions(runId).find(decision => decision.prompt === 'How does this plan look?'); } finally { db.close(); }
+      if (pending) {
+        execFileSync(process.execPath, [fileURLToPath(new URL('../dist/index.js', import.meta.url)), 'build:decide', root, '--run', runId, '--decision', pending.decisionId, '--choice', 'proceed'], { env, stdio: 'pipe', timeout: 30000 });
+        const continued = await resume(root, alias, runId, env, extra, true);
+        return { ...continued, output: output + continued.output };
+      }
+    }
+    return { code, output };
+  }
   finally { clearTimeout(timeout); }
 }
 
@@ -61,6 +88,7 @@ for (const alias of ['resume', 'build:resume']) for (const role of ['builder', '
       const tickets = new StateDb(join(root, '.tickets/ticket-state.sqlite'));
       try { tickets.upsertState('T002', { status: partial === 'eligible' || blockingFirst ? 'next' : 'blocked', blocker_notes: partial === 'eligible' ? null : 'Separate unresolved work' }, new Date().toISOString()); } finally { tickets.close(); }
     }
+    approveFixturePlan(root);
     let run = createBuildRun({ repositoryRoot: root, tickets: scope, builder: settings('builder'), qa: settings('qa'), qaEnabled: role === 'qa' });
     run = checkpointBuildRun(root, run, role === 'qa' ? 'qa-review-ready' : 'builder-interrupted');
     let oldAttempt;
@@ -69,7 +97,7 @@ for (const alias of ['resume', 'build:resume']) for (const role of ['builder', '
       writeFileSync(join(root, 'implemented.txt'), 'recovered T001\n');
       db = new WorkflowDb(root);
       const digest = captureFrozenQaSource(root).digest;
-      db.admitWork({runId:run.runId,kind:'ticket',ticketId:'T001',definition:{id:'T001'},approvalId:'fixture',scopeRevision:'fixture',provenance:{userTurn:'Build T001',reason:'Authorized interrupted QA fixture'}});
+      db.admitWork({runId:run.runId,kind:'ticket',ticketId:'T001',definition:ticket,approvalId:'fixture',scopeRevision:'fixture',provenance:{userTurn:'Build T001',reason:'Authorized interrupted QA fixture'}});
       db.beginQaReviewAttempt({ attemptId: 'interrupted-review', runId: run.runId, ticketId: 'T001', reviewNumber: 1, cycle: 1, remediationGeneration: 0, sourceDigest: digest });
       let head = db.qaTicketHead(run.runId, 'T001');
       head = db.transitionQa(run.runId, 'T001', head.revision, { type: 'source-frozen', sourceStateDigest: digest });

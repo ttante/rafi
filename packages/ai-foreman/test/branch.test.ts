@@ -1,3 +1,4 @@
+import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -89,18 +90,13 @@ class FakeBuilder implements BuilderAdapter {
     private readonly writeOnFirstTurn = true,
   ) {}
 
-  async sendTurn(instruction: string): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     this.turnCount++;
     if (this.writeOnFirstTurn && this.turnCount === 1) {
       mkdirSync(join(this.cwd, "src"), { recursive: true });
       writeFileSync(join(this.cwd, "src", "ticket.txt"), `turn ${this.turnCount}\n`, "utf8");
     }
-    return {
-      text: `Implemented.\nSTEP_STATUS: done | ticket="${/Ticket scope: ([A-Za-z0-9_-]+)\./.exec(instruction)?.[1] ?? "T001"}" summary="implemented"`,
-      isError: false,
-      numTurns: 1,
-      costUsd: 0,
-    };
+    return nativeFixtureFromText(policy, this.id, 'STEP_STATUS: done | summary="implemented"', "codex");
   }
 
   sessionId(): string | undefined {
@@ -256,11 +252,11 @@ test("branch answers resume the preserved ticket once and release deferred depen
       createBuilder: async cwd => {
         const ticket = nodes.find(node => node.worktreePath === cwd)!.ticket.id;
         const builder = new FakeBuilder(cwd, `session-${ticket}`, false);
-        builder.sendTurn = async instruction => {
+        builder.sendTurn = async (instruction, policy) => {
           calls.push(ticket);
           if (calls.length === 1) {
             firstWorktree = cwd;
-            return { text: 'STEP_STATUS: needs_input | ticket="T001" question="Which registry?" choices="Public|Local"', isError: false, numTurns: 1, costUsd: 0 };
+            return nativeFixtureFromText(policy, `session-${ticket}`, 'STEP_STATUS: needs_input | question="Which registry?" choices="Public|Local"', "codex");
           }
           if (ticket === "T003") {
             const db = new WorkflowDb(project);
@@ -269,7 +265,7 @@ test("branch answers resume the preserved ticket once and release deferred depen
           }
           if (ticket === "T001") { assert.equal(cwd, firstWorktree); assert.match(instruction, /Answer: Use the local mirror/); }
           writeFileSync(join(cwd, `${ticket}.txt`), "implemented\n");
-          return { text: `STEP_STATUS: done | ticket="${ticket}" summary="implemented"`, isError: false, numTurns: 1, costUsd: 0 };
+          return nativeFixtureFromText(policy, `session-${ticket}`, 'STEP_STATUS: done | summary="implemented"', "codex");
         };
         return builder;
       },

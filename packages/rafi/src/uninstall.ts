@@ -3,11 +3,10 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Command } from "commander";
 import type { InstallManifestEntryV2, UninstallProposal } from "rafi-spec";
-import { parseProviderContract } from "rafi-spec";
-import { z } from "zod";
+import { uninstallProposalOutput } from "rafi-spec";
 import { assertLifecycleForCommand } from "./lifecycle.js";
 import { cleanupUninstallRecovery, INSTALL_MANIFEST, listUninstallRecoveries, preservePreimagesForLaterRestore, readInstallManifest, removeManagedBlocksTransaction, removeOwnedPathsTransaction, restoreOwnedPreimagesTransaction, restoreUninstallRecovery, validateOwnedPath } from "./ownership.js";
-import { readOnlyPermissionConfig, runRoleInstruction } from "ai-foreman/agent-run.js";
+import { readOnlyPermissionConfig, runRoleInstruction, operationPayload } from "ai-foreman/agent-run.js";
 import { WorkflowDb, type ProjectLease } from "ai-foreman/workflow-db.js";
 
 export type UninstallCategory = "tickets" | "plans" | "skills" | "agents" | "rules" | "documentation-created" | "documentation-modified" | "managed-gitignore" | "config" | "runtime-state" | "generated-other" | "dependencies" | "core" | "generated-agents" | "modified-owned";
@@ -22,11 +21,6 @@ export interface UninstallPlan {
   warnings: string[];
   fingerprint: string;
 }
-
-const uninstallProposalSchema = z.strictObject({
-  operations: z.array(z.strictObject({ kind: z.enum(["keep", "delete", "edit", "remove-dependency"]), target: z.string().trim().min(1).max(4_000), reason: z.string().trim().min(1).max(10_000), confidence: z.enum(["high", "medium", "low"]) })).max(500),
-  followUpQuestion: z.string().trim().min(1).max(4_000).optional(),
-});
 
 export function buildUninstallPlan(projectDir: string, choices: UninstallChoice[], proposal?: UninstallProposal): UninstallPlan {
   const root = resolve(projectDir);
@@ -245,9 +239,9 @@ export function buildUninstallCleanupCommand(): Command {
     });
 }
 
-export async function interpretUninstallInstruction(projectDir: string, instruction: string): Promise<UninstallProposal> {
-  const prompt = `You are Rafi's read-only uninstaller interpreter. Inspect the project but do not mutate anything. Translate only the user's explicit instruction into JSON. Ambiguity must produce followUpQuestion instead of guessed targets.\n\nUser instruction:\n${instruction}\n\nReturn exactly one JSON object with: {"operations":[{"kind":"keep|delete|edit|remove-dependency","target":"repo-relative path or package","reason":"...","confidence":"high|medium|low"}],"followUpQuestion":"optional"}. Never target outside the repository, the repository root, remote state, or Git metadata.`;
-  const run = await runRoleInstruction({
+export async function interpretUninstallInstruction(projectDir: string, instruction: string, runInstruction = runRoleInstruction): Promise<UninstallProposal> {
+  const prompt = `You are Rafi's read-only uninstaller interpreter. Inspect the project but do not mutate anything. Translate only the user's explicit instruction into the native uninstall-proposal payload. Ambiguity must produce followUpQuestion instead of guessed targets.\n\nUser instruction:\n${instruction}\n\nSubmit the completed native result with this payload: {"operations":[{"kind":"keep|delete|edit|remove-dependency","target":"repo-relative path or package","reason":"...","confidence":"high|medium|low"}],"followUpQuestion":"optional"}. Never target outside the repository, the repository root, remote state, or Git metadata.`;
+  const run = await runInstruction({
     projectDir,
     role: "uninstaller",
     instruction: prompt,
@@ -255,12 +249,10 @@ export async function interpretUninstallInstruction(projectDir: string, instruct
     permissionConfig: readOnlyPermissionConfig(),
     sandboxMode: "read-only",
     logEvent: "uninstall-proposal",
+    output: uninstallProposalOutput,
   });
   if (run.turn.result.isError) throw new Error(`uninstaller agent failed: ${run.turn.result.text.slice(0, 300)}`);
-  const match = run.turn.result.text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("uninstaller agent did not return a JSON proposal");
-  const proposal = parseProviderContract(uninstallProposalSchema, JSON.parse(match[0]), "UninstallProposalV1");
-  return proposal;
+  return operationPayload<UninstallProposal>(run.turn.result, uninstallProposalOutput);
 }
 
 export function inventoryByCategory(root: string, entries: InstallManifestEntryV2[]): Record<UninstallCategory, string[]> {

@@ -1,3 +1,7 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy } from "../src/structuredOperation.js";
+import type { OutputContract } from "rafi-spec";
+import type { PreparationDependencies } from "../src/qaPreparation.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -56,306 +60,150 @@ test("explicit coverage retains its requirement link on the covering check", () 
   assert.ok(!original.checks.find(item => item.id === check.id)?.requirementRefs.includes(requirement.id));
 });
 
-test("assessment schema drift is repaired without accepting copied preparation evidence", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  let assessmentCalls = 0, repairCalls = 0;
+function providerDraft(full = candidate()) {
+  return { kind: "draft" as const, checks: full.checks, coverage: full.coverage, baseline: [], unresolved: full.unresolved,
+    preparationEvidence: full.preparationEvidence.map(({ obligation, references, analysis }) => ({ obligation, analysis, references: references.map(({ path, locator }) => ({ path, locator })) })) };
+}
+function providerAssessment(full = candidate()) {
+  const { draftPayloadDigest, inventoryDigest, policyVersion, operationId, sessionId, authorSessionId, ...payload } = assessment(full);
+  return payload;
+}
+function reply(output: OutputContract, operationId: string, payload: unknown, sessionId = "author", alternative?: unknown) {
+  return { ...nativeFixtureTurn(nativePolicy(output, { dispatchId: operationId }), sessionId, payload, "claude", alternative), sessionId };
+}
+const normalizeDraft: NonNullable<PreparationDependencies["normalizeDraft"]> = (draft, response) => {
+  for (const evidence of draft.preparationEvidence) {
+    evidence.operationId = response.operationId!; evidence.sessionId = response.sessionId; evidence.evidenceDigest = "a".repeat(64);
+    for (const reference of evidence.references) reference.digest = "a".repeat(64);
+  }
+  return draft;
+};
+
+test("malformed assessment is retained without copying preparation evidence or sending a format repair", async () => {
+  const { db, store } = storeFixture(); const initial = candidate(); let calls = 0;
   try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      normalizeDraft: draft => { for (const evidence of draft.preparationEvidence) { evidence.evidenceDigest = "a".repeat(64); for (const reference of evidence.references) reference.digest = "a".repeat(64); } return draft; },
-      dispatch: async (phase, _instruction, operationId) => {
-        if (phase === "prepare") {
-          const draft = candidate();
-          for (const evidence of draft.preparationEvidence) { evidence.operationId = operationId; evidence.sessionId = "author"; }
-          return { text: envelope("RAFI_QA_CANDIDATE", { checks: draft.checks, coverage: draft.coverage, baseline: draft.baseline, preparationEvidence: draft.preparationEvidence.map(({ obligation, references, analysis }) => ({ obligation, references: references.map(({ path, locator }) => ({ path, locator })), analysis })), unresolved: draft.unresolved }), sessionId: "author" };
-        }
-        if (phase === "assess") {
-          assessmentCalls++;
-          return { text: envelope("RAFI_QA_ASSESSMENT", { ...assessment(candidate()), preparationEvidence: candidate().preparationEvidence }), sessionId: "assessor" };
-        }
-        assert.equal(phase, "repair"); repairCalls++;
-        const clean = assessment(candidate()); clean.operationId = operationId;
-        return { text: envelope("RAFI_QA_ASSESSMENT", clean), sessionId: "assessor-repair" };
-      },
-    });
-    assert.equal(result.status, "ready", JSON.stringify(result));
-    assert.equal(assessmentCalls, 1);
-    assert.equal(repairCalls, 1);
+    const result = await prepareVerificationContract(initial, initial.requirements, { store, normalizeDraft, now: () => 1000, inputsCurrent: () => true,
+      dispatch: async (phase, _instruction, id, _ms, output) => {
+        calls++;
+        return reply(output, id, phase === "prepare" ? providerDraft() : { ...providerAssessment(), preparationEvidence: initial.preparationEvidence }, phase === "prepare" ? "author" : "assessor");
+      } });
+    assert.equal(result.status, "incomplete"); assert.equal(calls, 2);
+    assert.notEqual(store.head(initial.runId, initial.workId, initial.admissionDigest).state, "ready");
+    assert.equal(store.budget(initial.runId, initial.workId, initial.admissionDigest)!.reservations.length, 2);
   } finally { db.close(); }
 });
 
-test("host restores its metadata and requirements, then requests correction of invalid coverage", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  let prepared = candidate(), prepareCalls = 0;
+test("semantic coverage correction retains host metadata and original source requirements", async () => {
+  const { db, store } = storeFixture(); const initial = candidate(); let prepares = 0; let normalized = initial;
   try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true, hostFacts: "Host graph test fact; external Graphify status is separate.",
-      dispatch: async (phase, instruction, operationId) => {
+    const result = await prepareVerificationContract(initial, initial.requirements, { store, now: () => 1000, inputsCurrent: () => true,
+      hostFacts: "Host graph test fact; external Graphify status is separate.",
+      normalizeDraft: (draft, response) => normalized = normalizeDraft(draft, response),
+      dispatch: async (phase, instruction, id, _ms, output) => {
         assert.match(instruction, /Different named files or an extra relevant file do not by themselves create a material conflict/);
         assert.match(instruction, /Host graph test fact; external Graphify status is separate/);
         assert.match(instruction, /Do not disregard explicit user-established security/);
         assert.match(instruction, /not a Builder acceptance criterion or a material conflict/);
-        assert.match(instruction, /do not require the host to amend the plan before building/);
         assert.match(instruction, /Do not invent mandatory inline node -e or node --eval commands/);
         assert.match(instruction, /Do not invent a mandatory test-first RED phase/);
         assert.match(instruction, /When an original requirement actually requires a historical sequence, preserve it/);
         assert.match(instruction, /independent QA snapshot may have a detached HEAD/);
-        assert.match(instruction, /captured pre-implementation baseline/);
-        assert.match(instruction, /do not invent a mandatory branch-alone execution check/);
         assert.match(instruction, /Preserve explicitly requested procedures/);
-        if (phase === "prepare" || phase === "repair") {
-          assert.match(instruction, /verify that rollback restores behavior/);
-          assert.match(instruction, /rafi qa-rehearse-rollback/);
-          assert.match(instruction, /Do not assume copying files to external scratch/);
-          assert.match(instruction, /Never perform destructive rollback/);
-          prepareCalls++;
-          prepared = candidate();
-          if (prepareCalls === 1) {
-            prepared.createdAt = "2026-11-01T00:00:00Z";
-            prepared.predecessorDigest = "b".repeat(64);
-            prepared.requirements[0]!.statement = "Provider summary";
-            prepared.checks[0]!.requirementRefs = ["unknown"];
-          } else {
-            assert.match(instruction, /Unknown requirement on check/);
-            assert.match(instruction, /Targeted QA contract repair only/);
-            const previous = JSON.parse(instruction.split("Authoritative candidate/input inventory:\n")[1]!);
-            assert.equal(previous.createdAt, initial.createdAt);
-            assert.equal(previous.predecessorDigest, undefined);
-            assert.deepEqual(previous.requirements, initial.requirements);
-            assert.deepEqual(previous.unresolved, []);
-          }
-          for (const evidence of prepared.preparationEvidence) { evidence.operationId = operationId; evidence.sessionId = "author"; }
-          return { text: envelope("RAFI_QA_CANDIDATE", prepared), sessionId: "author" };
+        if (phase === "assess") return reply(output, id, providerAssessment(normalized), "assessor");
+        prepares++;
+        assert.match(instruction, /Never perform destructive rollback/);
+        const draft = providerDraft();
+        if (prepares === 1) draft.checks[0]!.requirementRefs = ["unknown"];
+        else {
+          assert.match(instruction, /Unknown requirement on check/);
+          assert.match(instruction, /Targeted QA contract repair only/);
+          const previous = JSON.parse(instruction.split("Authoritative candidate/input inventory:\n")[1]!);
+          assert.equal(previous.createdAt, initial.createdAt); assert.deepEqual(previous.requirements, initial.requirements);
         }
-        assert.equal(phase, "assess");
-        return { text: envelope("RAFI_QA_ASSESSMENT", { ...assessment(prepared), policyVersion_note: "No change to the required assessment." }), sessionId: "assessor" };
-      },
-    });
-    assert.equal(result.status, "ready", JSON.stringify(result));
-    assert.equal(prepareCalls, 2);
-  } finally { db.close(); }
-});
-
-test("changed approved inputs still block preparation", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      dispatch: async () => { const draft = candidate(); draft.inputs[0]!.digest = "b".repeat(64); return { text: envelope("RAFI_QA_CANDIDATE", draft), sessionId: "author" }; },
-    });
-    assert.equal(result.status, "incomplete");
-    if (result.status === "incomplete") assert.match(result.detail, /host-owned/);
-  } finally { db.close(); }
-});
-
-test("provider-only draft needs no model-generated hashes or copied authority", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  let assembled = candidate();
-  try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      normalizeDraft: (draft, response) => {
-        for (const evidence of draft.preparationEvidence) {
-          evidence.evidenceDigest = "a".repeat(64);
-          for (const reference of evidence.references) reference.digest = "a".repeat(64);
-          evidence.operationId = response.operationId!; evidence.sessionId = response.sessionId;
-        }
-        assembled = draft; return draft;
-      },
-      dispatch: async (phase, instruction) => {
-        if (phase === "prepare") {
-          assert.match(instruction, /you do not need shell access or hash calculations/);
-          const full = candidate();
-          return { sessionId: "author", text: envelope("RAFI_QA_CANDIDATE", { checks: full.checks, coverage: full.coverage, baseline: [], unresolved: [], preparationEvidence: full.preparationEvidence.map(({ obligation, references, analysis }) => ({ obligation, analysis, references: references.map(({ path, locator }) => ({ path, locator })) })) }) };
-        }
-        return { sessionId: "assessor", text: envelope("RAFI_QA_ASSESSMENT", assessment(assembled)) };
-      },
-    });
-    assert.equal(result.status, "ready", JSON.stringify(result));
-    if (result.status === "ready") {
-      assert.deepEqual(result.contract.inputs, initial.inputs);
-      assert.deepEqual(result.contract.depthDecision, initial.depthDecision);
-      assert.equal(result.contract.preparationEvidence[0]!.references[0]!.digest, "a".repeat(64));
-    }
-  } finally { db.close(); }
-});
-
-test("provider refusal is reported directly without format-repair dispatch", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  let calls = 0;
-  try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      dispatch: async () => { calls++; return { sessionId: "author", text: "I cannot calculate SHA-256 hashes because shell access was denied; RAFI_QA_CANDIDATE_START ` / ` RAFI_QA_CANDIDATE_END" }; },
-    });
-    assert.equal(result.status, "incomplete");
-    if (result.status === "incomplete") assert.match(result.detail, /could not produce.*cannot calculate SHA-256/);
-    assert.equal(calls, 1);
-  } finally { db.close(); }
-});
-
-test("format repair retains original investigation provenance", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  let prepared = candidate(), investigationId = "";
-  try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      normalizeDraft: (draft, response) => { assert.equal(response.operationId, investigationId); assert.equal(response.sessionId, "author"); return draft; },
-      dispatch: async (phase, _instruction, operationId) => {
-        if (phase === "prepare") { investigationId = operationId; return { sessionId: "author", text: JSON.stringify(prepared) }; }
-        if (phase === "repair") return { sessionId: "formatter", text: envelope("RAFI_QA_CANDIDATE", prepared) };
-        for (const evidence of prepared.preparationEvidence) { evidence.operationId = investigationId; evidence.sessionId = "author"; }
-        return { sessionId: "assessor", text: envelope("RAFI_QA_ASSESSMENT", assessment(prepared)) };
-      },
-    });
-    assert.equal(result.status, "ready", JSON.stringify(result));
-    if (result.status === "ready") assert.ok(result.contract.preparationEvidence.every(item => item.operationId === investigationId && item.sessionId === "author"));
-  } finally { db.close(); }
-});
-
-test("prose-only preparation output receives bounded format repair", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  let repairCalls = 0;
-  const prepared = candidate();
-  try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      normalizeDraft: draft => { for (const evidence of draft.preparationEvidence) { evidence.evidenceDigest = "b".repeat(64); for (const reference of evidence.references) reference.digest = "a".repeat(64); } return draft; },
-      dispatch: async (phase) => {
-        if (phase === "prepare") return { sessionId: "author", text: "I’m preparing the requested QA review now." };
-        if (phase === "repair") { repairCalls++; return { sessionId: "formatter", text: envelope("RAFI_QA_CANDIDATE", { checks: prepared.checks, coverage: prepared.coverage, baseline: [], unresolved: [], preparationEvidence: prepared.preparationEvidence.map(({ obligation, references, analysis }) => ({ obligation, analysis, references: references.map(({ path, locator }) => ({ path, locator })) })) }) }; }
-        return { sessionId: "assessor", text: envelope("RAFI_QA_ASSESSMENT", assessment(prepared)) };
-      },
-    });
-    assert.equal(result.status, "ready", JSON.stringify(result));
-    assert.equal(repairCalls, 1);
-  } finally { db.close(); }
-});
-
-test("legacy formatting differences do not become host authority", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.inputs[0]!.reference = "/project/plan.md"; initial.depthDecision.rationale = "Inspected ordinary `behavior` and tests"; initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  let prepared = candidate();
-  try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      dispatch: async (phase, _instruction, operationId) => {
-        if (phase === "prepare") {
-          prepared = candidate(); prepared.inputs[0]!.reference = "plan.md";
-          for (const evidence of prepared.preparationEvidence) { evidence.operationId = operationId; evidence.sessionId = "author"; }
-          return { text: envelope("RAFI_QA_CANDIDATE", prepared), sessionId: "author" };
-        }
-        prepared.inputs = structuredClone(initial.inputs); prepared.depthDecision = structuredClone(initial.depthDecision);
-        return { text: envelope("RAFI_QA_ASSESSMENT", assessment(prepared)), sessionId: "assessor" };
-      },
-    });
-    assert.equal(result.status, "ready", JSON.stringify(result));
+        return reply(output, id, draft);
+      } });
+    assert.equal(result.status, "ready", JSON.stringify(result)); assert.equal(prepares, 2);
     if (result.status === "ready") { assert.deepEqual(result.contract.inputs, initial.inputs); assert.deepEqual(result.contract.depthDecision, initial.depthDecision); }
   } finally { db.close(); }
 });
 
-test("legacy changes to selected depth are rejected", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
+for (const [field, value] of Object.entries({ inputs: [{ digest: "b".repeat(64) }], depthDecision: { level: 1, rationale: "new risk" }, requirements: [{ id: "invented" }, { id: "invented" }], createdAt: "2026-11-01", predecessorDigest: "b".repeat(64) })) {
+  test(`provider cannot introduce host-owned ${field} into a native draft`, async () => {
+    const { db, store } = storeFixture(); const initial = candidate(); let calls = 0;
+    try {
+      const result = await prepareVerificationContract(initial, initial.requirements, { store, normalizeDraft, now: () => 1000, inputsCurrent: () => true,
+        dispatch: async (_phase, _instruction, id, _ms, output) => { calls++; return reply(output, id, { ...providerDraft(), [field]: value }); } });
+      assert.equal(result.status, "incomplete"); assert.equal(calls, 1);
+      if (result.status === "incomplete") assert.match(result.detail, /contract|additional|unknown/i);
+      assert.notEqual(store.head(initial.runId, initial.workId, initial.admissionDigest).state, "ready");
+    } finally { db.close(); }
+  });
+}
+
+test("provider-only draft needs no hashes and preserves actual investigation provenance", async () => {
+  const { db, store } = storeFixture(); const initial = candidate(); let normalized = initial; let investigationId = "";
   try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      dispatch: async () => { const draft = candidate(); draft.depthDecision.level = 1; return { sessionId: "author", text: envelope("RAFI_QA_CANDIDATE", draft) }; },
-    });
-    assert.equal(result.status, "incomplete");
-    if (result.status === "incomplete") assert.match(result.detail, /host-owned/);
+    const result = await prepareVerificationContract(initial, initial.requirements, { store, now: () => 1000, inputsCurrent: () => true,
+      normalizeDraft: (draft, response) => { assert.equal(response.operationId, investigationId); return normalized = normalizeDraft(draft, response); },
+      dispatch: async (phase, instruction, id, _ms, output) => {
+        if (phase === "prepare") { investigationId = id; assert.match(instruction, /you do not need shell access or hash calculations/); return reply(output, id, providerDraft()); }
+        assert.equal(phase, "assess"); return reply(output, id, providerAssessment(normalized), "assessor");
+      } });
+    assert.equal(result.status, "ready", JSON.stringify(result));
+    if (result.status === "ready") for (const evidence of result.contract.preparationEvidence) { assert.equal(evidence.operationId, investigationId); assert.equal(evidence.sessionId, "author"); assert.equal(evidence.references[0]!.digest, "a".repeat(64)); }
   } finally { db.close(); }
 });
 
-test("legacy substantive risk rationale changes are rejected", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
+test("typed provider blocker is reported directly without a formatting dispatch", async () => {
+  const { db, store } = storeFixture(); const initial = candidate(); let calls = 0;
   try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      dispatch: async () => { const draft = candidate(); draft.depthDecision.rationale = "The work requires a different risk assessment"; return { sessionId: "author", text: envelope("RAFI_QA_CANDIDATE", draft) }; },
-    });
-    assert.equal(result.status, "incomplete");
-    if (result.status === "incomplete") assert.match(result.detail, /host-owned/);
+    const result = await prepareVerificationContract(initial, initial.requirements, { store, now: () => 1000, inputsCurrent: () => true,
+      dispatch: async (_phase, _instruction, id, _ms, output) => { calls++; return reply(output, id, undefined, "author", { kind: "blocked", reason: "Required source is inaccessible", nextAction: "Restore source access" }); } });
+    assert.equal(result.status, "incomplete"); assert.equal(calls, 1);
+    if (result.status === "incomplete") assert.match(result.detail, /Required source is inaccessible/);
   } finally { db.close(); }
 });
 
-test("changed authoritative source prevents publishing an otherwise valid draft", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  const prepared = candidate();
+for (const text of ["Preparing the requested review now", envelope("RAFI_QA_CANDIDATE", candidate()), JSON.stringify(candidate())]) test(`legacy output cannot enter native preparation: ${text.slice(0, 35)}`, async () => {
+  const { db, store } = storeFixture(); const initial = candidate(); let calls = 0;
   try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => false,
-      dispatch: async (phase, _instruction, operationId) => {
-        if (phase === "prepare") { for (const evidence of prepared.preparationEvidence) { evidence.operationId = operationId; evidence.sessionId = "author"; } return { sessionId: "author", text: envelope("RAFI_QA_CANDIDATE", prepared) }; }
-        return { sessionId: "assessor", text: envelope("RAFI_QA_ASSESSMENT", assessment(prepared)) };
-      },
-    });
-    assert.equal(result.status, "incomplete");
-    if (result.status === "incomplete") assert.match(result.detail, /inputs changed before publication/);
+    const result = await prepareVerificationContract(initial, initial.requirements, { store, now: () => 1000, inputsCurrent: () => true, dispatch: async () => { calls++; return { sessionId: "author", text }; } });
+    assert.equal(result.status, "incomplete"); assert.equal(calls, 1);
+    if (result.status === "incomplete") assert.match(result.detail, /missing receipt/);
+  } finally { db.close(); }
+});
+
+test("changed authoritative source prevents publishing an otherwise valid native draft", async () => {
+  const { db, store } = storeFixture(); const initial = candidate(); let normalized = initial;
+  try {
+    const result = await prepareVerificationContract(initial, initial.requirements, { store, now: () => 1000, inputsCurrent: () => false,
+      normalizeDraft: (draft, response) => normalized = normalizeDraft(draft, response),
+      dispatch: async (phase, _instruction, id, _ms, output) => reply(output, id, phase === "prepare" ? providerDraft() : providerAssessment(normalized), phase === "prepare" ? "author" : "assessor") });
+    assert.equal(result.status, "incomplete"); if (result.status === "incomplete") assert.match(result.detail, /inputs changed before publication/);
     assert.notEqual(store.head(initial.runId, initial.workId, initial.admissionDigest).state, "ready");
   } finally { db.close(); }
 });
 
-test("legacy provider cannot introduce new or duplicate approved requirements", async () => {
-  for (const duplicate of [false, true]) {
-    const { db, store } = storeFixture();
-    const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-    try {
-      const result = await prepareVerificationContract(initial, initial.requirements, {
-        store, now: () => 1000, inputsCurrent: () => true,
-        dispatch: async () => { const draft = candidate(); draft.requirements.push({ ...draft.requirements[0]!, id: duplicate ? "req" : "invented" }); return { sessionId: "author", text: envelope("RAFI_QA_CANDIDATE", draft) }; },
-      });
-      assert.equal(result.status, "incomplete");
-      if (result.status === "incomplete") assert.match(result.detail, /unknown or duplicate requirement/);
-    } finally { db.close(); }
-  }
-});
-
-test("malformed provider-only drafts get bounded specific correction feedback", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  let calls = 0;
+test("missing draft fields stop immediately with retained schema diagnostics", async () => {
+  const { db, store } = storeFixture(); const initial = candidate(); let calls = 0;
   try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true, normalizeDraft: draft => draft,
-      dispatch: async (_phase, instruction) => {
-        calls++;
-        if (calls === 2) assert.match(instruction, /must have required property 'checks'/);
-        return { sessionId: "author", text: envelope("RAFI_QA_CANDIDATE", { checks: undefined, coverage: [], baseline: [], preparationEvidence: [], unresolved: [] }) };
-      },
-    });
-    assert.equal(result.status, "incomplete");
-    if (result.status === "incomplete") assert.match(result.detail, /draft correction exhausted/);
-    assert.equal(calls, 2);
+    const result = await prepareVerificationContract(initial, initial.requirements, { store, now: () => 1000, inputsCurrent: () => true,
+      dispatch: async (_phase, _instruction, id, _ms, output) => { calls++; return reply(output, id, { coverage: [], baseline: [], preparationEvidence: [], unresolved: [] }); } });
+    assert.equal(result.status, "incomplete"); assert.equal(calls, 1);
+    if (result.status === "incomplete") assert.match(result.detail, /checks/);
   } finally { db.close(); }
 });
 
-test("invalid coverage remains blocked after the bounded correction attempts", async () => {
-  const { db, store } = storeFixture();
-  const initial = candidate(); initial.checks = []; initial.coverage = []; initial.preparationEvidence = [];
-  let calls = 0;
+test("invalid semantic coverage exhausts its durable allowance without resetting on resume", async () => {
+  const { db, store } = storeFixture(); const initial = candidate(); let calls = 0;
   try {
-    const result = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      dispatch: async () => { calls++; const draft = candidate(); draft.checks[0]!.requirementRefs = ["unknown"]; return { text: envelope("RAFI_QA_CANDIDATE", draft), sessionId: "author" }; },
-    });
-    assert.equal(result.status, "incomplete");
+    const deps: PreparationDependencies = { store, normalizeDraft, now: () => 1000, inputsCurrent: () => true,
+      dispatch: async (_phase, _instruction, id, _ms, output) => { calls++; const draft = providerDraft(); draft.checks[0]!.requirementRefs = ["unknown"]; return reply(output, id, draft); } };
+    const result = await prepareVerificationContract(initial, initial.requirements, deps);
+    assert.equal(result.status, "incomplete"); assert.equal(calls, 2);
     if (result.status === "incomplete") assert.match(result.detail, /Invalid coverage|Unknown requirement on check/);
-    assert.equal(calls, 2);
-    const retry = await prepareVerificationContract(initial, initial.requirements, {
-      store, now: () => 1000, inputsCurrent: () => true,
-      dispatch: async () => { throw new Error("exhausted budget must not dispatch"); },
-    });
-    assert.equal(retry.status, "incomplete");
+    const retry = await prepareVerificationContract(initial, initial.requirements, deps);
+    assert.equal(retry.status, "incomplete"); assert.equal(calls, 2);
     if (retry.status === "incomplete") assert.match(retry.detail, /allowance exhausted/);
   } finally { db.close(); }
 });

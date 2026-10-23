@@ -9,6 +9,8 @@ import { OperationDeadline } from "./util/deadline.js";
 import { hostTestSequenceEvidence, type HostBuilderToolObservation } from "./qaBuilderEvidence.js";
 import { qaHostGraphFact } from "./qaHostFacts.js";
 import type { QaVerificationContractV1 } from "rafi-spec";
+import { builderCoverageOutput, workReportOutput, remediationOutput, type WorkReportPayload, type CoverageClaims, type RemediationPayload } from "rafi-spec";
+import { operationPayload, operationInstruction, nativePolicy } from "./structuredOperation.js";
 
 /** Claims are collected after source capture so the provider can name the actual completed source. */
 export async function collectBuilderContractCoverage(projectDir: string, runId: string, workId: string, workspace: string, adapter: BuilderAdapter, operationId: string, instruction: string, implementation: TurnResult, hostObservations: HostBuilderToolObservation[] = [], initialSourceDigest?: string): Promise<void> {
@@ -34,13 +36,19 @@ async function collectBuilderContractCoverageOwned(projectDir: string, runId: st
       return;
     }
     // Preserve the implementation response before a failed acknowledgment or a crash.
-    const implementationDigest = db.putEvidence("qa", implementation.rawResponse ?? implementation.text);
-    db.planOperation({ runId, idempotencyKey: eventId, kind: "builder-coverage", intent: { workId, contractDigest: contract.contentDigest, binding, implementationDigest, session } });
-    db.updateOperation(eventId, "in_progress");
+    const implementationDigest = db.putEvidence("qa", Buffer.from(JSON.stringify({ structured: implementation.structured, rawResponse: implementation.rawResponse ?? implementation.text })));
+    // Persist host-owned command metadata before dispatching the response-only
+    // acknowledgement. This survives a process restart and does not retain
+    // commands or output, only bounded sequence/status/digest facts.
+    const hostObservationDigest = db.putEvidence("qa", Buffer.from(JSON.stringify({ version: 1, kind: "host-builder-tool-observations", workId, operationId, observations: hostObservations })));
+    db.planOperation({ runId, idempotencyKey: eventId, kind: "builder-coverage", intent: { workId, contractDigest: contract.contentDigest, binding, implementationDigest, hostObservationDigest, session } });
+    db.updateOperation(eventId, "in_progress", { result: { hostObservationDigest } });
     try {
       const prompt = `Response-only evidence collection for completed implementation ${operationId}. Do not run tools, modify files, repeat work, or invent verification. Record failed, blocked or not-run truthfully. The implementation response is retained as ${implementationDigest}.\n${COVERAGE_INSTRUCTIONS}\nExact coverage binding: ${JSON.stringify({ version: 1, runId, workId, revision: contract.revision, contractDigest: contract.contentDigest, ...binding })}\nAll checks: ${JSON.stringify(contract.checks)}`;
-      const response = await new OperationDeadline("Builder coverage acknowledgment", 120_000).run(() => dispatchWithGraphAccess(projectDir, adapter, prompt, { purpose: "response-repair", responseOnly: true }, (text, policy) => adapter.sendTurn(text, policy)), () => { void adapter.close(); });
-      const responseDigest = db.putEvidence("qa", response.rawResponse ?? response.text);
+      const composed = implementation.structured?.state === "candidate" ? implementation.structured.operation === "builder-remediation"
+        ? operationPayload<RemediationPayload>(implementation, remediationOutput).coverage : operationPayload<WorkReportPayload>(implementation, workReportOutput).coverage : undefined;
+      const response = composed ? implementation : await new OperationDeadline("Builder coverage acknowledgment", 120_000).run(() => dispatchWithGraphAccess(projectDir, adapter, `${prompt}\n\n${operationInstruction(builderCoverageOutput)}`, nativePolicy(builderCoverageOutput, { purpose: "response-repair", responseOnly: true, logicalActionId: operationId, journalRunId: runId }), (text, policy) => adapter.sendTurn(text, policy)), () => { void adapter.close(); });
+      const responseDigest = db.putEvidence("qa", Buffer.from(JSON.stringify({ structured: response.structured, rawResponse: response.rawResponse ?? response.text })));
       db.updateOperation(eventId, "uncertain", { result: { responseDigest } });
       if (response.isError || response.failure) throw new Error("Builder coverage provider failed; retained response requires reconciliation");
       const afterSession = actualContractSession(adapter, workspace, projectDir);
@@ -53,12 +61,13 @@ async function collectBuilderContractCoverageOwned(projectDir: string, runId: st
       // Bind the retained coverage to the host-observed post-compaction session
       // while continuing to reject unscoped session changes and source edits.
       binding = { ...binding, sessionId: afterSession.sessionId };
-      const coverage = bindCoverageHostFields(parseContractCoverage(response.text), contract, binding);
+      const claims = composed ?? operationPayload<CoverageClaims>(response, builderCoverageOutput);
+      const coverage = bindCoverageHostFields(claims as import("rafi-spec").QaContractCoverageV1, contract, binding);
       bindHostOwnedBuilderFacts(db, coverage, contract, hostObservations, initialSourceDigest, source.digest, workId, projectDir);
       const errors = validateContractCoverage(contract, coverage, binding, false);
       if (errors.length) throw new Error(`Builder coverage invalid: ${errors.join("; ")}`);
       const coverageDigest = store.putArtifact("builder-coverage", coverage);
-      db.updateOperation(eventId, "confirmed", { result: { responseDigest, coverageDigest, binding, implementationDigest } });
+      db.updateOperation(eventId, "confirmed", { result: { responseDigest, coverageDigest, binding, implementationDigest, hostObservationDigest } });
     } catch (error) {
       throw new Error(`Builder evidence collection blocked: ${String(error)}`);
     }
@@ -69,7 +78,7 @@ function checkText(check: QaVerificationContractV1["checks"][number]): string {
   return JSON.stringify(check);
 }
 
-function bindHostOwnedBuilderFacts(db: WorkflowDb, coverage: ReturnType<typeof bindCoverageHostFields>, contract: QaVerificationContractV1, observations: HostBuilderToolObservation[], _initialSourceDigest: string | undefined, finalSourceDigest: string, workId: string, projectDir: string): void {
+function bindHostOwnedBuilderFacts(db: WorkflowDb, coverage: ReturnType<typeof bindCoverageHostFields>, contract: QaVerificationContractV1, observations: HostBuilderToolObservation[], initialSourceDigest: string | undefined, finalSourceDigest: string, workId: string, projectDir: string): void {
   const graphFact = qaHostGraphFact(projectDir);
   const graphDisabled = /"enabled":false/.test(graphFact);
   for (const row of coverage.checks ?? []) {
@@ -83,8 +92,8 @@ function bindHostOwnedBuilderFacts(db: WorkflowDb, coverage: ReturnType<typeof b
         row.evidence = [...(row.evidence ?? []), { procedure: "Rafi retained preimplementation baseline observation", cwd: ".", runtime: "rafi host", sourceDigest: baseline.sourceDigest, reference: baseline.evidenceDigest }];
       }
     }
-    if (graphDisabled && /graph/i.test(text) && /disabled|not.?adopt|no graph/i.test(text)) {
-      const factDigest = db.putEvidence("qa", graphFact);
+    if (graphDisabled && check.hostKind === "graph-maintenance") {
+      const factDigest = db.putEvidence("qa", Buffer.from(graphFact));
       if (row.outcome === "not-run") row.outcome = "passed";
       if (!row.evidence?.some(evidence => evidence.reference === `host-graph-fact:${factDigest}`)) row.evidence = [...(row.evidence ?? []), { procedure: "Rafi host-owned graph configuration observation", cwd: ".", runtime: "rafi host", sourceDigest: finalSourceDigest, reference: `host-graph-fact:${factDigest}` }];
     }
@@ -92,10 +101,10 @@ function bindHostOwnedBuilderFacts(db: WorkflowDb, coverage: ReturnType<typeof b
     const historical = /red|test.?first|ordering|historical/i.test(text);
     if (!historical) continue;
     const testPath = check.verification.find(method => method.kind === "command" && method.argv?.includes("--test"))?.argv?.at(-1);
-    const sequence = hostTestSequenceEvidence(observations, finalSourceDigest, testPath);
+    const sequence = hostTestSequenceEvidence(observations, finalSourceDigest, testPath, initialSourceDigest);
     if (!sequence) continue;
     const evidence = JSON.stringify({ version: 1, kind: "host-builder-test-sequence", workId, checkId: row.checkId, sequence });
-    const evidenceDigest = db.putEvidence("qa", evidence);
+    const evidenceDigest = db.putEvidence("qa", Buffer.from(evidence));
     row.evidence = [...(row.evidence ?? []), { procedure: "Rafi host-observed test sequence", cwd: ".", runtime: "provider tool lifecycle plus host source capture", sourceDigest: finalSourceDigest, reference: `host-test-sequence:${evidenceDigest}` }];
   }
 }

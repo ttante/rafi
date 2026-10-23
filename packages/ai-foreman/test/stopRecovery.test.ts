@@ -1,3 +1,4 @@
+import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -50,9 +51,9 @@ for (const scenario of ["dependent", "mixed", "limit"] as const) test(`same-run 
   writeFileSync(join(root, ".tickets/tickets.yaml"), JSON.stringify({ tickets: ids.map((id, order) => ({ id, order, title: id, area: "test", priority: "P1", size: "S", risk: "Low", summary: id, acceptance: ["works"], required_tests: ["test"], likely_files: [], depends_on: scenario !== "limit" && id === "T002" ? ["T001"] : [] })) }));
   for (const id of ids.filter(id => scenario === "limit" || id !== "T002")) cmdUpdate(root, id!, { status: "next" });
   const instructions: string[] = []; let prompts = 0;
-  const builder: BuilderAdapter = { agent: "codex", sessionId: () => "fake", async close() {}, async *events() {}, async sendTurn(instruction) {
+  const builder: BuilderAdapter = { agent: "codex", sessionId: () => "fake", async close() {}, async *events() {}, async sendTurn(instruction, policy) {
     instructions.push(instruction); const ticket = instruction.match(/Assigned ticket: (T\d+)/)?.[1]!;
-    return { text: instructions.length === 1 ? `STEP_STATUS: needs_input | ticket="${ticket}" question="Source?" choices="Local|Download"` : `STEP_STATUS: done | ticket="${ticket}" summary="complete"`, isError: false, numTurns: 1, costUsd: 0 };
+    return nativeFixtureFromText(policy, "fake", instructions.length === 1 ? `STEP_STATUS: needs_input | ticket="${ticket}" question="Source?" choices="Local|Download"` : `STEP_STATUS: done | ticket="${ticket}" summary="complete"`, "codex");
   } };
   const foreman = new Foreman(builder, new Log(join(root, "log")), false, false, 3, root);
   (foreman as unknown as { decisionPrompt: () => Promise<string> }).decisionPrompt = async () => { prompts++; assert.equal(instructions.length, scenario === "dependent" ? 1 : 2); return "option-1"; };
@@ -107,14 +108,14 @@ test("inline answered continuation is journaled and cannot be replayed after dis
   writeFileSync(join(root, ".tickets/tickets.yaml"), JSON.stringify({ tickets: [{ id: "T001", order: 1, title: "One", area: "test", priority: "P1", size: "S", risk: "Low", summary: "One", acceptance: ["works"], required_tests: ["test"], likely_files: [], depends_on: [] }] }));
   cmdUpdate(root, "T001", { status: "next" });
   let calls = 0, decisionId = "";
-  const builder: BuilderAdapter = { agent: "codex", sessionId: () => "fake", async close() {}, async *events() {}, async sendTurn(instruction) {
+  const builder: BuilderAdapter = { agent: "codex", sessionId: () => "fake", async close() {}, async *events() {}, async sendTurn(instruction, policy) {
     if (++calls === 1) {
       await assert.rejects(durableHumanDecision({ projectDir: root, runId: identity.qaRunId, key: `builder:T001:${buildScopeRevision(root)}`, ticketId: "T001", prompt: "Source?", choices: [{ id: "option-1", label: "Local" }, { id: "custom", label: "Custom response" }], defer: true, operation: async () => "Local" }), HumanDecisionRequired);
       const db = new WorkflowDb(root); try { decisionId = db.pendingHumanDecisions(identity.qaRunId)[0]!.decisionId; db.answerHumanDecision(identity.qaRunId, decisionId, "option-1"); } finally { db.close(); }
-      return { text: 'STEP_STATUS: needs_input | ticket="T001" question="Source?" choices="Local"', isError: false, numTurns: 1, costUsd: 0 };
+      return nativeFixtureFromText(policy, "fake", 'STEP_STATUS: needs_input | question="Source?" choices="Local"', "codex");
     }
     assert.match(instruction, /Local/);
-    return { text: 'STEP_STATUS: done | ticket="T001" summary="complete"', isError: false, numTurns: 1, costUsd: 0 };
+    return nativeFixtureFromText(policy, "fake", 'STEP_STATUS: done | summary="complete"', "codex");
   } };
   const foreman = new Foreman(builder, new Log(join(root, "log")), false, false, 3, root);
   const identity = foreman as unknown as { qaRunId: string; currentTicketId: string; continueIndependentTickets: boolean; doTurn(instruction: string): Promise<unknown> };

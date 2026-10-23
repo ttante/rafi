@@ -2,12 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 
 import { createBuildRun as createUnadmittedBuildRun, persistBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease } from "ai-foreman/build-runs.js";
 import { createProviderSessionRef } from "ai-foreman/session-identity.js";
@@ -23,7 +23,27 @@ import type { BuildRunRecordV2 } from "rafi-spec";
 import { buildBuildResumeCommand, reconcileStaleSupervisor } from "../src/buildResume.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 
+/** Resume fixtures explicitly approve the real plan and definitions they create. */
+function approveFixturePlan(projectDir: string, ticketIds: string[]) {
+  const config = parse(readFileSync(join(projectDir, "rafi-config.yaml"), "utf8"));
+  const file = join(projectDir, ".tickets/tickets.yaml");
+  const definitions = (parse(readFileSync(file, "utf8"))?.tickets ?? []) as Array<Record<string, unknown>>;
+  for (const id of ticketIds) if (!definitions.some(ticket => ticket.id === id)) definitions.push({ id, order: definitions.length + 1, title: `Fixture ${id}`, area: "tests", priority: "P2", size: "S", risk: "Low", depends_on: [], summary: `Approved work ${id}`, acceptance: ["Fixture work is complete"], required_tests: [], likely_files: [], rollback: null, notes: null });
+  writeFileSync(file, stringify({ tickets: definitions }));
+  const plan = { version: 1, plan_id: "resume-fixture-plan", revision: 1, content_digest: "", slices: definitions.map(ticket => ({ ...ticket, slice_ref: ticket.id })) };
+  const canonical = (value: unknown): string => JSON.stringify(value, (_, child) => child && typeof child === "object" && !Array.isArray(child) ? Object.fromEntries(Object.entries(child).sort(([a], [b]) => a.localeCompare(b))) : child);
+  plan.content_digest = createHash("sha256").update(canonical(plan)).digest("hex");
+  const directory = join(projectDir, config.docs?.root ?? "docs"); mkdirSync(directory, { recursive: true }); writeFileSync(join(directory, "rafi-plan.json"), JSON.stringify(plan));
+  const db = new WorkflowDb(projectDir);
+  try {
+    const runId = `fixture-plan-approval:${plan.content_digest}`;
+    if (!db.getRun(runId)) db.createRun({ runId, kind: "plan" });
+    db.transition(runId, { status: "completed", checkpoint: "approved", state: { planId: plan.plan_id, revision: plan.revision, digest: plan.content_digest, decisionReceipt: { planDigest: plan.content_digest } } });
+  } finally { db.close(); }
+}
+
 function createBuildRun(input:Parameters<typeof createUnadmittedBuildRun>[0]) {
+  approveFixturePlan(input.repositoryRoot, input.tickets ?? []);
   const run=createUnadmittedBuildRun(input);
   const db=new WorkflowDb(input.repositoryRoot);
   try {for(const ticketId of run.tickets)db.admitWork({runId:run.runId,kind:"ticket",ticketId,definition:{id:ticketId},approvalId:"fixture",scopeRevision:"fixture",provenance:{userTurn:`Test authorizes ${ticketId}`,reason:"Approved resume fixture"}});}finally{db.close();}
@@ -74,6 +94,7 @@ function interruptedQaDispatchFixture(dir: string, options: { withoutDispatchSes
   initializeGit(dir);
   const definition = { id: "T001", order: 1, title: "Feature", area: "tests", priority: "P2", size: "XS", risk: "Low", depends_on: [], summary: "Feature", acceptance: ["Feature works"], required_tests: [], likely_files: ["tracked.txt"], notes: "Fixture" };
   writeFileSync(join(dir, ".tickets", "tickets.yaml"), stringify({ tickets: [definition] }));
+  approveFixturePlan(dir, ["T001"]);
   let run = createUnadmittedBuildRun({ repositoryRoot: dir, tickets: ["T001"], branchMode: "shared", builder: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false }, qa: { role: "qa", source: "project", make: "codex", model: "default", reasoning: "default", fast: false } });
   const ref = scopedQaSession(dir, "interrupted-qa");
   run = persistBuildSession(dir, run, "qa", ref);

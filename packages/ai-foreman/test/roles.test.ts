@@ -93,14 +93,22 @@ test("tier 3: returns fallback even with no projectDir when library is null", ()
 
 // --- STEP_STATUS protocol pins ---
 
-test("MARKER_SPEC contains all four builder marker kinds", () => {
-  for (const kind of ["done", "blocked", "plan_complete", "needs_input"]) {
-    assert.ok(MARKER_SPEC.includes(`STEP_STATUS: ${kind}`), `MARKER_SPEC missing: ${kind}`);
-  }
+test("work and QA instructions select native contracts without legacy status suffixes", () => {
+  assert.match(MARKER_SPEC, /work-report.*native JSON schema/);
+  assert.match(MARKER_SPEC, /independent QA/);
+  assert.match(QA_MARKER_SPEC, /qa-verdict.*native JSON schema/);
+  assert.match(QA_MARKER_SPEC, /pass cannot contain blocking findings/);
+  assert.doesNotMatch(MARKER_SPEC + QA_MARKER_SPEC, /STEP_STATUS:/);
 });
 
-test("QA_MARKER_SPEC contains qa_pass, qa_fail, and blocked marker kinds", () => {
-  for (const kind of ["qa_pass", "qa_fail", "blocked"]) {
-    assert.ok(QA_MARKER_SPEC.includes(`STEP_STATUS: ${kind}`), `QA_MARKER_SPEC missing: ${kind}`);
+test("branch and generated tracker instructions agree with native result contracts", async () => {
+  const { buildBranchTicketInstruction, buildBranchTicketResumeInstruction } = await import("../src/branch/runner.js");
+  const { renderTrackerRules } = await import("../src/tickets/renderMarkdown.js");
+  const node = { ticket: { id: "T001", title: "Work", summary: "Implement", acceptance: ["Works"], required_tests: ["npm test"], likely_files: ["index.mjs"] } } as Parameters<typeof buildBranchTicketInstruction>[0];
+  for (const instruction of [buildBranchTicketInstruction(node), buildBranchTicketResumeInstruction(node), renderTrackerRules()]) {
+    assert.doesNotMatch(instruction, /STEP_STATUS|RAFI_CONTINUITY_DELTA|RAFI_QA_FAILURE_REPORT_START/);
+    assert.match(instruction, /native|structured JSON/);
+    assert.match(instruction, /independent QA/);
   }
+  assert.match(buildBranchTicketInstruction(node), /branchDependency/);
 });

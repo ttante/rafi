@@ -1,3 +1,5 @@
+import { nativeEnvelope } from "./helpers/nativeOutput.js";
+import { structuredPlanOutput } from "rafi-spec";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -129,8 +131,8 @@ test("create preserves a local source through a docs-rafi plan into Ticket Maker
         yes: true,
         runInstruction: async () => ({
           turn: {
-            result: { text: completedPlanOutput(), isError: false, numTurns: 1, costUsd: 0 },
-            status: { kind: "plan_complete", summary: "created ticket-maker-ready Rafi plan" },
+            result: nativeEnvelope(structuredPlanOutput, completedPlanOutput(), PLAN_PROPOSAL_START, PLAN_PROPOSAL_END, "planner-session"),
+            status: { kind: "done", summary: "created ticket-maker-ready Rafi plan" },
           },
           runtime: "codex",
           model: "test-model",
@@ -186,8 +188,8 @@ test("create snapshots an external local source and carries it into Ticket Maker
         yes: true,
         runInstruction: async () => ({
           turn: {
-            result: { text: completedPlanOutput(), isError: false, numTurns: 1, costUsd: 0 },
-            status: { kind: "plan_complete", summary: "created ticket-maker-ready Rafi plan" },
+            result: nativeEnvelope(structuredPlanOutput, completedPlanOutput(), PLAN_PROPOSAL_START, PLAN_PROPOSAL_END, "planner-session"),
+            status: { kind: "done", summary: "created ticket-maker-ready Rafi plan" },
           },
           runtime: "codex",
           model: "test-model",

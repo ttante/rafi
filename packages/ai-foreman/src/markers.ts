@@ -1,25 +1,9 @@
 /**
- * STEP_STATUS protocol strings. Extracted from foreman.ts so tests can import
+ * Native operation instructions. Extracted from foreman.ts so tests can import
  * them without pulling in @clack/prompts (which requires Node >=20 for styleText).
  */
 
-export const MARKER_SPEC = `End EVERY turn with exactly one marker line as the LAST line, nothing after it:
-  STEP_STATUS: done | ticket="T001" summary="what you just did" next="the next ticket or step"
-  STEP_STATUS: blocked | ticket="T001" reason="why you cannot proceed"
-  STEP_STATUS: plan_complete | ticket="T001" summary="what you just did"
-  STEP_STATUS: needs_input | ticket="T001" question="your question for the user" choices="Option A|Option B|Option C"
-Use "done" after finishing a ticket or step when more remain, "plan_complete" after
-the final ticket or step, "blocked" if you cannot proceed without help, and "needs_input"
-if you need the user to make a decision before continuing.
-Always include the assigned ticket="<ticket-id>" in every work response marker, including needs_input, when working from a ticket queue. Never substitute another ticket.
-After "done" or "plan_complete", foreman may run a QA pass on your work — expect a
-follow-up instruction asking you to triple-check accuracy, tests, and ticket satisfaction.`;
+/** Active work protocol; legacy status parsers remain historical readers. */
+export const MARKER_SPEC = `Return one work-report result through the configured native JSON schema. result.kind completed is your claim that the assigned work is finished; do not add a duplicate status field. The payload contains disposition modified or already-satisfied, truthful evidence, coverage when a verification contract is supplied (otherwise null), and graphMaintenance (null unless a meaningful indexed change occurred). Blocked work and questions use their own result alternatives. Never claim completion merely because a turn ended. Include bounded continuity when requested. The host still requires independent QA before completing a ticket.`;
 
-export const QA_MARKER_SPEC = `End EVERY turn with exactly one marker line as the LAST line, nothing after it:
-  STEP_STATUS: qa_pass | summary="confirmed everything checks out"
-  RAFI_QA_FAILURE_REPORT_START
-  {"version":1,"summary":"...","checks_run":[...],"findings":[...],"observations":[...]}
-  RAFI_QA_FAILURE_REPORT_END
-  STEP_STATUS: qa_fail | issues="short plain-text synopsis"
-  STEP_STATUS: blocked | reason="why QA itself cannot proceed"
-  STEP_STATUS: needs_input | question="..." choices="..."`;
+export const QA_MARKER_SPEC = `Return one qa-verdict result through the configured native JSON schema. A completed verdict payload is either passed with independent coverage, or failed with the complete structured failure report and coverage. Report blocked work or a question explicitly. A pass cannot contain blocking findings; preserve all failures and uncertainties. Include required continuity in the same object.`;

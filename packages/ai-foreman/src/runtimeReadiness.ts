@@ -1,3 +1,4 @@
+import { ProbeIpcTracker } from "./probeIpc.js";
 import { fileURLToPath } from "node:url";
 import { cleanupReadiness, type ReadinessProcess } from "./readinessCleanup.js";
 import { windowsProbeCommand, windowsProbeJobState } from "./windowsProbeJob.js";
@@ -165,21 +166,21 @@ async function probeRuntimeInternal(
     let providerSpawnError: NodeJS.ErrnoException | undefined;
     let providerResult: { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
     let startupTimer: ReturnType<typeof setTimeout> | undefined;
+    const probeMessages = new ProbeIpcTracker(tag, child.pid);
     if (useHost) {
       startupTimer = setTimeout(() => { startupError = new RuntimeCleanupError("Readiness helper startup timed out"); abort(); }, 15_000);
-      child.on("message", message => {
-        if (!message || typeof message !== "object" || !("kind" in message)) return;
+      child.on("message", raw => {
+        if (settled) return;
+        const message = probeMessages.accept(raw);
+        if (message === "conflict") { startupError = new RuntimeCleanupError("Readiness helper sent conflicting terminal results"); abort(); return; }
+        if (!message) return;
         if (message.kind === "rafi-probe-result") {
-          const reported = message as { exitCode?: unknown; signal?: unknown };
-          if ((reported.exitCode === null || Number.isInteger(reported.exitCode)) && (reported.signal === null || typeof reported.signal === "string")) {
-            providerResult = reported as typeof providerResult;
-            setTimeout(() => { if (!settled) { child.stdout?.destroy(); child.stderr?.destroy(); void finish(providerResult!.exitCode, providerResult!.signal); } }, 100).unref();
-          }
+          providerResult = { exitCode: message.exitCode, signal: message.signal as NodeJS.Signals | null };
+          setTimeout(() => { if (!settled) { child.stdout?.destroy(); child.stderr?.destroy(); void finish(providerResult!.exitCode, providerResult!.signal); } }, 100).unref();
           return;
         }
         if (message.kind === "rafi-probe-spawn-error") {
-          const reported = message as { code?: string; message?: string };
-          providerSpawnError = Object.assign(new Error(reported.message ?? "Provider could not start"), { code: reported.code });
+          providerSpawnError = Object.assign(new Error(message.message), { code: message.code ?? undefined });
           return;
         }
         if (message.kind !== "rafi-probe-registered") return;
@@ -188,7 +189,7 @@ async function probeRuntimeInternal(
           if (authority && ownedProcess) journal = new WorkflowDb(ownerProject!, undefined, { runId: authority.runId });
           if (cancelled || timedOut || settled) { if (authority && ownedProcess) journal?.revokeReadinessHelper(ownedProcess, authority); child.kill("SIGKILL"); return; }
           if (authority && ownedProcess) journal!.authorizeReadinessHelper(authority, ownedProcess, child.pid!);
-          child.send("rafi-probe-authorized", error => { if (error) { startupError = error; abort(); } });
+          child.send({ version: 1, kind: "rafi-probe-authorized", id: tag, pid: child.pid }, error => { if (error) { startupError = error; abort(); } });
           clearTimeout(startupTimer);
         } catch (error) { startupError = new RuntimeCleanupError(`Readiness authorization failed: ${String(error)}`); abort(); }
         finally { journal?.close(); }
@@ -196,7 +197,7 @@ async function probeRuntimeInternal(
     }
     const notifySupervisor = (active: boolean) => {
       if (process.send && process.connected && process.env.RAFI_BUILD_WORKER_RUN && child.pid) {
-        try { process.send({ kind: "rafi-readiness-child", active, tag, pid: child.pid, processStart: active ? processStartIdentity(child.pid) : undefined }, () => {}); } catch { /* Durable ownership survives a disconnected supervisor. */ }
+        try { process.send({ version: 1, kind: "rafi-readiness-child", runId: process.env.RAFI_BUILD_WORKER_RUN, generation: Number(process.env.RAFI_BUILD_WORKER_GENERATION), workerPid: process.pid, active, tag, pid: child.pid, processStart: active ? processStartIdentity(child.pid) ?? null : null }, () => {}); } catch { /* Durable ownership survives a disconnected supervisor. */ }
       }
     };
     notifySupervisor(true);
@@ -233,6 +234,7 @@ async function probeRuntimeInternal(
     const finish = async (exitCode: number | null, signal: NodeJS.Signals | null, spawnError?: NodeJS.ErrnoException): Promise<void> => {
       if (settled) return;
       settled = true;
+      if (useHost && !probeMessages.terminal && !cancelled && !timedOut && !spawnError) startupError ??= new RuntimeCleanupError("Readiness helper exited without a correlated terminal result");
       if (providerResult) { exitCode = providerResult.exitCode; signal = providerResult.signal; }
 
       clearTimeout(timer);

@@ -66,6 +66,7 @@ import { buildResumeCommand } from "./resume.js";
 import { buildPlanDoctorCommand } from "./planDoctor.js";
 import { buildBuildResumeCommand } from "./buildResume.js";
 import { buildBuildStartOverCommand } from "./buildStartOver.js";
+import { buildResetCommand } from "./buildReset.js";
 import { offerStartRecovery } from "./startRecovery.js";
 import { buildUninstallCleanupCommand, buildUninstallCommand, buildUninstallRestoreCommand, interpretUninstallInstruction } from "./uninstall.js";
 import { buildAuditCommand } from "./audit.js";
@@ -1104,6 +1105,7 @@ program.addCommand(buildDecideCommand());
 program.addCommand(buildStopCommand());
 program.addCommand(buildBuildResumeCommand({ executeStart: (args, context) => launchResumeStart(fileURLToPath(import.meta.url), args, context) }));
 program.addCommand(buildBuildStartOverCommand());
+program.addCommand(buildResetCommand());
 program.addCommand(buildHandoffsCommand());
 program.addCommand(buildAgentsCommand());
 program.addCommand(buildStateCommand({ resolveProject: (project) => {

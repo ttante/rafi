@@ -1,3 +1,4 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -28,9 +29,9 @@ for (const scenario of ["tests", "rollback", "priority", "combined", "exhausted"
     }
     await buildTicketsCommand().parseAsync(["node", "test", "init", "--project", root, "--app-name", "Repair"]);
     const invalid = proposal();
-    if (["tests", "combined", "exhausted"].includes(scenario)) invalid.additions[0]!.required_tests = [];
+    if (["tests", "combined"].includes(scenario)) invalid.additions[0]!.required_tests = [];
     if (["rollback", "combined", "exhausted"].includes(scenario)) invalid.additions[0]!.rollback = "";
-    if (["priority", "combined", "exhausted"].includes(scenario)) invalid.additions[0]!.priority = "Medium";
+    if (["priority", "combined"].includes(scenario)) invalid.additions[0]!.priority = "Medium";
     const run = (resumeSession?: string) => runTicketPlan({ project: root, brief: "Plan work", agent: "codex", resumeSession, yes: true,
       beforeApply: (_root, artifacts = []) => {
         ownedWrites++; plannedArtifacts = artifacts;
@@ -41,10 +42,10 @@ for (const scenario of ["tests", "rollback", "priority", "combined", "exhausted"
         assert.deepEqual(artifacts, plannedArtifacts);
         for (const path of artifacts) { assert.equal(existsSync(join(root, path)), true); finalizePreparedOwnedWrite(root, path, "tickets:plan", "plans"); }
       }, createPlanner: async () => ({ runtime: "codex", roleBundle: {} as never, skills: [], log: { write() {} } as never, graphRoot: root,
-      builder: { agent: "codex", sessionId: () => "repair-session", events: async function* () {}, close: async () => { closed = true; }, sendTurn: async instruction => {
+      builder: { agent: "codex", sessionId: () => "repair-session", events: async function* () {}, close: async () => { closed = true; }, sendTurn: async (instruction, policy) => {
         turns++;
         if (turns > 1) assert.match(instruction, /Correct|corrected/);
-        return { text: output(!recovering && (turns === 1 || scenario === "exhausted") ? invalid : proposal()), isError: false, numTurns: 1, costUsd: 0 };
+        return nativeFixtureTurn(policy, "repair-session", !recovering && (turns === 1 || scenario === "exhausted") ? invalid : proposal(), "codex");
       } },
     }) }, ["--no-grill-me"]);
     if (scenario === "exhausted") {
@@ -54,10 +55,16 @@ for (const scenario of ["tests", "rollback", "priority", "combined", "exhausted"
       const record = readInterviewRecords(root).records[0]!;
       assert.equal(record.runtime.sessionId, "repair-session");
       assert.ok(record.failure);
-      let resumed: string | undefined;
-      await buildPlanDoctorCommand({ select: async records => records[0]?.id, resume: async (_root, saved) => { resumed = saved.id; recovering = true; await run(saved.runtime.sessionId); } }).parseAsync(["node", "test", root]);
-      assert.equal(resumed, record.id);
-      assert.equal(readInterviewRecords(root).records[0]?.status, "completed");
+      recovering = true;
+      await assert.rejects(() => run(record.runtime.sessionId), /after 3 attempts/);
+      assert.equal(turns, 4, "resume retains the exhausted domain-correction budget");
+      assert.equal(ownedWrites, 0);
+      return;
+    } else if (scenario === "priority" || scenario === "combined" || scenario === "tests") {
+      await assert.rejects(() => run(), /schema|contract|structured/i);
+      assert.equal(turns, 1, "invalid wire contracts never trigger response correction");
+      assert.equal(ownedWrites, 0);
+      return;
     } else { await run(); assert.equal(turns, scenario === "valid" ? 1 : 2); assert.equal(closed, true); }
     assert.equal(ownedWrites, 1, "preimages are captured exactly once at approved publication");
     assert.deepEqual(readInstallManifest(root)?.files.filter(file => file.category === "plans").map(file => file.path).sort(), [...plannedArtifacts].sort());
@@ -73,20 +80,20 @@ test("planning doctor labels session age", () => {
   assert.equal(planningSessionAge("2026-10-12T10:00:00Z", Date.parse("2026-10-12T12:00:00Z")), "2h ago");
 });
 
-test("unattended ticket planning corrects an unexpected provider question", async () => {
+test("unattended ticket planning preserves a missing decision without inventing an answer", async () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-unattended-ticket-plan-"));
   let turns = 0;
   try {
     writeFileSync(join(root, "rafi-config.yaml"), stringify(buildProjectConfig(defaultAnswers())));
     await buildTicketsCommand().parseAsync(["node", "test", "init", "--project", root, "--app-name", "Unattended"]);
-    await runTicketPlan({ project: root, brief: "Plan work", agent: "codex", yes: true, createPlanner: async () => ({ runtime: "codex", roleBundle: {} as never, skills: [], log: { write() {} } as never, graphRoot: root,
-      builder: { agent: "codex", sessionId: () => "unattended-session", events: async function* () {}, close: async () => {}, sendTurn: async instruction => {
+    await assert.rejects(() => runTicketPlan({ project: root, brief: "Plan work", agent: "codex", yes: true, createPlanner: async () => ({ runtime: "codex", roleBundle: {} as never, skills: [], log: { write() {} } as never, graphRoot: root,
+      builder: { agent: "codex", sessionId: () => "unattended-session", events: async function* () {}, close: async () => {}, sendTurn: async (instruction, policy) => {
         turns++;
-        if (turns === 1) return { text: 'STEP_STATUS: needs_input | question="Should I proceed?" choices="Yes (Recommended)|No"', isError: false, numTurns: 1, costUsd: 0 };
+        if (turns === 1) return nativeFixtureTurn(policy, "unattended-session", undefined, "codex", { kind: "needs-input", question: "Should I proceed?", choices: ["Yes (Recommended)", "No"] });
         assert.match(instruction, /unattended ticket planning cannot accept/);
-        return { text: output(proposal()), isError: false, numTurns: 1, costUsd: 0 };
+        throw new Error("Unexpected automatic continuation");
       } },
-    }) }, ["--no-grill-me"]);
-    assert.equal(turns, 2);
+    }) }, ["--no-grill-me"]), /resume interactively/);
+    assert.equal(turns, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -25,7 +25,7 @@ if (!providers.length || providers.some(value => value !== "claude" && value !==
 const liveWorkspace = createLiveWorkspace("rafi-live-build-stalls-");
 const root = liveWorkspace.evidenceRoot;
 const workspaceRoot = liveWorkspace.workspaceRoot;
-const workspace = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const workspace = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const results: unknown[] = [];
 const versions: Record<string, unknown> = { hostDigest: createHash("sha256").update(["cli/start.js", "supervisedStart.js", "adapters/codex.js", "adapters/claude.js", "foreman.js"].map(path => readFileSync(join(workspace, "packages/ai-foreman/dist", path), "utf8")).join("\n")).digest("hex") };
 const save = () => writeFileSync(join(root, "results.json"), JSON.stringify({ node: process.version, versions, samples, scenarios, results }, null, 2));

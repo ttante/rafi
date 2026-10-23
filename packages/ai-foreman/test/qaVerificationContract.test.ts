@@ -126,6 +126,26 @@ test("documentation policy is opt-in, explicit, and delivered with the contract"
   assert.match(validateCandidate(incomplete, incomplete.requirements).join(";"), /Documentation policy requires explicit targets and criteria/);
 });
 
+test("V2 verification intent has its own digest without changing statement identity", () => {
+  const draft = candidate();
+  const intent = {
+    id: "run-unit", summary: "Run the unit suite", timing: "postimplementation" as const,
+    applicability: { kind: "always" as const },
+    methods: [{ kind: "command" as const, argv: ["pnpm", "test"], cwd: ".", runtime: "node", timeout_ms: 60_000, expected_outcome: "passes" }],
+    expected_evidence: ["test output"], depends_on: [],
+  };
+  draft.requirements[0] = {
+    ...draft.requirements[0]!,
+    statement: intent.summary,
+    digest: contractDigest("statement", intent.summary),
+    verificationIntent: intent,
+    verificationIntentDigest: contractDigest("verification-intent-v2", intent),
+  };
+  assert.deepEqual(validateCandidate(draft, draft.requirements), []);
+  draft.requirements[0]!.verificationIntentDigest = contractDigest("verification-intent-v2", { ...intent, summary: "different" });
+  assert.match(validateCandidate(draft, draft.requirements).join(";"), /Invalid V2 verification intent/);
+});
+
 test("independent assessment blockers include their reason and next action", () => {
   const draft = candidate(), review = assessment(draft);
   review.concerns.push({ reason: "The proposed verification misses the boundary case", requirementIds: ["req"], checkIds: ["check"], material: true, owner: "host", nextAction: "Add a boundary check" });

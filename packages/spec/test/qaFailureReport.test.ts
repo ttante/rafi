@@ -70,6 +70,29 @@ test("parses response atomically and ignores marker-like JSON strings", () => {
   assert.equal(parsed.report?.findings[0]?.id, "QA-1");
 });
 
+test("accepts a plain JSON failure report followed by STEP_STATUS", () => {
+  const parsed = parseQaResponseContract(`${JSON.stringify(report)}\nSTEP_STATUS: qa_fail | issues="empty input throws"`);
+  assert.equal(parsed.valid, true, parsed.errors.join("; "));
+  assert.equal(parsed.report?.findings[0]?.id, "QA-1");
+});
+
+test("preserves continuity ordering for plain JSON failure reports", () => {
+  const body = JSON.stringify(report);
+  assert.equal(
+    parseQaResponseContract(`RAFI_CONTINUITY_DELTA {"summary":"reviewed"}\n${body}\nSTEP_STATUS: qa_fail | issues="empty input throws"`, { continuityRequired: true }).valid,
+    true,
+  );
+  const late = parseQaResponseContract(`${body}\nRAFI_CONTINUITY_DELTA {"summary":"late"}\nSTEP_STATUS: qa_fail | issues="empty input throws"`, { continuityRequired: true });
+  assert.equal(late.valid, false);
+  assert.match(late.errors.join("; "), /continuity marker must precede/);
+});
+
+test("does not accept a plain JSON failure report without STEP_STATUS", () => {
+  const parsed = parseQaResponseContract(JSON.stringify(report));
+  assert.equal(parsed.valid, false);
+  assert.match(parsed.errors.join("; "), /missing STEP_STATUS/);
+});
+
 test("enforces status/report contradictions and continuity ordering", () => {
   assert.equal(parseQaResponseContract('STEP_STATUS: qa_fail | issues="x"').valid, false);
   assert.equal(parseQaResponseContract(`${response()}\nSTEP_STATUS: qa_pass`).valid, false);

@@ -8,6 +8,19 @@ if (process.argv[2] !== 'app-server') {
   }
   console.log('OK'); process.exit(0);
 }
+function wire(schema, value, root = schema) {
+  if (schema.$ref) return wire(schema.$ref.slice(2).split("/").reduce((node, key) => node[key.replaceAll("~1", "/").replaceAll("~0", "~")], root), value, root);
+  const branches = schema.anyOf || schema.oneOf;
+  if (branches) {
+    const branch = branches.find(b => b.type === "null" ? value === null : value !== null && (b.type !== "object" || typeof value === "object" && !Array.isArray(value) && Object.entries(b.properties || {}).every(([key, f]) => f.const === undefined && !f.enum || f.const === value[key] || f.enum?.includes(value[key]))) && (!b.enum || b.enum.includes(value)));
+    return branch ? wire(branch, value, root) : value;
+  }
+  if (schema.type === "object" && schema.properties && value && typeof value === "object") return Object.fromEntries(Object.entries(schema.properties).map(([key, child]) => [key, value[key] === undefined ? null : wire(child, value[key], root)]));
+  if (Array.isArray(value) && schema.items) return value.map(item => wire(schema.items, item, root));
+  return value;
+}
+
+let turnSequence = 0;
 let questionAsked = false;
 let thread = `scripted-thread-${process.pid}`;
 let cwd = process.cwd();
@@ -27,12 +40,18 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     const instruction = (p.input || []).map(item => item.text || '').join('\n');
     const assignedTicket = instruction.match(/Assigned ticket: ([^\s.]+)\./)?.[1] || instruction.match(/Ticket scope: ([^\s.]+)\./)?.[1];
     const ticketMarker = assignedTicket ? `ticket="${assignedTicket}" ` : '';
-    const isWorkInstruction = /Assigned ticket:|Implement exactly this ticket|Implement the next ticket or step now|You are being run by an automated foreman/.test(instruction);
+    const operation = p.outputSchema?.properties?.operation?.const;
+    if (!operation) throw new Error("Fixture requires native output schema");
+    const id = `turn-${++turnSequence}`;
+    const emitResult = result => {
+      send({ id: request.id, result: { turn: { id } } });
+      send({ method: 'item/completed', params: { threadId: thread, turnId: id, item: { id: `item-${id}`, type: 'agentMessage', phase: 'final_answer', text: JSON.stringify(wire(p.outputSchema, { version: 1, operation, result, continuity: delta })) } } });
+      send({ method: 'turn/completed', params: { threadId: thread, turn: { id, status: 'completed' } } });
+    };
+    const isWorkInstruction = operation === 'work-report';
     if (process.env.RAFI_FIXTURE_QUESTION === "1" && !questionAsked && isWorkInstruction) {
       questionAsked = true;
-      send({ id: request.id, result: { turn: { id: 'question-turn' } } });
-      send({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text: 'STEP_STATUS: needs_input | ' + ticketMarker + 'question="Fixture terminal decision?" choices="Continue|Cancel"\nRAFI_CONTINUITY_DELTA: ' + JSON.stringify(delta) } } });
-      send({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'question-turn', status: 'completed' } } });
+      emitResult({ kind: 'needs-input', question: 'Fixture terminal decision?', choices: ['Continue', 'Cancel'] });
       return;
     }
     if (isWorkInstruction) {
@@ -41,12 +60,16 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       if (process.env.RAFI_FIXTURE_CRASH_ON_WORK === '1') { process.kill(process.ppid, 'SIGKILL'); return; }
       require('node:fs').writeFileSync(require('node:path').join(cwd, 'implemented.txt'), 'scripted implementation\n');
     }
-    send({ id: request.id, result: { turn: { id: 'turn' } } });
+    let payload;
+    if (operation === 'session-initialization') payload = { ready: true };
+    else if (operation === 'build-preflight') payload = { steps: [{ ticket: assignedTicket || null, work: 'Implement authorized work' }] };
+    else if (operation === 'handoff-acceptance') { const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(instruction); payload = { manifestDigest: match[1], generation: Number(match[2]), missingResources: [] }; }
+    else if (operation === 'guided-recovery') payload = { reconciled: true };
+    else if (operation === 'branch-dependency-audit') payload = { dependencies: [] };
+    else if (operation === 'manager') payload = { answer: '0 retained build runs. Consult project setup and planning before starting a build.' };
+    else if (operation === 'work-report') payload = { disposition: 'modified', evidence: ['implemented.txt'], coverage: null, graphMaintenance: null };
+    else throw new Error(`Unsupported fixture operation ${operation}`);
     send({ method: 'thread/tokenUsage/updated', params: { threadId: thread, tokenUsage: { total: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, last: { totalTokens: 20 }, modelContextWindow: 1000 } } });
-    // Production accepts the marker only as the first non-whitespace line.
-    // Detect the protocol token rather than a particular wording so this
-    // fixture remains compatible with clarified host instructions.
-    send({ method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', text: (instruction.includes('HANDOFF_ACCEPTED') ? 'HANDOFF_ACCEPTED\n' : 'STEP_STATUS: done | ' + ticketMarker + 'summary="scripted work complete"\n') + 'RAFI_CONTINUITY_DELTA: ' + JSON.stringify(delta) } } });
-    send({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'turn', status: 'completed' } } });
+    emitResult({ kind: 'completed', summary: 'Fixture completed', payload });
   } else send({ id: request.id, result: {} });
 });

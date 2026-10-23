@@ -1,3 +1,4 @@
+import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
 import { withGraphDerivedAccess } from "../src/graph/derived.js";
 import { graphExclusions } from "../src/graph/corpus.js";
 import { loadGraphConfig } from "../src/graph/config.js";
@@ -80,6 +81,7 @@ class FakeBuilder implements BuilderAdapter {
   private closed = false;
   response = "";
   correctionItemType = "text";
+  emitTestLifecycle = false;
   ref: ProviderSessionRefV1;
 
   constructor(cwd: string, private readonly graphEnabled = false) {
@@ -100,8 +102,14 @@ class FakeBuilder implements BuilderAdapter {
     };
   }
 
-  async sendTurn(instruction: string): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     this.instructions.push(instruction);
+    if (this.emitTestLifecycle) {
+      const started: BuilderEvent = { kind: "tool", name: "Bash", input: { command: "node --test test/input.test.ts" }, lifecycle: "started", callId: "test-call", providerTurnId: policy?.dispatchId };
+      for (const listener of this.observers) listener(started);
+      const completed: BuilderEvent = { ...started, lifecycle: "completed", completionKnown: true, exitCode: 0 };
+      for (const listener of this.observers) listener(completed);
+    }
     if (!this.response) {
       const handoffId = /QA failure handoff ID: ([a-f0-9]{64})/.exec(instruction)?.[1];
       const findingKey = /QA-1 -> ([a-f0-9]{64})/.exec(instruction)?.[1];
@@ -110,7 +118,7 @@ class FakeBuilder implements BuilderAdapter {
       this.response = [
         BUILDER_QA_REMEDIATION_START,
         JSON.stringify({
-          version: 2,
+          version: 3,
           handoff_id: handoffId,
           summary: "Fixed empty input.",
           findings: [{
@@ -129,11 +137,12 @@ class FakeBuilder implements BuilderAdapter {
     }
     const wire = this.graphEnabled && this.instructions.length===1 ? JSON.stringify({kind:"rafi_graph_request",version:1,requestId:"impact",operations:[{operation:"query",query:"input"}]}) : this.response;
     const result: TurnResult = {
+      ...nativeFixtureFromText(policy, this.ref.sessionId, wire, "codex"),
       text: wire,
       isError: false,
       numTurns: 1,
       costUsd: 0,
-      turnId: `builder-turn-${this.instructions.length}`,
+      turnId: policy?.dispatchId,
       hostInstruction: instruction,
       providerInstruction: `provider role text\n${instruction}`,
       rawResponse: wire,
@@ -154,7 +163,7 @@ class FakeBuilder implements BuilderAdapter {
   async close(): Promise<void> { this.closed = true; }
 }
 
-for (const scenario of [false, true, "retained-repair", "revoked-repair", "inherited-report", "tool-repair", "unknown-repair"] as const) test(`QA failure delivery preserves its binding across graph exchange: ${scenario}`, async () => {
+for (const scenario of [false, true, "test-observation", "retained-repair", "revoked-repair", "inherited-report", "tool-repair", "unknown-repair"] as const) test(`QA failure delivery preserves its binding across graph exchange: ${scenario}`, async () => {
   const graphEnabled = scenario === true;
   const unsafeRepair = scenario === "tool-repair" || scenario === "unknown-repair";
   const repair = scenario === "retained-repair" || scenario === "revoked-repair" || unsafeRepair;
@@ -199,6 +208,7 @@ for (const scenario of [false, true, "retained-repair", "revoked-repair", "inher
     } finally { db.close(); }
 
     const builder = new FakeBuilder(root,graphEnabled);
+    builder.emitTestLifecycle = scenario === "test-observation";
     if (unsafeRepair) builder.correctionItemType = scenario === "tool-repair" ? "commandExecution" : "unknown-provider-action";
     if (repair) {
       const db = new WorkflowDb(root);
@@ -206,9 +216,12 @@ for (const scenario of [false, true, "retained-repair", "revoked-repair", "inher
       const key = digest("session-access", { provider: builder.agent, session: builder.sessionId() });
       try { db.registerGraphEvidence(key, [access]); db.graphStore().put("session-access", key, { grants: [access] }); } finally { db.close(); }
       const send = builder.sendTurn.bind(builder);
-      builder.sendTurn = async prompt => {
-        const result = await send(prompt);
-        if (builder.instructions.length === 1) result.text = result.rawResponse = result.cleanedResponse = "Malformed remediation report";
+      builder.sendTurn = async (prompt, policy) => {
+        const result = await send(prompt, policy);
+        if (builder.instructions.length === 1) {
+          result.text = result.rawResponse = result.cleanedResponse = "Malformed remediation report";
+          result.structured = { state: "rejected", reason: "invalid-contract", detail: "Malformed native remediation", dispatchId: policy!.dispatchId! };
+        }
         return result;
       };
     }
@@ -236,19 +249,19 @@ for (const scenario of [false, true, "retained-repair", "revoked-repair", "inher
       return;
     }
     const result = await delivery;
-    if (unsafeRepair) {
+    if (repair) {
       assert.equal(result.ok, false);
-      assert.match(result.detail ?? "", /used tools during response correction/);
+      assert.match(result.detail ?? "", /Malformed native remediation/);
       const observed = new WorkflowDb(root);
       try {
         const turns = observed.qaDeliveryTurns(result.operationId!);
-        assert.equal(turns.at(-1)?.toolCount, 1);
+        assert.equal(turns.length, 1); assert.equal(builder.instructions.length, 1, "No formatting repair dispatch");
         assert.equal(observed.qaRemediationAttempts("run", ticket.id).at(-1)?.status === "succeeded", false);
       } finally { observed.close(); }
       return;
     }
     assert.equal(result.ok, true, result.detail);
-    assert.equal(builder.instructions.length,graphEnabled || repair?2:1);
+    assert.equal(builder.instructions.length,graphEnabled ? 2 : 1);
     assert.match(builder.instructions[0] ?? "", /Current validated QA remediation chunk/);
     assert.match(builder.instructions[0] ?? "", /Remediation chunk:/);
     assert.match(builder.instructions[0] ?? "", /finalIndependentReviewRequired/);
@@ -261,9 +274,10 @@ for (const scenario of [false, true, "retained-repair", "revoked-repair", "inher
       const handoff = finalDb.qaFailureHandoffs("run", ticket.id).at(-1);
       assert.equal(handoff?.state, "recheck-required");
       const turns=finalDb.qaDeliveryTurns(result.operationId!);
-      assert.deepEqual(turns.map(t=>t.kind),graphEnabled?["remediation","graph-continuation"]:repair?["remediation","response-repair"]:["remediation"]);
+      assert.deepEqual(turns.map(t=>t.kind),graphEnabled?["remediation","graph-continuation"]:["remediation"]);
       assert.equal(finalDb.qaRemediationAttempts("run",ticket.id).length,1);
-      assert.ok(turns.every(turn => turn.toolCount === 0), "Native text provider-items are response content, not tools");
+      if (scenario === "test-observation") assert.ok(turns.every(turn => turn.toolCount === 2), "The explicit test lifecycle is retained as host-observed tool activity");
+      else assert.ok(turns.every(turn => turn.toolCount === 0), "Native text provider-items are response content, not tools");
       assert.equal(handoff?.reportDigest, reportDigest);
       assert.equal(handoff?.responseDigest, finalDb.qaRemediationAttempts("run", ticket.id).at(-1)?.responseDigest);
       assert.equal(handoff?.builderSession?.sessionId, "builder-session-1");

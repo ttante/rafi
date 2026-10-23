@@ -1,3 +1,5 @@
+import { semanticExtractionOutput } from "rafi-spec";
+import { nativePolicy, operationInstruction, operationPayload, journalStructuredDispatch } from "../structuredOperation.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { BuilderAdapter, BuilderAdapterOptions, TurnResult } from "../adapters/types.js";
@@ -5,7 +7,7 @@ import { ClaudeAdapter } from "../adapters/claude.js";
 import { CodexAdapter } from "../adapters/codex.js";
 import { WorkflowDb } from "../workflowDb.js";
 import type { GraphSemanticHost, SemanticExtraction } from "./maintenance.js";
-import { parseSemanticResult, semanticExchange, SEMANTIC_INSTRUCTIONS } from "./semantic.js";
+import { validateSemanticResult, semanticExchange, SEMANTIC_INSTRUCTIONS } from "./semantic.js";
 import { canonical, confined, digest, bytesDigest } from "./util.js";
 /** Fresh packet-only worker, using the selected host's exact runtime settings. */
 export function graphSemanticHost(root: string, host: BuilderAdapter, createWorker: (options: BuilderAdapterOptions) => Promise<BuilderAdapter> = async options => host.agent === "codex" ? new CodexAdapter(options) : ClaudeAdapter.create(options)): GraphSemanticHost | undefined {
@@ -99,29 +101,16 @@ export function graphSemanticHost(root: string, host: BuilderAdapter, createWork
             store.put("job", id, { version: 1, state: "returned-unvalidated", operationId, requestId: request.operationId,
               inputDigest: request.inputDigest, sessionId: worker?.sessionId(),
               observations: observations.map(t => ({ turnId: t.turnId, usage: t.usage, costUsd: t.costAuthoritative ? t.costUsd : undefined,
-                responseDigest: bytesDigest(t.rawResponse ?? t.text), failed: Boolean(t.isError || t.failure) })) });
+                responseDigest: bytesDigest(JSON.stringify({ structured: t.structured, rawResponse: t.rawResponse ?? t.text })), failed: Boolean(t.isError || t.failure) })) });
           };
-          const turn = await Promise.race([worker.sendTurn(canonical(request), { responseOnly: true, handback: true, logicalActionId: request.operationId }), stopped]);
+          const turn = await Promise.race([journalStructuredDispatch(root, worker, `${canonical(request)}\n${operationInstruction(semanticExtractionOutput)}`, nativePolicy(semanticExtractionOutput, { responseOnly: true, handback: true, logicalActionId: request.operationId }), (prompt, policy) => worker!.sendTurn(prompt, policy)), stopped]);
           recordObservation(turn);
           check();
-          accountOutput(turn.cleanedResponse ?? turn.text);
           if (turn.isError || turn.failure)
             throw new Error(`Semantic provider failed: ${turn.text.slice(0, 500)}`);
-          let parsed: SemanticExtraction;
-          try {
-            parsed = parseSemanticResult(turn.cleanedResponse ?? turn.text, request);
-          }
-          catch (error) {
-            check();
-            store.put("job", id, { version: 1, state: "repair-intended", operationId, requestId: request.operationId, inputDigest: request.inputDigest, initialResponseDigest: bytesDigest(turn.rawResponse ?? turn.text), observations: observations.map(t => ({ turnId: t.turnId, usage: t.usage, costUsd: t.costAuthoritative ? t.costUsd : undefined })) });
-            const repaired = await Promise.race([worker.sendTurn(`Format correction only. Preserve your source observations; no tools or new extraction. Return strict JSON matching ${canonical({ operationId: request.operationId, inputDigest: request.inputDigest })}. Validation: ${String(error)}`, { responseOnly: true, handback: true, logicalActionId: request.operationId }), stopped]);
-            recordObservation(repaired);
-            check();
-            accountOutput(repaired.cleanedResponse ?? repaired.text);
-            if (repaired.isError || repaired.failure)
-              throw new Error("Semantic format correction failed; reconciliation required");
-            parsed = parseSemanticResult(repaired.cleanedResponse ?? repaired.text, request);
-          }
+          const payload = operationPayload(turn, semanticExtractionOutput);
+          accountOutput(JSON.stringify(payload));
+          const parsed = validateSemanticResult(payload, request);
           const known = observations.every(t => t.usage?.scope === "turn-delta" && t.usage.inputTokens !== undefined && t.usage.outputTokens !== undefined);
           const authoritative = observations.every(t => t.costAuthoritative === true);
           store.put("job", id, { version: 1, state: "completed", operationId, sessionId: worker.sessionId(),

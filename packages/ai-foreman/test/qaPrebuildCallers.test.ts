@@ -1,3 +1,4 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
 import test from "node:test";
 import { DEFAULT_GRAPH_CONFIG } from "rafi-spec";
 import { adoptGraph } from "../src/graph/maintenance.js";
@@ -36,7 +37,7 @@ for (const graphEnabled of [false, true]) for (const [branch, provenanceOnly, le
         original = instruction;
         assert.match(instruction, /rafi_graph_evidence/);
         assert.equal(policy?.purpose, "preparation");
-        return { text: JSON.stringify({ kind: "rafi_graph_request", version: 1, requestId: sessionId, operations: [{ operation: "query", query: "expiry boundary" }] }), isError: false, numTurns: 1, costUsd: 0 };
+        return nativeFixtureTurn(policy, sessionId, null, "claude", { kind: "graph-request", request: { kind: "rafi_graph_request", version: 1, requestId: sessionId, operations: [{ operation: "query", query: "expiry boundary" }] } });
       }
       if (graphEnabled) {
         assert.match(instruction, /Continue the same frozen action/);
@@ -44,33 +45,34 @@ for (const graphEnabled of [false, true]) for (const [branch, provenanceOnly, le
         instruction = original!;
       }
       assert.ok(instruction.includes("Frozen admitted work definition:")); assert.ok(instruction.includes("Preserve expiry boundary")); assert.ok(instruction.includes("Revert guard"));
+      assert.ok(instruction.includes("Frozen effective configuration reference"));
+      assert.doesNotMatch(instruction, /"qaRules"\s*:/, "the full already-loaded rule bundle is not duplicated into the operation prompt");
+      assert.doesNotMatch(instruction, /"content"\s*:\s*"## /, "the full already-loaded skill bodies are not duplicated into the operation prompt");
       if (instruction.includes("QA preparation only.")) {
         phases.push("prepare");
         const draft = JSON.parse(instruction.split("Authoritative candidate/input inventory:\n")[1]!.split("\nOriginal approved plan context:")[0]!) as QaContractCandidateV1;
         draft.checks = [{ id: "expiry", requirementRefs: draft.requirements.map(req => req.id), origin: "explicit", expectedBehavior: "Reject expired token while preserving applicable project invariants", obligation: "mandatory", timing: "postimplementation", applicability: { kind: "unconditional", decisionOwner: "qa", requiredEvidence: [] }, verification: [{ kind: "procedure", steps: ["Independently inspect expiry rejection and applicable project invariants"], cwd: ".", fixtures: [], runtime: "node20", timeoutMs: 30000, expectedOutcome: "Expiry rejection and mapped invariants hold" }], expectedEvidence: ["Independent inspection"], prerequisiteRefs: [], dependsOnChecks: [] }];
         draft.coverage = draft.requirements.map(req => ({ requirementId: req.id, checkIds: ["expiry"] }));
         draft.preparationEvidence = depthObligations(level).map(obligation => ({ obligation, references: [{ path: "product.txt", digest, locator: "expiry behavior" }], analysis: `Inspected ${obligation} against the token guard and each authoritative requirement`, operationId: "host-bound", sessionId, evidenceDigest: digest, graphReceiptRefs: ["agent-invented-receipt"] }));
-        return { text: envelope("RAFI_QA_CANDIDATE", draft), isError: false, numTurns: 1, costUsd: 0 };
+        return nativeFixtureTurn(policy, sessionId, { kind: "draft", checks: draft.checks, coverage: draft.coverage, baseline: [], unresolved: [], preparationEvidence: draft.preparationEvidence.map(({ obligation, references, analysis }) => ({ obligation, analysis, references: references.map(({ path, locator }) => ({ path, locator })) })) });
       }
       if (instruction.includes("Independent approach challenge")) {
         phases.push("challenge");
         const draft = JSON.parse(instruction.split("\nOriginal approved plan context:")[0]!.split("\n").at(-1)!) as QaContractCandidateV1;
-        const binding = JSON.parse(instruction.split("Binding: ")[1]!.split(". Previously retained concerns")[0]!);
-        return { text: envelope("RAFI_QA_CHALLENGE", { version: 1, ...binding, sessionId, operationId: "host-bound", assessedRequirementIds: draft.requirements.map(req => req.id), assessedObligations: depthObligations(level), concerns: [], approach: "Critiqued the retained source-based approach", concernCategories: ["scope", "invariants", "failure-boundaries", "verification"], approachConcerns: [] }), isError: false, numTurns: 1, costUsd: 0 };
+        return nativeFixtureTurn(policy, sessionId, { version: 1, assessedRequirementIds: draft.requirements.map(req => req.id), assessedObligations: depthObligations(level), concerns: [], approach: "Critiqued the retained source-based approach", concernCategories: ["scope", "invariants", "failure-boundaries", "verification"], approachConcerns: [] });
       }
       phases.push("assess"); const draft = JSON.parse(instruction.split("\nDraft:\n")[1]!.split("\nOriginal approved plan context:")[0]!) as QaContractCandidateV1;
-      const binding = JSON.parse(instruction.split("Bind exactly ")[1]!.split(".\n")[0]!);
-      return { text: envelope("RAFI_QA_ASSESSMENT", { version: 1, ...binding, sessionId, operationId: "host-bound", assessedRequirementIds: draft.requirements.map(req => req.id), assessedObligations: depthObligations(level), concerns: [] }), isError: false, numTurns: 1, costUsd: 0 };
+      return nativeFixtureTurn(policy, sessionId, { version: 1, assessedRequirementIds: draft.requirements.map(req => req.id), assessedObligations: depthObligations(level), concerns: [] });
     } };
     return { adapter } as QaSessionHandle;
   };
   const createBuilder = async (cwd: string): Promise<BuilderAdapter> => {
     const ref = createProviderSessionRef({ provider: "claude", sessionId: `builder:${cwd}`, role: "builder", stream: "builder", generation: 0, cwd, configRoot: root, source: "observed", validatedAt: new Date().toISOString() });
     return { agent: "claude", sessionId: () => ref.sessionId, sessionRef: () => ref, events: async function* () {}, close: async () => {}, contractCapabilities: () => ({ sameSessionAcceptance: true, nativeCompactionBarrier: true }), enableContractEnforcement: () => {}, contractCompactionSequence: () => 0, acceptContractDelivery: () => {}, sendTurn: async (instruction, policy) => {
-      if (policy?.purpose === "contract-acceptance") { phases.push("accept"); currentContract = JSON.parse(instruction.split("Full structured contract:\n")[1]!.split("\n")[0]!); return { text: envelope("RAFI_QA_ACCEPTANCE", { workId: ticket.id, revision: currentContract!.revision, digest: currentContract!.contentDigest, missingSections: [] }), isError: false, numTurns: 1, costUsd: 0 }; }
-      if (policy?.responseOnly) { phases.push("claims"); const binding = JSON.parse(instruction.split("Exact coverage binding: ")[1]!.split("\n")[0]!); return { text: envelope("RAFI_QA_COVERAGE", { ...binding, checks: currentContract!.checks.map(check => ({ checkId: check.id, applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] })) }), isError: false, numTurns: 1, costUsd: 0 }; }
+      if (policy?.purpose === "contract-acceptance") { phases.push("accept"); currentContract = JSON.parse(instruction.split("Full structured contract:\n")[1]!.split("\n")[0]!); return nativeFixtureTurn(policy, ref.sessionId, { workId: ticket.id, revision: currentContract!.revision, digest: currentContract!.contentDigest, missingSections: [] }); }
+      if (policy?.responseOnly) { phases.push("claims"); return nativeFixtureTurn(policy, ref.sessionId, { checks: currentContract!.checks.map(check => ({ checkId: check.id, applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] })) }); }
       phases.push("implement"); assert.ok(instruction.includes("Preserve expiry boundary")); assert.ok(instruction.includes("Revert guard")); assert.ok(instruction.includes(currentContract!.contentDigest)); writeFileSync(join(cwd, "product.txt"), "implemented expiry rejection\n");
-      return { text: `STEP_STATUS: done | ticket="${ticket.id}" summary="Guard implemented; final verification remains unverified"`, turnId: "implementation", isError: false, numTurns: 1, costUsd: 0 };
+      return nativeFixtureTurn(policy, ref.sessionId, { disposition: "modified", evidence: ["product.txt"], coverage: null, graphMaintenance: null });
     } };
   };
   try {
@@ -83,7 +85,7 @@ for (const graphEnabled of [false, true]) for (const [branch, provenanceOnly, le
       assert.equal(result[0]?.buildStatus, "done", JSON.stringify(result));
     } else {
       const args: ConstructorParameters<typeof Foreman> = [await createBuilder(root), new Log(join(root, ".foreman", "caller-test.jsonl")), false, false, 1, root, undefined, createQa]; args[22] = "run"; args[24] = ticket.id;
-      const result = await new Foreman(...args).runInstruction("Implement the approved token guard"); assert.equal(result.status.kind, "done", result.result.text);
+      const result = await new Foreman(...args).runBuilderWork("Implement the approved token guard"); assert.equal(result.status.kind, "done", result.result.text);
     }
     assert.deepEqual(phases, ["prepare", "assess", ...(level === 5 ? ["challenge"] : []), "accept", "implement", "claims"]);
     assert.equal(currentContract!.depthDecision.level, level);
@@ -110,7 +112,7 @@ for (const graphEnabled of [false, true]) for (const [branch, provenanceOnly, le
       writeFileSync(join(compiled, "system.md"), provenanceOnly ? role.system : "Retain the original expiry boundary and explicitly inspect the approved failure path.");
       writeFileSync(join(compiled, "meta.json"), JSON.stringify({ skills: provenanceOnly ? role.skills : [] }));
       const args: ConstructorParameters<typeof Foreman> = [await createBuilder(root), new Log(join(root, ".foreman", "amendment-test.jsonl")), false, false, 1, root, undefined, createQa]; args[22] = "run"; args[24] = ticket.id;
-      const resumed = await new Foreman(...args).runInstruction("Continue the same approved token guard under clarified project rules");
+      const resumed = await new Foreman(...args).runBuilderWork("Continue the same approved token guard under clarified project rules");
       assert.equal(resumed.status.kind, "done", resumed.result.text);
       assert.equal(currentContract!.revision, 2); assert.equal(currentContract!.predecessorDigest, original.contentDigest);
       assert.notEqual(currentContract!.contentDigest, original.contentDigest);
@@ -141,10 +143,10 @@ for (const mode of ["legacy", "shadow"] as const) test(`actual Foreman ${mode} m
     execFileSync("git", ["init", "-q", root]); cmdInit(root, {}); saveTickets(join(root, ".tickets/tickets.yaml"), [ticket]); writeFileSync(join(root, "product.txt"), "baseline\n");
     execFileSync("git", ["add", "."], { cwd: root }); execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: root });
     const db = new WorkflowDb(root); db.ensureRun("run"); db.qaPreparationStore().freezePolicy("run", resolveQaPreparationConfig({ mode })); db.admitWork({ runId: "run", kind: "ticket", ticketId: ticket.id, definition: ticket, approvalId: "fixture", scopeRevision: "fixture", provenance: { userTurn: "Implement token guard", reason: "Explicit execution fixture" } }); db.close();
-    const adapter: BuilderAdapter = { agent: "codex", sessionId: () => "legacy-capability-builder", events: async function* () {}, close: async () => {}, sendTurn: async () => { builderTurns++; return { text: `STEP_STATUS: done | ticket="${ticket.id}"`, isError: false, numTurns: 1, costUsd: 0 }; } };
+    const adapter: BuilderAdapter = { agent: "codex", sessionId: () => "legacy-capability-builder", events: async function* () {}, close: async () => {}, sendTurn: async (_instruction, policy) => { builderTurns++; return nativeFixtureTurn(policy, "legacy-capability-builder", { disposition: "modified", evidence: ["product.txt"], coverage: null, graphMaintenance: null }, "codex"); } };
     const createQa = async (): Promise<QaSessionHandle> => ({ adapter: { agent: "codex", sessionId: () => "confined-preparation", events: async function* () {}, close: async () => {}, sendTurn: async () => { preparationTurns++; return { text: "Controlled preparation failure", isError: true, numTurns: 0, costUsd: 0 }; } } } as unknown as QaSessionHandle);
     const args: ConstructorParameters<typeof Foreman> = [adapter, new Log(join(root, ".foreman", "mode-test.jsonl")), false, false, 1, root, undefined, createQa]; args[22] = "run"; args[24] = ticket.id;
-    const result = await new Foreman(...args).runInstruction("Implement approved token guard"); assert.equal(result.status.kind, "done", result.result.text);
+    const result = await new Foreman(...args).runBuilderWork("Implement approved token guard"); assert.equal(result.status.kind, "done", result.result.text);
     assert.equal(builderTurns, 1); assert.equal(preparationTurns, mode === "shadow" ? 1 : 0);
     const inspected = new WorkflowDb(root);
     try { const store = inspected.qaPreparationStore(), admission = inspected.assertAdmittedWork("run", ticket.id); assert.equal(store.head("run", ticket.id, admission.requirementsDigest).digest, undefined); assert.equal(store.metrics("run").firstReviewPasses, 0); assert.equal(store.metrics("run").preparationFailures, mode === "shadow" ? 1 : 0); }

@@ -1,3 +1,4 @@
+import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
 import { admitFixtureWork } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -43,12 +44,12 @@ async function fixture(provider: "claude" | "codex" = "codex", responseText?: (t
   const queue = new BuilderEventQueue();
   let ref: ProviderSessionRefV1 = { version: 1, provider, sessionId: "session", role: "builder", stream: "builder", generation: 0, cwd: root, configRoot: root, ticketId: "T1", source: "observed", createdAt: new Date(0).toISOString() };
   const calls: string[] = [];
-  const adapter: BuilderAdapter = { agent: provider, sessionId: () => ref.sessionId, sessionRef: () => ref, observeEvents: listener => queue.observe(listener), events: () => queue, close: async () => { queue.close(); }, sendTurn: async prompt => {
+  const adapter: BuilderAdapter = { agent: provider, sessionId: () => ref.sessionId, sessionRef: () => ref, observeEvents: listener => queue.observe(listener), events: () => queue, close: async () => { queue.close(); }, sendTurn: async (prompt, policy) => {
     calls.push(prompt);
     const handoff_id = /QA failure handoff ID: ([a-f0-9]{64})/.exec(prompt)![1];
     let text = `${START}\n${JSON.stringify({ version: 3, handoff_id, summary: "Reported", findings: [{ finding_key: refs[0]!.findingKey, raw_id: "QA-1", disposition: "disputed", changes: ["No code change required"], evidence: "Actual evidence", verification: [{ check: "inspect", outcome: "passed", evidence: "guard exists" }] }], observations: [] })}\n${END}\nSTEP_STATUS: done | summary="reported"`;
     text = responseText?.(text, calls.length) ?? text;
-    const result: TurnResult = { text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: false, numTurns: 1, costUsd: 0, turnId: `turn-${calls.length}`, providerMetadata: { provider, sessionId: ref.sessionId, sessionRef: ref } };
+    const result: TurnResult = { ...nativeFixtureFromText(policy, ref.sessionId, text, provider), text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: false, numTurns: 1, costUsd: 0, turnId: policy?.dispatchId, providerMetadata: { provider, sessionId: ref.sessionId, sessionRef: ref } };
     queue.push({ kind: "turn-complete", result, turnId: result.turnId }); return result;
   } };
   const input: QaFailureDeliveryInput = { projectDir: root, runId: "run", ticket, builderWorktree: root, report, reportDigest: digest, reviewAttemptId: "review", reviewNumber: 1, reviewedSourceStateDigest: source.digest, reviewBasisDigest: "basis", remediationGeneration: 0, latestBuilderResult: "implemented", history: [] };
@@ -62,7 +63,7 @@ for (const provider of ["claude", "codex"] as const) for (const scenario of ["va
   const original = f.adapter.sendTurn;
   f.adapter.sendTurn = async (text, policy) => {
     policies.push(policy);
-    if (scenario === "repair-tool" && policies.length === 2) f.queue.push({ kind: "tool", name: "Read", input: {} });
+    if (scenario === "repair-tool" && policies.length === 1) f.queue.push({ kind: "tool", name: "Read", input: {} });
     const result = await original(text, policy);
     if (scenario === "provider-error") result.isError = true;
     return result;
@@ -75,8 +76,8 @@ for (const provider of ["claude", "codex"] as const) for (const scenario of ["va
   const pump = (async () => { for await (const event of adapter.events()) observed.push(event); })();
   try {
     const result = await new QaFailureDeliveryService().deliver(f.input, { adapter: () => adapter, sessionStrategy: "compact", prepareBoundary: async current => current });
-    assert.equal(result.outcome, scenario === "repair-tool" ? "response-invalid" : scenario === "provider-error" || scenario === "missing-observation" ? "delivery-uncertain" : "remediation-reported", result.detail);
-    assert.equal(f.calls.length, scenario === "missing-observation" ? 0 : scenario.startsWith("repair") ? 2 : 1);
+    assert.equal(result.outcome, scenario === "provider-error" || scenario === "missing-observation" ? "delivery-uncertain" : "remediation-reported", result.detail);
+    assert.equal(f.calls.length, scenario === "missing-observation" ? 0 : 1);
     assert.ok(policies.every(policy => policy?.handback));
     if (policies.length === 2) assert.equal(policies[1]?.responseOnly, true);
     const db = new WorkflowDb(f.root);
@@ -92,7 +93,7 @@ for (const provider of ["claude", "codex"] as const) test(`${provider} handback 
   const f = await fixture(provider);
   try {
     const original = f.adapter.sendTurn;
-    f.adapter.sendTurn = async prompt => { const result = await original(prompt); f.setRef({ ...f.adapter.sessionRef!()!, validatedAt: new Date().toISOString() }); return result; };
+    f.adapter.sendTurn = async (prompt, policy) => { const result = await original(prompt, policy); f.setRef({ ...f.adapter.sessionRef!()!, validatedAt: new Date().toISOString() }); return result; };
     const result = await f.run(); assert.equal(result.outcome, "remediation-reported", result.detail);
     const replay = await new QaFailureDeliveryService().deliver(f.input, { adapter: () => undefined, sessionStrategy: "compact" });
     assert.equal(replay.ok, true, "completed receipt replay does not require a live Builder session");
@@ -164,7 +165,7 @@ test("budget zero dispatches nothing; scoped operator grant is consumed atomical
 test("questions survive restart, reject foreign/empty answers, and consume identical answers idempotently", async () => {
   const f = await fixture();
   try {
-    f.adapter.sendTurn = async prompt => { f.calls.push(prompt); const text = 'STEP_STATUS: needs_input | question="Which approved registry may I use?"'; const result: TurnResult = { text, isError: false, numTurns: 1, costUsd: 0, turnId: "question", providerMetadata: { provider: "codex", sessionId: "session", sessionRef: f.adapter.sessionRef!() } }; f.queue.push({ kind: "turn-complete", result, turnId: result.turnId }); return result; };
+    f.adapter.sendTurn = async (prompt, policy) => { f.calls.push(prompt); const text = 'STEP_STATUS: needs_input | question="Which approved registry may I use?"'; const result: TurnResult = { ...nativeFixtureFromText(policy, "session", text, "codex"), text, providerMetadata: { provider: "codex", sessionId: "session", sessionRef: f.adapter.sessionRef!() } }; f.queue.push({ kind: "turn-complete", result, turnId: result.turnId }); return result; };
     assert.equal((await f.run()).outcome, "needs-input");
     assert.equal((await f.run()).outcome, "needs-input"); assert.equal(f.calls.length, 1);
     const db = new WorkflowDb(f.root);

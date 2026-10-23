@@ -86,10 +86,10 @@ export function createDisposableQaSnapshot(builderWorktree: string, options: { p
   const frozenState = captureFrozenQaSource(source);
   const tempRoot = mkdtempSync(join(tmpdir(), "rafi-qa-"));
   const review = join(tempRoot, "review");
-  cloneRepositorySync(root, review, frozenState.head);
+  if (frozenState.head === "unavailable") initializeUncommittedReviewSync(review); else cloneRepositorySync(root, review, frozenState.head);
   try {
     applyFrozenSync(review, frozenState);
-    if (options.projectDependencies !== false) projectDependencyTrees(root, review);
+    if (options.projectDependencies !== false) projectDependencyTrees(root, review, frozenState.head === "unavailable");
     mkdirSync(join(tempRoot, "scratch"), { mode: 0o700 });
     const manifest = manifestFromFrozen(frozenState);
     const snapshot: DisposableQaSnapshot = {
@@ -115,9 +115,9 @@ export async function createDisposableQaSnapshotAsync(builderWorktree: string, p
   const review = join(tempRoot, "review");
   try {
     progress("preparing disposable QA snapshot", "creating independent review repository");
-    await cloneRepositoryAsync(root, review, frozenState.head);
+    if (frozenState.head === "unavailable") await initializeUncommittedReviewAsync(review); else await cloneRepositoryAsync(root, review, frozenState.head);
     await applyFrozenAsync(review, frozenState, progress);
-    projectDependencyTrees(root, review);
+    projectDependencyTrees(root, review, frozenState.head === "unavailable");
     await mkdir(join(tempRoot, "scratch"), { mode: 0o700 });
     const manifest = manifestFromFrozen(frozenState);
     const snapshot: AsyncDisposableQaSnapshot = {
@@ -141,12 +141,12 @@ export async function createDisposableQaSnapshotAsync(builderWorktree: string, p
 export function frozenQaStateManifest(state: FrozenQaSourceState): QaChangeManifest { return manifestFromFrozen(state); }
 
 export function changeManifest(worktree: string): QaChangeManifest {
-  const diff = gitBuffer(resolve(worktree), ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]);
+  const diff = hasHeadSync(worktree) ? gitBuffer(resolve(worktree), ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]) : Buffer.alloc(0);
   return { diffDigest: hash(diff), untracked: untrackedPaths(worktree).map((path) => describeUntrackedSync(worktree, path)) };
 }
 
 export async function changeManifestAsync(worktree: string, progress: QaSnapshotProgress = () => {}, state = "checking QA file changes"): Promise<QaChangeManifest> {
-  const diff = await runGit(worktree, ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]);
+  const diff = (await hasHeadAsync(worktree)) ? await runGit(worktree, ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]) : Buffer.alloc(0);
   const paths = await untrackedPathsAsync(worktree);
   const untracked: QaChangeManifest["untracked"] = [];
   for (let index = 0; index < paths.length; index++) {
@@ -195,14 +195,14 @@ export function prospectiveGitTreeMatches(worktree: string, expectedTree: string
 }
 
 function captureOnce(cwd: string): FrozenQaSourceState {
-  const head = gitText(cwd, ["rev-parse", "HEAD"]);
+  const head = hasHeadSync(cwd) ? gitText(cwd, ["rev-parse", "HEAD"]) : "unavailable";
   const repository = captureRepositoryMetadataSync(cwd);
   const status = gitBuffer(cwd, ["status", "--porcelain=v2", "-z", "--untracked-files=all", ...PRODUCT_PATHSPEC]);
-  const combinedDiff = gitBuffer(cwd, ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]);
-  const stagedDiff = gitBuffer(cwd, ["diff", "--cached", "--binary", ...PRODUCT_PATHSPEC]);
-  const unstagedDiff = gitBuffer(cwd, ["diff", "--binary", ...PRODUCT_PATHSPEC]);
-  const stagedNames = gitBuffer(cwd, ["diff", "--cached", "--name-status", "-z", ...PRODUCT_PATHSPEC]);
-  const unstagedNames = gitBuffer(cwd, ["diff", "--name-status", "-z", ...PRODUCT_PATHSPEC]);
+  const combinedDiff = head === "unavailable" ? Buffer.alloc(0) : gitBuffer(cwd, ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]);
+  const stagedDiff = gitBuffer(cwd, ["diff", "--cached", "--binary", ...(head === "unavailable" ? ["--root"] : []), ...PRODUCT_PATHSPEC]);
+  const unstagedDiff = head === "unavailable" ? Buffer.alloc(0) : gitBuffer(cwd, ["diff", "--binary", ...PRODUCT_PATHSPEC]);
+  const stagedNames = gitBuffer(cwd, ["diff", "--cached", "--name-status", "-z", ...(head === "unavailable" ? ["--root"] : []), ...PRODUCT_PATHSPEC]);
+  const unstagedNames = head === "unavailable" ? Buffer.alloc(0) : gitBuffer(cwd, ["diff", "--name-status", "-z", ...PRODUCT_PATHSPEC]);
   const untrackedNames = gitBuffer(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
   const untracked = untrackedPathsFrom(untrackedNames).map((path) => captureUntrackedSync(cwd, path));
   const pathInventory = enrichTrackedPathInventorySync(cwd, buildPathInventory(stagedNames, unstagedNames, untracked));
@@ -217,14 +217,15 @@ async function captureOnceAsync(cwd: string, progress: QaSnapshotProgress): Prom
   // observe a different index/worktree generation and manufacture a state
   // that never existed. The enclosing double-capture supplies the stability
   // fence across the complete sequence.
-  const headBytes = await runGit(cwd, ["rev-parse", "HEAD"]);
+  const headAvailable = await hasHeadAsync(cwd);
+  const headBytes = headAvailable ? await runGit(cwd, ["rev-parse", "HEAD"]) : Buffer.from("unavailable");
   const repository = await captureRepositoryMetadataAsync(cwd);
   const status = await runGit(cwd, ["status", "--porcelain=v2", "-z", "--untracked-files=all", ...PRODUCT_PATHSPEC]);
-  const combinedDiff = await runGit(cwd, ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]);
-  const stagedDiff = await runGit(cwd, ["diff", "--cached", "--binary", ...PRODUCT_PATHSPEC]);
-  const unstagedDiff = await runGit(cwd, ["diff", "--binary", ...PRODUCT_PATHSPEC]);
-  const stagedNames = await runGit(cwd, ["diff", "--cached", "--name-status", "-z", ...PRODUCT_PATHSPEC]);
-  const unstagedNames = await runGit(cwd, ["diff", "--name-status", "-z", ...PRODUCT_PATHSPEC]);
+  const combinedDiff = headAvailable ? await runGit(cwd, ["diff", "--binary", "HEAD", ...PRODUCT_PATHSPEC]) : Buffer.alloc(0);
+  const stagedDiff = await runGit(cwd, ["diff", "--cached", "--binary", ...(headAvailable ? [] : ["--root"]), ...PRODUCT_PATHSPEC]);
+  const unstagedDiff = headAvailable ? await runGit(cwd, ["diff", "--binary", ...PRODUCT_PATHSPEC]) : Buffer.alloc(0);
+  const stagedNames = await runGit(cwd, ["diff", "--cached", "--name-status", "-z", ...(headAvailable ? [] : ["--root"]), ...PRODUCT_PATHSPEC]);
+  const unstagedNames = headAvailable ? await runGit(cwd, ["diff", "--name-status", "-z", ...PRODUCT_PATHSPEC]) : Buffer.alloc(0);
   const untrackedNames = await runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
   const paths = untrackedPathsFrom(untrackedNames);
   const untracked: QaUntrackedCapture[] = [];
@@ -332,7 +333,13 @@ function describeUntrackedSync(worktree: string, path: string): QaChangeManifest
 function untrackedPaths(worktree: string): string[] { return untrackedPathsFrom(gitBuffer(resolve(worktree), ["ls-files", "--others", "--exclude-standard", "-z"])); }
 async function untrackedPathsAsync(worktree: string): Promise<string[]> { return untrackedPathsFrom(await runGit(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])); }
 function untrackedPathsFrom(raw: Buffer): string[] { return raw.toString().split("\0").filter((path) => path && isQaProductPath(path)).sort(); }
-function isQaProductPath(path: string): boolean { return path !== ".foreman" && !path.startsWith(".foreman/") && path !== ".rafi" && !path.startsWith(".rafi/"); }
+function isQaProductPath(path: string): boolean {
+  return path !== ".git" && !path.startsWith(".git/")
+    && path !== ".foreman" && !path.startsWith(".foreman/")
+    && path !== ".rafi" && !path.startsWith(".rafi/")
+    && path !== "node_modules" && !path.startsWith("node_modules/")
+    && path !== "vendor" && !path.startsWith("vendor/");
+}
 
 function renderSummary(staged: Buffer, unstaged: Buffer, untracked: Buffer): string {
   const normalize = (value: Buffer) => value.toString().split("\0").filter(Boolean).filter(isQaProductPath).sort().join("\n") || "(none)";
@@ -450,6 +457,17 @@ function manifestDifference(before: QaChangeManifest, after: QaChangeManifest): 
   return changes;
 }
 
+function initializeUncommittedReviewSync(review: string): void {
+  mkdirSync(review, { recursive: true });
+  const initialized = spawnSync("git", ["init", "-q", review], { encoding: "utf8" });
+  if (initialized.status !== 0) throw new Error(`cannot initialize independent QA repository: ${initialized.stderr.trim()}`);
+}
+
+async function initializeUncommittedReviewAsync(review: string): Promise<void> {
+  await mkdir(review, { recursive: true });
+  await runGit(dirname(review), ["init", "-q", review]);
+}
+
 function cloneRepositorySync(root: string, review: string, head: string): void {
   const cloned = spawnSync("git", ["clone", "--no-local", "--no-hardlinks", "--no-checkout", "--quiet", root, review], { encoding: "utf8" });
   if (cloned.status !== 0) { rmSync(dirname(review), { recursive: true, force: true }); throw new Error(`cannot create independent QA repository: ${cloned.stderr.trim()}`); }
@@ -467,7 +485,7 @@ async function cloneRepositoryAsync(root: string, review: string, head: string):
  * Project the existing trees without copying or permitting writes so validation
  * commands in the independent clone can resolve the same installed toolchain.
  */
-function projectDependencyTrees(sourceRoot: string, reviewRoot: string): void {
+function projectDependencyTrees(sourceRoot: string, reviewRoot: string, uncommitted = false): void {
   const parents = ["", ...readdirSync(sourceRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && entry.name !== ".git" && entry.name !== "node_modules")
     .flatMap((entry) => {
@@ -482,10 +500,29 @@ function projectDependencyTrees(sourceRoot: string, reviewRoot: string): void {
     const target = join(reviewRoot, parent, "node_modules");
     if (!existsSync(source) || existsSync(target) || !lstatSync(source).isDirectory()) continue;
     const relativeTarget = parent ? `${parent.replaceAll("\\", "/")}/node_modules` : "node_modules";
-    if (spawnSync("git", ["-C", reviewRoot, "check-ignore", "-q", "--", relativeTarget]).status !== 0) continue;
+    if (!uncommitted && spawnSync("git", ["-C", reviewRoot, "check-ignore", "-q", "--", relativeTarget]).status !== 0) continue;
     mkdirSync(dirname(target), { recursive: true });
     symlinkSync(source, target, "dir");
   }
+  if (!uncommitted) return;
+  for (const entry of readdirSync(sourceRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || [".git", ".rafi", ".foreman", "node_modules"].includes(entry.name)) continue;
+    const source = join(sourceRoot, entry.name);
+    const target = join(reviewRoot, entry.name);
+    if (existsSync(target)) continue;
+    const ignored = spawnSync("git", ["-C", sourceRoot, "check-ignore", "-q", "--", entry.name]).status === 0;
+    if (!ignored) continue;
+    symlinkSync(source, target, "dir");
+  }
+}
+
+function hasHeadSync(cwd: string): boolean {
+  const result = spawnSync("git", ["-C", resolve(cwd), "rev-parse", "--verify", "HEAD"], { stdio: "ignore" });
+  return result.status === 0;
+}
+
+async function hasHeadAsync(cwd: string): Promise<boolean> {
+  try { await runGit(cwd, ["rev-parse", "--verify", "HEAD"]); return true; } catch { return false; }
 }
 
 function captureRepositoryMetadataSync(cwd: string): FrozenQaSourceState["repository"] {

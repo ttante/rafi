@@ -1,4 +1,5 @@
-import { sendRoleGraphTurn, withGraphDerivedAccess } from "ai-foreman/agent-run.js";
+import { operationContract, validateStructuredCandidate, type StructuredResponse } from "rafi-spec";
+import { operationInstruction, operationPayload, operationResponse, operationStatus, nativePolicy, sendRoleGraphTurn, withGraphDerivedAccess } from "ai-foreman/agent-run.js";
 import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -19,6 +20,7 @@ import {
   readTicketPlanningContext,
   ticketPlanningFingerprint,
   validateTicketPlanProposal,
+  ticketPlanProposalV1Schema,
   type TicketPlanProposal,
 } from "ai-foreman/ticket-planning.js";
 import type { ProjectConfig, ProjectSourceEntry, SourceRegistryConfig, TicketBuildBranchStrategy } from "rafi-spec";
@@ -85,6 +87,8 @@ export interface TicketPlanInstructionOptions {
   unattended?: boolean;
 }
 
+export const ticketPlanOutput = operationContract("ticket-plan", ticketPlanProposalV1Schema, { sources: true });
+
 export function buildTicketPlanInstruction(opts: TicketPlanInstructionOptions): string {
   return `You are Rafi's read-only guided ticket planner. Use the planner role and ticket-maker schema guidance.${opts.grill === "exhaustive" ? " Use the grill-me skill exhaustively. There is no arbitrary minimum question count." : " Use a standard focused interview."}
 
@@ -114,7 +118,7 @@ ${opts.unattended ? "- This is an unattended approved run. Do not ask questions 
 - If your runtime provides a native AskUserQuestion-style question tool, you may use it; Rafi will collect the user's structured choice or custom response and return it to this same session. If no useful user-judgment question exists, return the candidate and Rafi will independently verify it.
 - Session choices may cover inspection depth, ticket size, estimates, source treatment, delivery grouping, branch mode, PRs, merge behavior, and next work.
 - Set proposal build_defaults to the host-owned values above. A later planner suggestion cannot change them; only another host question can.
-- If more source content is needed, emit one JSON object (or an array) between ${SOURCE_REQUEST_START}/${SOURCE_REQUEST_END}, then ask a needs_input question. Preserve the human's complete answer; never split on spaces, commas, or plus signs.
+- If more source content is needed, return a typed source-request result listing the required sources. Preserve the human's complete answer; never split on spaces, commas, or plus signs.
 - Source request types are local, url, github, gitlab, linear, and jira. For Linear/Jira request only non-secret query settings and environment-variable names, never credentials.
 - Account for every discovered source item with mapped, split, combined, deferred, or excluded disposition and a reason where required.
 - Existing IDs are stable. Preserve completed state/evidence. Represent replacements with reciprocal supersession links through the proposal.
@@ -124,17 +128,11 @@ ${opts.unattended ? "- This is an unattended approved run. Do not ask questions 
 - When setting next work, explicitly honor whether existing next tickets are retained or replaced.
 - The user may ask to upgrade to exhaustive grill-me at any time; retain the current proposal and continue.
 
-If no native question tool is available, ask questions using a final marker:
-STEP_STATUS: needs_input | question="..." choices="Recommended answer (Recommended)|Alternative|Stop questions and make the plan now"
+If no native question tool is available, return a needs-input result with one question and ordered choices: recommended answer, meaningful alternative, and Stop questions and make the plan now.
 
-When a complete proposal is ready, return readable Markdown followed by exactly this machine envelope:
-${PROPOSAL_START}
+When a complete proposal is ready, put this entire payload in the native ticket-plan result:
 { "version": 1, "title": "...", "markdown": "complete proposed plan", "additions": [], "edits": [], "supersessions": [], "state_changes": [], "source_reconciliation": [], "delivery": null, "build_defaults": null, "future_work": [], "next": { "ticket_ids": [], "replace_existing": false } }
-${PROPOSAL_END}
-Then end with:
-STEP_STATUS: plan_complete | summary="proposal_ready"
-
-The JSON must contain the exact approved candidate ticket set, full ticket objects for additions, patches for edits, optional delivery units, and no commentary outside the schema after ${PROPOSAL_END}.`;
+The payload must contain the exact approved candidate ticket set, full ticket objects for additions, patches for edits, and optional delivery units.`;
 }
 
 export function applyTicketPlanWorkModeDefault(
@@ -346,64 +344,57 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
     });
     roleRef = role;
     activeRole = role;
-    const sendPlanningTurn = (instruction: string) => sendRoleGraphTurn(role, instruction, "planning");
+    const sendPlanningTurn = (instruction: string, responseOnly = false) => sendRoleGraphTurn(role, `${instruction}\n\n${operationInstruction(ticketPlanOutput)}`, "planning", nativePolicy(ticketPlanOutput, { purpose: responseOnly ? "response-repair" : "planning", responseOnly }));
     console.log(`rafi tickets plan: project ${String(config.appName ?? "unnamed")} at ${projectDir}`);
     console.log(`rafi tickets plan: runtime=${role.runtime} model=${role.model ?? role.roleBundle.model ?? "runtime default"} effort=${role.effort ?? "runtime default"}`);
     console.log(`rafi tickets plan: interview=${grill}; agent changes are disabled\n`);
     if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() } });
 
     const baseInstruction = buildTicketPlanInstruction({ brief, sourceChoice, sources: sourceContextForTickets(projectDir, stagedSources, context), sourceSnapshots: registered.snapshots, context, grill, docsRoot, workMode, autoCompactThresholdPercent: pendingAgentDefaults?.roles.builder?.auto_compact_threshold_percent ?? 65, compactMaximum: pendingAgentDefaults?.roles.builder?.compact_maximum ?? 10, branchPrefix: config.tickets?.build?.branch_prefix ?? "feature", unattended: !interactive });
-    let correctionAttempts = 0;
-    const savedProposal = resumingInterview && typeof interview?.decisions.proposalResponse === "string" ? interview.decisions.proposalResponse : undefined;
-    const savedIssues = interview?.decisions.validationIssues;
-    let result = savedProposal && !rebuildingLostContinuity
-      ? await sendRoleGraphTurn(role, `${baseInstruction}\n\nRecover this saved invalid proposal. Revalidate against the current context above and return the complete corrected proposal with the plan_complete marker. Retain agreed decisions.\nValidation errors: ${JSON.stringify(savedIssues)}\nSaved proposal:\n${savedProposal}`, "planning", { responseOnly: true })
+    const priorAttempts = resumingInterview ? interview?.decisions.correctionAttempts ?? 0 : 0;
+    if (!Number.isSafeInteger(priorAttempts) || Number(priorAttempts) < 0 || Number(priorAttempts) > 3) throw new Error("Saved proposal correction budget is invalid; reconcile the planning record before resuming");
+    let correctionAttempts = Number(priorAttempts);
+    const savedReceipt = resumingInterview ? interview?.decisions.structuredResponse as StructuredResponse | undefined : undefined;
+    const savedText = typeof interview?.decisions.proposalResponse === "string" ? interview.decisions.proposalResponse : "";
+    if (resumingInterview && savedText && !savedReceipt && !rebuildingLostContinuity) throw new Error("Saved proposal uses the historical text protocol. Review that proposal with plan:doctor and start a new native planning action; it cannot be accepted or automatically repaired as a native result");
+    if (savedReceipt && !rebuildingLostContinuity) validateStructuredCandidate(ticketPlanOutput, savedReceipt);
+    let result = savedReceipt && !rebuildingLostContinuity
+      ? { text: savedText, structured: savedReceipt, isError: false, numTurns: 0, costUsd: 0 }
       : await sendPlanningTurn(rebuildingLostContinuity && grillState.answers.length
       ? `${baseInstruction}\n\n${buildAuditAnswersContinuation(grillState)}`
       : baseInstruction);
     while (true) {
-      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: { ...interview.decisions, proposalResponse: result.text, correctionAttempts } });
+      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: { ...interview.decisions, proposalResponse: result.text, structuredResponse: result.structured, correctionAttempts } });
       if (result.isError) throw new Error(`planning agent failed: ${result.text.slice(0, 300)}`);
-      const marker = parseConversationMarker(result.text);
+      const marker = operationStatus(result, ticketPlanOutput);
       if (marker.kind === "needs_input") {
         if (!interactive) {
           const issue = `unattended ticket planning cannot accept a needs_input question: ${marker.question?.trim() || "planner omitted its question"}`;
-          if (interview) interview = checkpointInterview(projectDir, interview, { decisions: { ...interview.decisions, proposalResponse: result.text, validationIssues: [issue], correctionAttempts } });
-          if (correctionAttempts++ >= 3) throw new Error(`Ticket planning could not produce an unattended proposal after 3 attempts:\n${issue}\nRun \`rafi plan:doctor\` to recover this saved session.`);
-          result = await sendRoleGraphTurn(role, `${issue}. Use the safest reasonable recommendation and return the complete corrected proposal with the plan_complete marker. Do not ask a question, inspect the repository again, or emit needs_input.`, "planning", { responseOnly: true });
-          continue;
+          if (interview) interview = checkpointInterview(projectDir, interview, { decisions: { ...interview.decisions, proposalResponse: result.text, structuredResponse: result.structured, validationIssues: [issue], correctionAttempts } });
+          throw new Error(`${issue}; resume interactively to supply the missing decision`);
         }
-        if (!marker.question?.trim()) {
-          result = await sendPlanningTurn(grill === "exhaustive"
-            ? `Your needs_input marker omitted its question. Return the same single user-judgment question again using exactly: STEP_STATUS: needs_input | question="..." choices="recommended option (Recommended)|meaningful alternative|Stop questions and make the plan now". Do not inspect the repository again and do not return a proposal yet.`
-            : `Your needs_input marker omitted its question. Return the same focused question again using exactly: STEP_STATUS: needs_input | question="..." choices="recommended option|alternative". Do not inspect the repository again.`);
-          continue;
-        }
-        console.log(stripMachineTail(result.text));
-        const input = await (opts.handleInput ?? handlePlanningInput)({ projectDir, output: result.text, question: marker.question, choices: marker.choices, registry: stagedSources, storage: selectedStorage, interactive, context: (registry) => sourceContextForTickets(projectDir, registry, context) });
+        console.log(result.text);
+        const response = operationResponse(result, ticketPlanOutput);
+        const input = await (opts.handleInput ?? handlePlanningInput)({ projectDir, sourceRequests: response.result.kind === "source-request" ? response.result.requests : [], output: result.text, question: marker.question, choices: marker.choices, registry: stagedSources, storage: selectedStorage, interactive, context: (registry) => sourceContextForTickets(projectDir, registry, context) });
         stagedSources = input.registry; registered.snapshots.push(...input.snapshots);
         if (input.cancelled) { await role.builder.close(); await chooseStagedSourceDisposition(projectDir, loadedSources.registry, stagedSources); console.log("rafi tickets plan: cancelled; tracker unchanged"); return; }
-        rememberPlannerAnswer(marker.question, input.answer, "text");
-        const observed = recordTextGrillAnswer(grillState, { question: marker.question, choices: marker.choices, answer: input.answer });
+        rememberPlannerAnswer(marker.question!, input.answer, "text");
+        const observed = recordTextGrillAnswer(grillState, { question: marker.question!, choices: marker.choices, answer: input.answer });
         persistGrillState(observed.state, observed.qualified ? "grill_answer_collected" : "provider_question_nonqualifying");
         result = await sendPlanningTurn(input.continuation!);
         continue;
       }
-      let proposal: TicketPlanProposal;
-      let issues: string[];
-      try {
-        if (marker.kind !== "plan_complete") throw new Error("planning agent did not return a plan_complete/proposal_ready marker or a valid question");
-        proposal = extractTicketPlanProposal(result.text, context.tickets, {
-          futureWorkIds: context.futureWork.flatMap((item) => typeof item.id === "number" ? [item.id] : []),
-        });
-        issues = validateProposalSourceRefs(proposal, stagedSources, projectDir);
-      } catch (error) {
-        issues = [error instanceof Error ? error.message : String(error)];
-      }
-      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: { ...interview.decisions, proposalResponse: result.text, validationIssues: issues!, correctionAttempts } });
+      if (marker.kind === "blocked") throw new Error(marker.reason ?? "Planning is blocked");
+      // Transport/schema errors stop here. Only a valid native proposal with
+      // substantive domain issues may consume a bounded correction turn.
+      let proposal = operationPayload<TicketPlanProposal>(result, ticketPlanOutput);
+      const issues = [...validateTicketPlanProposal(proposal, context.tickets, { futureWorkIds: context.futureWork.flatMap((item) => typeof item.id === "number" ? [item.id] : []) }), ...validateProposalSourceRefs(proposal, stagedSources, projectDir)];
+      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: { ...interview.decisions, proposalResponse: result.text, structuredResponse: result.structured, validationIssues: issues!, correctionAttempts } });
       if (issues!.length) {
-        if (correctionAttempts++ >= 3) throw new Error(`Ticket planning could not correct its proposal after 3 attempts:\n${issues!.join("\n")}\nRun \`rafi plan:doctor\` to recover this saved session.`);
-        result = await sendRoleGraphTurn(role, `Your proposal failed validation. Return the complete corrected proposal and proposal_ready marker without changing agreed decisions. Do not inspect the repository again:\n${issues!.join("\n")}`, "planning", { responseOnly: true });
+        if (correctionAttempts >= 3) throw new Error(`Ticket planning could not correct its proposal after 3 attempts:\n${issues!.join("\n")}\nRun \`rafi plan:doctor\` to recover this saved session.`);
+        correctionAttempts++;
+        if (interview) interview = checkpointInterview(projectDir, interview, { decisions: { ...interview.decisions, correctionAttempts } });
+        result = await sendPlanningTurn(`Your proposal failed validation. Return the complete corrected proposal in the native ticket-plan response without changing agreed decisions. Do not inspect the repository again:\n${issues!.join("\n")}`, true);
         continue;
       }
       proposal = proposal!;
@@ -663,15 +654,6 @@ function validateProposalSourceRefs(proposal: TicketPlanProposal, registry: Sour
 }
 
 
-function parseConversationMarker(text: string): { kind: string; question?: string; choices?: string[] } {
-  const line = text.trimEnd().split(/\r?\n/).at(-1) ?? "";
-  const kind = /STEP_STATUS:\s*([a-z_]+)/i.exec(line)?.[1]?.toLowerCase() ?? "unknown";
-  const question = /question="([^"]*)"/.exec(line)?.[1];
-  const choices = /choices="([^"]*)"/.exec(line)?.[1]?.split("|").map((item) => item.trim());
-  return { kind, question, choices };
-}
-
-function stripMachineTail(text: string): string { return text.replace(/^SOURCE_REQUEST:.*$/gmi, "").replace(/^STEP_STATUS:.*$/gmi, "").trim(); }
 function sourceLabel(source: ProjectSourceEntry): string { return `${source.label} (${source.id})`; }
 function readProjectConfig(projectDir: string): ProjectConfig { const active = join(projectDir, RAFI_CONFIG_FILE); const path = existsSync(active) ? active : join(projectDir, "project.yaml"); return normalizeProjectConfig(parseYaml(readFileSync(path, "utf8"))); }
 async function promptText(message: string, initialValue?: string): Promise<string> { const { text, isCancel } = await import("@clack/prompts"); const answer = await text({ message, initialValue, defaultValue: initialValue, validate: (value) => String(value ?? "").trim() ? undefined : "Enter a response" }); if (isCancel(answer)) throw new Error("ticket planning cancelled"); return String(answer).trim(); }

@@ -1,3 +1,5 @@
+import { operationPayload, operationResponse, operationStatus } from "./structuredOperation.js";
+import { workReportOutput, type WorkReportPayload } from "rafi-spec";
 import { assertBuilderContractCoverage } from "./qaBuilderCoverage.js";
 import { resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
 import { contractDigest } from "./qaVerificationContract.js";
@@ -43,7 +45,7 @@ export interface BuildAssignmentCapture {
   guidanceIds: string[];
 }
 
-type BuildSourceState = Pick<FrozenQaSourceState, "digest" | "head" | "contentDigest" | "capturedAt" | "pathInventory" | "stagedDiff" | "unstagedDiff" | "untracked"> & { captureMode: "git" | "filesystem"; omissions?: string[] };
+type BuildSourceState = Pick<FrozenQaSourceState, "digest" | "head" | "contentDigest" | "capturedAt" | "pathInventory" | "stagedDiff" | "unstagedDiff" | "untracked"> & { captureMode: "git" | "filesystem"; omissions?: string[]; fileByteLengths?: Record<string, number> };
 
 export class BuildAssignmentRejected extends Error {}
 
@@ -350,7 +352,17 @@ export function beginBuildAssignment(projectDir: string, runId: string, ticketId
 }
 
 export function finishBuildAssignment(projectDir: string, assignment: BuildAssignmentCapture, result: TurnResult, status: StepStatus): string | undefined {
-  let rejection = result.failure?.dispatchState === "not-sent" ? undefined : validateBuildAssignment(assignment.ticketId, status, result.text);
+  let rejection: string | undefined;
+  if (result.failure?.dispatchState !== "not-sent") {
+    try {
+      const response = operationResponse(result, workReportOutput);
+      if (!["completed", "blocked", "needs-input"].includes(response.result.kind)) throw new Error("Unconsumed intermediate assignment result");
+      if (result.structured?.state !== "candidate" || result.structured.dispatchId !== result.turnId) throw new Error("Assignment receipt dispatch mismatch");
+      const nativeStatus = operationStatus(result, workReportOutput, assignment.ticketId);
+      if (nativeStatus.kind !== status.kind || status.ticket && status.ticket !== assignment.ticketId) throw new Error("Assignment status disagrees with the native result");
+      status = nativeStatus;
+    } catch (error) { rejection = `Builder assignment has no valid native result: ${error instanceof Error ? error.message : String(error)}`; }
+  }
   // Source capture can fail after an external turn. Keep the response even then.
   let after: BuildSourceState | undefined;
   let sourceError: string | undefined;
@@ -364,26 +376,27 @@ export function finishBuildAssignment(projectDir: string, assignment: BuildAssig
         catch (error) { rejection = String(error); }
       }
       const responseDigest = db.putEvidence("qa", Buffer.from(result.rawResponse ?? result.text));
+      const structuredResponseDigest = result.structured ? db.putEvidence("qa", Buffer.from(JSON.stringify(result.structured))) : undefined;
       const cleanedResponseDigest = db.putEvidence("qa", Buffer.from(result.cleanedResponse ?? result.text));
       const providerInstructionDigest = result.providerInstruction ? db.putEvidence("qa", Buffer.from(result.providerInstruction)) : undefined;
-      db.updateOperation(assignment.operationId, result.failure?.dispatchState === "unknown" || result.isError && !result.failure?.dispatchState && status.kind === "unknown" ? "uncertain" : "confirmed", { result: { turnId:result.turnId, responseDigest, cleanedResponseDigest, providerInstructionDigest, providerMetadata: result.providerMetadata, dispatchState: result.failure?.dispatchState, status, rejection, sourceError, after: after ? retainSource(db, after) : undefined } });
+      db.updateOperation(assignment.operationId, result.failure?.dispatchState === "unknown" || result.isError && !result.failure?.dispatchState && status.kind === "unknown" ? "uncertain" : "confirmed", { result: { turnId:result.turnId, responseDigest, structuredResponseDigest, cleanedResponseDigest, providerInstructionDigest, providerMetadata: result.providerMetadata, dispatchState: result.failure?.dispatchState, status, rejection, sourceError, after: after ? retainSource(db, after) : undefined } });
       const admission = db.assertAdmittedWork(assignment.runId, assignment.ticketId);
       db.qaPreparationStore().metric(assignment.runId, assignment.ticketId, admission.requirementsDigest, `metric:builder-result:${assignment.operationId}`, "phase-observation", { phase: "builder", durationMs: Math.max(0, Date.now() - Date.parse(assignment.before.capturedAt)), costUsd: result.costAuthoritative ? result.costUsd : null, inputTokens: result.inputTokens ?? null, outputTokens: result.outputTokens ?? null });
-      db.finishGuidance(assignment.guidanceIds, "builder", {submitted: result.failure?.dispatchState === "not-sent" ? false : result.turnId ? true : undefined, receipt: result.turnId ? {turnId:result.turnId,responseDigest,providerInstructionDigest,postSourceDigest:after?.digest} : undefined, applied: !rejection && status.kind === "done" && assignment.guidanceIds.every(id => result.text.includes(id))});
+      db.finishGuidance(assignment.guidanceIds, "builder", {submitted: result.failure?.dispatchState === "not-sent" ? false : result.turnId ? true : undefined, receipt: result.turnId ? {turnId:result.turnId,responseDigest,providerInstructionDigest,postSourceDigest:after?.digest} : undefined, applied: !rejection && status.kind === "done"});
       if (rejection || sourceError) {
         const run = db.getRun(assignment.runId)!;
         db.transition(assignment.runId, { checkpoint: "build-assignment-rejected", state: { ...run.state, assignmentConflict: { operationId: assignment.operationId, ticketId: assignment.ticketId, worktree: assignment.worktree, responseDigest, rejection, sourceError } }, event: "build_assignment_rejected", payload: { operationId: assignment.operationId, ticketId: assignment.ticketId, returnedTicketId: status.ticket, responseDigest, rejection, sourceError } });
       }
     });
   } finally { db.close(); }
-  if(!rejection&&!sourceError&&!result.isError&&status.kind==="done"&&after){try{queueGraphMaintenance(projectDir,assignment.worktree,assignment.operationId,result.text,after.contentDigest!==assignment.before.contentDigest);}catch(error){console.error(`Graph maintenance deferred: ${String(error)}`);}}
+  if(!rejection&&!sourceError&&!result.isError&&status.kind==="done"&&after){try{queueGraphMaintenance(projectDir,assignment.worktree,assignment.operationId,operationPayload<WorkReportPayload>(result,workReportOutput).graphMaintenance === "meaningful-indexed-change",after.contentDigest!==assignment.before.contentDigest);}catch(error){console.error(`Graph maintenance deferred: ${String(error)}`);}}
   return rejection ?? (sourceError ? `Builder source evidence is unavailable: ${sourceError}. Reconcile before continuing.` : undefined);
 }
 
 function retainSource(db: WorkflowDb, source: BuildSourceState): Record<string, unknown> {
   const staged = retainDiff(db, source.stagedDiff);
   const unstaged = retainDiff(db, source.unstagedDiff);
-  return { digest: source.digest, head: source.head, captureMode: source.captureMode, omissions: source.omissions, contentDigest: source.contentDigest, capturedAt: source.capturedAt, pathInventory: source.pathInventory,
+  return { digest: source.digest, head: source.head, captureMode: source.captureMode, omissions: source.omissions, contentDigest: source.contentDigest, capturedAt: source.capturedAt, pathInventory: source.pathInventory, fileByteLengths: source.fileByteLengths,
     stagedDiffDigest: staged.digest, stagedDiffChunks: staged.chunks, stagedDiffBytes: source.stagedDiff.length,
     unstagedDiffDigest: unstaged.digest, unstagedDiffChunks: unstaged.chunks, unstagedDiffBytes: source.unstagedDiff.length,
     untracked: source.untracked.map(file => { const evidence = retainDiff(db, file.bytes); return { path: file.path, mode: file.mode, kind: file.kind, digest: file.digest, evidenceDigest: evidence.digest, evidenceChunks: evidence.chunks, byteLength: file.bytes.length }; }) };
@@ -399,11 +412,37 @@ function retainDiff(db: WorkflowDb, bytes: Buffer): { digest?: string; chunks?: 
 
 export function captureBuildSource(worktree: string): BuildSourceState {
   const head = spawnSync("git", ["-C", worktree, "rev-parse", "--verify", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  if (head.status === 0) return { ...captureFrozenQaSource(worktree), captureMode: "git" };
+  if (head.status === 0) {
+    const source = captureFrozenQaSource(worktree);
+    // Length is only a hint for comparing a final prefix with the already
+    // digest-bound baseline hash. A stale length can never manufacture a match.
+    const fileByteLengths: Record<string, number> = {};
+    for (const item of source.pathInventory) {
+      if (!item.worktreeObject?.startsWith("file:")) continue;
+      try { const stat = lstatSync(join(worktree, item.path)); if (stat.isFile()) fileByteLengths[item.path] = stat.size; } catch { /* unavailable comparison stays explicit */ }
+    }
+    return { ...source, captureMode: "git", fileByteLengths };
+  }
   if ((head.error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT" && !/not a git repository|Needed a single revision|unknown revision/.test(head.stderr ?? "")) throw head.error ?? new Error(`Git source identity is unavailable: ${head.stderr}`);
   const capture = (): BuildSourceState => {
     const root = resolve(worktree);
     const untracked: FrozenQaSourceState["untracked"] = [];
+    const gitPaths = spawnSync("git", ["-C", root, "ls-files", "--others", "--exclude-standard", "-z"], { encoding: "buffer", stdio: ["ignore", "pipe", "pipe"] });
+    if (gitPaths.status === 0) {
+      for (const path of gitPaths.stdout.toString().split("\0").filter(Boolean).sort()) {
+        if (path === ".foreman" || path.startsWith(".foreman/") || path === ".rafi" || path.startsWith(".rafi/")) continue;
+        const absolute = join(root, path);
+        let stat;
+        try { stat = lstatSync(absolute); } catch { continue; }
+        // Git reports an untracked nested repository as its directory. It is
+        // a separate source boundary, not a reason to recursively hash its
+        // entire checkout (MoneyTree's vendor/reference trees can be GBs).
+        if (!stat.isFile() && !stat.isSymbolicLink()) continue;
+        const kind = stat.isSymbolicLink() ? "symlink" : "file";
+        const bytes = kind === "symlink" ? Buffer.from(readlinkSync(absolute)) : readFileSync(absolute);
+        untracked.push({ path, kind, bytes, mode: stat.mode, digest: createHash("sha256").update(bytes).digest("hex") });
+      }
+    } else {
     const ignored = new Set([".git", ".rafi", ".foreman", "node_modules"]);
     const visit = (directory: string): void => {
       for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -418,6 +457,7 @@ export function captureBuildSource(worktree: string): BuildSourceState {
       }
     };
     visit(root);
+    }
     const contentDigest = createHash("sha256").update(JSON.stringify(untracked.map(({ bytes: _, ...identity }) => identity))).digest("hex");
     return { digest: contentDigest, head: "unavailable", captureMode: "filesystem", omissions: ["Git baseline/diff unavailable: project is not a repository or has no first commit"], contentDigest, capturedAt: new Date().toISOString(),
       pathInventory: untracked.map(file => ({ path: file.path, staged: [], unstaged: [], untracked: { kind: file.kind, mode: file.mode, digest: file.digest } })), untracked, stagedDiff: Buffer.alloc(0), unstagedDiff: Buffer.alloc(0) };

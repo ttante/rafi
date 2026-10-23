@@ -1,4 +1,5 @@
 export { withGraphDerivedAccess } from "./graph/derived.js";
+export { operationInstruction, operationResponse, operationStatus, operationPayload, nativePolicy } from "./structuredOperation.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, DEFAULT_CONFIG, type PermissionConfig } from "./config.js";
@@ -67,6 +68,7 @@ export interface RoleBuilder {
 }
 
 export interface RoleInstructionRunOptions extends Omit<RoleBuilderOptions, "log"> {
+  output: import("rafi-spec").OutputContract;
   instruction: string;
   logPath?: string;
   logEvent?: "rafi-plan" | "ticket-populate" | "preflight" | "uninstall-proposal";
@@ -383,7 +385,7 @@ export async function runRoleInstruction(opts: RoleInstructionRunOptions): Promi
   foreman.setGraphPurpose(opts.graphPurpose ?? ({planner:"planning",discovery:"discovery","ticket-maker":"ticket-population",uninstaller:"uninstall-analysis"} as Record<string,GraphPurpose>)[opts.role] ?? "implementation");
 
   try {
-    const turn = await foreman.runInstruction(opts.instruction);
+    const turn = await foreman.runInstruction(opts.instruction, { output: opts.output });
     await builder.close();
     await viewer;
 

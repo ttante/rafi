@@ -82,6 +82,8 @@ test("audit questions resume at the first unanswered item and stop immediately",
   assert.equal(state.stopped, true);
   assert.equal(state.answers.length, 2);
   assert.match(buildAuditAnswersContinuation(state), /User stopped further questions: yes/);
+  assert.match(buildAuditAnswersContinuation(state), /native structured operation/);
+  assert.doesNotMatch(buildAuditAnswersContinuation(state), /STEP_STATUS|RAFI_PLAN_PROPOSAL/);
 });
 
 test("cancelled audit input is persisted as interrupted", async () => {

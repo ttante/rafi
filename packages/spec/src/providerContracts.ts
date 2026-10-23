@@ -15,6 +15,23 @@ const workspaceRelativePath = z.string().trim().min(1).max(4_000).refine((value)
   const normalized = value.replaceAll("\\", "/");
   return !normalized.startsWith("/") && !normalized.split("/").includes("..") && !/^[A-Za-z]:\//.test(normalized);
 }, "must be a workspace-relative path without parent traversal");
+/** V2 verification intent is approved data, never shell prose. */
+export const verificationApplicabilityV2Schema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("always") }),
+  z.strictObject({ kind: z.literal("host-executable-available"), executable: z.enum(["pnpm", "npm", "yarn", "bun", "node", "python3", "pytest", "cargo", "go"]), expected: z.boolean(), phase: z.enum(["preimplementation", "postimplementation", "both"]) }),
+]);
+export const verificationMethodV2Schema = z.strictObject({
+  kind: z.enum(["command", "procedure"]), argv: z.array(text(4_000)).min(1).max(32).optional(), steps: textList(32, 4_000).optional(), cwd: workspaceRelativePath,
+  runtime: text(256), timeout_ms: z.number().int().min(1).max(3_600_000), expected_outcome: text(4_000),
+}).superRefine((value, ctx) => {
+  if (value.kind === "command" && !value.argv?.length) ctx.addIssue({ code: "custom", message: "command verification requires argv" });
+  if (value.kind === "procedure" && !value.steps?.length) ctx.addIssue({ code: "custom", message: "procedure verification requires steps" });
+});
+export const verificationRequirementV2Schema = z.strictObject({
+  id: ref, summary: text(4_000), timing: z.enum(["preimplementation", "postimplementation", "both"]), applicability: verificationApplicabilityV2Schema,
+  methods: z.array(verificationMethodV2Schema).min(1).max(16), expected_evidence: textList(32, 4_000), depends_on: z.array(ref).max(64),
+});
+export type VerificationRequirementV2 = z.infer<typeof verificationRequirementV2Schema>;
 const discoveryArtifact = z.strictObject({
   path: workspaceRelativePath,
   kind: z.enum(["file", "directory"]),
@@ -67,6 +84,9 @@ const planSlice = z.strictObject({
   summary: text(),
   acceptance: textList(),
   required_tests: textList(),
+  /** Absent only on historical V1 artifacts. New plans declare version 2. */
+  verification_version: z.literal(2).optional(),
+  verification_requirements: z.array(verificationRequirementV2Schema).min(1).max(200).optional(),
   likely_files: z.array(text(1_000)).max(200),
   depends_on: z.array(ref).max(200),
   source_refs: z.array(sourceRef).max(100).optional(),

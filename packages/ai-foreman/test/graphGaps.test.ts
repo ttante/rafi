@@ -1,3 +1,5 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import type { TurnPolicy } from "../src/adapters/types.js";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -118,28 +120,28 @@ test("round exhaustion gives a terminal limitation followed by a normal business
     assert.match(prompts[2], /round budget exhausted/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
-test("semantic repair usage is retained and completed chunks reuse without provider dispatch", async () => {
+test("native semantic usage is retained and completed chunks reuse without provider dispatch", async () => {
   const root = fixture();
   try {
     let count = 0;
     let request: { operationId: string; inputDigest: string };
     const host = { agent: "codex", graphRuntimeSettings: () => ({ model: "fixture-model" }) } as unknown as BuilderAdapter;
-    const semantic = graphSemanticHost(root, host, async () => ({ sessionId: () => "semantic-session", close: async () => {}, sendTurn: async (text: string) => {
+    const semantic = graphSemanticHost(root, host, async () => ({ agent: "codex", sessionId: () => "semantic-session", close: async () => {}, sendTurn: async (text: string, policy?: TurnPolicy) => {
       count++;
-      if (count === 1) { request = JSON.parse(text); return turn("bad JSON"); }
-      return turn(JSON.stringify({ kind: "rafi_graph_semantic_result", version: 1, operationId: request.operationId, inputDigest: request.inputDigest, nodes: [{ id: "x", source_file: "doc.md" }], edges: [], origin: { provider: "codex", operationId: request.operationId } }));
+      request = JSON.parse(text.split("\n")[0]!);
+      return { ...turn("Presentation only"), ...nativeFixtureTurn(policy, "semantic-session", { kind: "rafi_graph_semantic_result", version: 1, operationId: request.operationId, inputDigest: request.inputDigest, nodes: [{ id: "x", source_file: "doc.md" }], edges: [], origin: { provider: "codex", operationId: request.operationId } }, "codex"), costUsd: 0.1 };
     } } as unknown as BuilderAdapter))!;
     const chunks = [{ path: "doc.md", digest: "captured", text: "Requirement" }];
     await semantic(chunks, "semantic-job");
     await semantic(chunks, "semantic-job");
-    assert.equal(count, 2);
+    assert.equal(count, 1);
     const db = new WorkflowDb(root);
     try {
       const jobs = db.graphStore().list<{ state: string; usage: { inputTokens: number; costUsd: number; observations: unknown[] } }>("job");
       const job = jobs.find(j => j.value.state === "completed")!.value;
-      assert.equal(job.usage.inputTokens, 40);
-      assert.equal(job.usage.costUsd, 0.2);
-      assert.equal(job.usage.observations.length, 2);
+      assert.equal(job.usage.inputTokens, 20);
+      assert.equal(job.usage.costUsd, 0.1);
+      assert.equal(job.usage.observations.length, 1);
     } finally { db.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

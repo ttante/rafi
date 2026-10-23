@@ -1,3 +1,5 @@
+import { operationPayload } from "./structuredOperation.js";
+import { loadGraphConfig } from "./graph/config.js";
 import { resolveQaPreparationConfig } from "./qaPreparationPolicy.js";
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
@@ -20,7 +22,7 @@ import { captureBuildSource, assertBuildAssignmentReconciled, BuildAssignmentRej
 import { createDisposableQaSnapshotAsync } from "./qaSnapshot.js";
 import { allocateStableCheckIds, authoritativeInventory, bindUniqueBaselineCheckIds, contractDigest, ensureHostScopeCheck, mapSnapshotWorkingDirectories, normalizeSnapshotPaths, renderVerificationContract, rewriteProviderHostScopeChecks } from "./qaVerificationContract.js";
 import { loadQaPreparationPolicy, resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
-import { prepareVerificationContract } from "./qaPreparation.js";
+import { prepareVerificationContract, draftOutput, depthOutput, assessmentOutput, challengeOutput } from "./qaPreparation.js";
 import { qaHostGraphFact } from "./qaHostFacts.js";
 import { actualContractSession, assertContractReceipt, deliverVerificationContract } from "./qaContractDelivery.js";
 import { BUILDER_WORK_COVERAGE_INSTRUCTIONS } from "./qaContractCoverage.js";
@@ -36,6 +38,25 @@ export function preparationTurnPayload(turn: TurnResult): { text: string; format
   return {
     text: formatErrors.length ? turn.rawResponse ?? turn.cleanedResponse ?? turn.text : turn.text,
     formatErrors,
+  };
+}
+
+/**
+ * The selected QA bundle is already injected as immutable system context for
+ * the isolated provider session.  Repeat only its identity here: the exact
+ * requirements remain in the authoritative inventory, while repeating full
+ * rules and skill bodies in every operation wastes context and makes native
+ * structured submission needlessly fragile.
+ */
+export function preparationConfigurationReference(effective: ReturnType<typeof resolveEffectiveQaConfiguration>) {
+  return {
+    digest: effective.digest,
+    configRoot: effective.configRoot,
+    roleSource: effective.roleSource,
+    checklistDigest: contractDigest("input-checklist", effective.checklist),
+    qaRulesDigest: contractDigest("qa-rules", effective.qaRules),
+    builderRulesDigest: contractDigest("builder-rules", effective.builderRules),
+    skills: effective.skills.map(skill => ({ name: skill.name, path: skill.path, digest: skill.digest })),
   };
 }
 
@@ -63,6 +84,9 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
     const configurationEvent = `preparation-configuration:${runId}:${workId}:${effective.digest}`;
     if (!store.eventRecord(configurationEvent)) store.event(runId, workId, configurationEvent, "effective-preparation-configuration", { policy, effectiveDigest: effective.digest, configRoot: effective.configRoot, roleSource: effective.roleSource, provider: builder.agent, capabilities: builder.contractCapabilities?.() ?? null, finalReviewEnabled: (db.getRun(runId)?.state as { qaEnabled?: boolean })?.qaEnabled ?? null });
     const inputs: ContractInputRef[] = [
+      { id: "communication-contract", kind: "policy", reference: "structured-provider-output-v1", digest: contractDigest("communication-contract", {
+        protocolVersion: 1, hostValidation: "typed-invariants-v1", schemas: [draftOutput, depthOutput, assessmentOutput, challengeOutput].map(output => ({ operation: output.operation, version: output.schemaVersion, digest: output.schemaDigest })),
+      }), authority: "planner-policy", revision: "1", availability: "available" },
       { id: "admitted-ticket", kind: "ticket", reference: admission.assignmentId, digest: contractDigest("input-ticket", ticket), authority: "approved-scope", revision: admission.scopeRevision, availability: "available" },
       { id: "project-checklist", kind: "checklist", reference: "tickets.build.validation_checklist", digest: contractDigest("input-checklist", effective.checklist), authority: "project-rule", revision: "current", availability: "available" },
       { id: "effective-rules", kind: "rules", reference: effective.configRoot, digest: effective.digest, authority: "project-rule", revision: "current", availability: "available" },
@@ -107,7 +131,8 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
       if (comparison.changed.length || comparison.unavailable.length || changedDuringAmendment) {
         const qaHead = db.qaTicketHead(runId, workId);
         if (["completed", "waived", "finalizing", "turn-intended", "turn-uncertain", "remediation-intended", "remediation-uncertain"].includes(qaHead.state)) throw new Error("Active or finalized QA authority requires explicit recovery/reopen before contract amendment");
-        const budget = priorBudget!;
+        if (!priorBudget) throw new Error("Retained contract lacks its preparation budget; explicit recovery is required before amendment");
+        const budget = priorBudget;
         if (retainedIntent?.inputDigest !== inputDigest || retainedIntent.predecessorDigest !== old.contentDigest) store.beginAmendment(budget, inventory, { reason: `Canonical authorized inputs changed: ${[...comparison.changed, ...comparison.unavailable].join(", ") || "inputs reverted during amendment"}`, inputDigest, predecessorDigest: old.contentDigest });
         amendmentPredecessor = old.contentDigest;
       }
@@ -128,7 +153,14 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
       provider: builder.agent,
       store, now: Date.now, hostFacts: `${qaHostGraphFact(projectDir)}\n${deliveryFact}\nHost-owned baseline fact: Rafi captured the complete preimplementation per-file path manifest and will perform the exact unchanged-file and scope comparison. Its digest is ${preimplementationPathManifestDigest}. Do not require the provider to receive or reproduce the raw manifest; cite the retained host-preimplementation-source observation and assess the host comparison result instead. Do not author a provider-executed check for Rafi's host postimplementation path manifest, complete changed-path inventory, or unchanged-file comparison; Rafi performs that comparison outside the provider snapshot. Ordinary approved product paths, exports, and tests are not a material QA concern merely because the provider cannot prove whether they were present before implementation; Rafi owns that comparison. Do not reconstruct or disclose the full baseline. For current-branch additive tickets, a provider-authored or inferred request to test the branch with an already-completed sibling feature removed is not an applicable requirement when the approved scope says not to remove or reconstruct that sibling; verify the ticket's own behavior and tests against the shared baseline instead. Treat sibling-absence testing as binding only when the user explicitly approved that absence requirement. Escalate only an actual host-observed out-of-scope, destructive, protected-file, or requirement-relevant change.`,
       normalizeDraft: (draft, response) => {
-        const normalized = allocateStableCheckIds(bindUniqueBaselineCheckIds(rewriteProviderHostScopeChecks(normalizeGraphQaChecks(ensureHostScopeCheck(draft, hostBaseline.id)), hostBaseline.id)));
+        // The dispatch already retains the selected contract digest. Do not
+        // recursively embed its validator/schema in every evidence summary.
+        const { output, ...providerReceipt } = response;
+        const investigationEvidence = store.putArtifact("investigation-evidence", {
+          ...providerReceipt,
+          ...(output ? { selectedContract: { operation: output.operation, schemaVersion: output.schemaVersion, schemaDigest: output.schemaDigest } } : {}),
+        });
+        const normalized = allocateStableCheckIds(bindUniqueBaselineCheckIds(normalizeGraphQaChecks(ensureHostScopeCheck(draft, hostBaseline.id), loadGraphConfig(projectDir).enabled)));
         if (!normalized.baseline.some(observation => observation.id === hostBaseline.id)) normalized.baseline.unshift(structuredClone(hostBaseline));
         for (const check of normalized.checks) for (const method of check.verification) {
           if (response.workspacePaths && Object.hasOwn(response.workspacePaths, method.cwd)) method.cwd = response.workspacePaths[method.cwd]!;
@@ -138,14 +170,15 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
           observation.sourceDigest = source.digest;
           observation.observedAt = new Date().toISOString();
           observation.phase = "preimplementation-investigation";
-          observation.evidenceDigest = store.putArtifact("baseline-observation", { observation: original, sourceDigest: source.digest, operationId: response.operationId, sessionId: response.sessionId, providerReceipt: store.putArtifact("investigation-evidence", response) });
+          observation.evidenceDigest = store.putArtifact("baseline-observation", { observation: original, sourceDigest: source.digest, operationId: response.operationId, sessionId: response.sessionId, providerReceipt: investigationEvidence });
         }
         for (const evidence of normalized.preparationEvidence) {
           evidence.operationId = response.operationId!; evidence.sessionId = response.sessionId;
           delete evidence.graphReceiptRefs;
           if (response.graphReceiptRefs?.length) evidence.graphReceiptRefs = [...response.graphReceiptRefs];
-          evidence.evidenceDigest = store.putArtifact("investigation-evidence", response);
+          evidence.evidenceDigest = investigationEvidence;
           for (const reference of evidence.references) {
+            if (response.workspacePaths && Object.hasOwn(response.workspacePaths, reference.path)) reference.path = response.workspacePaths[reference.path]!;
             let path: string;
             try { path = realpathSync(resolve(workspace, reference.path)); }
             catch { throw new Error(`Inspected source reference ${JSON.stringify(reference.path)} is missing or inaccessible; cite an existing file actually inspected in the frozen workspace`); }
@@ -165,7 +198,7 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
         const compared = compareContractInputs(candidate as import("rafi-spec").QaVerificationContractV1, inputs.map(input => input.id === "effective-rules" ? { ...input, digest: current.digest } : input.id === "project-checklist" ? { ...input, digest: contractDigest("input-checklist", current.checklist) } : input.id === "preimplementation-source" ? { ...input, digest: currentSource.digest, revision: currentSource.head } : input));
         return !compared.changed.length && !compared.unavailable.length;
       },
-      dispatch: async (phase, instruction, operationId, remainingMs) => new OperationDeadline("QA preparation operation", remainingMs).run(async () => {
+      dispatch: async (phase, instruction, operationId, remainingMs, output) => new OperationDeadline("QA preparation operation", remainingMs).run(async () => {
         const started = performance.now();
         const remaining = () => {
           const value = remainingMs - (performance.now() - started);
@@ -176,12 +209,12 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
         if (phase === "planner") {
           const role = await createRoleBuilder({ projectDir: workspace, configRoot: projectDir, role: "planner", label: "QA depth assessment", sandboxMode: "read-only", permissionConfig: readOnlyPermissionConfig(), yes: true, allowSwitch: false });
           try {
-            const turn = await sendPreparationGraphTurn(role.builder, `This is a read-only QA planning subturn, not Builder work. Do not implement anything, edit files, run project tests, or describe a TDD implementation plan. Your response must begin with RAFI_QA_DEPTH_START and contain only the requested depth JSON, ending with RAFI_QA_DEPTH_END.\n${instruction}\nFrozen admitted work definition: ${JSON.stringify(ticket)}\nOriginal approved plan context: ${JSON.stringify(planInput?.plan ?? null)}\nFrozen effective configuration: ${JSON.stringify(effective)}`, { phase, projectDir, workspace, sourceRef: before.digest, runId, workId, operationId, remainingMs: remaining() });
+            const turn = await sendPreparationGraphTurn(role.builder, `This is a read-only QA planning subturn, not Builder work. Do not implement anything, edit files, run project tests, or describe a TDD implementation plan. Return the requested native depth result.\n${instruction}\nFrozen admitted work definition: ${JSON.stringify(ticket)}\nOriginal approved plan context: ${JSON.stringify(planInput?.plan ?? null)}\nFrozen effective configuration reference (authoritative requirements are in the candidate): ${JSON.stringify(preparationConfigurationReference(effective))}`, { phase, projectDir, workspace, sourceRef: before.digest, runId, workId, operationId, remainingMs: remaining(), output });
             store.event(runId, workId, `${operationId}:raw`, "preparation-provider-return", turn);
             if (captureBuildSource(workspace).contentDigest !== before.contentDigest) throw new Error("Product source changed during confined planning; reconcile retained dispatch");
             const payload = preparationTurnPayload(turn);
-            if ((turn.isError && !payload.formatErrors.length) || turn.failure || !role.builder.sessionId()) throw new Error(`planner-unavailable: ${turn.text}`);
-            return { text: payload.text, graphReceiptRefs: turn.graphReceiptRefs, sessionId: role.builder.sessionId()!, usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
+            if (turn.isError || turn.failure || !role.builder.sessionId()) throw new Error(`planner-unavailable: ${turn.text}`);
+            return { text: payload.text, structured: turn.structured, output, graphReceiptRefs: turn.graphReceiptRefs, sessionId: role.builder.sessionId()!, usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
           } finally { await role.builder.close(); }
         }
         const snapshot = await createDisposableQaSnapshotAsync(workspace);
@@ -189,17 +222,17 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
         try {
           remaining();
           const prerequisites = await checkQaPrerequisites({ snapshotPath: snapshot.path, sourceDigest: snapshot.frozenState.digest, ticket });
-          const prerequisiteDigest = db.putEvidence("qa", JSON.stringify(prerequisites));
+          const prerequisiteDigest = db.putEvidence("qa", Buffer.from(JSON.stringify(prerequisites)));
           remaining();
           if (qaFactory) adapter = (await qaFactory(snapshot.path)).adapter;
           else adapter = (await createRoleBuilder({ projectDir: snapshot.path, configRoot: projectDir, role: "qa", agent: state?.qa?.settings?.make ?? builder.agent, preloadedSkillContent: effective.skills.map(skill => ({ name: skill.name, content: skill.content })), label: "QA preparation", sandboxMode: "read-only", permissionConfig: readOnlyPermissionConfig(), yes: true, allowSwitch: false })).builder;
-          const turn = await sendPreparationGraphTurn(adapter, `${instruction}\nOriginal approved plan context: ${JSON.stringify(planInput?.plan ?? null)}\nFrozen admitted work definition: ${JSON.stringify(ticket)}\nHost early prerequisite observations (host availability is not provider access; classify readiness versus final-only dependencies): ${JSON.stringify({ ...prerequisites, evidenceDigest: prerequisiteDigest })}\nFrozen effective configuration: ${JSON.stringify(effective)}\nOperation: ${operationId}; remaining wall time: ${remainingMs}ms; source: ${source.digest}`, { phase, projectDir, workspace: snapshot.path, accessWorkspace: workspace, sourceRef: snapshot.frozenState.digest, runId, workId, operationId, remainingMs: remaining() });
+          const turn = await sendPreparationGraphTurn(adapter, `${instruction}\nOriginal approved plan context: ${JSON.stringify(planInput?.plan ?? null)}\nFrozen admitted work definition: ${JSON.stringify(ticket)}\nHost early prerequisite observations (host availability is not provider access; classify readiness versus final-only dependencies): ${JSON.stringify({ ...prerequisites, evidenceDigest: prerequisiteDigest })}\nFrozen effective configuration reference (the exact QA rules and skills are already loaded as immutable system context; authoritative requirements are in the inventory): ${JSON.stringify(preparationConfigurationReference(effective))}\nOperation: ${operationId}; remaining wall time: ${remainingMs}ms; source: ${source.digest}`, { phase, projectDir, workspace: snapshot.path, accessWorkspace: workspace, sourceRef: snapshot.frozenState.digest, runId, workId, operationId, remainingMs: remaining(), output });
           store.event(runId, workId, `${operationId}:raw`, "preparation-provider-return", turn);
           const payload = preparationTurnPayload(turn);
           payload.text = normalizeSnapshotPaths(payload.text);
-          if ((turn.isError && !payload.formatErrors.length) || turn.failure || !adapter.sessionId()) throw new Error(`Preparation provider unavailable: ${turn.text}`);
+          if (turn.isError || turn.failure || !adapter.sessionId()) throw new Error(`Preparation provider unavailable: ${turn.text}`);
           if (captureBuildSource(workspace).contentDigest !== before.contentDigest) throw new Error("Source changed during preparation; retained dispatch requires reconciliation");
-          return { text: payload.text, graphReceiptRefs: turn.graphReceiptRefs, sessionId: adapter.sessionId()!, workspacePaths: mapSnapshotWorkingDirectories(payload.text, snapshot.path), usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
+          return { text: payload.text, structured: turn.structured, output, graphReceiptRefs: turn.graphReceiptRefs, sessionId: adapter.sessionId()!, workspacePaths: mapSnapshotWorkingDirectories(operationPayload<Partial<QaContractCandidateV1>>(turn, output), snapshot.path), usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
         } finally { try { await adapter?.close(); } finally { await snapshot.remove(); } }
       }),
     });

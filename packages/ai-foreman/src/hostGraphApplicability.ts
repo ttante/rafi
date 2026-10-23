@@ -21,33 +21,28 @@ export const hostGraphApplicabilityV1Schema = z.object({
 
 export type HostGraphApplicabilityV1 = z.infer<typeof hostGraphApplicabilityV1Schema>;
 
-function graphText(check: QaVerificationContractV1["checks"][number]): string {
-  return [check.expectedBehavior, ...check.expectedEvidence, ...check.applicability.requiredEvidence,
-    ...check.verification.flatMap(method => [method.expectedOutcome, ...(method.steps ?? []), ...(method.argv ?? [])])].join(" ");
-}
-
 export function isGraphQaCheck(check: QaVerificationContractV1["checks"][number]): boolean {
-  return /\bgraphify(?:y)?\b|\brafi[- ]managed graph(?:ify)?\b|\bgraphify adoption\b|\bgraphify[- ](?:receipt|evidence|command)\b/i.test(graphText(check));
+  return check.hostKind === "graph-maintenance";
 }
 
 export function findGraphQaChecks(contract: QaVerificationContractV1): QaVerificationContractV1["checks"] {
   return contract.checks.filter(isGraphQaCheck);
 }
 
-export function normalizeGraphQaChecks(candidate: QaContractCandidateV1): QaContractCandidateV1 {
+/** Host policy adds its own check; provider wording cannot acquire host authority. */
+export function normalizeGraphQaChecks(candidate: QaContractCandidateV1, adopted = false): QaContractCandidateV1 {
   const copy = structuredClone(candidate);
-  for (const check of copy.checks) {
-    if (!isGraphQaCheck(check as QaVerificationContractV1["checks"][number])) continue;
-    check.origin = "invariant";
-    check.obligation = "mandatory";
-    check.timing = "postimplementation";
-    check.applicability = {
-      kind: "conditional",
-      predicate: "Rafi-managed Graphify is adopted and enabled for this project",
-      decisionOwner: "host",
-      requiredEvidence: ["Host-owned Graphify applicability observation"],
-    };
-  }
+  if (!adopted || copy.checks.some(isGraphQaCheck)) return copy;
+  const requirement = copy.requirements[0]?.id;
+  if (!requirement) throw new Error("Graph policy requires an admitted requirement inventory");
+  let id = "host-graph-maintenance";
+  while (copy.checks.some(check => check.id === id)) id += "-host";
+  copy.checks.push({ id, hostKind: "graph-maintenance", requirementRefs: [requirement], origin: "invariant", obligation: "mandatory", timing: "postimplementation",
+    expectedBehavior: "Adopted Graphify evidence follows the host trigger gate and maintenance policy.",
+    applicability: { kind: "conditional", predicate: "Rafi-managed Graphify remains adopted and enabled", decisionOwner: "host", requiredEvidence: ["Host-owned Graphify applicability observation"] },
+    verification: [{ kind: "procedure", steps: ["Inspect the host maintenance receipt or the documented non-trigger result for this work."], cwd: ".", fixtures: [], expectedOutcome: "Meaningful indexed changes have a host maintenance receipt; routine non-trigger work does not refresh the graph.", runtime: "Rafi host", timeoutMs: 30000 }],
+    expectedEvidence: ["Host graph maintenance or non-trigger receipt"], prerequisiteRefs: [], dependsOnChecks: [],
+  });
   return copy;
 }
 

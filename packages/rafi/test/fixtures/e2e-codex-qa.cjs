@@ -14,6 +14,7 @@ if (process.argv[2] !== "app-server") {
 let cwd = process.cwd();
 let thread = `rafi-e2e-${process.pid}`;
 let lastTicketProposal;
+let turnSequence = 0;
 const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const delta = { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: ["scripted e2e work"], evidence: [], failures: [], blockers: [], openWork: [], nextAction: "finish" };
 const obligations = ["behavior-mapping", "prerequisites", "scope-boundaries", "implementation-inspection", "test-inspection", "edge-cases", "verification-sequence"];
@@ -82,44 +83,50 @@ function ticketProposal(instruction, repaired) {
   };
 }
 
-function responseFor(instruction) {
-  if (instruction.includes("Read-only depth assessment of admitted scope")) return envelope("RAFI_QA_DEPTH", { version: 1, decisionId: "scripted-depth", level: 2, rationale: "Ordinary bounded fixture change", riskFactors: [], policyVersion: "qa-preparation-v1", plannerOperationId: "host-replaced", plannerIdentity: "host-replaced", timestamp: "2026-01-01T00:00:00Z", minimumLevel: 2, minimumReasons: [] });
-  if (instruction.includes("QA preparation only. Inspect relevant source/tests")) {
+
+// Encode canonical fixture data using the exact provider schema selected by Rafi.
+function wire(schema, value, root = schema) {
+  if (schema.$ref) return wire(schema.$ref.slice(2).split("/").reduce((node, key) => node[key.replaceAll("~1", "/").replaceAll("~0", "~")], root), value, root);
+  const branches = schema.anyOf || schema.oneOf;
+  if (branches) {
+    const branch = branches.find(b => b.type === "null" ? value === null : value !== null && (b.type !== "object" || typeof value === "object" && !Array.isArray(value) && Object.entries(b.properties || {}).every(([key, f]) => f.const === undefined && !f.enum || f.const === value[key] || f.enum?.includes(value[key]))) && (!b.enum || b.enum.includes(value)));
+    return branch ? wire(branch, value, root) : value;
+  }
+  if (schema.type === "object" && schema.properties && value && typeof value === "object") return Object.fromEntries(Object.entries(schema.properties).map(([key, child]) => [key, value[key] === undefined ? null : wire(child, value[key], root)]));
+  if (Array.isArray(value) && schema.items) return value.map(item => wire(schema.items, item, root));
+  return value;
+}
+function responseFor(instruction, schema) {
+  if (!schema) return "Ready";
+  const operation = schema.properties.operation.const;
+  let payload;
+  if (operation === "structured-plan") payload = planProposal();
+  else if (operation === "ticket-population") {
+    if (instruction.includes("Correct the existing ticket population proposal only")) {
+      if (!lastTicketProposal) throw new Error("Correction without a prior proposal");
+      payload = structuredClone(lastTicketProposal);
+      for (const ticket of payload.tickets) ticket.rollback = "Disable the feature path, restore the previous behavior, and verify the focused test passes.";
+    } else payload = lastTicketProposal = ticketProposal(instruction, false);
+  } else if (operation === "qa-preparation-depth") payload = { version: 1, decisionId: "scripted-depth", level: 2, rationale: "Ordinary bounded fixture change", riskFactors: [], policyVersion: "qa-preparation-v1", timestamp: "2026-01-01T00:00:00Z", minimumLevel: 2, minimumReasons: [] };
+  else if (operation === "qa-preparation-draft") {
     const initial = jsonAfter(instruction, "Authoritative candidate/input inventory:\n");
-    const checks = initial.requirements.map((requirement, index) => ({ id: `proposed-${index}`, requirementRefs: [requirement.id], origin: "explicit", expectedBehavior: requirement.statement, obligation: "mandatory", timing: "postimplementation", applicability: { kind: "unconditional", decisionOwner: "qa", requiredEvidence: [] }, verification: [{ kind: "procedure", steps: ["Inspect the fixture implementation and its test"], cwd: ".", fixtures: [], expectedOutcome: "The requirement is satisfied", runtime: "inspection", timeoutMs: 30000 }], expectedEvidence: ["Inspection result"], prerequisiteRefs: [], dependsOnChecks: [] }));
-    return envelope("RAFI_QA_CANDIDATE", { checks, coverage: initial.requirements.map((requirement, index) => ({ requirementId: requirement.id, checkIds: [`proposed-${index}`] })), baseline: [], preparationEvidence: obligations.map(obligation => ({ obligation, references: [{ path: process.env.RAFI_E2E_BAD_QA ? "not-an-existing-file" : "README.md", locator: "fixture description" }], analysis: `Inspected the fixture to assess ${obligation}` })), unresolved: [] });
-  }
-  if (instruction.includes("Independent semantic assessment in a fresh conversation")) {
-    const binding = jsonAfter(instruction, "Bind exactly "), draft = jsonAfter(instruction, "\nDraft:\n");
-    return envelope("RAFI_QA_ASSESSMENT", { version: 1, ...binding, operationId: "host-replaced", sessionId: "host-replaced", assessedRequirementIds: draft.requirements.map(item => item.id), assessedObligations: obligations, concerns: [] });
-  }
-  if (instruction.includes("Return RAFI_QA_ACCEPTANCE_START/END containing")) return envelope("RAFI_QA_ACCEPTANCE", jsonAfter(instruction, "Return RAFI_QA_ACCEPTANCE_START/END containing "));
-  if (instruction.includes("Exact coverage binding: ")) {
-    const binding = jsonAfter(instruction, "Exact coverage binding: "), checks = jsonAfter(instruction, "All checks: ");
-    return envelope("RAFI_QA_COVERAGE", { ...binding, checks: checks.map(check => ({ checkId: check.id, applicability: "applicable", predicateEvidence: [], outcome: "passed", evidence: [{ procedure: "Inspect fixture implementation", cwd: ".", runtime: "inspection", sourceDigest: binding.sourceDigest, reference: "fixture inspection" }] })) });
-  }
-  const assignedTicket = instruction.match(/Assigned ticket: ([^\s.]+)\./)?.[1] || instruction.match(/Ticket scope: ([^\s.]+)\./)?.[1];
-  const ticketMarker = assignedTicket ? `ticket="${assignedTicket}" ` : "";
-  if (instruction.includes("HANDOFF_ACCEPTED")) {
-    return `HANDOFF_ACCEPTED\nSTEP_STATUS: done | summary="scripted handoff accepted"\nRAFI_CONTINUITY_DELTA: ${JSON.stringify(delta)}`;
-  }
-  if (instruction.includes("RAFI_PLAN_PROPOSAL_START")) {
-    return `RAFI_PLAN_PROPOSAL_START\n${JSON.stringify(planProposal())}\nRAFI_PLAN_PROPOSAL_END\nSTEP_STATUS: plan_complete | summary="scripted plan complete"`;
-  }
-  if (instruction.includes("Correct the existing ticket population proposal only")) {
-    if (!lastTicketProposal) throw new Error("ticket correction arrived without an earlier proposal");
-    const corrected = structuredClone(lastTicketProposal);
-    for (const ticket of corrected.tickets) ticket.rollback = "Disable the feature path, restore the previous behavior, and verify the focused test passes.";
-    return `RAFI_TICKET_POPULATION_PROPOSAL_START\n${JSON.stringify(corrected)}\nRAFI_TICKET_POPULATION_PROPOSAL_END\nSTEP_STATUS: done | summary="scripted rollback repair complete"`;
-  }
-  if (instruction.includes("RAFI_TICKET_POPULATION_PROPOSAL_START")) {
-    lastTicketProposal = ticketProposal(instruction, false);
-    return `RAFI_TICKET_POPULATION_PROPOSAL_START\n${JSON.stringify(lastTicketProposal)}\nRAFI_TICKET_POPULATION_PROPOSAL_END\nSTEP_STATUS: done | summary="scripted ticket proposal"`;
-  }
-  if (/Implement exactly this ticket|You are being run by an automated foreman/.test(instruction)) {
+    const checks = initial.requirements.map((r, index) => ({ id: `proposed-${index}`, requirementRefs: [r.id], origin: "explicit", expectedBehavior: r.statement, obligation: "mandatory", timing: "postimplementation", applicability: { kind: "unconditional", decisionOwner: "qa", requiredEvidence: [] }, verification: [{ kind: "procedure", steps: ["Inspect the fixture implementation and its test"], cwd: ".", fixtures: [], expectedOutcome: "The requirement is satisfied", runtime: "inspection", timeoutMs: 30000 }], expectedEvidence: ["Inspection result"], prerequisiteRefs: [], dependsOnChecks: [] }));
+    payload = { kind: "draft", checks, coverage: initial.requirements.map((r, index) => ({ requirementId: r.id, checkIds: [`proposed-${index}`] })), baseline: [], preparationEvidence: obligations.map(obligation => ({ obligation, references: [{ path: process.env.RAFI_E2E_BAD_QA ? "not-an-existing-file" : "README.md", locator: "fixture description" }], analysis: `Inspected fixture for ${obligation}` })), unresolved: [] };
+  } else if (operation === "qa-preparation-assessment") {
+    const draft = jsonAfter(instruction, "\nDraft:\n");
+    payload = { version: 1, assessedRequirementIds: draft.requirements.map(r => r.id), assessedObligations: obligations, concerns: [] };
+  } else if (operation === "builder-coverage") payload = { checks: jsonAfter(instruction, "All checks: ").map(check => ({ checkId: check.id, applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] })) };
+  else if (operation === "session-initialization") payload = { ready: true };
+  else if (operation === "handoff-acceptance") {
+    const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(instruction);
+    payload = { manifestDigest: match[1], generation: Number(match[2]), missingResources: [] };
+  } else if (operation === "build-preflight") payload = { steps: [{ ticket: null, work: "Implement approved fixture" }] };
+  else if (operation === "branch-dependency-audit") payload = { dependencies: [] };
+  else if (operation === "work-report") {
     fs.writeFileSync(path.join(cwd, "implemented.txt"), "scripted implementation\n");
-  }
-  return `STEP_STATUS: done | ${ticketMarker}summary="scripted work complete"\nRAFI_CONTINUITY_DELTA: ${JSON.stringify(delta)}`;
+    payload = { disposition: "modified", evidence: ["implemented.txt"], coverage: null, graphMaintenance: null };
+  } else throw new Error(`Fixture has no native response for ${operation}`);
+  return JSON.stringify(wire(schema, { version: 1, operation, result: { kind: "completed", summary: "Scripted fixture completed", payload }, continuity: delta }));
 }
 
 readline.createInterface({ input: process.stdin }).on("line", line => {
@@ -134,11 +141,12 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
   }
   if (request.method === "turn/start") {
     const instruction = (params.input || []).map(item => item.text || "").join("\n");
-    const text = responseFor(instruction);
-    send({ id: request.id, result: { turn: { id: `turn-${process.pid}` } } });
+    const text = responseFor(instruction, params.outputSchema);
+    const turnId = `turn-${process.pid}-${++turnSequence}`;
+    send({ id: request.id, result: { turn: { id: turnId } } });
     send({ method: "thread/tokenUsage/updated", params: { threadId: thread, tokenUsage: { total: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, last: { totalTokens: 20 }, modelContextWindow: 1000 } } });
-    send({ method: "item/completed", params: { threadId: thread, item: { type: "agentMessage", text } } });
-    send({ method: "turn/completed", params: { threadId: thread, turn: { id: `turn-${process.pid}`, status: "completed" } } });
+    send({ method: "item/completed", params: { threadId: thread, turnId, item: { type: "agentMessage", id: `item-${turnId}`, phase: "final_answer", text } } });
+    send({ method: "turn/completed", params: { threadId: thread, turn: { id: turnId, status: "completed" } } });
     return;
   }
   send({ id: request.id, result: {} });

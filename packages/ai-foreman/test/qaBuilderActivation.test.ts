@@ -1,3 +1,6 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy } from "../src/structuredOperation.js";
+import { workReportOutput } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -24,7 +27,12 @@ class Adapter implements BuilderAdapter {
   adoptSessionRef(ref: ProviderSessionRefV1) { this.ref = ref; }
   async sendTurn(text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     this.turns.push({ text, responseOnly: policy?.responseOnly });
-    return { text: this.refuse ? "I refuse this handoff protocol." : `${policy?.responseOnly ? "HANDOFF_ACCEPTED\n" : "Authorized follow-up inspected current source.\n"}RAFI_CONTINUITY_DELTA: ${JSON.stringify(baselineContinuityDelta("Continue approved work."))}`, isError: false, numTurns: 1, costUsd: 0 };
+    if (this.refuse) return { text: "I refuse this handoff protocol.", isError: false, numTurns: 1, costUsd: 0 };
+    const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(text);
+    const payload = policy?.output?.operation === "handoff-acceptance"
+      ? { manifestDigest: match![1], generation: Number(match![2]), missingResources: [] }
+      : { disposition: "already-satisfied", evidence: ["Inspected current source"], coverage: null, graphMaintenance: null };
+    return nativeFixtureTurn(policy, this.ref.sessionId, payload, "codex", undefined, baselineContinuityDelta("Continue approved work."));
   }
   async *events(): AsyncIterable<BuilderEvent> {}
   async close() { this.closed = true; }
@@ -76,10 +84,10 @@ test("QA-only startup leaves Builder ownership untouched; an actual follow-up ac
     const published = persistCurrentBuildSession(f.root, f.run, "builder", owned.sessionRef!()!);
     assert.equal(published.builder!.sessionId, f.successor.sessionId());
     assert.equal(published.runDecisions?.dirtyWork, "preserve", "publication must preserve intervening durable state");
-    const result = await owned.sendTurn("Apply the authorized follow-up to T001.");
+    const result = await owned.sendTurn("Apply the authorized follow-up to T001.", nativePolicy(workReportOutput));
     assert.equal(result.isError, false); assert.equal(f.successor.turns.length, 2);
     assert.equal(f.db.unresolvedRoleDispatches(f.run.runId, "builder").length, 0);
-    assert.equal(f.db.operations(f.run.runId).filter(op => op.kind === "provider-dispatch" && op.status === "confirmed").length, 1);
+    assert.equal(f.db.operations(f.run.runId).filter(op => op.kind === "provider-dispatch" && op.status === "confirmed").length, 2);
     assert.equal(await activateQaRecoveryBuilder({ ...f.input, adapter: owned }), owned, "Repeated boundary checks must not create another handoff");
     assert.equal(f.factories(), 1);
   } finally { await owned?.close(); f.close(); }

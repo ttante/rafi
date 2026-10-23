@@ -220,10 +220,7 @@ export function buildBranchAuditInstruction(tickets: TicketDef[]): string {
 
   return `Audit this selected ticket batch for undeclared code dependencies. Do not implement anything.
 
-Return one line per required selected-ticket dependency using:
-<ticket> depends_on <ticket> - <short reason>
-
-Only name dependencies where both tickets are in this selected batch. If there are none, say "None".
+Submit the native branch-dependency-audit payload with dependencies containing ticket, dependsOn, and reason. Only name dependencies where both tickets are in this selected batch. If there are none, return an empty dependencies array.
 
 ${body}`;
 }

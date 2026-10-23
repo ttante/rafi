@@ -77,6 +77,7 @@ export interface QaSessionHandleV2 {
 }
 
 export interface QaTurnIntentV2 {
+  outputContract?: { protocolVersion: 1; operation: string; schemaVersion: number; schemaDigest: string };
   version: 2;
   operationId: string;
   runId: string;
@@ -92,6 +93,7 @@ export interface QaTurnIntentV2 {
 }
 
 export interface QaTurnReceiptV2 {
+  structuredResponseDigest?: string;
   version: 2;
   operationId: string;
   dispatch: "not-dispatched" | "completed" | "uncertain";

@@ -1,3 +1,7 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import type { TurnPolicy } from "../../ai-foreman/dist/adapters/types.js";
+import { nativeEnvelope } from "./helpers/nativeOutput.js";
+import { structuredPlanOutput } from "rafi-spec";
 import { createHash } from "node:crypto";
 import { adoptGraph, disableGraph } from "ai-foreman/graph-maintenance.js";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
@@ -31,6 +35,8 @@ import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 import {
   PLAN_PROPOSAL_END,
   PLAN_PROPOSAL_START,
+  extractStructuredPlanProposal,
+  materializeStructuredPlan,
   type StructuredPlanProposalV1,
 } from "../src/structuredPlan.js";
 import { GRILL_AUDIT_END, GRILL_AUDIT_START } from "../src/grillAudit.js";
@@ -88,8 +94,8 @@ function planCompleteOutput(proposal: unknown): string {
 function fakePlanRun(text: string, sessionId: string): Awaited<ReturnType<NonNullable<PlanWorkflowOptions["runInstruction"]>>> {
   return {
     turn: {
-      result: { text, isError: false, numTurns: 1, costUsd: 0 },
-      status: { kind: "plan_complete", summary: "created ticket-maker-ready Rafi plan" },
+      result: nativeEnvelope(structuredPlanOutput, text, PLAN_PROPOSAL_START, PLAN_PROPOSAL_END, sessionId),
+      status: { kind: "done", summary: "created ticket-maker-ready Rafi plan" },
     },
     runtime: "codex",
     model: "test-model",
@@ -104,6 +110,22 @@ test("--yes keeps post-plan ticket setup non-interactive", () => {
   assert.equal(ticketSetupAction(true, true, true), "next");
   assert.equal(ticketSetupAction(false, true, true), "prompt");
   assert.equal(ticketSetupAction(false, false, true), "next");
+});
+
+test("structured plan normalizes omitted QA minimum risk reasons before persistence", () => {
+  const proposal = validStructuredProposal();
+  proposal.slices[0]!.qa_preparation = {
+    ...fixtureQaDepth(),
+    level: 3,
+    minimumLevel: 3,
+    lowRisk: undefined,
+    riskFactors: [{ category: "compatibility", rationale: "Shared export behavior needs regression coverage.", references: ["src/index.mjs"] }],
+    minimumReasons: [],
+  };
+  const parsed = extractStructuredPlanProposal(planCompleteOutput(proposal));
+  assert.deepEqual(parsed.slices[0]!.qa_preparation!.minimumReasons, ["compatibility"]);
+  const plan = materializeStructuredPlan(parsed);
+  assert.deepEqual(plan.slices[0]!.qa_preparation!.minimumReasons, ["compatibility"]);
 });
 
 test("standard plan instruction excludes grill-me and keeps the output contract", () => {
@@ -142,7 +164,7 @@ test("standard plan instruction excludes grill-me and keeps the output contract"
   assert.match(instruction, /repository files belong in likely_files, not source_refs/);
   assert.match(instruction, /Independent-slice contract/);
   assert.match(instruction, /Do not turn that into an acceptance criterion requiring the sibling feature to be removed/);
-  assert.match(instruction, /STEP_STATUS: plan_complete/);
+  assert.match(instruction, /native structured-plan response/);
 });
 
 test("current-branch planning does not assume a ticket branch or commit", () => {
@@ -194,7 +216,7 @@ test("exhaustive plan run loads grill-me and allows native interactive questions
   assert.match(instruction, /complete grill-me skill instructions/);
   assert.match(instruction, /native AskUserQuestion-style question tool/);
   assert.doesNotMatch(instruction, /Do not call provider-native, host-native, or runtime interactive tools/);
-  assert.match(instruction, /STEP_STATUS: needs_input/);
+  assert.match(instruction, /needs-input/);
 });
 
 test("plan docs root resolves from rafi-config.yaml or defaults to docs", () => {
@@ -250,9 +272,9 @@ test("only existing local pending create sources are promoted before planning", 
   }
 });
 
-test("plan success status accepts only plan_complete", () => {
-  assert.equal(isSuccessfulPlanStatus("plan_complete"), true);
-  assert.equal(isSuccessfulPlanStatus("done"), false);
+test("plan success status accepts only validated done status", () => {
+  assert.equal(isSuccessfulPlanStatus("plan_complete"), false);
+  assert.equal(isSuccessfulPlanStatus("done"), true);
   assert.equal(isSuccessfulPlanStatus("qa_pass"), false);
 });
 
@@ -458,7 +480,7 @@ test("nextPopulateCommand points tickets populate at the latest plan", () => {
   }
 });
 
-test("plan workflow repairs a malformed structured proposal in the same session", async () => {
+test("plan workflow rejects malformed native proposals without a repair dispatch", async () => {
   const dir = tempDir();
   installRafiConfig(dir);
   const malformed = validStructuredProposal() as unknown as Record<string, unknown>;
@@ -485,13 +507,11 @@ test("plan workflow repairs a malformed structured proposal in the same session"
       runInstruction,
     });
 
-    assert.equal(outcome.status, "completed");
-    assert.equal(calls, 2);
+    assert.equal(outcome.status, "failed");
+    assert.equal(calls, 1);
     assert.equal(sessions[0], undefined);
-    assert.equal(sessions[1], "session-1");
-    assert.match(instructions[1]!, /delivery unit labels\.depends_on must be a string array/);
-    assert.match(instructions[1]!, /STEP_STATUS: plan_complete/);
-    assert.ok(outcome.result?.latestData.endsWith("docs/rafi-plan.json"));
+    assert.equal(existsSync(join(dir, "docs/rafi-plan.json")), false);
+
   } finally {
     rmSync(dir, { recursive: true });
   }
@@ -507,18 +527,13 @@ test("plan workflow handles grill-me needs_input through Rafi and resumes the sa
     let index = 0;
     const builder = {
       agent: "codex" as const,
-      async sendTurn(text: string) {
+      async sendTurn(text: string, policy?: TurnPolicy) {
         turns.push(text);
         index += 1;
         if (index === 1) {
-          return {
-            text: 'Before planning, pick a path.\nSTEP_STATUS: needs_input | question="Which path?" choices="Recommended path (Recommended)|Alternative|Stop questions and make the plan now"',
-            isError: false,
-            numTurns: 1,
-            costUsd: 0,
-          };
+          return nativeFixtureTurn(policy, "same-session", undefined, "codex", { kind: "needs-input", question: "Which path?", choices: ["Recommended path (Recommended)", "Alternative", "Stop questions and make the plan now"] });
         }
-        return { text: planCompleteOutput(validStructuredProposal()), isError: false, numTurns: 1, costUsd: 0 };
+        return nativeFixtureTurn(policy, "same-session", validStructuredProposal(), "codex");
       },
       sessionId: () => "same-session",
       async *events() {},
@@ -574,9 +589,9 @@ test("exhaustive plan with zero valid answers runs one independent complete audi
     return {
       runtime: "codex", model: "test-model", roleBundle: {} as never, skills: ["grill-me"], log: { write() {} } as never,
       builder: {
-        agent: "codex", async sendTurn(text: string) {
+        agent: "codex", async sendTurn(text: string, policy?: TurnPolicy) {
           assert.match(text, /exactly one turn/i);
-          return { text: `${GRILL_AUDIT_START}\n{"status":"complete","evidence":"The brief fixes scope and the repository fixes implementation constraints."}\n${GRILL_AUDIT_END}`, isError: false, numTurns: 1, costUsd: 0 };
+          return nativeFixtureTurn(policy, "audit-session", { status: "complete", evidence: "The brief fixes scope and the repository fixes implementation constraints." }, "codex");
         },
         sessionId: () => "audit-session", async *events() {}, async close() {},
       },
@@ -601,10 +616,10 @@ test("generic implementation prompt does not count and --yes fails closed when a
   const createPlanner: PlanWorkflowOptions["createPlanner"] = async () => ({
     runtime: "codex", model: "test-model", roleBundle: {} as never, skills: ["grill-me"], log: { write() {} } as never,
     builder: {
-      agent: "codex", async sendTurn() {
+      agent: "codex", async sendTurn(_text: string, policy?: TurnPolicy) {
         turn += 1;
-        if (turn === 1) return { text: 'STEP_STATUS: needs_input | question="Do you want to implement?" choices="Yes|No"', isError: false, numTurns: 1, costUsd: 0 };
-        return { text: planCompleteOutput(validStructuredProposal()), isError: false, numTurns: 1, costUsd: 0 };
+        if (turn === 1) return nativeFixtureTurn(policy, "planner-session", undefined, "codex", { kind: "needs-input", question: "Do you want to implement?", choices: ["Yes", "No"] });
+        return nativeFixtureTurn(policy, "planner-session", validStructuredProposal(), "codex");
       },
       sessionId: () => "planner-session", async *events() {}, async close() {},
     },
@@ -612,7 +627,7 @@ test("generic implementation prompt does not count and --yes fails closed when a
   const createAuditor: PlanWorkflowOptions["createAuditor"] = async () => ({
     runtime: "codex", model: "test-model", roleBundle: {} as never, skills: ["grill-me"], log: { write() {} } as never,
     builder: {
-      agent: "codex", async sendTurn() { return { text: `${GRILL_AUDIT_START}\n${JSON.stringify({ status: "needs_user_input", questions: [{ id: "scope", question: "Include migration?", recommendation: "Include it", rationale: "Existing data needs continuity", alternatives: ["Defer it"] }] })}\n${GRILL_AUDIT_END}`, isError: false, numTurns: 1, costUsd: 0 }; },
+      agent: "codex", async sendTurn(_text: string, policy?: TurnPolicy) { return nativeFixtureTurn(policy, "audit-session", { status: "needs_user_input", questions: [{ id: "scope", question: "Include migration?", recommendation: "Include it", rationale: "Existing data needs continuity", alternatives: ["Defer it"] }] }, "codex"); },
       sessionId: () => "audit-session", async *events() {}, async close() {},
     },
   });
@@ -627,12 +642,12 @@ test("generic implementation prompt does not count and --yes fails closed when a
   } finally { rmSync(dir, { recursive: true }); }
 });
 
-test("plan workflow stops after three unsuccessful structured proposal repairs", async () => {
+test("plan workflow stops after three unsuccessful semantic proposal corrections", async () => {
   const dir = tempDir();
   installRafiConfig(dir);
   const malformed = validStructuredProposal() as unknown as Record<string, unknown>;
   const units = structuredClone(malformed.delivery_units) as Array<Record<string, unknown>>;
-  delete units[0]!.depends_on;
+  units[0]!.depends_on = ["unknown-unit"];
   malformed.delivery_units = units;
   let calls = 0;
   const runInstruction: PlanWorkflowOptions["runInstruction"] = async () => {
@@ -653,6 +668,10 @@ test("plan workflow stops after three unsuccessful structured proposal repairs",
     assert.equal(calls, 4);
     assert.match(outcome.diagnostic ?? "", /invalid structured proposal after 3 repair attempts/);
     assert.match(outcome.resumeCommand ?? "", /--resume-session "session-4"/);
+    const resumed = await runPlanWorkflow({ project: dir, brief: "Add labels.", yes: true, rawArgs: ["--no-grill-me"], resumeSession: "session-4", runInstruction });
+    assert.equal(resumed.status, "failed");
+    assert.match(resumed.diagnostic ?? "", /exhausted its 3 semantic corrections/);
+    assert.equal(calls, 4, "resuming must not reset the durable correction budget");
   } finally {
     rmSync(dir, { recursive: true });
   }

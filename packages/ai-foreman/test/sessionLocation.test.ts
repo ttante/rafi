@@ -1,3 +1,6 @@
+import { nativeFixtureTurn, nativeFixtureFromText } from "./helpers/nativeOutput.js";
+import { nativePolicy } from "../src/structuredOperation.js";
+import { workReportOutput } from "rafi-spec";
 import { runAuthorizedQa } from "./helpers/workAdmission.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,7 +15,7 @@ import { ClaudeAdapter, probeClaudeSession } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import { RecoveringAdapter } from "../src/adapters/recovering.js";
 import { SessionUnavailableError } from "../src/adapters/sessionFailure.js";
-import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, TurnResult } from "../src/adapters/types.js";
+import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, TurnPolicy, TurnResult } from "../src/adapters/types.js";
 import { CurrentWorkflowGuardAdapter, captureCurrentWorkflowSessionIdentity } from "../src/branch/currentGuard.js";
 import { buildRunSessionBinding, createBuildRun, persistBuildSession, projectBuildRecovery, releaseBuildLease } from "../src/buildRuns.js";
 import { ContinuityAdapter, SessionUnavailableContinuityError } from "../src/continuity.js";
@@ -43,9 +46,14 @@ class StaticAdapter implements BuilderAdapter {
     agent: "claude" | "codex" = "codex",
   ) { this.agent = agent; }
 
-  async sendTurn(): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: TurnPolicy): Promise<TurnResult> {
     this.sends += 1;
-    const result = { ...this.result, turnId: this.result.turnId ?? `${this.id ?? "session"}-turn-${this.sends}` };
+    const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(instruction);
+    const native = policy?.output && !this.result.isError && !this.result.failure
+      ? match ? nativeFixtureTurn(policy, this.id!, { manifestDigest: match[1], generation: Number(match[2]), missingResources: [] }, this.agent, undefined, { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: ["continue"], nextAction: "continue" })
+        : nativeFixtureFromText(policy, this.id!, this.result.text, this.agent)
+      : this.result;
+    const result = { ...native, turnId: native.turnId ?? `${this.id ?? "session"}-turn-${this.sends}` };
     this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
     this.eventWaiters.splice(0).forEach((resolve) => resolve());
     return result;
@@ -298,7 +306,7 @@ test("continuity does not issue a repair turn after uncertain exact-session loss
     text: failure.message, isError: true, numTurns: 0, costUsd: 0, failure: failure.failure,
   });
   const adapter = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-1", role: "builder", settings: SETTINGS });
-  await assert.rejects(adapter.sendTurn("one side effect"), (error: unknown) => {
+  await assert.rejects(adapter.sendTurn("one side effect", nativePolicy(workReportOutput)), (error: unknown) => {
     assert.ok(error instanceof SessionUnavailableContinuityError);
     assert.equal(error.guidedRecovery, true);
     return true;
@@ -306,7 +314,7 @@ test("continuity does not issue a repair turn after uncertain exact-session loss
   assert.equal(provider.sends, 1, "continuity repair must not replay an uncertain turn");
   const db = new WorkflowDb(projectDir);
   assert.equal(db.continuityHead("run-1", "builder")?.state, "degraded");
-  assert.equal(db.continuityEvents("run-1").at(-1)?.kind, "session_unavailable");
+  assert.ok(db.continuityEvents("run-1").some(event => event.kind === "session_unavailable"));
   db.close();
   await adapter.close();
 });
@@ -321,7 +329,7 @@ test("pre-dispatch exact-session loss pauses without degrading or issuing a repa
     text: failure.message, isError: true, numTurns: 0, costUsd: 0, failure: failure.failure,
   });
   const adapter = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-1", role: "builder", settings: SETTINGS });
-  await assert.rejects(adapter.sendTurn("safe to transfer later"), (error: unknown) => {
+  await assert.rejects(adapter.sendTurn("safe to transfer later", nativePolicy(workReportOutput)), (error: unknown) => {
     assert.ok(error instanceof SessionUnavailableContinuityError);
     assert.equal(error.guidedRecovery, false);
     return true;
@@ -446,7 +454,7 @@ test("each disposable QA cycle creates a fresh provider session in a different s
       }), cwd);
     },
     sessionBoundary: unavailableQaBoundary,
-    fix: async () => ({ ok: true, response: 'STEP_STATUS: done | summary="fixed"', summary: "fixed", providerTurnId: "builder-fix-1" }),
+    fix: async () => ({ ok: true, outcome: "remediation-reported" as const, response: 'STEP_STATUS: done | summary="fixed"', summary: "fixed", providerTurnId: "builder-fix-1" }),
     observeNativeCompactions: async (adapter) => { if (adapter.sessionId()) observedQaSessions.push(adapter.sessionId()!); },
   });
   assert.equal(result.outcome, "passed");

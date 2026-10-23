@@ -8,14 +8,17 @@ import { applyHostGraphApplicability, createHostGraphApplicability, hostGraphApp
 import { applyHostQaAugmentations } from "../src/hostQaAugmentation.js";
 import { assessment, candidate, coverage, digest } from "./qaPreparationFixtures.js";
 
-test("Graphify checks are normalized as host-owned conditional checks", () => {
+test("host adds a tagged conditional Graphify check and preserves provider checks", () => {
   const draft = candidate();
   draft.checks[0]!.expectedBehavior = "Use Graphify graph evidence to verify the changed callers";
   draft.checks[0]!.expectedEvidence = ["Graphify evidence receipt"];
-  const normalized = normalizeGraphQaChecks(draft);
-  assert.equal(normalized.checks[0]!.applicability.kind, "conditional");
-  assert.equal(normalized.checks[0]!.applicability.decisionOwner, "host");
-  assert.equal(normalized.checks[0]!.obligation, "mandatory");
+  const normalized = normalizeGraphQaChecks(draft, true);
+  assert.equal(normalized.checks.at(-1)!.applicability.kind, "conditional");
+  assert.equal(normalized.checks.at(-1)!.applicability.decisionOwner, "host");
+  assert.equal(normalized.checks.at(-1)!.obligation, "mandatory");
+  assert.deepEqual(normalized.checks[0], draft.checks[0]);
+  assert.equal(isGraphQaCheck(draft.checks[0]!), false);
+  assert.deepEqual(normalizeGraphQaChecks(draft, false), draft);
 });
 
 test("ordinary product graph checks are not treated as Graphify checks", () => {
@@ -30,22 +33,22 @@ test("disabled or unavailable Graphify becomes non-blocking host coverage", () =
   const draft = candidate();
   draft.checks[0]!.expectedBehavior = "Use Graphify graph evidence to verify the changed callers";
   draft.checks[0]!.expectedEvidence = ["Graphify evidence receipt"];
-  const normalized = normalizeGraphQaChecks(draft);
+  const normalized = normalizeGraphQaChecks(draft, true);
   const contract = assembleContract(normalized, normalized.requirements, assessment(normalized), "author");
   const sourceDigest = digest;
   const store = { artifacts: () => [], putArtifact: (_kind: string, value: unknown) => digest };
   const result = createHostGraphApplicability({ projectDir: mkdtempSync(join(tmpdir(), "rafi-graph-")), runId: "run", ticketId: "T1", contract, reviewAttemptId: "review", reviewBasisDigest: digest, sourceDigest, store });
   assert.equal(hostGraphApplicabilityV1Schema.parse(result.result).status, "disabled");
   const augmented = applyHostGraphApplicability(coverage(contract), contract, result.result, result.resultDigest, ".");
-  assert.equal(augmented.checks[0]!.applicability, "not-applicable");
-  assert.equal(augmented.checks[0]!.outcome, "passed");
+  assert.equal(augmented.checks.at(-1)!.applicability, "not-applicable");
+  assert.equal(augmented.checks.at(-1)!.outcome, "passed");
 });
 
 test("missing Graphify project is fail-open and never treated as a blocker", () => {
   const draft = candidate();
   draft.checks[0]!.expectedBehavior = "Use Graphify graph evidence";
   draft.checks[0]!.expectedEvidence = ["Graphify evidence"];
-  const normalized = normalizeGraphQaChecks(draft);
+  const normalized = normalizeGraphQaChecks(draft, true);
   const contract = assembleContract(normalized, normalized.requirements, assessment(normalized), "author");
   const result = createHostGraphApplicability({ projectDir: "/tmp/rafi-graphify-project-does-not-exist", runId: "run", ticketId: "T1", contract, reviewAttemptId: "review", reviewBasisDigest: digest, sourceDigest: digest, store: { artifacts: () => [], putArtifact: () => digest } });
   assert.equal(result.result.status, "unavailable");
@@ -55,28 +58,28 @@ test("host-owned adopted Graphify applicability overrides provider waiver", () =
   const draft = candidate();
   draft.checks[0]!.expectedBehavior = "Use Graphify graph evidence";
   draft.checks[0]!.expectedEvidence = ["Graphify evidence"];
-  const normalized = normalizeGraphQaChecks(draft);
+  const normalized = normalizeGraphQaChecks(draft, true);
   const contract = assembleContract(normalized, normalized.requirements, assessment(normalized), "author");
   const result = hostGraphApplicabilityV1Schema.parse({ version: 1, runId: "run", ticketId: "T1", contractDigest: contract.contentDigest, contractRevision: contract.revision, reviewAttemptId: "review", reviewBasisDigest: digest, sourceDigest: digest, status: "adopted-enabled", reason: "adopted", observedAt: "2026-01-01T00:00:00.000Z" });
   const provider = coverage(contract);
-  provider.checks[0]!.applicability = "not-applicable";
-  provider.checks[0]!.outcome = "not-run";
+  provider.checks.at(-1)!.applicability = "not-applicable";
+  provider.checks.at(-1)!.outcome = "not-run";
   const augmented = applyHostGraphApplicability(provider, contract, result, digest, ".");
-  assert.equal(augmented.checks[0]!.applicability, "applicable");
-  assert.equal(augmented.checks[0]!.outcome, "not-run");
+  assert.equal(augmented.checks.at(-1)!.applicability, "applicable");
+  assert.equal(augmented.checks.at(-1)!.outcome, "not-run");
 });
 
 test("the shared host augmentation produces the same replay coverage", () => {
   const draft = candidate();
   draft.checks[0]!.expectedBehavior = "Use Graphify graph evidence";
   draft.checks[0]!.expectedEvidence = ["Graphify evidence receipt"];
-  const normalized = normalizeGraphQaChecks(draft);
+  const normalized = normalizeGraphQaChecks(draft, true);
   const contract = assembleContract(normalized, normalized.requirements, assessment(normalized), "author");
   const result = hostGraphApplicabilityV1Schema.parse({ version: 1, runId: "run", ticketId: "T1", contractDigest: contract.contentDigest, contractRevision: contract.revision, reviewAttemptId: "review", reviewBasisDigest: digest, sourceDigest: digest, status: "disabled", reason: "disabled", observedAt: "2026-01-01T00:00:00.000Z" });
   const providerCoverage = coverage(contract);
   const live = applyHostQaAugmentations({ coverage: providerCoverage, contract, projectDir: ".", hostGraph: { result, resultDigest: digest } });
   const replay = applyHostQaAugmentations({ coverage: structuredClone(providerCoverage), contract, projectDir: ".", hostGraph: { result, resultDigest: digest } });
   assert.deepEqual(replay, live);
-  assert.equal(replay.checks[0]!.outcome, "passed");
-  assert.equal(replay.checks[0]!.applicability, "not-applicable");
+  assert.equal(replay.checks.at(-1)!.outcome, "passed");
+  assert.equal(replay.checks.at(-1)!.applicability, "not-applicable");
 });

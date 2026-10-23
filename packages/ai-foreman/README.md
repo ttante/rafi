@@ -48,7 +48,7 @@ Helpful when:
 
 Requires:
 
-- Node.js 20 or newer.
+- Node.js 22 or newer (Node 24 recommended).
 
 ### Claude runtime and enterprise authentication
 

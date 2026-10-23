@@ -1,3 +1,6 @@
+import { fixtureOperationValue, codexWireFixture, nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { structuredReceipt } from "../src/adapters/structured.js";
+import { providerOutputSchema } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -70,7 +73,7 @@ function makeDef(id: string): TicketDef {
 for (const qaEnabled of [false, true]) {
   for (const kind of ["done", "plan_complete", "blocked", "needs_input"] as const) {
     for (const returned of ["T001", "UNKNOWN", undefined]) {
-      test(`assignment rejects ${kind}/${returned ?? "missing"} with QA ${qaEnabled}`, async () => {
+      test(`assignment rejects invalid native receipt for ${kind}/${returned ?? "missing"} with QA ${qaEnabled}`, async () => {
         const dir = makeTmpDir();
         try {
           cmdInit(dir, { appName: "Test", timezone: "UTC" });
@@ -78,7 +81,7 @@ for (const qaEnabled of [false, true]) {
           let qaCalls = 0;
           const run = createBuildRun({ tickets: ["T002"], repositoryRoot: dir, qaEnabled });
           const response = `STEP_STATUS: ${kind} | ${returned ? `ticket="${returned}" ` : ""}summary="returned" reason="blocked" question="choose" choices="A|B"`;
-          const builder = new FakeBuilder([response], () => writeFileSync(join(dir, "unexpected.txt"), "preserve these edits"));
+          const builder = new FakeBuilder([response], () => writeFileSync(join(dir, "unexpected.txt"), "preserve these edits"), true);
           const parameters: ConstructorParameters<typeof Foreman> = [builder, new Log(join(dir, ".foreman/test.jsonl")), false, qaEnabled, 3, dir, undefined, async (cwd) => { qaCalls++; return qaHandle(new FakeBuilder([qaPass]), cwd); }];
           parameters[22] = run.runId;
           const foreman = new Foreman(...parameters);
@@ -190,20 +193,21 @@ class FakeBuilder implements BuilderAdapter {
   constructor(
     private readonly turns: Array<string | ((instruction:string)=>string)>,
     private readonly beforeTurn?: (index: number) => void,
+    private readonly foreignReceipt = false,
   ) {}
 
-  async sendTurn(instruction: string): Promise<TurnResult> {
-    this.instructions.push(instruction);
-    this.beforeTurn?.(this.index);
-    const response = this.turns[this.index++] ?? "";
+  async sendTurn(instruction: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
+    const initialization = policy?.output?.operation === "session-initialization";
+    if (!initialization) { this.instructions.push(instruction); this.beforeTurn?.(this.index); }
+    const response = initialization ? "Ready" : this.turns[this.index++] ?? "";
     let text = typeof response === "function" ? response(instruction) : response;
-    if (instruction.includes(BUILDER_QA_REMEDIATION_START) && !text.includes(BUILDER_QA_REMEDIATION_START)) {
+    if (policy?.output?.operation === "builder-remediation" && !text.includes(BUILDER_QA_REMEDIATION_START)) {
       const handoffId = /QA failure handoff ID: ([a-f0-9]{64})/.exec(instruction)?.[1] ?? "missing";
       const findingKey = /QA-1 -> ([a-f0-9]{64})/.exec(instruction)?.[1] ?? "missing";
       text = [
         BUILDER_QA_REMEDIATION_START,
         JSON.stringify({
-          version: 2,
+          version: 3,
           handoff_id: handoffId,
           summary: "Applied QA remediation.",
           findings: [{
@@ -220,8 +224,13 @@ class FakeBuilder implements BuilderAdapter {
         'STEP_STATUS: done | summary="fixed"',
       ].join("\n");
     }
-    const result = { text, isError: false, numTurns: 1, costUsd: 0, turnId: `fake-${this.index}`, hostInstruction: instruction, providerInstruction: instruction, rawResponse: text, cleanedResponse: text,
+    const result: TurnResult = { text, isError: false, numTurns: 1, costUsd: 0, turnId: policy?.dispatchId ?? `fake-${this.index}`, hostInstruction: instruction, providerInstruction: instruction, rawResponse: text, cleanedResponse: text,
       providerMetadata: { provider: this.agent, sessionId: this.sessionId(), sessionRef: this.ref } };
+    if (policy?.output) {
+      const value = fixtureOperationValue(policy.output.operation, text);
+      const wire = value;
+      result.structured = structuredReceipt(policy.output, this.agent, wire, { dispatchId: this.foreignReceipt ? "foreign-dispatch" : result.turnId!, sessionId: this.sessionId(), nativeTurnId: `native-${this.index}` }, "decoded-json");
+    }
     for (const observer of this.observers) observer({ kind: "turn-complete", result, turnId: result.turnId });
     this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId }); this.eventWaiters.splice(0).forEach((wake) => wake());
     return result;
@@ -271,13 +280,13 @@ test("reported blockers are converted into multiple approaches before a non-inte
     ]);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir);
 
-    const resolved = await foreman.resolveBlocker(builder, "missing deployment credential");
+    const resolved = await foreman.resolveBlocker(builder, "missing deployment credential", "builder", (await import("rafi-spec")).workReportOutput);
 
     assert.equal(resolved.status.kind, "blocked");
     assert.match(resolved.status.reason ?? "", /waiting for input/);
     assert.ok((resolved.status.reason ?? "").includes(`Resume with rafi resume ${dir}`));
     assert.match(builder.instructions[0] ?? "", /two or three safe, materially different approaches/);
-    assert.match(builder.instructions[0] ?? "", /recommended approach and consequence \(Recommended\)/);
+    assert.match(builder.instructions[0] ?? "", /needs-input/);
   } finally {
     rmSync(dir, { recursive: true });
   }
@@ -330,7 +339,7 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
     assert.equal(result.outcome, "blocked", result.detail);
     assert.equal(result.completed, 0);
     assert.match(result.detail ?? "", /Deferred tickets: T001/);
-    assert.match(result.detail ?? "", /invalid QA response contract|complete fresh QA review|required/);
+    assert.match(result.detail ?? "", /QA could not converge after 1 Builder fix attempt/);
 
     const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
     try {
@@ -420,7 +429,7 @@ for (const blocked of [false, true]) test(`scoped recovery ${blocked ? "stops at
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("scoped recovery cannot complete a different ticket named by the provider", async () => {
+test("presentation text cannot change the host-bound assignment ticket", async () => {
   const dir = makeTmpDir();
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
@@ -430,9 +439,9 @@ test("scoped recovery cannot complete a different ticket named by the provider",
     const builder = new FakeBuilder(['STEP_STATUS: done | ticket="OTHER"']);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
     const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
-    assert.equal(result.outcome, "needs-human"); assert.equal(result.completed, 0);
+    assert.equal(result.outcome, "all-done", result.detail); assert.equal(result.completed, 1);
     const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
-    try { assert.equal(db.getState("OTHER")?.status, "next"); assert.equal(db.getState("T001")?.status, "in_progress"); }
+    try { assert.equal(db.getState("OTHER")?.status, "next"); assert.equal(db.getState("T001")?.status, "done"); }
     finally { db.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -516,7 +525,7 @@ test("preflight rejects an adapter error instead of treating it as a plan", asyn
   }
 });
 
-test("every follow-up Builder dispatch re-enters the safe boundary", async () => {
+test("invalid native results stop at the safe boundary without format repair", async () => {
   const dir = makeTmpDir();
   try {
     const builder = new FakeBuilder(["missing final marker", "STEP_STATUS: done | summary=\"corrected\""]);
@@ -526,28 +535,22 @@ test("every follow-up Builder dispatch re-enters the safe boundary", async () =>
       undefined, undefined, undefined, undefined, undefined, undefined,
       async (adapter, frozenAction) => { boundaries.push(frozenAction); return adapter; },
     );
-    const result = await foreman.runInstruction("perform one action");
-    assert.equal(result.status.kind, "done");
-    assert.equal(boundaries.length, 2);
+    const result = await foreman.runBuilderWork("perform one action");
+    assert.equal(result.status.kind, "unknown");
+    assert.equal(boundaries.length, 1);
+    assert.equal(builder.instructions.length, 1);
   } finally {
     rmSync(dir, { recursive: true });
   }
 });
 
-test("workflow completion can preserve a valid response with trailing commentary", async () => {
+test("text completion callbacks cannot authorize a native result", async () => {
   const dir = makeTmpDir();
   try {
-    const builder = new FakeBuilder(['proposal\nSTEP_STATUS: done | summary="ready"\nprovider notes']);
+    const builder = new FakeBuilder(['STEP_STATUS: done']);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir);
-    const result = await foreman.runInstruction("prepare the proposal", {
-      completion: text => {
-        const status = parseStepStatus(text, { requireFinalLine: false });
-        return status.kind === "done" ? status : undefined;
-      },
-    });
-    assert.equal(result.status.kind, "done");
-    assert.equal(builder.instructions.length, 1);
-    assert.match(result.result.text, /provider notes/);
+    await assert.rejects(foreman.runInstruction("prepare the proposal", { completion: () => ({ kind: "done" }), output: (await import("rafi-spec")).workReportOutput }), /Text completion predicates/);
+    assert.equal(builder.instructions.length, 0);
   } finally { rmSync(dir, { recursive: true }); }
 });
 
@@ -586,9 +589,9 @@ for (const mode of ["pending", "answered", "stale", "outside", "run-wide"] as co
       const replacement = db.pendingHumanDecisions("questions")[0]!;
       assert.ok(replacement); assert.notEqual(replacement.decisionId, decision.decisionId);
       db.answerHumanDecision("questions", replacement.decisionId, "a");
-      builder.sendTurn = async instruction => {
+      builder.sendTurn = async (instruction, policy) => {
         writeBuilderProduct(dir, 99);
-        return { text: 'STEP_STATUS: done | ticket="T001"', isError: false, numTurns: 1, costUsd: 0 };
+        return nativeFixtureTurn(policy, builder.sessionId()!, { disposition: "modified", evidence: ["fixture"], coverage: null, graphMaintenance: null });
       };
       const resumed = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
       assert.equal(resumed.completed, 1, resumed.detail);
@@ -614,17 +617,17 @@ test("explicit recovery cannot substitute an independent ticket after a blocker"
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("scoped completion without ticket identity cannot pass QA or update tracker", async () => {
+test("scoped completion rejects a foreign dispatch identity before QA", async () => {
   const dir = makeTmpDir();
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
     cmdUpdate(dir, "T001", { status: "in_progress", actor: "test" });
-    const builder = new FakeBuilder(['STEP_STATUS: done | summary="ambiguous"']);
+    const builder = new FakeBuilder(['STEP_STATUS: done | summary="claim"'], undefined, true);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async () => { throw new Error("QA must not run"); });
     const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
-    assert.equal(result.completed, 0); assert.match(result.detail ?? "", /no ticket/);
-    assert.equal(builder.instructions.length, 1, "do not repeat implementation to recover marker identity");
+    assert.equal(result.completed, 0); assert.match(result.detail ?? "", /native result/);
+    assert.equal(builder.instructions.length, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -681,25 +684,18 @@ test("interruption during an awaited session boundary prevents the next provider
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("response-only protocol correction retains the assigned ticket across safe boundaries", async () => {
+test("invalid structured completion is retained and never repaired by repeating implementation", async () => {
   const dir = makeTmpDir();
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
-    cmdUpdate(dir, "T001", { status: "next", actor: "test" });
-    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"}', 'STEP_STATUS: done | ticket="T001"'], index => writeBuilderProduct(dir, index));
+    const builder = new FakeBuilder(['STEP_STATUS: plan_complete | ticket="T001"', 'STEP_STATUS: done | ticket="T001"'], index => writeBuilderProduct(dir, index));
     const boundaries: string[] = [];
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir, undefined, undefined, undefined, undefined, undefined, undefined,
       async (adapter, action) => { boundaries.push(action); return adapter; });
     const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
-    assert.equal(result.completed, 1, result.detail);
-    assert.equal(builder.instructions.length, 2);
-    assert.match(builder.instructions[1]!, /Protocol correction only/);
-    assert.match(builder.instructions[1]!, /Do not repeat implementation/);
-    assert.match(builder.instructions[1]!, /malformed STEP_STATUS field/);
-    assert.match(builder.instructions[1]!, /Do not append braces/);
-    assert.match(builder.instructions[1]!, /exact marker form is: STEP_STATUS: done \| ticket="T001"/);
-    assert.ok(builder.instructions.every(instruction => instruction.includes('Ticket scope: T001.') && instruction.includes('ticket="T001"')));
-    assert.ok(boundaries.every(instruction => instruction.includes('Ticket scope: T001.')));
+    assert.equal(result.completed, 0); assert.equal(result.outcome, "needs-human");
+    assert.equal(builder.instructions.length, 1); assert.equal(boundaries.length, 1);
+    assert.match(builder.instructions[0]!, /Ticket scope: T001/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

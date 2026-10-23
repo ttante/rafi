@@ -521,8 +521,8 @@ export function renderQaRecoveryAcknowledgementInstruction(packet: QaRecoveryPac
     `Packet digest: ${packet.manifest.packetDigest}`,
     `Reviewed-state digest: ${packet.manifest.reviewedStateDigest}`,
     "Required resources:", required,
-    "Reply with exactly the following acknowledgement line, followed by the required RAFI_CONTINUITY_DELTA record:",
-    `RAFI_QA_RECOVERY_ACK packet="${packet.manifest.packetDigest}" reviewed_state="${packet.manifest.reviewedStateDigest}" required_resources_read="all"`,
+    "Return the following payload in the native qa-recovery-acceptance response, with bounded continuity in the same object:",
+    JSON.stringify({ packet: packet.manifest.packetDigest, reviewed_state: packet.manifest.reviewedStateDigest, required_resources_read: "all" }),
   ].join("\n");
 }
 

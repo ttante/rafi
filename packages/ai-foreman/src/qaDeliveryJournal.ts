@@ -21,6 +21,7 @@ export interface QaDeliveryInvocationV3 {
 }
 
 export interface QaDeliveryTurnV3 {
+  structuredResponseDigest?: string;
   version: 3;
   turnRecordId: string;
   operationId: string;
@@ -73,10 +74,16 @@ export type QaDeliveryTurn = QaDeliveryTurnV3 | QaDeliveryTurnV4;
  * evidence-continuation journal they would interpret as a response-only repair. */
 export function registerQaGraphJournalWriter(db: import("better-sqlite3").Database): void {
   db.function("rafi_graph_delivery_protocol", () => 4);
+  db.function("rafi_structured_communication_protocol", () => 1);
 }
 export function ensureQaGraphJournalGuards(db: import("better-sqlite3").Database): void {
   const tables = ["qa_delivery_turns", "qa_review_attempts", "qa_remediation_attempts", "qa_turns", "qa_ticket_heads", "qa_operation_journal", "qa_pass_certificates", "build_assignments"];
   db.transaction(() => {
+    for (const table of [...tables, "operation_journal", "continuity_events", "continuity_checkpoints", "handoffs", "role_mutation_leases", "continuity_heads", "build_launches", "workflow_runs", "build_work_scope", "build_work_admissions", "qa_failure_handoffs", "qa_handoffs", "qa_remediation_receipts", "qa_finalization_steps"]) {
+      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue;
+      for (const action of ["INSERT", "UPDATE", "DELETE"])
+        db.exec(`CREATE TRIGGER IF NOT EXISTS structured_comms_v1_${table}_${action} BEFORE ${action} ON ${table} BEGIN SELECT CASE WHEN rafi_structured_communication_protocol() <> 1 THEN RAISE(ABORT,'Structured communication state requires a compatible Rafi writer') END; END;`);
+    }
     for (const table of tables) {
       if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue;
       for (const action of ["INSERT", "UPDATE", "DELETE"])

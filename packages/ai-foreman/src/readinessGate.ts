@@ -1,3 +1,4 @@
+import { parseHostIpc } from "rafi-spec";
 /** Trusted bootstrap: registration and durable authorization precede all provider work. */
 import { WorkflowDb } from "./workflowDb.js";
 import { spawn } from "node:child_process";
@@ -20,13 +21,13 @@ try {
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => finish(new Error("Readiness authorization timed out")), 10_000);
     const disconnect = () => finish(new Error("Readiness owner disconnected"));
-    const message = (value: unknown) => { if (value === "rafi-probe-authorized") finish(); };
+    const message = (value: unknown) => { const ack = parseHostIpc(value); if (ack?.kind === "rafi-probe-authorized" && ack.id === id && ack.pid === process.pid) finish(); };
     function finish(error?: Error) {
       clearTimeout(timer); process.off("message", message); process.off("disconnect", disconnect);
       if (error) reject(error); else resolve();
     }
     process.on("message", message); process.once("disconnect", disconnect);
-    process.send!({ kind: "rafi-probe-registered", id });
+    process.send!({ version: 1, kind: "rafi-probe-registered", id, pid: process.pid });
     if (disconnected) disconnect();
   });
   db?.assertReadinessHelper(id);
@@ -37,10 +38,10 @@ try {
     stdio: [windows ? "pipe" : "ignore", "inherit", "inherit"],
   });
   child.on("error", (error: NodeJS.ErrnoException) => {
-    process.send?.({ kind: "rafi-probe-spawn-error", code: error.code, message: error.message });
+    process.send?.({ version: 1, kind: "rafi-probe-spawn-error", id, pid: process.pid, code: error.code ?? null, message: error.message.slice(0, 8192) });
     console.error(error.message); process.exitCode = 127;
   });
-  const done = new Promise<void>(resolve => { child.once("exit", (code, signal) => { process.send?.({ kind: "rafi-probe-result", exitCode: code, signal }); process.exitCode = code ?? 1; resolve(); }); child.once("error", () => resolve()); });
+  const done = new Promise<void>(resolve => { child.once("exit", (code, signal) => { process.send?.({ version: 1, kind: "rafi-probe-result", id, pid: process.pid, exitCode: code, signal }); process.exitCode = code ?? 1; resolve(); }); child.once("error", () => resolve()); });
   if (windows) {
     try {
       if (!child.pid) throw new Error("Windows job creator did not start");

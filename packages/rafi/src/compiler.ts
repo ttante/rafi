@@ -281,7 +281,14 @@ function writeAppendInstructionFile(
   writeFileSync(sidecarPath, generated, "utf8");
   registerOwnedFile(targetDir, sidecarRelPath, { mode: "generated", origin: `compile:sidecar:${runtime}` });
   const referenceBlock = rafiAppendReferenceBlock(runtime, sidecarFileName);
-  const referenceContent = replaceOrInsertManagedBlock(existing, referenceBlock, "top");
+  // The inline guidance can be too large while the short sidecar reference is
+  // comfortably within the append budget.  Decide placement from the final
+  // root content, not from the superseded inline candidate.  This preserves a
+  // user's document order whenever doing so is safe.
+  const referenceAtExistingLocation = replaceOrInsertManagedBlock(existing, referenceBlock, "end");
+  const referenceContent = exceedsAppendLimit(runtime, referenceAtExistingLocation)
+    ? replaceOrInsertManagedBlock(existing, referenceBlock, "top")
+    : referenceAtExistingLocation;
   writeFileSync(rootPath, referenceContent, "utf8");
 }
 

@@ -60,8 +60,30 @@ import { WorkflowDb } from "../src/workflowDb.js";
 import { withBuildInvocation } from "../src/buildAdmission.js";
 import Database from "better-sqlite3";
 import { registerHandbackWriter } from "../src/qaHandbackMigration.js";
+import { migrateTrackerRules, renderTrackerRules } from "../src/tickets/renderMarkdown.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+test("tracker-rule migration upgrades only exact Rafi-owned protocol text", () => {
+  const current = renderTrackerRules("docs/tracker.md");
+  const legacy = current
+    .replace("<!-- rafi:tracker-rules:start -->\n", "")
+    .replace("\n<!-- rafi:tracker-rules:end -->", "");
+  const replaced = migrateTrackerRules(legacy, "docs/tracker.md");
+  assert.equal(replaced.disposition, "replaced-legacy");
+  assert.equal(replaced.content, current);
+
+  const mixed = `# Team additions\n\n${legacy}\n\nKeep this sentence exactly.\n`;
+  const updated = migrateTrackerRules(mixed, "docs/tracker.md");
+  assert.equal(updated.disposition, "updated-managed-block");
+  assert.ok(updated.content.startsWith("# Team additions\n\n# Tracker Rules"));
+  assert.ok(updated.content.endsWith("Keep this sentence exactly.\n"));
+  assert.ok(updated.content.includes("<!-- rafi:tracker-rules:start -->"));
+
+  const altered = legacy.replace("Rafi binds the assigned ticket identity", "Our team binds the assigned ticket identity");
+  assert.deepEqual(migrateTrackerRules(altered, "docs/tracker.md"), { disposition: "unchanged", content: altered });
+  assert.deepEqual(migrateTrackerRules(current, "docs/tracker.md"), { disposition: "unchanged", content: current });
+});
 
 for (const grouped of [false, true]) test(`tracker ${grouped ? "group" : "ticket"} reset reconciles a dead admission while retaining uncertain dispatch`, () => {
   const dir = makeTmpDir();
@@ -536,8 +558,8 @@ test("populate instruction makes the Medium/High rollback policy unambiguous", (
   const instruction = buildPopulateInstruction("docs/rafi-plan.json");
   assert.match(instruction, /For every Medium or High risk ticket, `rollback` is required/);
   assert.match(instruction, /`notes` may add context but never satisfies this requirement/);
-  assert.match(instruction, /"risk":"Medium"/);
-  assert.match(instruction, /Disable the feature flag/);
+  assert.match(instruction, /what is disabled, reverted, or contained/);
+  assert.match(instruction, /how recovery or impact is verified/);
 });
 
 test("populate treats file lists as hints without weakening explicit safety restrictions", () => {
@@ -586,6 +608,35 @@ test("ticket population preserves a valid proposal when notes follow the status 
     "provider notes",
   ].join("\n");
   assert.equal(acceptTicketPopulationCompletion(response)?.kind, "done");
+});
+
+test("ticket population accepts a plain JSON proposal followed by STEP_STATUS", () => {
+  const proposal = {
+    version: 1,
+    plan_id: "pln_test",
+    revision: 1,
+    tickets: [{
+      slice_ref: "slc_test",
+      title: "Test ticket",
+      area: "core",
+      priority: "P1",
+      size: "S",
+      risk: "Low",
+      summary: "test",
+      acceptance: ["works"],
+      required_tests: ["test"],
+      likely_files: [],
+      documentation: { required: false, targets: [], criteria: [] },
+      depends_on: [],
+      rollback: null,
+      notes: null,
+    }],
+    retirements: [],
+  };
+  assert.equal(
+    acceptTicketPopulationCompletion(`${JSON.stringify(proposal)}\nSTEP_STATUS: done | summary="populated"`)?.kind,
+    "done",
+  );
 });
 
 test("exhausted risk-plan correction gives an exact retry without unrelated doctor guidance", () => {
