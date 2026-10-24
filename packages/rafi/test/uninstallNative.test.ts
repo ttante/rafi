@@ -16,6 +16,6 @@ for (const mode of ["native", "text-only", "blocked"] as const) test(`uninstall 
     return { turn: { result, status: { kind: "done" } } } as RoleInstructionRunResult;
   });
   if (mode === "native") assert.deepEqual(await pending, proposal);
-  else await assert.rejects(pending, mode === "blocked" ? /blocked/ : /missing receipt/);
+  else await assert.rejects(pending, mode === "blocked" ? /blocked/ : /missing receipt|sealed selected dispatch tuple/);
   assert.equal(calls, 1);
 });

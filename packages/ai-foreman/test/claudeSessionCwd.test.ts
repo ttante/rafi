@@ -105,3 +105,25 @@ test("concurrent Claude shutdown callers wait for the same drain and settle the 
   await new Promise(resolve => setImmediate(resolve)); assert.equal(drained, false);
   release(); await first; assert.equal(drained, true);
 });
+
+
+test("live query reserves before SDK launch, enforces native dollars and records terminal cost", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-claude-budget-"));
+  const stream = new AsyncQueue<unknown>(), controller = new AbortController();
+  let reserved = 0, settled = 0, observed: number | undefined;
+  const Constructor = ClaudeAdapter as unknown as new (opts: BuilderAdapterOptions, query: (request: any) => unknown) => ClaudeAdapter;
+  const adapter = new Constructor({ cwd: root, permission: async () => ({ behavior: "deny", message: "fixture" }),
+    queryBudget: { reserveQuery(provider) { assert.equal(provider, "claude"); reserved++;
+      return { maximumSpendUsd: 0.25, signal: controller.signal, record(cost) { observed = cost; }, close() { settled++; } }; } },
+  }, request => {
+    assert.equal(reserved, 1); assert.equal(request.options.maxBudgetUsd, 0.25);
+    return { [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](), interrupt: async () => stream.close() };
+  });
+  try {
+    const pending = adapter.sendTurn("Non-authoritative transport fixture");
+    stream.push({ type: "system", subtype: "init", session_id: "budget-session", cwd: root });
+    stream.push({ type: "result", subtype: "success", result: "display", is_error: false, num_turns: 1, total_cost_usd: 0.12 });
+    assert.equal((await pending).isError, false); assert.equal(observed, 0.12);
+  } finally { await adapter.close(); rmSync(root, { recursive: true, force: true }); }
+  assert.equal(settled, 1);
+});

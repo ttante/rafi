@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { StructuredPlanV1 } from "rafi-spec";
-import { assertRiskPlanOnlyCorrection, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, TicketPopulationValidationError, validateTicketPopulationProposal, type TicketPopulationProposalV1 } from "../src/ticketPopulation.js";
+import { assertRiskPlanOnlyCorrection, authorizeTicketRetirements, materializeTicketPopulation, TicketPopulationValidationError, validateTicketPopulationProposal, type TicketPopulationProposalV1 } from "../src/ticketPopulation.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 
 const old: TicketDef = {
@@ -97,36 +97,6 @@ test("population does not apply additive-absence validation to per-ticket branch
 
   assert.doesNotThrow(() =>
     materializeTicketPopulation(invalid, plan, [old], { branchStrategy: "branch-per-ticket" }),
-  );
-});
-
-test("ticket-maker proposal parsing errors remain distinct from plan discovery failures", () => {
-  assert.throws(
-    () => extractTicketPopulationProposal("Codex returned prose but no proposal envelope."),
-    /ticket-maker output is missing RAFI_TICKET_POPULATION_PROPOSAL_START/,
-  );
-});
-
-test("ticket-maker accepts a plain JSON proposal followed by STEP_STATUS", () => {
-  assert.deepEqual(
-    extractTicketPopulationProposal(`${JSON.stringify(proposal)}\nSTEP_STATUS: done | summary="populated"`),
-    proposal,
-  );
-});
-
-test("ticket-maker rejects a plain JSON proposal without STEP_STATUS", () => {
-  assert.throws(
-    () => extractTicketPopulationProposal(JSON.stringify(proposal)),
-    /ticket-maker output is missing STEP_STATUS marker/,
-  );
-});
-
-test("ticket population extraction rejects unknown fields before materialization", () => {
-  const value = structuredClone(proposal) as unknown as Record<string, unknown>;
-  (value.tickets as Array<Record<string, unknown>>)[0]!.provider_ticket_id = "T-provider";
-  assert.throws(
-    () => extractTicketPopulationProposal(`RAFI_TICKET_POPULATION_PROPOSAL_START\n${JSON.stringify(value)}\nRAFI_TICKET_POPULATION_PROPOSAL_END`),
-    /contract validation failed.*provider_ticket_id/s,
   );
 });
 

@@ -1,3 +1,4 @@
+import { inheritedStructuredLiveBudget } from "../structuredLiveBudget.js";
 import type { ProviderTurnPurpose } from "../providerPhase.js";
 import { OperationDeadline } from "../util/deadline.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -14,9 +15,10 @@ import { canonicalSessionPath, createProviderSessionRef, validateProviderSession
 import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
 import { isFastModeUnavailable, reportFastModeUnavailable } from "./fastMode.js";
 import { handoffSystemInstructions } from "../handoffProtocol.js";
-import { providerWireContract, renderProviderWireInstruction, initializationOutput, validateStructuredCandidate } from "rafi-spec";
+import { providerControlOperationV2, providerWireContract, renderProviderWireInstruction, initializationOutput, validateStructuredCandidate, selectedDispatchTupleV2, structuredDigest } from "rafi-spec";
+import { assertActiveProviderDispatch, withEphemeralInitializationDispatch } from "../structuredDispatchAuthority.js";
 import { CodexTurnCollector, structuredReceipt } from "./structured.js";
-import type { TurnPolicy } from "./types.js";
+import type { ProviderTurnPolicy } from "./types.js";
 
 export interface CodexLineResult { events: BuilderEvent[]; sessionId?: string; text?: string }
 
@@ -121,6 +123,7 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   constructor(private readonly opts: BuilderAdapterOptions) {
+    inheritedStructuredLiveBudget("codex");
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
     this._sessionRef = opts.resumeSessionRef;
   }
@@ -172,8 +175,9 @@ export class CodexAdapter implements BuilderAdapter {
     args.push(instruction); return args;
   }
 
-  async sendTurn(instruction: string, policy?: TurnPolicy): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: ProviderTurnPolicy): Promise<TurnResult> {
     if (this.turnInFlight) throw new Error("a turn is already in progress");
+    if (policy?.output) assertActiveProviderDispatch(policy, instruction, "codex", this.sessionRef());
     if (policy?.output) {
       const selected = policy.wireContract ?? providerWireContract(policy.output, "codex", "default", { requireRegistered: true });
       if (selected.provider !== "codex" || selected.canonical.schemaDigest !== policy.output.schemaDigest) throw new Error("Codex received a mismatched provider wire contract");
@@ -221,7 +225,7 @@ export class CodexAdapter implements BuilderAdapter {
     }
   }
 
-  private async sendTurnInternal(instruction: string, policy?: TurnPolicy): Promise<TurnResult> {
+  private async sendTurnInternal(instruction: string, policy?: ProviderTurnPolicy): Promise<TurnResult> {
     if (this.closed) throw new Error("builder is closed");
     this.eventQueue.push({ kind: "activity", state: "starting Codex turn", provider: "codex", model: this.opts.model });
     let turnStartDispatched = false;
@@ -282,20 +286,25 @@ export class CodexAdapter implements BuilderAdapter {
         this.disableFastMode();
         return this.sendTurnInternal(instruction, policy);
       }
-      const result: TurnResult = {
+      let result: TurnResult = {
         text: failed ? normalizeRuntimeErrorText("codex", String(responseOnlyViolation ? "Response-only correction used tools; its result cannot authorize completion" : error?.message ?? text), null, "app-server turn") : text,
         isError: failed, numTurns: 1, costUsd: 0, costAuthoritative: false,
         turnId: this.activeProviderTurnId, hostInstruction: instruction, providerInstruction,
         rawResponse: text, cleanedResponse: failed ? normalizeRuntimeErrorText("codex", String(responseOnlyViolation ? "Response-only correction used tools; its result cannot authorize completion" : error?.message ?? text), null, "app-server turn") : text,
         providerMetadata: { provider: "codex", sessionId: this._sessionId, sessionRef: this._sessionRef },
+        ...(policy?.selectedDispatch ? { selectedDispatch: policy.selectedDispatch } : {}),
         ...(this.lastTurnTokens ?? {}),
       };
       result.usage = { scope: "turn-delta", inputTokens: result.inputTokens, outputTokens: result.outputTokens,
         ...(result.inputTokens !== undefined || result.outputTokens !== undefined ? { totalTokens: (result.inputTokens ?? 0) + (result.outputTokens ?? 0) } : {}) };
       if (policy?.output) {
-        result.structured = failed ? { state: "rejected", reason: responseOnlyViolation ? "tool-policy-violation" : "execution-not-completed", detail: `Codex terminal ${String(turn?.status)}`, dispatchId: result.turnId! }
+        const selectedDispatch = policy.selectedDispatch;
+        if (!selectedDispatch || !this._sessionId) throw new Error("Structured terminal lost its sealed dispatch tuple or session");
+        result = { ...result, selectedDispatch, structured: failed ? { state: "rejected", reason: responseOnlyViolation ? "tool-policy-violation" : "execution-not-completed", detail: `Codex terminal ${String(turn?.status)}`, dispatchId: result.turnId! }
           : invalidFinal ? { state: "rejected", reason: "ambiguous-result", detail: invalidFinal, dispatchId: result.turnId! }
-          : structuredReceipt(policy.output, "codex", final?.itemId ? text : undefined, { dispatchId: result.turnId!, sessionId: this._sessionId, nativeTurnId: this.activeNativeTurnId, nativeItemId: final?.itemId }, "json-text", wire);
+          : !wire || !policy.selectedDispatch
+            ? { state: "rejected", reason: "invalid-contract", detail: "Codex structured turn has no sealed descriptor or tuple", dispatchId: result.turnId! }
+            : structuredReceipt(policy.output, "codex", final?.itemId ? text : undefined, { dispatchId: result.turnId!, sessionId: this._sessionId, nativeTurnId: this.activeNativeTurnId, nativeItemId: final?.itemId }, "json-text", wire, policy.selectedDispatch) };
         if (result.structured.state === "rejected") result.isError = true;
       }
       this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
@@ -381,6 +390,7 @@ export class CodexAdapter implements BuilderAdapter {
       }, hardTimeoutMs, false, controller.signal);
       this.manualCompactionInFlight = true;
       try {
+        providerControlOperationV2("codex", "thread/compact/start");
         const acknowledgementFailure = this.request("thread/compact/start", { threadId: this._sessionId }).then(
           () => { this.traceLifecycle("compaction-acknowledged"); return new Promise<never>(() => {}); },
           error => {
@@ -435,10 +445,23 @@ export class CodexAdapter implements BuilderAdapter {
     if (!this.usage?.maximum) {
       if (this.opts.allowAutoCompactionSetupTurn === false) return;
       const toolsBefore = this.observedToolCalls;
-      const setup = await this.sendTurn("Rafi internal initialization only. Do not call tools or modify files. Submit the native session-initialization result with completed payload {ready:true} and null continuity.", { purpose: "initialization", responseOnly: true, output: initializationOutput, dispatchId: randomUUID() });
+      const descriptor = providerWireContract(initializationOutput, "codex");
+      const instruction = renderProviderWireInstruction("Rafi internal initialization only. Do not call tools or modify files. Submit the native session-initialization result with completed payload {ready:true} and null continuity.", descriptor);
+      const session = this.sessionRef();
+      if (!session) throw new Error("Ephemeral Codex initialization requires a prepared session");
+      const id = randomUUID();
+      const tuple = selectedDispatchTupleV2({ operation: initializationOutput.operation, schemaVersion: initializationOutput.schemaVersion, schemaDigest: initializationOutput.schemaDigest,
+        provider: "codex", profile: descriptor.profile, variant: descriptor.variant, descriptorDigest: descriptor.descriptorDigest,
+        wireSchemaDigest: descriptor.wireSchemaDigest, guidanceDigest: descriptor.guidanceDigest, normalizerId: descriptor.normalizerId,
+        normalizerVersion: descriptor.normalizerVersion, maximumSchemaBytes: descriptor.maximumSchemaBytes, maximumResponseBytes: descriptor.maximumResponseBytes,
+        maximumPageBytes: descriptor.maximumPageBytes ?? null, instructionDigest: structuredDigest(instruction), actionId: id, dispatchId: id, sessionId: session.sessionId, generation: session.generation });
+      const setup = await withEphemeralInitializationDispatch(this.opts.configRoot ?? this.opts.cwd, tuple, dispatchCapability => this.sendTurn(instruction,
+        { purpose: "initialization", responseOnly: true, output: initializationOutput, dispatchId: id, logicalActionId: id, wireContract: descriptor,
+          renderedWireContractDigest: descriptor.descriptorDigest, selectedDispatch: tuple, dispatchCapability }), session);
       if (setup.isError) throw new Error(`Codex automatic-compaction setup failed: ${setup.text.slice(0, 240)}`);
       if (this.observedToolCalls !== toolsBefore) throw new Error("Codex automatic-compaction setup unexpectedly called a tool");
-      const accepted = validateStructuredCandidate(initializationOutput, setup.structured);
+      if (!setup.selectedDispatch) throw new Error("Codex initialization returned no sealed dispatch tuple");
+      const accepted = validateStructuredCandidate(initializationOutput, setup.structured, providerWireContract(initializationOutput, "codex"), setup.selectedDispatch);
       if (accepted.result.kind !== "completed" || !accepted.result.payload.ready) throw new Error("Codex initialization did not confirm readiness");
     }
     const maximum = this.usage?.maximum;

@@ -4,7 +4,7 @@ Historical preimplementation baseline and current regression entry point for [th
 
 ## 1. Reproducible baseline
 
-Use Node 24 (`nvm use`) and pnpm 10.2.1. Node 22 remains a compatibility target in the three-OS CI matrix. Manifests require Node 22+, TypeScript packages use Node 24 types, and the lockfile resolves `better-sqlite3` 13.0.3. Workspace linking is explicit in `.npmrc`; do not test against published copies of local packages.
+Use Node 24 (`nvm use`) and pnpm 10.2.1. Node 24 is required in the three-OS CI matrix. TypeScript packages use Node 24 types, and the lockfile resolves `better-sqlite3` 13.0.3. Workspace linking is explicit in `.npmrc`; do not test against published copies of local packages.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -125,4 +125,28 @@ Scope: runtime metadata/lockfile/CI, native smoke, baseline runner, representati
 
 Post-fix evidence: `/tmp/rafi-comms-audit/preflight-tests.log` has **60 passed, zero failed/skipped**; `/tmp/rafi-comms-audit/baseline/` records native smoke, workspace build/typecheck and **191 passed, zero failed/skipped**. Generated CLI docs and `git diff --check` passed. Both live profiles were rerun against the corrected harness: `/tmp/rf-e-8JtKU1` has all nine interface scenarios passing; `/tmp/rf-e-8Q9H2x` has all six representative contract scenarios passing. These runs include harness/support/contract hashes and actual provider versions in their ledgers.
 
-Remaining gates at that historical audit: the 20 existing packaged resume failures above, unchanged supervisor startup timing sensitivity, the Node 22/24 cross-platform matrix, and the production communication migration with integrated live release testing. This audit did not rerun the entire broad suite or claim those gates passed. The live probes remain small capability tests, not a reliability estimate.
+Remaining gates at that historical audit: the 20 existing packaged resume failures above, unchanged supervisor startup timing sensitivity, the historical Node 22/24 cross-platform matrix (superseded by Node 24-only policy), and the production communication migration with integrated live release testing. This audit did not rerun the entire broad suite or claim those gates passed. The live probes remain small capability tests, not a reliability estimate.
+
+## Current v2 authority and live gate
+
+`pnpm check:comms-inventory` checks Node 24, script types, the reviewed compiler
+inventory/descriptor baseline, and source versus packaged manifest parity.
+Run it after the workspace build. Regenerate `registry-baseline.v2.json` with
+`node --import tsx scripts/comms/registry-baseline.mts --write` only after reviewing
+changed descriptor identities, authority owners, and source sites. Preserve
+`registry-before-state.v2.json` as historical evidence.
+
+All live entry points now require `RAFI_LIVE_STRUCTURED=1`, an explicit
+`RAFI_LIVE_CREDENTIAL_SCOPE`, `RAFI_LIVE_RETAINED_LOG_DIRECTORY`, and a future
+`RAFI_LIVE_DEADLINE` at most 30 minutes away. Select `RAFI_LIVE_PROVIDERS=claude`:
+Codex fails before provider launch because no authoritative dollar meter is
+available. Runners sharing the scope, deadline, and retained root share one $5
+reservation ledger; CLI children inherit that ledger and deadline. Unknown
+terminal spend blocks further queries. Keep the ledger and per-run reports with
+the acceptance evidence; do not delete them to recover budget.
+
+The capacity journey forces two native pages by default. Optional
+`RAFI_LIVE_CAPACITY_FIXTURE` supplies a page or page array;
+`RAFI_LIVE_CAPACITY_MAX_TICKETS` declares its aggregate ticket count. Each page
+remains limited to 150 tickets/750 KiB, with 60 pages/6 MiB in total. Offline
+fixture validation does not count as a live capacity result.

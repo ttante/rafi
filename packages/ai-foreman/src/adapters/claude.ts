@@ -1,5 +1,7 @@
+import { inheritedStructuredLiveBudget } from "../structuredLiveBudget.js";
 import { ProviderPhaseBarrier, type ProviderTurnPurpose } from "../providerPhase.js";
 import { OperationDeadline } from "../util/deadline.js";
+import { assertActiveProviderDispatch } from "../structuredDispatchAuthority.js";
 import type {
   Query,
   SDKMessage,
@@ -52,9 +54,9 @@ import { createProviderSessionRef, validateProviderSessionScope, canonicalSessio
 import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
 import { isFastModeUnavailable, reportFastModeUnavailable } from "./fastMode.js";
 import { handoffSystemInstructions } from "../handoffProtocol.js";
-import { providerWireContract, renderProviderWireInstruction, validateProviderWireValue, type OutputContract, type ProviderWireContract } from "rafi-spec";
+import { providerControlOperationV2, providerWireContract, renderProviderWireInstruction, validateProviderWireValue, type OutputContract, type ProviderWireContract } from "rafi-spec";
 import { structuredReceipt } from "./structured.js";
-import type { TurnPolicy } from "./types.js";
+import type { TurnRequest } from "./types.js";
 
 const DEFAULT_PROVIDER_IDLE_TIMEOUT_MS = 30 * 60_000;
 
@@ -272,6 +274,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   private cumulativeUsage: ProviderSessionUsage = { observedAt: new Date(0).toISOString(), source: "provider" };
   private priorTurnUsage: { inputTokens?: number; outputTokens?: number; costUsd?: number } = {};
   private activeProviderTurnId?: string;
+  private activeTurnPolicy?: TurnRequest;
   private activeProviderTurnSpanId?: string;
   private readonly toolSpans = new Map<string, string>();
   private readonly structuredSubmissionIds = new Set<string>();
@@ -330,6 +333,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       const model = models.find(item => item.value === (this.opts.model ?? "default"));
       if (model?.supportsFastMode !== true || typeof this.query.applyFlagSettings !== "function") { this.disableFastModeNotice(); return; }
       try {
+        providerControlOperationV2("claude", "applyFlagSettings");
         await new OperationDeadline("Claude fast mode", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ fastMode: true }));
         this.fastModeEnabled = true;
       } catch (error) {
@@ -346,11 +350,14 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   private async disableFastMode(): Promise<void> {
+    providerControlOperationV2("claude", "applyFlagSettings");
     await new OperationDeadline("Claude standard speed", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ fastMode: false }));
     this.disableFastModeNotice();
   }
 
   static async create(opts: BuilderAdapterOptions): Promise<ClaudeAdapter> {
+    const inheritedBudget = inheritedStructuredLiveBudget("claude");
+    opts = { ...opts, queryBudget: opts.queryBudget ?? inheritedBudget };
     try {
       const runtimeExecutable = opts.runtimeExecutable ?? resolveExecutablePath("claude");
       if (!runtimeExecutable) {
@@ -406,15 +413,31 @@ export class ClaudeAdapter implements BuilderAdapter {
     // macOS's default TMPDIR is too long for the SDK's Unix socket paths.
     if (opts.sessionRole === "qa" || opts.sandboxMode === "read-only") this.scratchDirectory = mkdtempSync(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "rf-c-"));
     try { this.startQuery(); }
-    catch (error) { if (this.scratchDirectory) rmSync(this.scratchDirectory, { recursive: true, force: true }); throw error; }
+    catch (error) { this.finishQueryBudget(); if (this.scratchDirectory) rmSync(this.scratchDirectory, { recursive: true, force: true }); throw error; }
+  }
+
+  private queryBudget?: ReturnType<NonNullable<BuilderAdapterOptions["queryBudget"]>["reserveQuery"]>;
+  private queryBudgetAbort?: () => void;
+  private finishQueryBudget(): void {
+    if (this.queryBudgetAbort) this.queryBudget?.signal.removeEventListener("abort", this.queryBudgetAbort);
+    this.queryBudgetAbort = undefined;
+    this.queryBudget?.close(); this.queryBudget = undefined;
   }
 
   private startQuery(): void {
     const opts = this.opts;
+    this.queryBudget = opts.queryBudget?.reserveQuery("claude");
+    if (this.queryBudget) {
+      const lease = this.queryBudget;
+      this.queryBudgetAbort = () => { this.abort.abort(); void this.close(); };
+      lease.signal.addEventListener("abort", this.queryBudgetAbort, { once: true });
+      if (lease.signal.aborted) { this.finishQueryBudget(); throw new Error("Live query deadline expired before launch"); }
+    }
     this.query = this.queryFactory({
       prompt: this.providerInputs(),
       options: {
         ...buildClaudeQueryOptions(opts, this.scratchDirectory),
+        ...(this.queryBudget ? { maxBudgetUsd: this.queryBudget.maximumSpendUsd } : {}),
         ...(this._sessionId ? { resume: this._sessionId } : {}),
         ...(this.outputWireContract ? { outputFormat: { type: "json_schema", schema: this.outputWireContract.wireSchema } } : {}),
         abortController: this.abort,
@@ -525,6 +548,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.abort.abort();
       this.query.close?.();
       await new OperationDeadline("Claude schema transition", this.opts.shutdownTimeoutMs ?? 10_000).run(() => this.pumpDone);
+      this.finishQueryBudget();
     } catch (error) {
       this.streamEnded = true;
       throw error;
@@ -724,7 +748,8 @@ export class ClaudeAdapter implements BuilderAdapter {
           cwd: this.opts.cwd,
           diagnostics: rawDiagnostics,
         } : undefined;
-      const result: TurnResult = {
+      this.queryBudget?.record(msg.total_cost_usd);
+      let result: TurnResult = {
         text: failure ? formatClaudeFailure(failure) : text,
         isError: msg.is_error,
         numTurns: msg.num_turns,
@@ -737,12 +762,17 @@ export class ClaudeAdapter implements BuilderAdapter {
         rawResponse: text,
         cleanedResponse: failure ? formatClaudeFailure(failure) : text,
         providerMetadata: { provider: "claude", sessionId: this._sessionId, sessionRef: this._sessionRef },
+        ...(this.activeTurnPolicy?.selectedDispatch ? { selectedDispatch: this.activeTurnPolicy.selectedDispatch } : {}),
       };
       const rawResult = msg as unknown as Record<string, unknown>;
       if (this.output) {
-        result.structured = msg.subtype !== "success" || msg.is_error || this.responseOnlyViolation
+        const selectedDispatch = this.activeTurnPolicy?.selectedDispatch;
+        if (!selectedDispatch || !this._sessionId) throw new Error("Structured terminal lost its sealed dispatch tuple or session");
+        result = { ...result, selectedDispatch, structured: msg.subtype !== "success" || msg.is_error || this.responseOnlyViolation
           ? { state: "rejected", reason: this.responseOnlyViolation ? "tool-policy-violation" : "execution-not-completed", detail: `Claude terminal ${msg.subtype}`, dispatchId: result.turnId! }
-          : structuredReceipt(this.output, "claude", rawResult.structured_output, { dispatchId: result.turnId!, sessionId: this._sessionId, nativeTurnId: typeof rawResult.uuid === "string" ? rawResult.uuid : undefined }, "decoded-json", this.outputWireContract);
+          : !this.outputWireContract || !this.activeTurnPolicy?.selectedDispatch
+            ? { state: "rejected", reason: "invalid-contract", detail: "Claude structured turn has no sealed descriptor or tuple", dispatchId: result.turnId! }
+            : structuredReceipt(this.output, "claude", rawResult.structured_output, { dispatchId: result.turnId!, sessionId: this._sessionId, nativeTurnId: typeof rawResult.uuid === "string" ? rawResult.uuid : undefined }, "decoded-json", this.outputWireContract, this.activeTurnPolicy.selectedDispatch) };
         if (result.structured.state === "rejected") result.isError = true;
       }
       const mergedUsage = mergeClaudeProviderSessionUsage(this.cumulativeUsage, rawResult);
@@ -759,8 +789,9 @@ export class ClaudeAdapter implements BuilderAdapter {
     }
   }
 
-  async sendTurn(text: string, policy?: TurnPolicy): Promise<TurnResult> {
+  async sendTurn(text: string, policy?: import("./types.js").ProviderTurnPolicy): Promise<TurnResult> {
     if (this.pending || this.configuringTurn) throw new Error("a turn is already in progress");
+    if (policy?.output) assertActiveProviderDispatch(policy, text, "claude", this.sessionRef());
     this.configuringTurn = true;
     try {
       const selected = policy?.output ? policy.wireContract ?? providerWireContract(policy.output, "claude", "default", { requireRegistered: true }) : undefined;
@@ -773,6 +804,7 @@ export class ClaudeAdapter implements BuilderAdapter {
     }
     finally { this.configuringTurn = false; }
     this.responseOnlyViolation = false;
+    this.activeTurnPolicy = policy;
     this.responseOnlyTurn = Boolean(policy?.responseOnly);
     this.phaseBarrier.begin(policy?.purpose ?? (policy?.responseOnly ? "response-repair" : "implementation"));
     const turnId = policy?.dispatchId ?? randomUUID();
@@ -930,6 +962,7 @@ export class ClaudeAdapter implements BuilderAdapter {
           // Require an advertised built-in local command; never substitute a
           // model-generated warm-up for QA's pre-dispatch identity validation.
           if (commands.some(command => command.name === "context" && "builtin" in command && command.builtin === true)) {
+            providerControlOperationV2("claude", "/context");
             this.opts.onLifecycleTrace?.({ phase: "local-context-initialization-start", at: new Date().toISOString() });
             const result = await this.sendTurn("/context", { responseOnly: true });
             this.opts.onLifecycleTrace?.({ phase: "local-context-initialization-complete", at: new Date().toISOString() });
@@ -981,6 +1014,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   private async compactInternal(): Promise<CompactResult> {
+    providerControlOperationV2("claude", "/compact");
     this.compactResult = undefined;
     this.manualCompactionInFlight = true;
     const normalMs = Math.min(180_000, Math.max(1, this.opts.compactionTimeoutMs ?? 120_000));
@@ -1015,7 +1049,9 @@ export class ClaudeAdapter implements BuilderAdapter {
     // for first input. Sending getContextUsage then deadlocks the control
     // queue, including a later local command. Establish identity first.
     if (!this.providerIdentityObserved && typeof this.query.supportedCommands === "function") await this.prepareSession();
+    providerControlOperationV2("claude", "applyFlagSettings");
     await new OperationDeadline("Claude settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ autoCompactEnabled: true }));
+    providerControlOperationV2("claude", "getContextUsage");
     const baseline = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
     if (!Number.isFinite(baseline.maxTokens) || baseline.maxTokens <= 0
       || !Number.isFinite(baseline.autoCompactThreshold) || baseline.autoCompactThreshold === undefined
@@ -1028,7 +1064,9 @@ export class ClaudeAdapter implements BuilderAdapter {
     const reserve = baseline.maxTokens - baseline.autoCompactThreshold;
     if (reserve < 0) throw new Error("Claude reported an invalid automatic-compaction reserve");
     const requestedWindow = tokenLimit(baseline.maxTokens, threshold) + reserve;
+    providerControlOperationV2("claude", "applyFlagSettings");
     await new OperationDeadline("Claude settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ autoCompactEnabled: true, autoCompactWindow: requestedWindow }));
+    providerControlOperationV2("claude", "getContextUsage");
     const installed = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
     if (!installed.isAutoCompactEnabled || !Number.isFinite(installed.maxTokens) || installed.maxTokens <= 0
       || !Number.isFinite(installed.autoCompactThreshold) || installed.autoCompactThreshold === undefined) {
@@ -1062,6 +1100,7 @@ export class ClaudeAdapter implements BuilderAdapter {
 
   async contextUsage(): Promise<ContextUsage | undefined> {
     try {
+      providerControlOperationV2("claude", "getContextUsage");
       const usage = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
       const result = { used: usage.totalTokens, maximum: usage.maxTokens, percentage: usage.percentage, observedAt: new Date().toISOString(), source: "provider-query" as const };
       this.eventQueue.push({ kind: "context-usage", ...result });
@@ -1076,11 +1115,15 @@ export class ClaudeAdapter implements BuilderAdapter {
   async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
     if (settings.effort !== this.opts.effort || settings.fast !== this.opts.fast) return { ok: false, error: "Claude SDK cannot change reasoning/fast controls on an existing transport" };
     if (settings.model === this.opts.model) return { ok: true };
+    providerControlOperationV2("claude", "/model");
+    if (settings.model && /[\r\n]/.test(settings.model)) return { ok: false, error: "Model control requires one model identifier" };
     if (this.opts.fast) await this.prepareFastMode();
+    if (this.fastModeEnabled) providerControlOperationV2("claude", "applyFlagSettings");
     if (this.fastModeEnabled) await new OperationDeadline("Claude standard speed", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ fastMode: false }));
     this.fastModeEnabled = false;
     const result = await new OperationDeadline("Claude model settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.sendTurn(`/model ${settings.model ?? "default"}`), () => this.abort.abort());
     if (result.isError) return { ok: false, error: result.text, ...(result.failure ? { failure: result.failure } : {}) };
+    if (result.numTurns !== 0 || result.structured) return { ok: false, error: "Model control did not complete as a non-authoritative provider acknowledgement" };
     this.opts.model = settings.model;
     this.fastModePrepared = undefined; this.fastModeUnavailable = false;
     if (this.opts.fast) await this.prepareFastMode();
@@ -1111,6 +1154,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.query.close?.();
       await new OperationDeadline("Claude shutdown", this.opts.shutdownTimeoutMs ?? 10_000).run(() => this.pumpDone).catch(() => {});
     } finally {
+      this.finishQueryBudget();
       if (this.scratchDirectory) rmSync(this.scratchDirectory, { recursive: true, force: true });
     }
   }

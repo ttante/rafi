@@ -209,6 +209,7 @@ export class AgentStatusReporter {
 
 /** Switches the shared live status to a role for the lifetime of its adapter. */
 export class RoleStatusAdapter implements BuilderAdapter {
+  postConfirmedDispatch(reference: import("./adapters/types.js").ConfirmedDispatchReference): Promise<TurnResult | void> { return this.adapter.postConfirmedDispatch?.(reference) ?? Promise.resolve(); }
   readonly agent: "claude" | "codex";
   constructor(private readonly adapter: BuilderAdapter, private readonly onActive: (adapter: BuilderAdapter) => void, private readonly onClose: () => void) { this.agent = adapter.agent; }
   contractCapabilities() { return this.adapter.contractCapabilities?.() ?? { sameSessionAcceptance: false, nativeCompactionBarrier: false }; }

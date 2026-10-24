@@ -1,4 +1,4 @@
-import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
+import { workFixtureTurn } from "./helpers/nativeOutput.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -60,10 +60,10 @@ test("blocked ticket and its dependent defer while an independent ticket complet
   writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [ticket("T001", 1), ticket("T002", 2, ["T001"]), ticket("T003", 3)] }));
   cmdUpdate(dir, "T001", { status: "next", actor: "test" });
   cmdUpdate(dir, "T003", { status: "next", actor: "test" });
-  const replies = ['STEP_STATUS: blocked | ticket="T001" reason="registry unavailable"', 'STEP_STATUS: done | ticket="T003" summary="implemented independent work"'];
+  const replies = [{ kind: "blocked", reason: "registry unavailable", nextAction: "Restore registry access" }, undefined];
   let turns = 0;
   const instructions: string[] = [];
-  const builder: BuilderAdapter = { agent: "codex", async sendTurn(_instruction, policy) { turns++; return nativeFixtureFromText(policy, "session", replies.shift()!, "codex"); }, async *events(): AsyncIterable<BuilderEvent> {}, sessionId: () => "session", async close() {} };
+  const builder: BuilderAdapter = { agent: "codex", async sendTurn(_instruction, policy) { turns++; return workFixtureTurn(policy, "session", "codex", replies.shift()); }, async *events(): AsyncIterable<BuilderEvent> {}, sessionId: () => "session", async close() {} };
   const foreman = new Foreman(builder, new Log(join(dir, "log.jsonl")), false, false, 3, dir);
   const result = await foreman.runBatch(1);
   assert.equal(result.completed, 1);
@@ -193,9 +193,7 @@ test("an answered deferred question resumes at a safe boundary once", async t =>
       try { const question = db.pendingHumanDecisions(runId)[0]!; db.answerHumanDecision(runId, question.decisionId, "custom", undefined, "Use the local mirror"); }
       finally { db.close(); }
     }
-    const text = instructions.length === 1 ? 'STEP_STATUS: needs_input | ticket="T001" question="Which registry?" choices="Public|Local"'
-      : instructions.length === 2 ? 'STEP_STATUS: done | ticket="T002" summary="independent work"' : 'STEP_STATUS: done | ticket="T001" summary="used the mirror"';
-    return nativeFixtureFromText(policy, "session", text, "codex");
+    return workFixtureTurn(policy, "session", "codex", instructions.length === 1 ? { kind: "needs-input", question: "Which registry?", choices: ["Public", "Local"] } : undefined);
   }, async *events(): AsyncIterable<BuilderEvent> {}, sessionId: () => "session", async close() {} };
   const foreman = new Foreman(builder, new Log(join(dir, "log.jsonl")), false, false, 3, dir);
   runId = (foreman as unknown as { qaRunId: string }).qaRunId;

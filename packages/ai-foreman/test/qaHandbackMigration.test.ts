@@ -157,10 +157,11 @@ for (const defect of ["foreign-review", "missing-response-evidence", "foreign-re
     db.finishQaReviewAttempt("other-review", { status: "failed", reportDigest: seeded.input.reportDigest });
     db.beginQaRemediationAttempt({ attemptId: "operation", runId: "run", ticketId: "T1", reviewAttemptId: seeded.attemptId, generation: 1, mode: "validated-report", requestDigest: evidence });
     const receipt = { version: 2 as const, operationId: "operation", runId: "run", ticketId: "T1", reportDigest: seeded.input.reportDigest, sourceStateDigest: "source", requestDigest: evidence, responseDigest: evidence, summaryDigest: evidence, providerTurnId: "turn", completedAt: new Date().toISOString() };
-    db.recordBuilderRemediationReceipt(receipt);
     db.close(); downgradeFixture(root);
     const path = join(root, ".rafi/recovery.sqlite3");
     const raw = new Database(path);
+    raw.prepare("INSERT INTO qa_remediation_receipts(operation_id,run_id,ticket_id,report_digest,receipt_json,created_at) VALUES(?,?,?,?,?,?)")
+      .run(receipt.operationId, receipt.runId, receipt.ticketId, receipt.reportDigest, JSON.stringify(receipt), receipt.completedAt);
     if (defect === "foreign-review") raw.prepare("UPDATE qa_remediation_attempts SET review_attempt_id='other-review'").run();
     else raw.prepare("UPDATE qa_remediation_receipts SET receipt_json=?").run(JSON.stringify({ ...receipt, ...(defect === "missing-response-evidence" ? { responseDigest: "f".repeat(64) } : { ticketId: "foreign" }) }));
     raw.close();

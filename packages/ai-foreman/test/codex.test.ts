@@ -1,5 +1,5 @@
 import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
-import type { TurnPolicy, TurnResult } from "../src/adapters/types.js";
+import type { TurnRequest, TurnResult } from "../src/adapters/types.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -328,12 +328,17 @@ test("wrong-session compaction completion times out without accepting stale usag
   await a.close();
 });
 
-test("Codex automatic compaction discovers the provider window before restarting with a native ceiling", async () => {
-  const a = adapter({ autoCompactThresholdPercent: 50 });
+test("Codex automatic compaction discovers the provider window before restarting with a native ceiling", async t => {
+  const root = mkdtempSync(join(tmpdir(), "codex-initialization-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const a = adapter({ cwd: root, autoCompactThresholdPercent: 50, resumeSessionId: "session-1", resumeSessionRef: {
+    version: 1, provider: "codex", sessionId: "session-1", role: "builder", stream: "builder", generation: 0,
+    cwd: root, configRoot: root, source: "observed", createdAt: new Date(0).toISOString(),
+  } });
   const internal = a as unknown as {
     usage: { maximum: number };
     ensureThread(): Promise<void>;
-    sendTurnInternal(text: string, policy?: TurnPolicy): Promise<TurnResult>;
+    sendTurnInternal(text: string, policy?: TurnRequest): Promise<TurnResult>;
     restartForAutoCompaction(): Promise<void>;
   };
   let ensured = 0;

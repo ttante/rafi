@@ -16,6 +16,9 @@ import { recoverableBuildRuns } from "../../packages/ai-foreman/dist/buildRuns.j
 import { captureCurrentWorkflowSessionIdentity } from "../../packages/ai-foreman/dist/branch/currentGuard.js";
 import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
 
+import { runSupervisedStructuredLive, trackStructuredLiveChild } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("multiticket-recovery", async (supervisor) => {
 if (process.env.RAFI_LIVE_MULTITICKET !== "1") throw new Error("Explicit online authorization and RAFI_LIVE_MULTITICKET=1 required");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
 assert.ok(Number.isFinite(deadline) && deadline > Date.now(), "Authorized absolute deadline required");
@@ -114,6 +117,7 @@ async function phase(project, provider, scenario, name, args, limitMs, expectedC
   ledger.push(row); save(); console.log(`${provider}/${scenario}: ${name}`);
   const fd = openSync(row.log, "w", 0o600);
   const child = spawn(process.execPath, [cli, ...args], { cwd: project, env: { ...process.env, NO_COLOR: "1" }, stdio: ["ignore", fd, fd] });
+    trackStructuredLiveChild(child);
   let timedOut = false, fault, injected = false, killTimer;
   const watch = interrupt ? setInterval(() => {
     try {
@@ -286,3 +290,6 @@ try {
   }
 } catch (error) { ledger.push({ status: "fail", error: String(error), at: new Date().toISOString() }); save(); throw error; }
 console.log(`All requested multi-ticket gates passed; evidence ${root}`);
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

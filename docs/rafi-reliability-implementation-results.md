@@ -93,7 +93,7 @@ Exact interview/session flags support recovery internally; users can use the fla
 - No live-account planning/build canary was run. Provider transport/account behavior remains an explicit later verification lane.
 - Existing blocked tickets and MoneyFarm's canonical project identity still require legitimate recovery or prerequisite decisions before a new build. Reader access does not steal ownership or bypass state-transfer identity checks.
 - Ignored files are not part of the private Git input snapshot. Dirty submodules and conflicts require explicit resolution; unborn repositories can use include mode without creating a user-branch commit. Recovery retains saved baseline decisions and preserved worktrees.
-- The locally built source is updated. The global Rafi installation and package versions were not changed or published. To exercise this build explicitly, use Node 20 with `node /Users/tyler/reps/activeWork/rafi/packages/rafi/dist/index.js ...` from a disposable project or the intended project after review.
+- The locally built source is updated. The global Rafi installation and package versions were not changed or published. For the current checkout, use Node 24 with `node /Users/tyler/reps/activeWork/rafi/packages/rafi/dist/index.js ...` from a disposable project or the intended project after review.
 
 No original MoneyTree/MoneyFarm mutation, paid/live-provider invocation, package publishing, deployment, source commit, or push occurred during this implementation. Existing unrelated user changes were retained. Scratch-only Git commits and private baseline objects were used by the authorized tests.
 

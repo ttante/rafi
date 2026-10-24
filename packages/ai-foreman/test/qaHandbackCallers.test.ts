@@ -1,4 +1,4 @@
-import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
+import { canonicalFixtureTurn } from "./helpers/nativeOutput.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
@@ -34,21 +34,26 @@ for (const caller of ["foreman", "branch"] as const) for (const mode of ["blocke
       const provider = caller === "foreman" ? "claude" : "codex";
       const queue = new BuilderEventQueue();
       const ref: ProviderSessionRefV1 = { version: 1, provider, sessionId: `${role}-session-${adapters.length}`, role, stream: role, generation: 0, cwd, configRoot: role === "builder" ? root : cwd, ticketId: "T001", source: "observed", createdAt: new Date(0).toISOString(), validatedAt: new Date(0).toISOString() };
-      const adapter: BuilderAdapter = { agent: provider, sessionId: () => ref.sessionId, sessionRef: () => ref, observeEvents: listener => queue.observe(listener), events: () => queue, close: async () => { queue.close(); }, sendTurn: async (prompt, policy) => {
+      const adapter: BuilderAdapter = { agent: provider, sessionId: () => ref.sessionId, sessionRef: () => ref, prepareSession: async () => ref, observeEvents: listener => queue.observe(listener), events: () => queue, close: async () => { queue.close(); }, sendTurn: async (prompt, policy) => {
         let text: string;
+        let payload: unknown = { disposition: "modified", evidence: ["Fixture source inspection"], coverage: null, graphMaintenance: null };
+        let alternative: unknown;
         if (role === "qa") { reviewTurns++; text = mode === "missing-continuity" ? 'STEP_STATUS: qa_pass | summary="reviewed"' : `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify(qaReport)}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="missing guard"`; }
         else if (prompt.includes("QA failure handoff ID:")) {
           remediationTurns++;
           observedRunId = /Run ID: (.+)/.exec(prompt)?.[1] ?? observedRunId;
-          if (mode === "blocked") text = 'STEP_STATUS: blocked | reason="Registry unavailable; restore approved registry access"';
+          if (mode === "blocked") { text = "Registry unavailable; restore approved registry access"; alternative = { kind: "blocked", reason: text, nextAction: "Restore approved registry access" }; }
           else {
-            if (!envelope) envelope = `RAFI_BUILDER_QA_REMEDIATION_START\n${JSON.stringify({ version: 3, handoff_id: /QA failure handoff ID: ([a-f0-9]+)/.exec(prompt)![1], summary: "Reported", findings: [{ finding_key: /QA-1 -> ([a-f0-9]+)/.exec(prompt)![1], raw_id: "QA-1", disposition: "fixed", changes: ["guard"], evidence: "source", verification: [{ check: "inspect", outcome: "passed", evidence: "guard" }] }], observations: [] })}\nRAFI_BUILDER_QA_REMEDIATION_END\nSTEP_STATUS: done | summary="reported"`;
+            const report = { version: 3, handoff_id: /QA failure handoff ID: ([a-f0-9]+)/.exec(prompt)![1], summary: "Reported", findings: [{ finding_key: /QA-1 -> ([a-f0-9]+)/.exec(prompt)![1], raw_id: "QA-1", disposition: "fixed", changes: ["guard"], evidence: "source", verification: [{ check: "inspect", outcome: "passed", evidence: "guard" }] }], observations: [] };
+            payload = { status: "done", reason: null, coverage: null, report };
+            if (!envelope) envelope = "Remediation reported";
             text = remediationTurns === 1 ? `Prologue\n${envelope}` : envelope;
             if (remediationTurns === 2) queue.push({ kind: "tool", name: "Read", input: {}, providerTurnId: "turn-2" });
           }
         } else { writeFileSync(join(cwd, "source.txt"), "implementation\n"); text = 'STEP_STATUS: done | ticket="T001" summary="implemented"'; }
-        const result: TurnResult = { ...nativeFixtureFromText(policy, ref.sessionId, text, provider), text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: false, numTurns: 1, costUsd: 0, turnId: policy?.dispatchId, providerMetadata: { provider, sessionId: ref.sessionId, sessionRef: ref } };
-        if (mode === "tool-correction" && role === "builder" && remediationTurns === 1) result.structured = { state: "rejected", reason: "invalid-contract", detail: "Malformed native remediation", dispatchId: policy!.dispatchId! };
+        if (role === "qa") payload = mode === "missing-continuity" ? { kind: "passed", coverage: null, verifiedInstructionIds: [] } : { kind: "failed", report: qaReport, coverage: null, verifiedInstructionIds: [] };
+        let result: TurnResult = { ...canonicalFixtureTurn(policy, ref.sessionId, payload, provider, alternative), text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: false, numTurns: 1, costUsd: 0, turnId: policy?.dispatchId, providerMetadata: { provider, sessionId: ref.sessionId, sessionRef: ref } };
+        if (mode === "tool-correction" && role === "builder" && remediationTurns === 1) result = { ...result, selectedDispatch: policy!.selectedDispatch!, structured: { state: "rejected", reason: "invalid-contract", detail: "Malformed native remediation", dispatchId: policy!.dispatchId! } };
         queue.push({ kind: "turn-complete", result, turnId: result.turnId });
         if (mode === "missing-continuity" && role === "qa" && reviewTurns === 1) return { ...result, isError: true, text: "QA continuity record was invalid: missing continuity marker", continuityErrors: ["missing continuity marker"] };
         return result;

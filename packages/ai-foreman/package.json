@@ -289,7 +289,7 @@
     "dev": "tsx src/index.ts",
     "test": "node scripts/test-offline.mjs",
     "typecheck": "tsc --noEmit",
-    "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 tsx --test test/providerSmoke.test.ts",
+    "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 node --import tsx --test test/providerSmoke.test.ts",
     "prepublishOnly": "tsc -p ../spec/tsconfig.build.json && pnpm build && pnpm --filter ai-foreman test && tsc --noEmit"
   },
   "keywords": [
@@ -303,7 +303,7 @@
     "cli"
   ],
   "engines": {
-    "node": ">=22"
+    "node": "24.x"
   },
   "packageManager": "pnpm@10.2.1",
   "optionalDependencies": {

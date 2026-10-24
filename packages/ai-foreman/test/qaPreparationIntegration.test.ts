@@ -1,5 +1,5 @@
 import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
-import { nativePolicy } from "../src/structuredOperation.js";
+import { nativePolicy, journalStructuredDispatch } from "../src/structuredOperation.js";
 import { workReportOutput, qaVerdictOutput } from "rafi-spec";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -58,7 +58,7 @@ function fixture(kind: "ticket" | "synthetic" = "ticket", branch = false, compil
   const review = assessment(draft), contract = assembleContract(draft, draft.requirements, review, "author");
   const budget = store.ensureBudget("run", workId, admission.requirementsDigest, 2, Date.now()); store.putArtifact("semantic-assessment", review); store.retainProgress(budget, "inventory", draft.requirements); if (publish) store.publish(contract, 0, Date.now());
   let sequence = 0, turns = 0, failCoverage = false, sessionId = "actual-builder";
-  const adapter: BuilderAdapter = { agent: "claude", sessionId: () => sessionId, sessionRef: () => createProviderSessionRef({ provider: "claude", sessionId, role: "builder", stream: "builder", generation: 1, cwd: workspace, configRoot: root, source: "observed" }), events: async function* () {}, close: async () => {},
+  const adapter: BuilderAdapter = { agent: "claude", sessionId: () => sessionId, sessionRef: () => createProviderSessionRef({ provider: "claude", sessionId, role: "builder", stream: "builder", generation: 1, cwd: workspace, configRoot: root, source: "observed" }), prepareSession: async () => adapter.sessionRef!()!, events: async function* () {}, close: async () => {},
     contractCapabilities: () => ({ sameSessionAcceptance: true, nativeCompactionBarrier: true }), contractCompactionSequence: () => sequence, enableContractEnforcement: () => {}, acceptContractDelivery: () => {},
     sendTurn: async (instruction, policy) => {
       turns++; assert.equal(policy?.responseOnly, true);
@@ -110,14 +110,16 @@ test("enforced Builder coverage persists host-observed test lifecycle metadata",
   } finally { f.cleanup(); }
 });
 
-test("Builder coverage accepts a host-observed provider compaction without accepting source drift", async () => {
+test("Builder coverage rejects a new provider session under the previous sealed dispatch", async () => {
   const f = fixture("ticket", false, false, false, true, false, true);
   try {
     await deliverVerificationContract(f.contract, f.store, f.adapter, f.workspace, f.root, "Context");
     const assignment = beginBuildAssignment(f.root, "run", f.workId, f.workspace, "Implement", undefined, f.adapter);
     writeFileSync(join(f.workspace, "product.txt"), "implemented");
     const response = nativeFixtureTurn(nativePolicy(workReportOutput), "actual-builder", { disposition: "modified", evidence: ["Implemented source"], coverage: null, graphMaintenance: null });
-    await collectBuilderContractCoverage(f.root, "run", f.workId, f.workspace, f.adapter, assignment.operationId, assignment.instruction, response);
+    await assert.rejects(collectBuilderContractCoverage(f.root, "run", f.workId, f.workspace, f.adapter, assignment.operationId, assignment.instruction, response), /coverage provider failed/);
+    assert.equal(f.db.operations("run").filter(operation => operation.kind === "provider-dispatch").at(-1)?.status, "uncertain");
+    assert.notEqual(f.adapter.sessionId(), "actual-builder");
     assert.equal(f.store.metrics("run").started, 1);
   } finally { f.cleanup(); }
 });
@@ -132,7 +134,7 @@ test("completed Builder marker without durable coverage is rejected and its sour
   } finally { f.cleanup(); }
 });
 
-test("certificate issue and consumption bind immutable dispatch, terminal coverage and current contract", () => {
+test("certificate issue and consumption bind immutable dispatch, terminal coverage and current contract", async () => {
   const f = fixture();
   try {
     const sourceDigest = captureBuildSource(f.workspace).digest, attemptId = "fresh-review", sessionId = "fresh-independent-reviewer", instruction = "Independently verify this source";
@@ -141,14 +143,16 @@ test("certificate issue and consumption bind immutable dispatch, terminal covera
     let head = f.db.qaTicketHead("run", f.workId); head = f.db.transitionQa("run", f.workId, head.revision, { type: "source-frozen", sourceStateDigest: sourceDigest }); head = f.db.transitionQa("run", f.workId, head.revision, { type: "review-ready", reviewBasisDigest: basis.digest, sessionGeneration: 1 });
     f.db.beginQaReviewAttempt({ attemptId, runId: "run", ticketId: f.workId, reviewNumber: head.reviewNumber, cycle: 1, remediationGeneration: 0, sourceDigest });
     const at = new Date().toISOString(), operationId = "independent-turn";
-    f.db.commitQaTurnIntent({ version: 2, operationId, runId: "run", ticketId: f.workId, reviewNumber: head.reviewNumber, sessionGeneration: 1, slot: "initial", sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, instructionDigest: f.db.putEvidence("qa", `${instruction}\nImmutable input-basis digest: ${basis.digest}. Coverage must bind this inputBasisDigest.`), intendedAt: at, providerSession: { version: 2, provider: "claude", sessionId, role: "qa", stream: "qa", generation: 1, cwd: f.workspace, configRoot: f.root, createdAt: at, validatedAt: at } }, head.revision);
+    f.db.commitQaTurnIntent({ version: 2, operationId, runId: "run", ticketId: f.workId, reviewNumber: head.reviewNumber, sessionGeneration: 1, slot: "initial", sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, instructionDigest: f.db.putEvidence("qa", `${instruction}\nImmutable input-basis digest: ${basis.digest}. Coverage must bind this inputBasisDigest.`), intendedAt: at, providerSession: { version: 2, provider: "claude", sessionId, role: "qa", stream: "qa", generation: 1, cwd: f.workspace, configRoot: f.root, createdAt: at, validatedAt: at }, outputContract: { protocolVersion: 2, operation: qaVerdictOutput.operation, schemaVersion: qaVerdictOutput.schemaVersion, schemaDigest: qaVerdictOutput.schemaDigest } }, head.revision);
     head = f.db.qaTicketHead("run", f.workId);
     const result = { ...coverage(f.contract), workId: f.workId, sourceDigest, inputBasisDigest: basis.digest, attemptId, sessionId }; result.checks[0]!.evidence[0]!.sourceDigest = sourceDigest;
     // Native claims contain no provider-authored host bindings.
     const claims = { checks: result.checks.map(row => ({ ...row, evidence: row.evidence.map(({ sourceDigest, ...evidence }) => evidence) })) };
-    const native = nativeFixtureTurn(nativePolicy(qaVerdictOutput, { dispatchId: operationId }), sessionId, { kind: "passed", coverage: claims, verifiedInstructionIds: [] });
-    const responseDigest = f.db.putEvidence("qa", "Presentation only"), structuredResponseDigest = f.db.putEvidence("qa", JSON.stringify(native.structured));
-    const receipt = { version: 2 as const, operationId, dispatch: "completed" as const, providerTurnId: "native-turn", terminalEventObserved: true, sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, rawResponseDigest: responseDigest, cleanedResponseDigest: responseDigest, structuredResponseDigest, completedAt: at }; f.db.finishQaTurn(receipt);
+    const ref = createProviderSessionRef({ provider: "claude", sessionId, role: "qa", stream: "qa", generation: 1, cwd: f.workspace, configRoot: f.root, source: "observed" });
+    const qa: BuilderAdapter = { agent: "claude", sessionId: () => sessionId, sessionRef: () => ref, prepareSession: async () => ref, events: async function* () {}, close: async () => {}, sendTurn: async (_text, policy) => nativeFixtureTurn(policy, sessionId, { kind: "passed", coverage: claims, verifiedInstructionIds: [] }) };
+    const native = await journalStructuredDispatch(f.root, qa, instruction, nativePolicy(qaVerdictOutput, { dispatchId: operationId, logicalActionId: attemptId, journalRunId: "run" }), (text, policy) => qa.sendTurn(text, policy));
+    const responseDigest = f.db.putEvidence("qa", native.text), structuredResponseDigest = (f.db.operation(operationId)!.result as { responseDigest: string }).responseDigest;
+    const receipt = { version: 2 as const, operationId, dispatch: "completed" as const, providerTurnId: native.turnId, terminalEventObserved: true, sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, rawResponseDigest: responseDigest, cleanedResponseDigest: responseDigest, structuredResponseDigest, sealedDispatch: f.db.structuredOwnerDispatch(operationId), completedAt: at }; f.db.finishQaTurn(receipt);
     const input = { runId: "run", ticketId: f.workId, qaRevision: head.revision + 1, sourceStateDigest: sourceDigest, reviewBasisDigest: basis.digest, turnReceiptDigest: qaDigest("turn-receipt", receipt) };
     assert.throws(() => f.db.commitQaPassAttempt(attemptId, input, "Generic pass", head.revision), /tagged contract coverage/); assert.equal(f.db.qaReviewAttempt(attemptId)?.status, "started");
     const binding = { version: 1 as const, revision: 1, contractDigest: f.contract.contentDigest, coverageDigest: f.store.putArtifact("final-coverage", result), attemptId, sessionId };
@@ -196,7 +200,7 @@ for (const scenario of ["isolated", "isolated-host-comparison", "isolated-foreig
       sessionBoundary: async () => { throw new Error("Fresh initial review needs no replacement"); },
       createQa: async cwd => {
         const events = new AsyncQueue<import("../src/adapters/types.js").BuilderEvent>(), ref = createProviderSessionRef({ provider: "claude", sessionId: "actual-fresh-review", role: "qa", stream: "qa", generation: 0, cwd, configRoot: f.root, source: "observed", validatedAt: new Date().toISOString() });
-        const adapter: BuilderAdapter = { agent: "claude", sessionId: () => ref.sessionId, sessionRef: () => ref, events: () => events, close: async () => events.close(), sendTurn: async (instruction, policy) => {
+        const adapter: BuilderAdapter = { agent: "claude", sessionId: () => ref.sessionId, sessionRef: () => ref, prepareSession: async () => ref, events: () => events, close: async () => events.close(), sendTurn: async (instruction, policy) => {
           reviews++; assert.ok(instruction.includes("Expired tokens return unauthorized"));
           assert.match(instruction, /exact allowed list: \[\]/);
           assert.match(instruction, /return verifiedInstructionIds: \[\]/);

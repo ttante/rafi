@@ -1,6 +1,6 @@
 # Communication migration cleanup inventory
 
-Implementation dispositions, updated 2026-10-23 UTC. This records the working tree, not a release approval. The integrated offline and live gates remain open until the [migration plan](../../STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md) records final results. All changes ship together.
+Implementation dispositions, updated 2026-10-24 UTC. This records the working tree, not a release approval. The integrated offline and live gates remain open until the [migration plan](../../STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md) records final results. All changes ship together.
 
 ## Removed from active result acceptance
 
@@ -43,7 +43,34 @@ Implementation dispositions, updated 2026-10-23 UTC. This records the working tr
 
 ## Compatibility boundaries
 
-Legacy marker/envelope parsers remain for historical records, explicit import helpers and test fixture authoring. `qaTimeline` reads native receipts first and only falls back when a historical record has no native receipt. Native execution does not use an invalid/missing native receipt as permission to parse presentation text instead. The general graph helper retains its declared historical interface; every production operation caller selects a native output contract.
+Provider marker converters are removed from production exports and calls. The
+only retained historical parser is private to `packages/spec/src/legacyQaDisplay.ts`.
+Its public `describeHistoricalQaTranscript` returns only display status, validity,
+and issues; it cannot return a report, receipt, tuple, or dispatch. Foreman exposes
+that narrow function through `legacyCommunicationDisplay.ts`. Its callers are the
+human QA timeline and recovery-menu synopsis. A native receipt never falls back to
+legacy text for workflow acceptance.
+
+### Parser/caller ledger
+
+| Marker/extractor family | Disposition | Current callers / enforcement |
+| --- | --- | --- |
+| `parseProtocol`, `parseDelimitedJson`, `extractJson`, planner status/field extractors | Removed | No production definition/caller; compiler rejects any reintroduced authority call. |
+| `parseContinuityDelta` / `RAFI_CONTINUITY_DELTA` | Selected-native replacement; text converter removed | Continuity consumes verified native delta after durable confirmation; crash/replay regressions. |
+| `parsePreparationArtifact` / QA candidate, assessment and challenge envelopes | Selected-native replacement; text converter removed | Draft/assessment/challenge/depth contracts; literal marker rejection and preparation tests. |
+| `parseGraphRequest` / `rafi_graph_request` prose | Selected-native replacement; text converter removed | Graph loop consumes the closed native intermediate union. |
+| `extractDiscoveryEnvelope`, `extractStructuredPlanProposal`, `parseGrillAuditVerdict` | Selected-native replacement; text converters removed | CLI discovery/planning/audit native contracts; domain validation remains on object values. |
+| `parseBuilderQaRemediationContract` and report V2/V3 converters | Selected-native replacement; text converters removed | Remediation consumes persisted native receipt/tuple through the common verifier. |
+| `parseQaResponseContract`, `parseQaFailureReport` | Private historical display only | Only `legacyQaDisplay.ts`; narrow display projection, bounded input; inventory rejects other parser callers. |
+| `parseContractCoverage` | Explicit rejection boundary | Always throws; native coverage fields supply authoritative claims. |
+| Strict JSON operator-file parsing | Non-provider protocol | `parseStrictJson` rejects duplicate keys; bounded operator report schema validation does not accept Markdown or markers. |
+| `RAFI_APPEND`, managed root/skill/file regions | Non-protocol file delimiters | Managed file editing; no provider result conversion or workflow completion. |
+| Native question/permission callbacks, `/context`, `/compact`, model/settings RPCs | Registered non-authoritative control | Provider control manifest and observable completion; never a business-result parser. |
+
+Retained legacy text tests reject literal marker forms at native authority consumers.
+Object validation, QA depth normalization, blocker semantics and exact finding
+coverage have dedicated native/domain assertions; their coverage is not removed
+along with obsolete conversion fixtures.
 
 Packaged handoff protocol v2 describes the new native transport; protocol v1 remains a historical reference. `RAFI_APPEND` and similar generated-file regions are file-edit delimiters and are unrelated to provider result acceptance.
 

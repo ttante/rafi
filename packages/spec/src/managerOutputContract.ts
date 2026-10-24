@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { operationContract, type OperationResponse } from "./operationContracts.js";
-import { jsonOutputContract, registerCompatibilityProviderWireContracts } from "./structuredOutput.js";
+import { canonicalJson, createProviderWireContract, decodeCodexOptionalProperties, jsonOutputContract, projectCodexSchema, type ProviderWireContract } from "./structuredOutput.js";
 import { managerEvidenceRequestV2Schema } from "./schemas.js";
 import { managerGraphRequestV3Schema, type ManagerGraphRequestV3 } from "./graph.js";
 import type { ManagerEvidenceRequestV1, ManagerEvidenceRequestV2 } from "./types.js";
@@ -17,13 +17,38 @@ const requestV1 = z.strictObject({ version: z.literal(1), requestId: id, operati
   z.strictObject({ kind: z.literal("compare_runs"), runIds: ids, metrics: z.array(metrics).max(20) }),
 ])).min(1).max(6) });
 const schema = structuredClone(operationContract("manager", z.strictObject({ answer: z.string().min(1).max(100_000) }), { graph: false }).jsonSchema) as Record<string, any>;
-for (const [kind, request] of [["run-evidence-request", z.toJSONSchema(requestV1, { target: "draft-7", io: "input" })], ["qa-evidence-request", managerEvidenceRequestV2Schema], ["graph-evidence-request", managerGraphRequestV3Schema]] as const) {
-  schema.properties.result.oneOf.push({ type: "object", additionalProperties: false, required: ["kind", "request"], properties: { kind: { const: kind }, request } });
-}
+const evidenceRequests = {
+  run: z.toJSONSchema(requestV1, { target: "draft-7", io: "input" }),
+  qa: managerEvidenceRequestV2Schema,
+  graph: managerGraphRequestV3Schema,
+} as const;
+schema.properties.result.oneOf.push({
+  type: "object", additionalProperties: false, required: ["kind", "evidenceType", "request"],
+  properties: { kind: { const: "evidence-request" }, evidenceType: { enum: ["run", "qa", "graph"] }, request: { anyOf: Object.values(evidenceRequests) } },
+  // `anyOf` keeps the Codex wire projection representable. The conditional
+  // clauses retain the canonical correlation between subtype and request.
+  allOf: Object.entries(evidenceRequests).map(([evidenceType, request]) => ({
+    if: { properties: { evidenceType: { const: evidenceType } } },
+    then: { properties: { request } },
+  })),
+});
+export type ManagerEvidenceRequestResult =
+  | { kind: "evidence-request"; evidenceType: "run"; request: ManagerEvidenceRequestV1 }
+  | { kind: "evidence-request"; evidenceType: "qa"; request: ManagerEvidenceRequestV2 }
+  | { kind: "evidence-request"; evidenceType: "graph"; request: ManagerGraphRequestV3 };
 export type ManagerResponse = Omit<OperationResponse<{ answer: string }>, "result"> & { result:
-  OperationResponse<{ answer: string }>["result"] |
-  { kind: "run-evidence-request"; request: ManagerEvidenceRequestV1 } |
-  { kind: "qa-evidence-request"; request: ManagerEvidenceRequestV2 } |
-  { kind: "graph-evidence-request"; request: ManagerGraphRequestV3 } };
+  OperationResponse<{ answer: string }>["result"] | ManagerEvidenceRequestResult };
 export const managerOutput = jsonOutputContract<ManagerResponse>("manager", schema);
-registerCompatibilityProviderWireContracts(managerOutput, "manager");
+export function managerProviderWireContracts(): readonly ProviderWireContract[] {
+  return (["claude", "codex"] as const).map(provider => {
+  const wireSchema = (provider === "codex" ? projectCodexSchema(managerOutput.jsonSchema) : managerOutput.jsonSchema) as Record<string, unknown>;
+  const schemaBytes = Buffer.byteLength(canonicalJson(wireSchema));
+  return createProviderWireContract({
+    canonical: managerOutput, provider, profile: `${provider}-manager-v2`, variant: "default", wireVersion: 2,
+    wireSchema, maximumSchemaBytes: schemaBytes + 1024, maximumResponseBytes: Math.max(65_536, Math.min(1_000_000, schemaBytes * 16)),
+    normalizerId: provider === "codex" ? "codex-optional-properties" : "identity", normalizerVersion: 1,
+    normalize: value => provider === "codex" ? decodeCodexOptionalProperties(managerOutput.jsonSchema, value) : value,
+    guidanceId: `manager-${provider}-v2`, guidance: "Return one native manager JSON envelope. Do not invent host identifiers or fields outside the selected schema.",
+  });
+});
+}

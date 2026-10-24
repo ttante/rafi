@@ -1,4 +1,4 @@
-import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativeFixtureTurn, prepareFixtureAdapter } from "./helpers/nativeOutput.js";
 import test from "node:test";
 import { DEFAULT_GRAPH_CONFIG } from "rafi-spec";
 import { adoptGraph } from "../src/graph/maintenance.js";
@@ -64,11 +64,12 @@ for (const graphEnabled of [false, true]) for (const [branch, provenanceOnly, le
       phases.push("assess"); const draft = JSON.parse(instruction.split("\nDraft:\n")[1]!.split("\nOriginal approved plan context:")[0]!) as QaContractCandidateV1;
       return nativeFixtureTurn(policy, sessionId, { version: 1, assessedRequirementIds: draft.requirements.map(req => req.id), assessedObligations: depthObligations(level), concerns: [] });
     } };
+    prepareFixtureAdapter(adapter, cwd);
     return { adapter } as QaSessionHandle;
   };
   const createBuilder = async (cwd: string): Promise<BuilderAdapter> => {
     const ref = createProviderSessionRef({ provider: "claude", sessionId: `builder:${cwd}`, role: "builder", stream: "builder", generation: 0, cwd, configRoot: root, source: "observed", validatedAt: new Date().toISOString() });
-    return { agent: "claude", sessionId: () => ref.sessionId, sessionRef: () => ref, events: async function* () {}, close: async () => {}, contractCapabilities: () => ({ sameSessionAcceptance: true, nativeCompactionBarrier: true }), enableContractEnforcement: () => {}, contractCompactionSequence: () => 0, acceptContractDelivery: () => {}, sendTurn: async (instruction, policy) => {
+    return { agent: "claude", sessionId: () => ref.sessionId, sessionRef: () => ref, prepareSession: async () => ref, events: async function* () {}, close: async () => {}, contractCapabilities: () => ({ sameSessionAcceptance: true, nativeCompactionBarrier: true }), enableContractEnforcement: () => {}, contractCompactionSequence: () => 0, acceptContractDelivery: () => {}, sendTurn: async (instruction, policy) => {
       if (policy?.purpose === "contract-acceptance") { phases.push("accept"); currentContract = JSON.parse(instruction.split("Full structured contract:\n")[1]!.split("\n")[0]!); return nativeFixtureTurn(policy, ref.sessionId, { workId: ticket.id, revision: currentContract!.revision, digest: currentContract!.contentDigest, missingSections: [] }); }
       if (policy?.responseOnly) { phases.push("claims"); return nativeFixtureTurn(policy, ref.sessionId, { checks: currentContract!.checks.map(check => ({ checkId: check.id, applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] })) }); }
       phases.push("implement"); assert.ok(instruction.includes("Preserve expiry boundary")); assert.ok(instruction.includes("Revert guard")); assert.ok(instruction.includes(currentContract!.contentDigest)); writeFileSync(join(cwd, "product.txt"), "implemented expiry rejection\n");
@@ -144,7 +145,8 @@ for (const mode of ["legacy", "shadow"] as const) test(`actual Foreman ${mode} m
     execFileSync("git", ["add", "."], { cwd: root }); execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: root });
     const db = new WorkflowDb(root); db.ensureRun("run"); db.qaPreparationStore().freezePolicy("run", resolveQaPreparationConfig({ mode })); db.admitWork({ runId: "run", kind: "ticket", ticketId: ticket.id, definition: ticket, approvalId: "fixture", scopeRevision: "fixture", provenance: { userTurn: "Implement token guard", reason: "Explicit execution fixture" } }); db.close();
     const adapter: BuilderAdapter = { agent: "codex", sessionId: () => "legacy-capability-builder", events: async function* () {}, close: async () => {}, sendTurn: async (_instruction, policy) => { builderTurns++; return nativeFixtureTurn(policy, "legacy-capability-builder", { disposition: "modified", evidence: ["product.txt"], coverage: null, graphMaintenance: null }, "codex"); } };
-    const createQa = async (): Promise<QaSessionHandle> => ({ adapter: { agent: "codex", sessionId: () => "confined-preparation", events: async function* () {}, close: async () => {}, sendTurn: async () => { preparationTurns++; return { text: "Controlled preparation failure", isError: true, numTurns: 0, costUsd: 0 }; } } } as unknown as QaSessionHandle);
+    prepareFixtureAdapter(adapter, root);
+    const createQa = async (cwd: string): Promise<QaSessionHandle> => ({ adapter: prepareFixtureAdapter({ agent: "codex", sessionId: () => "confined-preparation", events: async function* () {}, close: async () => {}, sendTurn: async () => { preparationTurns++; return { text: "Controlled preparation failure", isError: true, numTurns: 0, costUsd: 0 }; } }, cwd) } as unknown as QaSessionHandle);
     const args: ConstructorParameters<typeof Foreman> = [adapter, new Log(join(root, ".foreman", "mode-test.jsonl")), false, false, 1, root, undefined, createQa]; args[22] = "run"; args[24] = ticket.id;
     const result = await new Foreman(...args).runBuilderWork("Implement approved token guard"); assert.equal(result.status.kind, "done", result.result.text);
     assert.equal(builderTurns, 1); assert.equal(preparationTurns, mode === "shadow" ? 1 : 0);

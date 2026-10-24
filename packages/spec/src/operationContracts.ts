@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { continuityDeltaV1Schema, ticketPopulationProposalV1Schema, structuredPlanProposalV1Schema, structuredSourceRequestSchema, riskNoteRepairProposalV1Schema, semanticResultV1Schema, qaRemediationProposalV1Schema, discoveryEnvelopeV1Schema, type TicketPopulationProposalV1Contract } from "./providerContracts.js";
-import { createProviderWireContract, decodeCodexOptionalProperties, outputContract, jsonOutputContract, projectCodexSchema, registerProviderWireContract, type OutputContract } from "./structuredOutput.js";
+import { continuityDeltaV1Schema, ticketPopulationProposalV1Schema, structuredPlanProposalV1Schema, structuredSourceRequestSchema, riskNoteRepairProposalV1Schema, semanticResultV1Schema, qaRemediationProposalV1Schema, discoveryEnvelopeV1Schema, grillAuditVerdictV1Schema, ticketPlanProposalV1Schema, type TicketPopulationProposalV1Contract } from "./providerContracts.js";
+import { canonicalJson, createProviderWireContract, decodeCodexOptionalProperties, outputContract, jsonOutputContract, projectCodexSchema, type OutputContract, type ProviderWireContract } from "./structuredOutput.js";
 
 const text = z.string().min(1).max(20_000);
 const textOf = (max = 20_000) => z.string().min(1).max(max);
@@ -34,6 +34,34 @@ export const ticketPopulationDraftSchema = ticketPopulationProposalV1Schema.exte
   tickets: z.array(ticketPopulationProposalV1Schema.shape.tickets.element.omit({ qa_preparation: true, documentation: true })).max(200),
 });
 export const ticketPopulationOutput = operationContract("ticket-population", ticketPopulationDraftSchema);
+/** A subordinate streamed page; only ticket population may select this operation. */
+export const ticketPopulationPageOutput = operationContract("ticket-population-page", z.strictObject({
+  plan_id: ticketPopulationDraftSchema.shape.plan_id,
+  revision: ticketPopulationDraftSchema.shape.revision,
+  tickets: z.array(ticketPopulationDraftSchema.shape.tickets.element).max(150),
+  retirements: ticketPopulationDraftSchema.shape.retirements,
+  terminal: z.boolean(),
+}));
+/** Replay-only page identity from the pre-streaming v2 candidate. Never selected for new work. */
+export const retiredTicketPopulationPageOutput = operationContract("ticket-population-page", z.strictObject({
+  plan_id: ticketPopulationDraftSchema.shape.plan_id, revision: ticketPopulationDraftSchema.shape.revision,
+  tickets: z.array(ticketPopulationDraftSchema.shape.tickets.element).max(150), terminal: z.boolean(),
+}));
+export function retiredTicketPopulationPageProviderWireContracts(): readonly ProviderWireContract[] {
+  const contract = retiredTicketPopulationPageOutput;
+  return (["claude", "codex"] as const).map(provider => {
+    const schema = provider === "claude" ? contract.jsonSchema : projectCodexSchema(contract.jsonSchema) as Record<string, unknown>;
+    return createProviderWireContract({ canonical: contract, provider, profile: `${provider}-ticket-population-page-v2`, variant: "default", wireVersion: 2,
+      wireSchema: schema, maximumSchemaBytes: Buffer.byteLength(canonicalJson(schema)) + 1024,
+      maximumResponseBytes: Math.max(65_536, Math.min(1_000_000, Buffer.byteLength(canonicalJson(schema)) * 16)),
+      normalizerId: provider === "claude" ? "identity" : "codex-optional-properties", normalizerVersion: 1,
+      normalize: provider === "claude" ? value => value : value => decodeCodexOptionalProperties(contract.jsonSchema, value),
+      guidanceId: `ticket-population-page-${provider}-v2`,
+      guidance: "Return one native ticket-population-page JSON envelope. Do not invent host identifiers or fields not requested by the selected schema.",
+    });
+  });
+}
+
 export const structuredPlanOutput = operationContract("structured-plan", structuredPlanProposalV1Schema, { sources: true });
 
 // Codex's strict schema mode makes every optional property a required nullable
@@ -131,44 +159,59 @@ export const uninstallProposalOutput = operationContract("uninstall-proposal", z
   followUpQuestion: z.string().trim().min(1).max(4000).optional(),
 }), { graph: false });
 
+/** Canonical CLI planning/audit contracts live in spec, never in a command module. */
+export const ticketPlanOutput = operationContract("ticket-plan", ticketPlanProposalV1Schema, { sources: true });
+export const grillAuditOutput = operationContract("grill-audit", grillAuditVerdictV1Schema);
+
 /**
- * These descriptors replace adapter-side schema derivation.  They are still
- * deliberately marked compatibility profiles until an operation has a
- * purpose-built wire shape; the registry makes that remaining work visible
- * and prevents an adapter from silently inventing a profile.
+ * Every operation/provider pair is registered with a unique immutable
+ * descriptor identity.  The shared builder only removes duplication; it does
+ * not create a shared compatibility profile.
  */
-function registerOperationWireProfiles(contract: OutputContract): void {
+function operationWireProfiles(contract: OutputContract): ProviderWireContract[] {
   if (contract === ticketPopulationOutput) {
-    registerProviderWireContract(createProviderWireContract({
-      canonical: contract, provider: "claude", profile: "claude-ticket-population-v1", variant: "default", wireVersion: 1,
+    return [createProviderWireContract({
+      canonical: contract, provider: "claude", profile: "claude-ticket-population-v2", variant: "default", wireVersion: 2,
       wireSchema: contract.jsonSchema, maximumSchemaBytes: 250_000, maximumResponseBytes: 1_000_000,
       normalizerId: "identity", normalizerVersion: 1, normalize: value => value,
-      guidanceId: "ticket-population-v1", guidance: () => "Return one native ticket-population JSON envelope. Do not invent host identifiers, QA preparation, or documentation fields.",
-    }));
-    registerProviderWireContract(createProviderWireContract({
-      canonical: contract, provider: "codex", profile: "codex-ticket-population-v1", variant: "default", wireVersion: 1,
+      guidanceId: "ticket-population-claude-v2", guidance: "Return one native ticket-population JSON envelope. Do not invent host identifiers, QA preparation, or documentation fields.",
+    }), createProviderWireContract({
+      canonical: contract, provider: "codex", profile: "codex-ticket-population-v2", variant: "default", wireVersion: 2,
       wireSchema: projectCodexSchema(z.toJSONSchema(ticketPopulationCodexWire, { target: "draft-7", io: "input" })) as Record<string, unknown>, maximumSchemaBytes: 250_000, maximumResponseBytes: 1_000_000,
       normalizerId: "ticket-population-codex-v1", normalizerVersion: 1, normalize: normalizeTicketPopulationCodexWire,
-      guidanceId: "ticket-population-v1", guidance: () => "Return one flat ticket-population JSON record. Its root fields are version, operation, kind, summary, payload, reason, nextAction, question, choices, and continuity. kind is completed, blocked, or needs-input. For completed, provide summary and payload; for blocked, provide reason and nextAction; for needs-input, provide question and choices. Do not nest a canonical result envelope. Do not include QA/documentation fields or host identifiers.",
-    }));
-    return;
+      guidanceId: "ticket-population-codex-v2", guidance: "Return one flat ticket-population JSON record. Its root fields are version, operation, kind, summary, payload, reason, nextAction, question, choices, and continuity. kind is completed, blocked, or needs-input. For completed, provide summary and payload; for blocked, provide reason and nextAction; for needs-input, provide question and choices. Do not nest a canonical result envelope. Do not include QA/documentation fields or host identifiers.",
+    })];
   }
-  registerProviderWireContract(createProviderWireContract({
-    canonical: contract, provider: "claude", profile: "claude-operation-compat-v1", variant: "default", wireVersion: 1,
-    wireSchema: contract.jsonSchema, maximumSchemaBytes: 1_000_000, maximumResponseBytes: 2_000_000,
+  const claudeSchema = contract.jsonSchema;
+  const codexSchema = projectCodexSchema(contract.jsonSchema) as Record<string, unknown>;
+  const budget = (schema: Record<string, unknown>) => {
+    const bytes = Buffer.byteLength(canonicalJson(schema));
+    return Math.max(65_536, Math.min(1_000_000, bytes * 16));
+  };
+  return [createProviderWireContract({
+    canonical: contract, provider: "claude", profile: `claude-${contract.operation}-v2`, variant: "default", wireVersion: 2,
+    wireSchema: claudeSchema, maximumSchemaBytes: Buffer.byteLength(canonicalJson(claudeSchema)) + 1024, maximumResponseBytes: contract.operation === "ticket-population-page" ? 750 * 1024 : budget(claudeSchema),
+    ...(contract.operation === "ticket-population-page" ? { maximumPageBytes: 750 * 1024 } : {}),
     normalizerId: "identity", normalizerVersion: 1, normalize: value => value,
-    guidanceId: "operation-envelope-v1", guidance: () => "Return one native JSON operation envelope. Do not invent host identifiers or fields not requested by the selected schema.",
-  }));
-  registerProviderWireContract(createProviderWireContract({
-    canonical: contract, provider: "codex", profile: "codex-operation-compat-v1", variant: "default", wireVersion: 1,
-    wireSchema: projectCodexSchema(contract.jsonSchema) as Record<string, unknown>, maximumSchemaBytes: 1_000_000, maximumResponseBytes: 2_000_000,
+    guidanceId: `${contract.operation}-claude-v2`, guidance: `Return one native ${contract.operation} JSON envelope. Do not invent host identifiers or fields not requested by the selected schema.`,
+  }), createProviderWireContract({
+    canonical: contract, provider: "codex", profile: `codex-${contract.operation}-v2`, variant: "default", wireVersion: 2,
+    wireSchema: codexSchema, maximumSchemaBytes: Buffer.byteLength(canonicalJson(codexSchema)) + 1024, maximumResponseBytes: contract.operation === "ticket-population-page" ? 750 * 1024 : budget(codexSchema),
+    ...(contract.operation === "ticket-population-page" ? { maximumPageBytes: 750 * 1024 } : {}),
     normalizerId: "codex-optional-properties", normalizerVersion: 1, normalize: value => decodeCodexOptionalProperties(contract.jsonSchema, value),
-    guidanceId: "operation-envelope-v1", guidance: () => "Return one native JSON operation envelope. Do not invent host identifiers or fields not requested by the selected schema.",
-  }));
+    guidanceId: `${contract.operation}-codex-v2`, guidance: `Return one native ${contract.operation} JSON envelope. Do not invent host identifiers or fields not requested by the selected schema.`,
+  })];
 }
 
-[
+export function operationProviderWireContracts(): readonly ProviderWireContract[] {
+  return [
   ticketPopulationOutput, structuredPlanOutput, riskNoteRepairOutput,
   semanticExtractionOutput, plannerRemediationOutput, discoveryOutput,
   guidedRecoveryOutput, branchAuditOutput, uninstallProposalOutput,
-].forEach(registerOperationWireProfiles);
+  ticketPlanOutput, grillAuditOutput,
+].flatMap(operationWireProfiles);
+}
+
+export function ticketPopulationPageProviderWireContracts(): readonly ProviderWireContract[] {
+  return operationWireProfiles(ticketPopulationPageOutput);
+}

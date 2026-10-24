@@ -23,8 +23,6 @@ export interface TicketSliceProposal {
   source_refs?: Array<{ source_id: string; fingerprint: string; item?: string; url?: string | null; note?: string | null }>;
 }
 export interface TicketPopulationProposalV1 { version: 1; plan_id: string; revision: number; tickets: TicketSliceProposal[]; retirements: string[] }
-export const TICKET_POPULATION_PROPOSAL_START = "RAFI_TICKET_POPULATION_PROPOSAL_START";
-export const TICKET_POPULATION_PROPOSAL_END = "RAFI_TICKET_POPULATION_PROPOSAL_END";
 export interface PopulationRiskWaiver { ticketId: string; reason: string; actor: string }
 export interface MaterializedTicketPopulation { tickets: TicketDef[]; delivery: DeliveryConfig; retirements: string[]; sliceToTicket: Map<string, string>; riskWaivers?: PopulationRiskWaiver[] }
 export type PopulationBranchStrategy = "current" | "batch" | "branch-per-ticket";
@@ -106,30 +104,6 @@ function stableJson(value: unknown): string {
     return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
-}
-
-export function extractTicketPopulationProposal(output: string): TicketPopulationProposalV1 {
-  const start = output.lastIndexOf(TICKET_POPULATION_PROPOSAL_START); const end = output.lastIndexOf(TICKET_POPULATION_PROPOSAL_END);
-  let raw: string;
-  if (start >= 0 || end >= 0) {
-    if (start < 0 || end <= start) throw new Error(`ticket-maker output is missing ${TICKET_POPULATION_PROPOSAL_START}/${TICKET_POPULATION_PROPOSAL_END}`);
-    raw = output.slice(start + TICKET_POPULATION_PROPOSAL_START.length, end).trim();
-  } else {
-    // STEP_STATUS remains the workflow status contract, but the proposal
-    // payload may be plain JSON. Do not scan arbitrary prose for an object.
-    const status = output.search(/^\s*STEP_STATUS:\s*[^\r\n]*(?:\r?\n|$)/m);
-    raw = (status >= 0 ? output.slice(0, status) : output).trim();
-    if (!/^(?:\{[\s\S]*\}|\[[\s\S]*\]|```(?:json)?[\s\S]*```)$/.test(raw)) {
-      throw new Error(`ticket-maker output is missing ${TICKET_POPULATION_PROPOSAL_START}/${TICKET_POPULATION_PROPOSAL_END}`);
-    }
-    if (status < 0) throw new Error("ticket-maker output is missing STEP_STATUS marker");
-  }
-  raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch (error) { throw new Error(`ticket-maker proposal is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
-  const validated = ticketPopulationProposalV1Schema.safeParse(parsed);
-  if (!validated.success) throw new Error(`ticket-maker proposal contract validation failed:\n${zodIssues(validated.error).map((issue) => `- ${issue}`).join("\n")}`);
-  return validated.data;
 }
 
 export function validateTicketPopulationProposal(proposal: TicketPopulationProposalV1, plan: StructuredPlanV1, existing: TicketDef[], options: { branchStrategy?: PopulationBranchStrategy } = {}): string[] {

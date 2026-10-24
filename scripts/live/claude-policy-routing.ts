@@ -4,6 +4,9 @@ import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { ClaudeAdapter } from "../../packages/ai-foreman/src/adapters/claude.js";
 import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
+import { runSupervisedStructuredLive } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("claude-policy-routing", async (supervisor) => {
 if (process.env.RAFI_LIVE_RECOVERY !== "1") throw new Error("Explicit live authorization required");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
 if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error("Approved deadline is missing or expired");
@@ -36,3 +39,6 @@ try {
   }
 } catch (error) { records.push({ error: String(error) }); writeFileSync(join(root, "results.json"), JSON.stringify(records, null, 2)); throw error; }
 console.log(JSON.stringify(records));
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

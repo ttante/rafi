@@ -1,4 +1,4 @@
-import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativeFixtureTurn, prepareFixtureAdapter } from "./helpers/nativeOutput.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -26,12 +26,14 @@ test("delivery acknowledges exact version on actual scoped session and renews af
   try {
     assert.throws(() => actualContractSession({ ...adapter, sessionId: () => "foreign-native-session" }, root, root), /actual scoped Builder/);
     assert.throws(() => actualContractSession({ ...adapter, sessionRef: () => ({ ...adapter.sessionRef!()!, role: "qa" }) }, root, root), /actual scoped Builder/);
+    prepareFixtureAdapter(adapter, root);
     const receipt = await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket"); assert.equal(receipt.sessionId, "builder"); assert.equal(accepted, 0);
     assert.equal(assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root), adapter).contentDigest, contract.contentDigest);
     const freshAdapter = { ...adapter };
     assert.throws(() => assertContractReceipt(store, "run", "T1", digest, actualContractSession(freshAdapter, root, root), freshAdapter), /current adapter/);
     assert.equal(assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root)).contentDigest, contract.contentDigest);
     sequence++; assert.throws(() => assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root)), /actual-session/);
+    prepareFixtureAdapter(adapter, root);
     await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket"); assert.equal(accepted, 1);
     sessionId = "replacement"; assert.throws(() => assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root)), /actual-session/);
     ackDigest = "b".repeat(64); await assert.rejects(() => deliverVerificationContract(contract, store, adapter, root, root, "Full ticket"), /stale/);
@@ -53,6 +55,7 @@ test("Codex delivery records the actual Builder contract and configures a non-bl
     sendTurn: async () => { sends++; return { text: "unexpected", isError: false, numTurns: 1, costUsd: 0 }; }, events: async function* () {}, close: async () => {},
   };
   try {
+    prepareFixtureAdapter(adapter, root);
     const receipt = await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket");
     assert.equal(receipt.sessionId, "codex-builder"); assert.equal(sends, 0, "Codex does not require a separate acknowledgement turn");
     assert.match(reminder, /context compacted/); assert.match(reminder, new RegExp(contract.contentDigest));
@@ -77,6 +80,7 @@ test("Codex contract delivery survives the production Builder wrapper chain", as
   const continuous = new ContinuityAdapter({ adapter: recovering, projectDir: root, runId: "run", role: "builder", settings: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false, session_strategy: "compact", display_session_cost: false, auto_compact_threshold_percent: 65, compact_maximum: 1, settings_revision: 1 } });
   const adapter = new RoleStatusAdapter(continuous, () => {}, () => {});
   try {
+    prepareFixtureAdapter(adapter, root);
     await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket");
     assert.match(reminder, /context compacted/);
     assert.equal(assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root), adapter).contentDigest, contract.contentDigest);
@@ -105,6 +109,7 @@ test("large transport is lossless, byte bounded and cannot acknowledge a missing
     if (segment) { segments++; const value = JSON.parse(segment[1]!); if (omit) value.missingSections = [String(value.index)]; return nativeFixtureTurn(policy, "builder", value); }
     return nativeFixtureTurn(policy, "builder", { workId: "T1", revision: 1, digest: contract.contentDigest, missingSections: [] });
   } };
+  prepareFixtureAdapter(adapter, root);
   try { await deliverVerificationContract(contract, store, adapter, root, root, text); assert.ok(segments > 1); omit = true; await assert.rejects(() => deliverVerificationContract(contract, store, adapter, root, root, text), /incomplete/); assert.equal(store.receipts(contract.contentDigest).length, 1); }
   finally { db.close(); rmSync(root, { recursive: true, force: true }); }
 });

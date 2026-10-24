@@ -14,6 +14,9 @@ import { completedJourneyTickets } from "./journey-completion.mjs";
 import { loadTicketsConfig, resolveTicketPaths } from "../../packages/ai-foreman/dist/tickets/config.js";
 import { loadTickets } from "../../packages/ai-foreman/dist/tickets/ticketLoader.js";
 
+import { runSupervisedStructuredLive, trackStructuredLiveChild } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("incident-journeys", async (supervisor) => {
 if (process.env.RAFI_LIVE_INCIDENT !== "1") throw new Error("Explicit online authorization and RAFI_LIVE_INCIDENT=1 are required.");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
 if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error("A valid authorized absolute deadline is required.");
@@ -63,6 +66,7 @@ async function phase(project, provider, seed, name, args, limitMs, expectedCodes
   const row = { provider, seed, phase: name, args, log, startedAt: new Date().toISOString(), status: "running" }; ledger.push(row); save();
   console.log(`${provider} seed ${seed}: ${name}`);
   const child = spawn(process.execPath, [cli, ...args], { cwd: project, env: { ...process.env, NO_COLOR: "1" }, stdio: ["ignore", fd, fd] });
+    trackStructuredLiveChild(child);
   let timedOut = false, force, interrupted = false, watchError;
   const baselineSource = name === "build-interrupt" ? readFileSync(join(project, "index.mjs"), "utf8") : undefined;
   const watch = name === "build-interrupt" ? setInterval(() => {
@@ -195,6 +199,10 @@ try {
     await phase(project, provider, seed, "plan", ["plan", ".", "--agent", provider, "--brief", brief, "--no-grill-me", "--yes"], 300_000);
     await phase(project, provider, seed, "ticket-setup", ["tickets", "setup:init", "--project", project, "--defaults", "--branch-strategy", "current", "--completion", "none", "--population-mode", "approved_plan"], 60_000);
     await phase(project, provider, seed, "populate", ["tickets", "populate", "--project", project, "--agent", provider, "--yes"], 300_000);
+    if (process.env.RAFI_LIVE_TICKET_PLAN_JOURNEY === "1") {
+      await phase(project, provider, seed, "ticket-plan", ["tickets", "plan", "--project", project, "--agent", provider,
+        "--brief", `${brief} Preserve the existing two approved tickets and their identities; review and approve that same scope without adding tickets.`, "--no-grill-me", "--yes"], 300_000);
+    }
     await phase(project, provider, seed, "validate", ["tickets", "validate", "--project", project], 60_000);
     await phase(project, provider, seed, "queue", ["tickets", "queue", "--project", project], 60_000);
     await driveRemainingTickets(project, provider, seed);
@@ -213,3 +221,6 @@ try {
   }
 } catch (error) { ledger.push({ status: "fail", error: String(error) }); save(); throw error; }
 console.log(JSON.stringify({ journeysPassed: providers.length * repetitions, evidence: root }));
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

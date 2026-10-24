@@ -36,6 +36,7 @@ export function captureCurrentWorkflowSessionIdentity(cwd: string): string {
 
 /** Fence every provider boundary against an unexpected user/provider ref switch. */
 export class CurrentWorkflowGuardAdapter implements BuilderAdapter {
+  postConfirmedDispatch(reference: import("../adapters/types.js").ConfirmedDispatchReference): Promise<TurnResult | void> { return this.adapter.postConfirmedDispatch?.(reference) ?? Promise.resolve(); }
   readonly agent: BuilderAdapter["agent"];
   constructor(private readonly adapter: BuilderAdapter, private readonly cwd: string, private readonly expected = captureCurrentWorkflowIdentity(cwd)) { this.agent = adapter.agent; }
   async sendTurn(text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {

@@ -1,3 +1,4 @@
+import { streamTicketPopulation } from "../ticketPopulationPaging.js";
 import { operationPayload } from "../structuredOperation.js";
 import { Command } from "commander";
 import { accent, error, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
@@ -5,11 +6,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { DeletedTicketResetPolicy, RequestedTicketResetTarget, SourceRegistryConfig, StructuredPlanV1, TicketGroupId } from "rafi-spec";
-import { ticketPopulationOutput, riskNoteRepairOutput, type TicketPopulationProposalV1Contract, riskNoteRepairProposalV1Schema, zodIssues } from "rafi-spec";
+import { riskNoteRepairOutput, type TicketPopulationProposalV1Contract, riskNoteRepairProposalV1Schema, zodIssues } from "rafi-spec";
 import { select, text, confirm, isCancel, multiselect } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
-import { Foreman, parseStepStatus, type StepStatus } from "../foreman.js";
+import { Foreman } from "../foreman.js";
 import type { EffortLevel } from "../adapters/types.js";
 import { printEvents } from "./events.js";
 import {
@@ -86,7 +87,8 @@ import {
   resumeInterviewRecord,
   type InterviewRecord,
 } from "../interviews.js";
-import { applyTicketPopulation, assertRiskPlanOnlyCorrection, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, recoverTicketPublications, TicketPopulationValidationError, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
+import { applyTicketPopulation, assertRiskPlanOnlyCorrection, authorizeTicketRetirements, materializeTicketPopulation, recoverTicketPublications, TicketPopulationValidationError } from "../ticketPopulation.js";
+import { WorkflowDb } from "../workflowDb.js";
 import { loadTickets, saveTickets, validateTicketDefs } from "../tickets/ticketLoader.js";
 import { resolveTicketPaths } from "../tickets/config.js";
 import { formatAllTicketDetails, formatTicketDetails, getAllTicketDetails, getTicketDetails } from "../tickets/details.js";
@@ -103,17 +105,6 @@ let nestedTicketCommandDepth = 0;
 class TicketInterviewCancelled extends Error {}
 function cancelTicketInterview(): never { throw new TicketInterviewCancelled("ticket interview cancelled"); }
 
-/**
- * Ticket Maker may append an explanatory note after its machine envelope.
- * Preserve a schema-valid proposal before Foreman's strict generic marker
- * repair path replaces the response with a status-only correction.
- */
-export function acceptTicketPopulationCompletion(text: string): StepStatus | undefined {
-  try { extractTicketPopulationProposal(text); }
-  catch { return undefined; }
-  const status = parseStepStatus(text, { requireFinalLine: false });
-  return status.kind === "done" || status.kind === "plan_complete" ? status : undefined;
-}
 function fail(msg: string): never {
   if (nestedTicketCommandDepth > 0) throw new Error(msg);
   console.error(`foreman tickets: ${msg}`);
@@ -1535,10 +1526,13 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     if (contextSources.length) {
       console.log(`foreman tickets: context sources ${contextSources.join(" ")}`);
     }
-    let turn = await foreman.runInstruction(
-      buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc),
-      { output: ticketPopulationOutput },
-    );
+    const population = (instruction: string, correction: number) => streamTicketPopulation({
+      projectDir: dir, interviewId: planningRecord.id, correction, instruction,
+      checkpoint: scope => { planningRecord = checkpointInterview(dir, planningRecord, { decisions: { ...planningRecord.decisions, populationArtifact: scope } }); },
+      dispatch: (instruction, policy) => foreman.runInstruction(instruction, policy),
+    });
+    const initialPopulation = await population(buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc), 0);
+    let turn = initialPopulation.turn;
     planningRecord = checkpointInterview(dir, planningRecord, { runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() }, decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text, structuredResponse: turn.result.structured } });
 
     log.write("ticket-populate", {
@@ -1560,7 +1554,8 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     }
 
     const existing = loadTickets(resolveTicketPaths(ticketsConfig, dir).tickets);
-    let proposal = operationPayload<TicketPopulationProposalV1Contract>(turn.result, ticketPopulationOutput);
+    if (!turn.result.selectedDispatch) throw new Error("Ticket population response has no sealed dispatch tuple");
+    let proposal = initialPopulation.proposal;
     let proposalArtifact = savePopulationProposalArtifact(dir, planningRecord.id, approvedPlan, proposal);
     let materialized: ReturnType<typeof materializeTicketPopulation>;
     let populationWaiver: { ticketIds: string[]; reason: string; actor: string } | undefined;
@@ -1583,7 +1578,8 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
           continue;
         }
         console.log(`foreman tickets: ${ids} need risk plans; asking Ticket Maker for a targeted correction (${correction + 1}/2)`);
-        const correctionTurn = await foreman.runInstruction(`Correct the existing ticket population proposal only. Do not change plan_id, revision, slice_ref mappings, ticket IDs, dependencies, scope, ownership, acceptance criteria, tests, retirements, or any field except \`rollback\` for these tickets: ${ids}. Each listed ticket is Medium or High risk and requires a concrete rollback or mitigation plan in \`rollback\`; \`notes\` cannot satisfy this requirement. Return the complete replacement proposal in the native ticket-population response.`, { output: ticketPopulationOutput });
+        const correctedPopulation = await population(`Correct the existing ticket population proposal only. Do not change plan_id, revision, slice_ref mappings, ticket IDs, dependencies, scope, ownership, acceptance criteria, tests, retirements, or any field except \`rollback\` for these tickets: ${ids}. Each listed ticket is Medium or High risk and requires a concrete rollback or mitigation plan in \`rollback\`; \`notes\` cannot satisfy this requirement. Return the complete replacement proposal through native ticket-population pages.`, correction + 1);
+        const correctionTurn = correctedPopulation.turn;
         if (correctionTurn.result.isError || (correctionTurn.status.kind !== "done" && correctionTurn.status.kind !== "plan_complete")) {
           throw new Error(`Ticket Maker could not correct missing risk plans for ${ids}: ${correctionTurn.status.reason ?? correctionTurn.status.error ?? correctionTurn.result.text.slice(0, 200)}`);
         }
@@ -1592,9 +1588,11 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
           runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() },
           decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text, structuredResponse: turn.result.structured, riskPlanCorrections: correction + 1 },
         });
-        const corrected = operationPayload<TicketPopulationProposalV1Contract>(turn.result, ticketPopulationOutput);
+        const corrected = correctedPopulation.proposal;
         assertRiskPlanOnlyCorrection(proposal, corrected, err.repairableRiskSliceRefs);
         proposal = corrected;
+        if (!turn.result.selectedDispatch) throw new Error("Ticket population correction has no sealed dispatch tuple");
+        // A correction is immutable lineage, never a rewrite of the terminal proposal.
         proposalArtifact = savePopulationProposalArtifact(dir, planningRecord.id, approvedPlan, proposal);
       }
     }
@@ -1624,6 +1622,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     fail(err instanceof TicketPopulationRiskCorrectionExhaustedError ? message : `${message}\nRecover with \`rafi plan:doctor\`.`);
   }
 }
+
 
 interface RepairRiskNotesOptions { project?: string; agent?: string; model?: string; effort?: string; fast?: boolean; apply?: boolean; yes?: boolean }
 

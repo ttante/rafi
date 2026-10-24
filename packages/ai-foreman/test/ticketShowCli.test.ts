@@ -19,10 +19,6 @@ function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "foreman-show-cli-test-"));
 }
 
-function tsxBin(): string {
-  const local = join(packageRoot, "node_modules", ".bin", "tsx");
-  return existsSync(local) ? local : resolve(packageRoot, "..", "..", "node_modules", ".bin", "tsx");
-}
 
 function definition(id: string, order: number): TicketDef {
   return {
@@ -44,7 +40,7 @@ function definition(id: string, order: number): TicketDef {
 }
 
 function run(cwd: string, args: string[]) {
-  return spawnSync(tsxBin(), [entry, "tickets", "show", ...args], { cwd, encoding: "utf8" });
+  return spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), entry, "tickets", "show", ...args], { cwd, encoding: "utf8" });
 }
 
 test("tickets show CLI requires exactly one selection mode", () => {

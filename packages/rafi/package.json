@@ -37,7 +37,7 @@
     "prepublishOnly": "pnpm test && pnpm typecheck"
   },
   "engines": {
-    "node": ">=22"
+    "node": "24.x"
   },
   "dependencies": {
     "@clack/prompts": "^1.4.0",

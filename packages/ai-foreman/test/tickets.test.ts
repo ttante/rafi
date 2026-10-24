@@ -1,3 +1,6 @@
+import { rawProviderFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy, operationStatus } from "../src/structuredOperation.js";
+import { ticketPopulationOutput } from "rafi-spec";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
@@ -34,7 +37,6 @@ import {
   resolvePopulationMode,
   resolvePopulationPlan,
   resolvePopulateSources,
-  acceptTicketPopulationCompletion,
 } from "../src/cli/tickets.js";
 import { loadTicketsConfig } from "../src/tickets/config.js";
 import { applyImportedItems } from "../src/tickets/importer.js";
@@ -607,10 +609,10 @@ test("ticket population preserves a valid proposal when notes follow the status 
     'STEP_STATUS: done | summary="populated"',
     "provider notes",
   ].join("\n");
-  assert.equal(acceptTicketPopulationCompletion(response)?.kind, "done");
+  assert.equal(operationStatus(rawProviderFixtureTurn(nativePolicy(ticketPopulationOutput), "fixture", response, "claude"), ticketPopulationOutput).kind, "unknown");
 });
 
-test("ticket population accepts a plain JSON proposal followed by STEP_STATUS", () => {
+test("ticket population rejects a plain JSON proposal followed by STEP_STATUS", () => {
   const proposal = {
     version: 1,
     plan_id: "pln_test",
@@ -634,8 +636,8 @@ test("ticket population accepts a plain JSON proposal followed by STEP_STATUS", 
     retirements: [],
   };
   assert.equal(
-    acceptTicketPopulationCompletion(`${JSON.stringify(proposal)}\nSTEP_STATUS: done | summary="populated"`)?.kind,
-    "done",
+    operationStatus(rawProviderFixtureTurn(nativePolicy(ticketPopulationOutput), "fixture", `${JSON.stringify(proposal)}\nSTEP_STATUS: done | summary="populated"`, "claude"), ticketPopulationOutput).kind,
+    "unknown",
   );
 });
 

@@ -1,4 +1,4 @@
-import { nativeFixtureFromText, nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { workFixtureTurn, nativeFixtureTurn } from "./helpers/nativeOutput.js";
 import { nativePolicy } from "../src/structuredOperation.js";
 import { workReportOutput } from "rafi-spec";
 import { admitFixtureWork } from "./helpers/workAdmission.js";
@@ -27,7 +27,7 @@ const settings: ResolvedAgentSettings = {
 };
 const delta = baselineContinuityDelta("Implement the next ticket");
 const marker = `RAFI_CONTINUITY_DELTA: ${JSON.stringify(delta)}`;
-const result = (text: string, isError = false): TurnResult => ({ text, isError, numTurns: 1, costUsd: 0 });
+const result = (text: string, isError = false, nativeAlternative?: unknown): TurnResult & { nativeAlternative?: unknown } => ({ text, isError, numTurns: 1, costUsd: 0, nativeAlternative });
 
 class ScriptedBuilder implements BuilderAdapter {
   readonly agent = "codex" as const;
@@ -35,7 +35,7 @@ class ScriptedBuilder implements BuilderAdapter {
   compactCalls = 0;
   closed = false;
   ref: ProviderSessionRefV1;
-  constructor(cwd: string, id: string, generation = 0, private readonly turns: TurnResult[] = []) {
+  constructor(cwd: string, id: string, generation = 0, private readonly turns: Array<TurnResult & { nativeAlternative?: unknown }> = []) {
     this.ref = {
       version: 1, provider: "codex", sessionId: id, role: "builder", stream: "builder",
       generation, cwd, configRoot: cwd, workspaceIdentity: "fixture",
@@ -51,9 +51,10 @@ class ScriptedBuilder implements BuilderAdapter {
       const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(instruction)!;
       return nativeFixtureTurn(policy, this.ref.sessionId, { manifestDigest: match[1], generation: Number(match[2]), missingResources: [] }, "codex", undefined, delta);
     }
-    return { ...nativeFixtureFromText(policy, this.ref.sessionId, turn.text, "codex"), isError: turn.isError };
+    return { ...workFixtureTurn(policy, this.ref.sessionId, "codex", turn.nativeAlternative), text: turn.text, isError: turn.isError };
   }
   sessionId(): string { return this.ref.sessionId; }
+  async prepareSession(): Promise<ProviderSessionRefV1> { return this.ref; }
   sessionRef(): ProviderSessionRefV1 { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.ref = ref; }
   async contextUsage() { return { used: 10, maximum: 100, percentage: 10 }; }
@@ -158,7 +159,7 @@ test("investigation: repeated blocked replies stop after one explanation", async
   };
   try {
     const adapter = new ScriptedBuilder(dir, "session", 0, [
-      ...Array.from({ length: 8 }, () => result('STEP_STATUS: blocked | reason="Registry unavailable"')),
+      ...Array.from({ length: 8 }, () => result("Registry unavailable", false, { kind: "blocked", reason: "Registry unavailable", nextAction: "Restore approved access" })),
       result('STEP_STATUS: done | summary="fixture stop"'),
     ]);
     const foreman = new Foreman(adapter, new Log(join(dir, "log.jsonl")), false, false);

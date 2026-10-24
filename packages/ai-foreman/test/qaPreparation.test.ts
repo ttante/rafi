@@ -4,8 +4,8 @@ import { candidate, assessment, storeFixture, digest } from "./qaPreparationFixt
 import { prepareVerificationContract, draftOutput } from "../src/qaPreparation.js";
 import { draftDigest, inventoryDigest } from "../src/qaVerificationContract.js";
 import type { QaContractCandidateV1, OutputContract } from "rafi-spec";
-import { structuredReceipt } from "../src/adapters/structured.js";
-import { validateStructuredCandidate } from "rafi-spec";
+import { canonicalFixtureTurn } from "./helpers/nativeOutput.js";
+import { validateStructuredCandidate, providerWireContract } from "rafi-spec";
 import type { PreparationDependencies } from "../src/qaPreparation.js";
 function nativePreparation(output: OutputContract, value: any, sessionId: string, operationId: string, escalation?: unknown) {
   const payload = structuredClone(value);
@@ -16,8 +16,7 @@ function nativePreparation(output: OutputContract, value: any, sessionId: string
       for (const reference of evidence.references) delete reference.digest;
     }
     if (escalation) {
-      const valueOnWire = { version: 1, operation: output.operation, result: { kind: "completed", summary: "fixture", payload: { kind: "escalation", escalation } }, continuity: null };
-      return { text: "Presentation has no authoritative payload", sessionId, structured: structuredReceipt(output, "claude", valueOnWire, { dispatchId: operationId, sessionId, nativeTurnId: operationId, nativeItemId: `item-${operationId}` }, "decoded-json"), output };
+      return { ...canonicalFixtureTurn({ output, dispatchId: operationId, logicalActionId: operationId }, sessionId, { kind: "escalation", escalation }, "claude"), sessionId, output, operationId };
     }
     Object.assign(payload, { kind: "draft" });
   } else if (output.operation === "qa-preparation-depth") {
@@ -25,15 +24,13 @@ function nativePreparation(output: OutputContract, value: any, sessionId: string
   } else {
     for (const field of ["draftPayloadDigest", "inventoryDigest", "policyVersion", "operationId", "sessionId", "authorSessionId"]) delete payload[field];
   }
-  const valueOnWire = { version: 1, operation: output.operation, result: { kind: "completed", summary: "fixture", payload }, continuity: null };
-  const structured = structuredReceipt(output, "claude", valueOnWire, { dispatchId: operationId, sessionId, nativeTurnId: operationId, nativeItemId: `item-${operationId}` }, "decoded-json");
-  return { text: "Presentation has no authoritative payload", sessionId, structured, output };
+  return { ...canonicalFixtureTurn({ output, dispatchId: operationId, logicalActionId: operationId }, sessionId, payload, "claude"), sessionId, output, operationId };
 }
 
 test("native draft payload separates an escalation from the operation result envelope", () => {
   const draft = candidate();
   const normal = nativePreparation(draftOutput, draft, "author", "draft");
-  const response = validateStructuredCandidate(draftOutput, normal.structured);
+  const response = validateStructuredCandidate(draftOutput, normal.structured, providerWireContract(draftOutput, "claude"), normal.selectedDispatch!);
   assert.equal(response.result.kind, "completed");
   if (response.result.kind === "completed") assert.equal(response.result.payload.kind, "draft");
   const malformed = {

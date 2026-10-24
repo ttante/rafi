@@ -176,37 +176,12 @@ export function authoritativeInventory(ticket: TicketDef, checklist: string[], i
   }
   return result;
 }
-export function parsePreparationArtifact<T>(text: string, tag: string, maximum = 2 * 1024 * 1024): T {
-  if (Buffer.byteLength(text) > maximum) throw new Error("QA preparation response exceeds size limit");
-  const start = `${tag}_START`, end = `${tag}_END`;
-  // Marker names can appear inline in provider prose or in a quoted repair
-  // instruction. Only a standalone marker line is an envelope boundary.
-  // This keeps the parser strict about malformed envelopes without treating
-  // explanatory text as a second/truncated artifact.
-  const markerOffsets = (marker: string): number[] => {
-    const offsets: number[] = [];
-    const pattern = new RegExp(`^[ \\t]*${marker}[ \\t]*$`, "gm");
-    for (let match = pattern.exec(text); match; match = pattern.exec(text)) offsets.push(match.index);
-    return offsets;
-  };
-  const starts = markerOffsets(start), ends = markerOffsets(end);
-  if (!starts.length || starts.length !== ends.length) throw new Error(`Expected exactly one ${tag} artifact`);
-  const artifacts = starts.map((at, index) => {
-    const from = at + start.length, to = ends[index]!;
-    if (to < from) throw new Error("Malformed preparation artifact envelope");
-    return text.slice(from, to).trim();
-  });
-  if (artifacts.length > 1) {
-    const normalized = artifacts.map(artifact => canonicalContractJson(JSON.parse(artifact)));
-    if (normalized.some(artifact => artifact !== normalized[0])) throw new Error(`Expected exactly one unambiguous ${tag} artifact`);
-  }
-  return JSON.parse(artifacts[0]!) as T;
-}
 /** Capture safe absolute snapshot paths before the disposable snapshot is removed. */
-export function mapSnapshotWorkingDirectories(text: string | Partial<QaContractCandidateV1>, snapshotPath: string): Record<string, string> {
+export function mapSnapshotWorkingDirectories(text: Partial<QaContractCandidateV1>, snapshotPath: string): Record<string, string> {
   const result: Record<string, string> = {};
   try {
-    const draft = typeof text === "string" ? parsePreparationArtifact<QaContractCandidateV1>(text, "RAFI_QA_CANDIDATE") : text;
+    if (typeof text === "string") throw new Error("Snapshot mappings require validated native draft fields");
+    const draft = text;
     const root = realpathSync(snapshotPath);
     for (const check of draft.checks ?? []) for (const method of check.verification ?? []) {
       if (typeof method.cwd !== "string" || !isAbsolute(method.cwd)) continue;

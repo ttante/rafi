@@ -1,4 +1,4 @@
-import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativeFixtureTurn, prepareFixtureAdapter } from "./helpers/nativeOutput.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -163,6 +163,7 @@ for (const provider of ["claude", "codex"] as const) test(`${provider} actual Bu
           return nativeFixtureTurn(policy, "actual-builder", { checks: [{ checkId: "check", applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] }] }, provider);
         },
       };
+      prepareFixtureAdapter(adapter, root);
       await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket");
       seedSession(root, adapter);
       const implementation = { text: "Implementation completed", isError: false, numTurns: 1, costUsd: 0 };

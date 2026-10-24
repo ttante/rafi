@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ContinuityDelta, HandoffAcceptanceReceiptV1, HandoffLineage, HandoffManifestV1, ProviderSessionRefV1, SessionUsageSample } from "rafi-spec";
-import { builderHandoffRequestV1Schema, parseProviderContract, handoffAcceptanceOutput } from "rafi-spec";
+import { builderHandoffRequestV1Schema, parseProviderContract, handoffAcceptanceOutput, providerWireContract } from "rafi-spec";
+import { BoundedTurnEvents, boundedUtf8, receiptFingerprint, rawFingerprint } from "./boundedTurnEvidence.js";
 import type { BuilderAdapter, BuilderEvent, TurnResult } from "./adapters/types.js";
 import { mergeContinuityDeltas, validateContinuityDelta } from "./continuity.js";
 import { nativePolicy, operationInstruction, operationResponse } from "./structuredOperation.js";
@@ -21,8 +22,8 @@ function handoffSessionIdentity(ref: ProviderSessionRefV1): string {
   return JSON.stringify([ref.version, ref.provider, ref.sessionId, ref.role, ref.stream, ref.generation, resolve(ref.cwd), resolve(ref.configRoot), ref.workspaceIdentity, ref.ticketId, ref.deliveryUnitId]);
 }
 
-async function collectHandoffTerminalEvents(adapter: BuilderAdapter, turnId: string): Promise<BuilderEvent[]> {
-  const events: BuilderEvent[] = [];
+async function collectHandoffTerminalEvents(adapter: BuilderAdapter, turnId: string, maximumBytes: number): Promise<BoundedTurnEvents> {
+  const events = new BoundedTurnEvents(maximumBytes);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const collect = (async () => {
     for await (const event of adapter.events()) {
@@ -42,6 +43,7 @@ async function collectHandoffTerminalEvents(adapter: BuilderAdapter, turnId: str
 }
 
 export interface BuilderHandoffRequest {
+  predecessorDispatchId?: string;
   version: 1;
   reason: string;
   delta: ContinuityDelta;
@@ -72,6 +74,7 @@ export function parseBuilderHandoffRequest(text: string | BuilderHandoffRequest)
 }
 
 export interface CreateHandoffInput {
+  predecessorDispatchId?: string;
   runId: string;
   role: "builder" | "qa";
   reason: string;
@@ -161,6 +164,7 @@ export class HandoffService {
   }
 
   stage(input: CreateHandoffInput, now = new Date()): StagedHandoff {
+    if (input.predecessorDispatchId) input = { ...input, roleState: { ...input.roleState, structuredParentDispatchId: input.predecessorDispatchId } };
     this.pruneExpiredCache(now);
     const db = new WorkflowDb(this.projectDir);
     try { return db.atomic(() => {
@@ -364,23 +368,28 @@ export class HandoffService {
       const sendAcceptance = async (prompt: string): Promise<TurnResult> => {
         const hostPromptDigest = db.putEvidence("handoff", Buffer.from(prompt));
         db.appendContinuityEvent({ runId: staged.manifest.runId, role: "host", kind: "handoff_acceptance_intended", payload: { generation: staged.manifest.generation, attempt: acceptanceAttempts.length + 1, hostPromptDigest, preparedRef }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0 });
-        const toolEvents: BuilderEvent[] = [];
-        const stopObserving = successor.observeEvents?.(event => { if (event.kind === "tool") toolEvents.push(event); });
+        const maximumBytes = providerWireContract(handoffAcceptanceOutput, successor.agent).maximumResponseBytes;
+        const observed = new BoundedTurnEvents(maximumBytes);
+        const stopObserving = successor.observeEvents?.(event => observed.push(event));
         let response: TurnResult;
-        try { response = await dispatchWithGraphAccess(this.projectDir, successor, prompt, nativePolicy(handoffAcceptanceOutput, { responseOnly: true, purpose: "contract-acceptance", journalRunId: staged.manifest.runId }), (text, policy) => successor.sendTurn(text, policy)); }
+        try { response = await dispatchWithGraphAccess(this.projectDir, successor, prompt, nativePolicy(handoffAcceptanceOutput, { responseOnly: true, purpose: "contract-acceptance", journalRunId: staged.manifest.runId, parentDispatchId: typeof staged.manifest.roleState?.structuredParentDispatchId === "string" ? staged.manifest.roleState.structuredParentDispatchId : undefined }), (text, policy) => successor.sendTurn(text, policy)); }
+        catch (error) {
+          if (!successor.sessionRef?.()) throw new HandoffAcceptanceError("missing-scoped-successor-session", staged.manifest.runId, staged.manifest.generation, "acceptance requires a prepared scoped successor");
+          throw error;
+        }
         finally { stopObserving?.(); }
-        const events = qaBoundary && response.turnId ? await collectHandoffTerminalEvents(successor, response.turnId) : [];
+        const events = qaBoundary && response.turnId ? await collectHandoffTerminalEvents(successor, response.turnId, maximumBytes) : new BoundedTurnEvents(maximumBytes);
         const attempt = {
           hostPromptDigest,
           providerPromptDigest: db.putEvidence("handoff", Buffer.from(response.providerInstruction ?? response.hostInstruction ?? prompt)),
-          rawResponseDigest: db.putEvidence("handoff", Buffer.from(JSON.stringify({ structured: response.structured, rawResponse: response.rawResponse ?? response.text }))),
-          cleanedResponseDigest: db.putEvidence("handoff", Buffer.from(response.cleanedResponse ?? response.text)),
+          rawResponseDigest: response.transportEvidence?.rawDigest ?? db.putEvidence("handoff", boundedUtf8(response.rawResponse ?? response.text, maximumBytes)),
+          cleanedResponseDigest: db.putEvidence("handoff", boundedUtf8(response.cleanedResponse ?? response.text, maximumBytes)),
           ...(response.turnId ? { providerTurnId: response.turnId } : {}),
-          ...(qaBoundary ? { eventStreamDigest: db.putEvidence("handoff", Buffer.from(JSON.stringify(events))) } : {}),
+          ...(qaBoundary ? { eventStreamDigest: db.putEvidence("handoff", Buffer.from(JSON.stringify(events.metadata()))) } : {}),
         };
         acceptanceAttempts.push(attempt);
-        db.appendContinuityEvent({ runId: staged.manifest.runId, role: "host", kind: "handoff_acceptance_observed", payload: { generation: staged.manifest.generation, attempt, isError: response.isError, failure: response.failure, providerMetadata: response.providerMetadata, activeSession: successor.sessionRef?.() }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0 });
-        if (toolEvents.length || events.some(event => event.kind === "tool")) throw new HandoffAcceptanceError("tool-use-during-acceptance", staged.manifest.runId, staged.manifest.generation, "tools were attempted during the host response-only receipt phase");
+        db.appendContinuityEvent({ runId: staged.manifest.runId, role: "host", kind: "handoff_acceptance_observed", payload: { generation: staged.manifest.generation, attempt, isError: response.isError, failure: response.failure && { ...response.failure, diagnostics: boundedUtf8(response.failure.diagnostics, 4096).toString() }, providerMetadata: response.providerMetadata, activeSession: successor.sessionRef?.() }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0 });
+        if (observed.toolCount || events.toolCount) throw new HandoffAcceptanceError("tool-use-during-acceptance", staged.manifest.runId, staged.manifest.generation, "tools were attempted during the host response-only receipt phase");
         if (response.isError || response.failure) throw new HandoffAcceptanceError("provider-turn-failed", staged.manifest.runId, staged.manifest.generation, "provider rejected or failed the acknowledgement turn");
         const activeRef = successor.sessionRef?.();
         const reportedRef = response.providerMetadata?.sessionRef;
@@ -390,7 +399,7 @@ export class HandoffService {
             || successor.agent !== preparedRef!.provider || handoffSessionIdentity(reportedRef) !== handoffSessionIdentity(preparedRef!)))) {
           throw new HandoffAcceptanceError("successor-identity-mismatch", staged.manifest.runId, staged.manifest.generation, "acknowledgement did not come from the prepared successor identity");
         }
-        if (qaBoundary && (!response.turnId || !events.some((event) => event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === response.turnId))) {
+        if (qaBoundary && (!response.turnId || events.terminalOverflow || events.terminalCount !== 1 || !events.some((event) => event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === response.turnId && receiptFingerprint(event.result) === receiptFingerprint(response) && rawFingerprint(event.result) === rawFingerprint(response)))) {
           throw new HandoffAcceptanceError("missing-terminal-event", staged.manifest.runId, staged.manifest.generation, "QA acknowledgement has no correlated terminal provider event");
         }
         return response;
@@ -429,7 +438,7 @@ export class HandoffService {
       const acceptedDelta = parsed.delta;
       return db.atomic(() => {
       db.appendContinuityEvent({ runId: staged.manifest.runId, role: staged.manifest.role, kind: "handoff_successor_accepted", payload: { generation: staged.manifest.generation, sessionId, sessionRef: successorRef, delta: parsed.delta, acceptanceAttempts }, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
-      const checkpoint = db.publishContinuityCheckpoint({ runId: staged.manifest.runId, role: staged.manifest.role, delta: acceptedDelta, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: successorRef });
+      const checkpoint = db.publishContinuityCheckpoint({ runId: staged.manifest.runId, role: staged.manifest.role, delta: acceptedDelta, authoritativeStateRevision: db.continuityHead(staged.manifest.runId, staged.manifest.role)?.authoritativeStateRevision ?? 0, sessionRef: observedSuccessorRef, origin: { kind: "provider", dispatchId: response.selectedDispatch!.dispatchId, publicationKind: "handoff_acceptance" } });
       const receipt: HandoffAcceptanceReceiptV1 | undefined = successorRef ? { version: 1, runId: staged.manifest.runId, generation: staged.manifest.generation, role: staged.manifest.role,
         manifestDigest: staged.lineage.manifestDigest, continuityCheckpointDigest: staged.manifest.continuityCheckpointDigest, acceptanceCheckpointDigest: checkpoint.digest,
         ...(staged.manifest.predecessorSessionRef ? { predecessorSessionRef: staged.manifest.predecessorSessionRef } : {}), successorSessionRef: successorRef,

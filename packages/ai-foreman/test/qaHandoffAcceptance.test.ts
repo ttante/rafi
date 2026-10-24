@@ -1,5 +1,5 @@
 import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
-import { nativePolicy } from "../src/structuredOperation.js";
+import { nativePolicy, journalStructuredDispatch } from "../src/structuredOperation.js";
 import { qaVerdictOutput } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ContinuityDelta, ProviderSessionRefV1 } from "rafi-spec";
-import type { BuilderAdapter, BuilderEvent, TurnPolicy, TurnResult } from "../src/adapters/types.js";
+import type { BuilderAdapter, BuilderEvent, TurnRequest, TurnResult } from "../src/adapters/types.js";
 import { HANDOFF_ACCEPTED, HandoffAcceptanceError, HandoffService } from "../src/handoffs.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { AsyncQueue } from "../src/util/asyncQueue.js";
@@ -25,7 +25,7 @@ class Successor implements BuilderAdapter {
     this.ref = { version: 1, provider: "codex", sessionId: "successor", role: "qa", stream: "qa", generation: 0,
       cwd: projectDir, configRoot: projectDir, source: "observed", createdAt: new Date(0).toISOString(), validatedAt: new Date(0).toISOString() };
   }
-  async sendTurn(instruction: string, policy?: TurnPolicy): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: TurnRequest): Promise<TurnResult> {
     this.calls++;
     const reported = this.mode === "mismatch" ? { ...this.ref, sessionId: "different-session" } : this.ref;
     const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(instruction);
@@ -39,6 +39,7 @@ class Successor implements BuilderAdapter {
   }
   sessionId(): string { return this.ref.sessionId; }
   sessionRef(): ProviderSessionRefV1 { return this.ref; }
+  async prepareSession(): Promise<ProviderSessionRefV1> { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.ref = ref; }
   events(): AsyncIterable<BuilderEvent> { return this.queue; }
   async close(): Promise<void> { this.closed = true; this.queue.close(); }
@@ -82,7 +83,7 @@ test("validated QA handoff returns the active successor with its event stream us
     const transfer = await new HandoffService(projectDir).transfer({ runId: "run", role: "qa", reason: "recover QA", compactionCount: 0, compactMaximum: 10 }, async () => successor);
     assert.equal(transfer.acceptanceReceipt?.successorSessionRef.sessionId, "successor");
     assert.equal(successor.closed, false);
-    const next = await successor.sendTurn("next review", nativePolicy(qaVerdictOutput));
+    const next = await journalStructuredDispatch(projectDir, successor, "next review", nativePolicy(qaVerdictOutput), (instruction, policy) => successor.sendTurn(instruction, policy));
     const event = await successor.events()[Symbol.asyncIterator]().next();
     assert.equal(event.value?.kind, "turn-complete");
     if (event.value?.kind === "turn-complete") assert.equal(event.value.turnId, next.turnId);

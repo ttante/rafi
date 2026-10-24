@@ -1,19 +1,76 @@
 /** Offline-testable probe controls; not a production provider adapter. */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+
+// Keep this small JS harness self-contained: it executes before workspace
+// TypeScript is built. These values are mirrored from the versioned spec
+// policy and asserted in the offline policy tests.
+export const STRUCTURED_LIVE_MAX_SPEND_USD = 5;
+export const STRUCTURED_LIVE_MAX_ELAPSED_MS = 30 * 60 * 1000;
+
+function requiredLiveConfiguration(env) {
+  const credentialScope = env.RAFI_LIVE_CREDENTIAL_SCOPE?.trim();
+  const retainedLogDirectory = env.RAFI_LIVE_RETAINED_LOG_DIRECTORY?.trim();
+  if (!credentialScope || !retainedLogDirectory) {
+    throw new Error("RAFI_LIVE_CREDENTIAL_SCOPE and RAFI_LIVE_RETAINED_LOG_DIRECTORY are required for live structured validation");
+  }
+  return { credentialScope, retainedLogDirectory };
+}
 
 export function probeConfig(env = process.env, now = Date.now()) {
   if (env.RAFI_LIVE_STRUCTURED !== "1") throw new Error("Explicit live-provider authorization required");
+  const liveValidation = requiredLiveConfiguration(env);
   const deadline = Date.parse(env.RAFI_LIVE_DEADLINE ?? "");
   if (!Number.isFinite(deadline) || deadline <= now) throw new Error("Future RAFI_LIVE_DEADLINE required");
+  if (deadline > now + STRUCTURED_LIVE_MAX_ELAPSED_MS) throw new Error("RAFI_LIVE_DEADLINE exceeds the 30 minute structured-validation limit");
   const providers = (env.RAFI_LIVE_PROVIDERS ?? "claude,codex").split(",");
   if (providers.some(p => !["claude", "codex"].includes(p))) throw new Error("Unknown provider");
   if (new Set(providers).size !== providers.length) throw new Error("Duplicate providers would exceed dispatch bounds");
   const profile = env.RAFI_LIVE_STRUCTURED_PROFILE ?? "interfaces";
   if (!["interfaces", "contracts"].includes(profile)) throw new Error("Unknown structured-output profile");
   const maximumHostDispatches = providers.reduce((sum, p) => sum + (profile === "contracts" ? 3 : p === "claude" ? 4 : 5), 0);
-  return { deadline, providers, profile, maximumHostDispatches };
+  const requireAuthoritativeCost = env.RAFI_LIVE_REQUIRE_COST_METER === "1";
+  return { deadline, providers, profile, maximumHostDispatches, liveValidation, requireAuthoritativeCost,
+    maximumSpendUsd: requireAuthoritativeCost ? STRUCTURED_LIVE_MAX_SPEND_USD : null };
+}
+
+/**
+ * Record available cost telemetry. Strict dollar enforcement is an opt-in;
+ * missing telemetry does not prevent an authorized default live run.
+ */
+export function createStructuredSpendLedger(limitUsd = STRUCTURED_LIVE_MAX_SPEND_USD, requireAuthoritativeCost = false) {
+  let spentUsd = 0;
+  return Object.freeze({
+    remaining() { return Math.max(0, limitUsd - spentUsd); },
+    record(provider, costUsd) {
+      if (!Number.isFinite(costUsd) || costUsd < 0) {
+        if (requireAuthoritativeCost) throw new Error(`${provider} did not report authoritative spend; live validation is blocked`);
+        return null;
+      }
+      if (requireAuthoritativeCost && spentUsd + costUsd > limitUsd) throw new Error(`Live structured validation reached its $${limitUsd} spend limit`);
+      spentUsd += costUsd;
+      return spentUsd;
+    },
+    assertProviderIsAuditable(provider) {
+      if (requireAuthoritativeCost && provider === "codex") throw new Error("Codex live structured validation is blocked: this harness has no authoritative spend meter");
+    },
+  });
+}
+
+/** Reject unsupported providers before any workspace or provider side effect. */
+export function assertStructuredLiveProvidersAuditable(providers, requireAuthoritativeCost = false) {
+  const ledger = createStructuredSpendLedger(STRUCTURED_LIVE_MAX_SPEND_USD, requireAuthoritativeCost);
+  for (const provider of providers) ledger.assertProviderIsAuditable(provider);
+}
+
+/** Allocate a unique immutable-run evidence directory beneath the approved root. */
+export function createStructuredRetainedEvidenceDirectory(liveValidation, prefix) {
+  const root = resolve(liveValidation.retainedLogDirectory);
+  mkdirSync(root, { recursive: true });
+  return mkdtempSync(join(root, `${prefix}-`));
 }
 
 export function providerVersions(providers, run, claudeExecutable = "claude") {

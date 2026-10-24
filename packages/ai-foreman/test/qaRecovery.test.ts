@@ -1,5 +1,5 @@
-import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
-import { createAuthorizedQaRecoveryPacket as createQaRecoveryPacket } from "./helpers/workAdmission.js";
+import { fixtureReplyTurn, passedQaReply, failedQaReply, recoveryQaReply, type NativeFixtureReply } from "./helpers/nativeOutput.js";
+import { createAuthorizedQaRecoveryPacket as createQaRecoveryPacket, nativeQaFix } from "./helpers/workAdmission.js";
 import { runAuthorizedQa as runIsolatedQa } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -23,7 +23,8 @@ import { qaDigest, type HandoffAcceptanceReceiptV2, type ProviderSessionRefV2 } 
 // unadmitted fixtures. Never supply a runtime authority or bypass a live fence.
 function registerFaultWriter(db: Database.Database): void {
   db.function("rafi_protocol_v3", () => 1);
-  db.function("rafi_structured_communication_protocol", () => 1);
+  db.function("rafi_structured_communication_protocol", () => 2);
+  db.function("rafi_structured_authority_revision", () => 3);
   assert.equal((db.prepare("SELECT COUNT(*) n FROM build_admission").get() as {n:number}).n, 0);
   assert.equal((db.prepare("SELECT COUNT(*) n FROM build_runtime_runs").get() as {n:number}).n, 0);
   registerHandbackWriter(db);
@@ -46,12 +47,12 @@ function repository(): string {
   return dir;
 }
 
-const validReport = `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify({ version: 1, summary: "one issue", checks_run: [{ check: "test", command: "pnpm test", outcome: "failed", evidence: "failed" }], findings: [{ id: "F1", requirement: "works", locations: ["tracked.txt"], problem: "broken", evidence: "test failed", expected: "passes", fix_direction: "repair", verification: ["pnpm test"] }], observations: [] })}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="one issue"`;
+const validReport = failedQaReply({ version: 1, summary: "one issue", checks_run: [{ check: "test", command: "pnpm test", outcome: "failed", evidence: "failed" }], findings: [{ id: "F1", requirement: "works", locations: ["tracked.txt"], problem: "broken", evidence: "test failed", expected: "passes", fix_direction: "repair", verification: ["pnpm test"] }], observations: [] }, "one issue");
 
 class Adapter implements BuilderAdapter {
   readonly agent = "codex" as const;
   instructions: string[] = [];
-  constructor(readonly id: string, private readonly reply: (instruction: string, turn: number) => string, private turn = 0) {}
+  constructor(readonly id: string, private readonly reply: (instruction: string, turn: number) => string | NativeFixtureReply, private turn = 0) {}
   private eventQueue: BuilderEvent[] = [];
   private eventWaiters: Array<() => void> = [];
   closed = false;
@@ -60,12 +61,14 @@ class Adapter implements BuilderAdapter {
   async sendTurn(instruction: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     this.instructions.push(instruction);
     const turn = this.turn++;
-    const text = this.reply(instruction, turn);
-    const result = { ...nativeFixtureFromText(policy, this.id, text, "codex"), hostInstruction: instruction, providerInstruction: instruction, rawResponse: text, cleanedResponse: text, providerMetadata: { provider: "codex" as const, sessionId: this.id, sessionRef: this.ref } };
+    const reply = this.reply(instruction, turn);
+    const text = typeof reply === "string" ? reply : reply.text;
+    const result = { ...fixtureReplyTurn(policy, this.id, reply, "codex"), hostInstruction: instruction, providerInstruction: instruction, rawResponse: text, cleanedResponse: text, providerMetadata: { provider: "codex" as const, sessionId: this.id, sessionRef: this.ref } };
     this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId }); this.eventWaiters.splice(0).forEach((wake) => wake());
     return result;
   }
   sessionId(): string { return this.id; }
+  async prepareSession(): Promise<ProviderSessionRefV1> { if (!this.ref) throw new Error("Fixture has no prepared session"); return this.ref; }
   sessionRef(): ProviderSessionRefV1 | undefined { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.ref = ref; }
   async compact(): Promise<CompactResult> { return { ok: true }; }
@@ -182,7 +185,7 @@ test("errored packet acknowledgement cannot authorize a full review or acknowled
   const dir = repository();
   try {
     const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "ack-provider-error", ticketId: "T1", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", resources: { prompt: { value: "old review", purpose: "old review" } } });
-    const adapter = new Adapter("ack-error", (instruction) => `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"`);
+    const adapter = new Adapter("ack-error", (instruction) => recoveryQaReply(instruction));
     const send = adapter.sendTurn.bind(adapter);
     adapter.sendTurn = async (instruction, turnPolicy) => ({ ...await send(instruction, turnPolicy), isError: true });
     const result = await runIsolatedQa({
@@ -206,7 +209,7 @@ test("finalization source drift pauses durably and a restarted full QA can compl
       ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
       builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0,
       recovery: { projectDir: dir, runId: "finalization-drift" }, sessionBoundary: unavailableBoundary,
-      createQa: async (cwd) => qaHandle(new Adapter(`full-review-${++reviews}`, () => 'STEP_STATUS: qa_pass | summary="complete review passed"'), cwd),
+      createQa: async (cwd) => qaHandle(new Adapter(`full-review-${++reviews}`, () => passedQaReply("complete review passed")), cwd),
       fix: async () => { throw new Error("Builder must not replay during finalization recheck"); },
     });
     const first = await review();
@@ -242,7 +245,7 @@ test("source drift before finalization intent durably invalidates the pass and s
       ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
       builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0,
       recovery: { projectDir: dir, runId: "pre-finalization-drift" }, sessionBoundary: unavailableBoundary,
-      createQa: async (cwd) => qaHandle(new Adapter("pre-finalization-review", () => 'STEP_STATUS: qa_pass | summary="complete review passed"'), cwd),
+      createQa: async (cwd) => qaHandle(new Adapter("pre-finalization-review", () => passedQaReply("complete review passed")), cwd),
       fix: async () => { throw new Error("Builder must not run for a passing review"); },
     });
     assert.equal(result.outcome, "passed");
@@ -296,7 +299,7 @@ for (const route of ["automatic", "operator", "resumed-operator"] as const) {
       let failedAdapter: Adapter | undefined;
       const freshAdapter = (id: string, failReview: boolean): Adapter => {
         const adapter = new Adapter(id, (instruction) => {
-          if (instruction.includes("Packet digest:")) return `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"`;
+          if (instruction.includes("Packet digest:")) return recoveryQaReply(instruction);
           if (failReview && instruction.includes("Report correction only")) return validReport;
           return invalid;
         });
@@ -372,7 +375,7 @@ test("synthetic terminal event with unknown provider dispatch remains uncertain 
       builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0,
       recovery: { projectDir: dir, runId: "synthetic-terminal" }, sessionBoundary: unavailableBoundary,
       createQa: async (cwd) => {
-        const adapter = new Adapter("interrupted-session", () => 'STEP_STATUS: qa_pass | summary="synthetic untrusted pass"');
+        const adapter = new Adapter("interrupted-session", () => passedQaReply("synthetic untrusted pass"));
         const send = adapter.sendTurn.bind(adapter);
         adapter.sendTurn = async (instruction, turnPolicy) => ({ ...await send(instruction, turnPolicy), isError: true, failure: { runtime: "claude", phase: "qa", category: "agent-stream", executable: "fixture", cwd, diagnostics: "submitted turn interrupted", dispatchState: "unknown" } });
         return qaHandle(adapter, cwd);
@@ -397,7 +400,7 @@ test("rejected provider identity preserves exact returned evidence without accep
       builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0,
       recovery: { projectDir: dir, runId: "identity-rejected" }, sessionBoundary: unavailableBoundary,
       createQa: async (cwd) => {
-        const adapter = new Adapter("expected-session", () => 'STEP_STATUS: qa_pass | summary="untrusted pass"');
+        const adapter = new Adapter("expected-session", () => passedQaReply("untrusted pass"));
         const original = adapter.sendTurn.bind(adapter);
         adapter.sendTurn = async (instruction, turnPolicy) => {
           const result = await original(instruction, turnPolicy);
@@ -722,7 +725,7 @@ test("resumed recovery acknowledges the packet and reconstructs only when review
         if (turn === 0) {
           const packetDigest = /Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1];
           const reviewed = /Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1];
-          return `RAFI_QA_RECOVERY_ACK packet="${packetDigest}" reviewed_state="${reviewed}" required_resources_read="all"`;
+          return recoveryQaReply(instruction);
         }
         return validReport;
       });
@@ -752,12 +755,12 @@ test("a malformed resumed report is retained without automatic fresh review", as
       if (turn === 0) {
         const packetDigest = /Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1];
         const reviewed = /Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1];
-        return `RAFI_QA_RECOVERY_ACK packet="${packetDigest}" reviewed_state="${reviewed}" required_resources_read="all"`;
+        return recoveryQaReply(instruction);
       }
       return 'STEP_STATUS: qa_fail | issues="still invalid"';
     });
     let created = 0;
-    const successor = new Adapter("full-review-successor", () => 'STEP_STATUS: qa_pass | summary="fresh complete review passed"');
+    const successor = new Adapter("full-review-successor", () => passedQaReply("fresh complete review passed"));
     const result = await runIsolatedQa({
       ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
       builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh",
@@ -840,7 +843,7 @@ test("invalid native report is retained without same-session correction", async 
           if (turn === 0 || turn === 1) {
             const packet = /Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1];
             const reviewed = /Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1];
-            return `RAFI_QA_RECOVERY_ACK packet="${packet}" reviewed_state="${reviewed}" required_resources_read="all"\nRAFI_CONTINUITY_DELTA {"version":1}`;
+            return recoveryQaReply(instruction);
           }
           return turn === 2 ? validReport : 'STEP_STATUS: qa_fail | issues="still invalid"';
         });
@@ -872,7 +875,7 @@ test("invalid manual JSON is not an authoritative recovery route", async () => {
       recovery: { projectDir: dir, runId: "manual-menu" }, createQa: qaFactory(current),
       sessionBoundary: async (_handle, _action, _strategy, cwd, recovery) => {
         fresh = new Adapter("qa-fresh-menu", (instruction, turn) => {
-          if (turn === 0) return `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"\nRAFI_CONTINUITY_DELTA {"version":1}`;
+          if (turn === 0) return recoveryQaReply(instruction);
           return 'STEP_STATUS: qa_fail | issues="still invalid"';
         });
         return acceptedBoundary(fresh, cwd, recovery);
@@ -901,7 +904,7 @@ test("report recovery never uses provider compaction or automatic fresh reconstr
       sessionBoundary: async (_handle, _action, _strategy, cwd, recovery) => {
         boundaryCalls++;
         fresh = new Adapter("qa-fresh-no-compact", (instruction, turn) => turn === 0
-          ? `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"\nRAFI_CONTINUITY_DELTA {"version":1}`
+          ? recoveryQaReply(instruction)
           : 'STEP_STATUS: qa_fail | issues="invalid"');
         return acceptedBoundary(fresh, cwd, recovery);
       },
@@ -927,7 +930,7 @@ test("an exhausted operator-requested fresh QA cannot reconstruct a report", asy
       sessionBoundary: async (_handle, _action, _strategy, cwd, recovery) => {
         boundaryCalls++;
         const adapter = new Adapter(`qa-fresh-repeat-${boundaryCalls}`, (instruction, turn) => turn === 0
-          ? `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"\nRAFI_CONTINUITY_DELTA {"version":1}`
+          ? recoveryQaReply(instruction)
           : 'STEP_STATUS: qa_fail | issues="invalid"');
         successors.push(adapter);
         return acceptedBoundary(adapter, cwd, recovery);
@@ -984,7 +987,7 @@ test("disabled fresh recovery does not expose acknowledgement context mutation p
           const relative = /Recovery context directory: (.+)/.exec(instruction)?.[1];
           if (!relative) return validReport;
           writeFileSync(join(freshCwd, relative, "manifest.json"), "mutated");
-          return `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"`;
+          return recoveryQaReply(instruction);
         });
         return acceptedBoundary(fresh, cwd, recovery);
       },
@@ -1011,7 +1014,7 @@ test("disabled fresh recovery does not expose fresh full-review context mutation
       sessionBoundary: async (_handle, _action, _strategy, cwd, recovery) => {
         freshCwd = cwd;
         fresh = new Adapter("qa-fresh-review-mutation", (instruction, turn) => {
-          if (turn === 0) return `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"`;
+          if (turn === 0) return recoveryQaReply(instruction);
           const contextRoot = join(freshCwd, ".foreman", "qa-recovery-context");
           const contextName = readdirSync(contextRoot)[0];
           if (!contextName) throw new Error("materialized recovery context is missing");
@@ -1054,7 +1057,7 @@ test("legacy historical hints are not projected into authoritative V2 QA snapsho
         copied = existsSync(join(cwd, ".foreman", "qa-legacy-history", "legacy-one", "old-report.txt"));
         return qaHandle(new Adapter("legacy-hints-qa", (instruction) => {
           assert.doesNotMatch(instruction, /Non-authoritative legacy QA context/);
-          return 'STEP_STATUS: qa_pass | summary="new full review passed"';
+          return passedQaReply("new full review passed");
         }), cwd);
       },
       sessionBoundary: unavailableBoundary,
@@ -1070,7 +1073,7 @@ test("a provider context-window discovery turn is journaled before the first QA 
   try {
     const qa = new SetupTurnAdapter("qa-setup", (_instruction, turn) => turn === 0
       ? "context ready"
-      : 'STEP_STATUS: qa_pass | summary="reviewed after setup"');
+      : passedQaReply("reviewed after setup"));
     const result = await runIsolatedQa({
       ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
       builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh",
@@ -1099,11 +1102,11 @@ test("review and Builder remediation history survives a fresh host process state
     let created = 0;
     const first = await runIsolatedQa({ ticket, builderWorktree: dir, builderSummary: "initial result", qaStrategy: "fresh", recovery: { projectDir: dir, runId: "durable-history" },
       state: { reviews: 0, modificationViolations: 0 }, maxCycles: 1, sessionBoundary: unavailableBoundary,
-      createQa: async (cwd) => qaHandle(new Adapter(`history-${++created}`, () => created === 1 ? validReport : 'STEP_STATUS: qa_pass | summary="fixed"'), cwd),
+      createQa: async (cwd) => qaHandle(new Adapter(`history-${++created}`, () => created === 1 ? validReport : passedQaReply("fixed")), cwd),
       fix: async (request) => {
         assert.equal(request.kind, "validated-report");
         if (request.kind === "validated-report") assert.equal(request.report.findings[0]!.id, "F1");
-        return { ok: true, outcome: "remediation-reported" as const, response: 'Builder exact remediation\nSTEP_STATUS: done | summary="fixed"', summary: "bounded fix summary", providerTurnId: "builder-fix-1" };
+        return nativeQaFix(dir, "durable-history", "bounded fix summary", "Builder exact remediation");
       },
     });
     assert.equal(first.outcome, "passed");
@@ -1120,7 +1123,7 @@ test("review and Builder remediation history survives a fresh host process state
     let restartPrompt = "";
     const restarted = await runIsolatedQa({ ticket, builderWorktree: dir, builderSummary: "fixed result", qaStrategy: "fresh", recovery: { projectDir: dir, runId: "durable-history" },
       state: { reviews: 0, modificationViolations: 0 }, maxCycles: 1, sessionBoundary: unavailableBoundary,
-      createQa: async (cwd) => qaHandle(new Adapter("history-restart", (instruction) => { restartPrompt = instruction; return 'STEP_STATUS: qa_pass | summary="still fixed"'; }), cwd),
+      createQa: async (cwd) => qaHandle(new Adapter("history-restart", (instruction) => { restartPrompt = instruction; return passedQaReply("still fixed"); }), cwd),
       fix: async () => ({ ok: false }),
     });
     assert.equal(restarted.outcome, "passed");
@@ -1138,8 +1141,8 @@ test("first sealed-packet acknowledgement can read exact local resources without
     const packet = createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "confined-packet-read", ticketId: "T1", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", resources: { source: { value: "current source", purpose: "current review evidence" } } });
     let reads = 0;
     const adapter = new Adapter("packet-reader", (instruction, turn) => turn === 0
-      ? `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"`
-      : 'STEP_STATUS: qa_pass | summary="fresh full review"');
+      ? recoveryQaReply(instruction)
+      : passedQaReply("fresh full review"));
     const send = adapter.sendTurn.bind(adapter);
     const result = await runIsolatedQa({ ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
       builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", recovery: { projectDir: dir, runId: "confined-packet-read" }, state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0, resumedRecovery: packet, continuityManaged: true,
@@ -1177,7 +1180,7 @@ test("a malformed resumed acknowledgement stops without formatting repair or fre
     let originalCwd = "";
     let successorCwd = "";
     let menuCalls = 0;
-    const successor = new Adapter("resumed-good-successor", () => 'STEP_STATUS: qa_pass | summary="fresh review passed"');
+    const successor = new Adapter("resumed-good-successor", () => passedQaReply("fresh review passed"));
     const result = await runIsolatedQa({
       ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
       builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", recovery: { projectDir: dir, runId: "resumed-seal" },
@@ -1222,9 +1225,9 @@ for (const succeeds of [true, false]) test(`resumed validated report consumes it
     let fixes = 0, reviews = 0;
     const resumed = await runIsolatedQa({ ticket, builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", recovery: { projectDir: dir, runId }, resumedRecovery: packet,
       state: { reviews: 0, modificationViolations: 0 }, maxCycles: 1,
-      createQa: async cwd => { reviews++; assert.equal(fixes, 1); assert.equal(succeeds, true, "unconfirmed fix must not start another review"); return qaHandle(new Adapter("fresh-after-fix", () => 'STEP_STATUS: qa_pass | summary="new full review"'), cwd); },
+      createQa: async cwd => { reviews++; assert.equal(fixes, 1); assert.equal(succeeds, true, "unconfirmed fix must not start another review"); return qaHandle(new Adapter("fresh-after-fix", () => passedQaReply("new full review")), cwd); },
       sessionBoundary: unavailableBoundary,
-      fix: async () => { fixes++; if (!succeeds) return { ok: false, detail: "unconfirmed fixture fix" }; writeFileSync(join(dir, "tracked.txt"), "confirmed remediated source\n"); return { ok: true, outcome: "remediation-reported" as const, response: 'STEP_STATUS: done | summary="fixed"', summary: "fixed", providerTurnId: "owned-fix-turn" }; },
+      fix: async () => { fixes++; if (!succeeds) return { ok: false, detail: "unconfirmed fixture fix" }; writeFileSync(join(dir, "tracked.txt"), "confirmed remediated source\n"); return nativeQaFix(dir, runId, "fixed"); },
     });
     assert.equal(fixes, 1); assert.equal(reviews, succeeds ? 1 : 0);
     assert.equal(resumed.outcome, succeeds ? "passed" : "blocked", JSON.stringify(resumed));
@@ -1246,11 +1249,11 @@ test("an existing unresolved packet follows a changed-source recheck and remains
         const cycle = ++created;
         return qaHandle(new Adapter(`packet-recheck-${cycle}`, (_instruction, turn) => cycle === 1
           ? validReport
-          : 'STEP_STATUS: blocked | reason="external test unavailable"'), cwd);
+          : ({ text: "external test unavailable", result: { kind: "blocked", reason: "external test unavailable", nextAction: "Restore the test service" } })), cwd);
       }, sessionBoundary: unavailableBoundary,
       fix: async () => {
         writeFileSync(join(dir, "tracked.txt"), "remediated source\n");
-        return { ok: true, outcome: "remediation-reported" as const, response: 'exact fix\nSTEP_STATUS: done | summary="fixed"', summary: "fixed", providerTurnId: "packet-recheck-fix" };
+        return nativeQaFix(dir, "packet-recheck", "fixed", "exact fix");
       },
     });
     assert.equal(result.outcome, "needs-human");
@@ -1266,8 +1269,8 @@ test("an existing unresolved packet follows a changed-source recheck and remains
     assert.notEqual(packet.manifest.originalReviewedStateDigest, packet.manifest.reviewedStateDigest);
     db.close();
     const qa = new Adapter("packet-recheck-resumed", (instruction, turn) => turn === 0
-      ? `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"`
-      : 'STEP_STATUS: qa_pass | summary="recheck passed"');
+      ? recoveryQaReply(instruction)
+      : passedQaReply("recheck passed"));
     const resumed = await runIsolatedQa({ ticket, builderWorktree: dir, builderSummary: "fixed", qaStrategy: "fresh",
       recovery: { projectDir: dir, runId: "packet-recheck" }, state: { reviews: 0, modificationViolations: 0 }, maxCycles: 1,
       resumedRecovery: packet, continuityManaged: true, createQa: async (cwd) => qaHandleForPacket(qa, cwd, packet),
@@ -1296,7 +1299,7 @@ test("plain fallback is not used as an authoritative Builder remediation route",
         }), cwd);
       },
       sessionBoundary: async (_handle, _action, _strategy, cwd, recovery) => acceptedBoundary(new Adapter("packet-reuse-fresh", (instruction, turn) => turn === 0
-        ? `RAFI_QA_RECOVERY_ACK packet="${/Packet digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" reviewed_state="${/Reviewed-state digest: ([a-f0-9]{64})/.exec(instruction)?.[1]}" required_resources_read="all"`
+        ? recoveryQaReply(instruction)
         : 'STEP_STATUS: qa_fail | issues="plain blocking issue"'), cwd, recovery),
       onReportRecovery: async () => (++menuCalls === 1 ? { action: "plain" } : { action: "pause" }),
       fix: async () => { fixes++; return { ok: true, outcome: "remediation-reported" as const, response: 'plain fix exact response\nSTEP_STATUS: done | summary="fixed"', summary: "plain fix summary", providerTurnId: "plain-fix" }; },
@@ -1312,7 +1315,7 @@ test("plain fallback is not used as an authoritative Builder remediation route",
     assert.equal(packet.manifest.reviewAttempt, 1);
     assert.equal(packet.manifest.reviewAttempt, head.reviewNumber);
     assert.equal(db.qaReviewAttempt(packet.manifest.reviewAttemptId)?.reviewNumber, head.reviewNumber);
-    assert.ok(packet.manifest.resources.some((resource) => resource.path === "context/original-raw-response.txt"));
+    assert.ok(packet.manifest.resources.some((resource) => resource.path === "context/original-raw-response.json"));
     assert.equal(db.qaReviewAttempts("packet-reuse", "T1").at(-1)?.remediationGeneration, 0);
     db.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -1337,7 +1340,7 @@ test("startup reconciles a changed-source recheck allocated before packet review
       createQa: async (cwd) => qaHandle(new Adapter(`allocation-${++created}`, () => validReport), cwd), sessionBoundary: unavailableBoundary,
       fix: async () => {
         writeFileSync(join(dir, "tracked.txt"), "changed by completed Builder fix\n");
-        return { ok: true, outcome: "remediation-reported" as const, response: 'STEP_STATUS: done | summary="fixed"', summary: "fixed", providerTurnId: "allocation-fix" };
+        return nativeQaFix(dir, "recheck-allocation-crash", "fixed");
       },
     }), /simulated crash after review allocation/);
     WorkflowDb.prototype.commitQaReviewReady = originalCommit;
@@ -1382,7 +1385,7 @@ test("completed missing-continuity turns pause without automatic replay, includi
         assert.ok(sessions.every(session => session.closed), "predecessors must be closed before retry dispatch");
         assert.ok(snapshots.every(path => !existsSync(path)), "old snapshots must be removed before retry");
         snapshots.push(cwd);
-        const adapter = new Adapter(`missing-continuity-${++created}`, () => 'STEP_STATUS: qa_pass | summary="review completed"');
+        const adapter = new Adapter(`missing-continuity-${++created}`, () => passedQaReply("review completed"));
         if (!pass) {
           const send = adapter.sendTurn.bind(adapter);
           adapter.sendTurn = async (instruction, turnPolicy) => ({ ...await send(instruction, turnPolicy), isError: true,
@@ -1424,7 +1427,7 @@ test("missing continuity on the first completed QA turn requires explicit recove
       recovery: { projectDir: dir, runId: "continuity-success" }, state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0,
       sessionBoundary: unavailableBoundary,
       createQa: async cwd => {
-        const adapter = new Adapter(`continuity-${++created}`, () => 'STEP_STATUS: qa_pass | summary="fresh review passed"');
+        const adapter = new Adapter(`continuity-${++created}`, () => passedQaReply("fresh review passed"));
         if (created === 1) {
           const send = adapter.sendTurn.bind(adapter);
           adapter.sendTurn = async (instruction, turnPolicy) => ({ ...await send(instruction, turnPolicy), isError: true, text: "missing continuity marker", continuityErrors: ["missing continuity marker"] });
@@ -1452,7 +1455,7 @@ test("missing continuity in a completed recovery acknowledgement requires explic
       state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0, continuityManaged: true, resumedRecovery: packet,
       sessionBoundary: unavailableBoundary,
       createQa: async cwd => {
-        const adapter = new Adapter(`ack-continuity-${++created}`, () => 'STEP_STATUS: qa_pass | summary="fresh review"');
+        const adapter = new Adapter(`ack-continuity-${++created}`, () => passedQaReply("fresh review"));
         if (created > 1) return qaHandle(adapter, cwd);
         const send = adapter.sendTurn.bind(adapter);
         adapter.sendTurn = async (instruction, turnPolicy) => ({ ...await send(instruction, turnPolicy), isError: true, text: "QA continuity record was invalid: missing continuity marker", continuityErrors: ["missing continuity marker"] });
@@ -1463,4 +1466,40 @@ test("missing continuity in a completed recovery acknowledgement requires explic
     assert.equal(result.outcome, "needs-human");
     assert.equal(created, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+for (const overLimit of [false,true]) test(`QA review reuses bounded UTF-8 transport evidence (${overLimit ? "over limit" : "exact limit"})`, async () => {
+  const {providerWireContract,qaVerdictOutput}=await import("rafi-spec");
+  const dir=repository();
+  const maximum=providerWireContract(qaVerdictOutput,"codex").maximumResponseBytes;
+  const raw="é".repeat(Math.floor(maximum/2)) + (maximum%2 ? "x" : "") + (overLimit ? "é" : "");
+  try {
+    const result=await runIsolatedQa({
+      ticket:{id:"T1",order:1,title:"QA",area:"test",priority:"P1",size:"S",risk:"Low",depends_on:[],summary:"test",acceptance:["works"],required_tests:["test"],likely_files:["tracked.txt"]},
+      builderWorktree:dir,builderSummary:"implemented",qaStrategy:"fresh",state:{reviews:0,modificationViolations:0},maxCycles:0,
+      recovery:{projectDir:dir,runId:"bounded-review"},sessionBoundary:unavailableBoundary,
+      createQa:async(cwd)=>{
+        const adapter=new Adapter("bounded-session",()=>passedQaReply("Independent native pass"));
+        const send=adapter.sendTurn.bind(adapter);
+        adapter.sendTurn=async(...args)=>({...await send(...args),rawResponse:raw,cleanedResponse:raw});
+        return qaHandle(adapter,cwd);
+      },fix:async()=>({ok:false}),
+    });
+    assert.equal(result.outcome,"passed");
+    const db=new WorkflowDb(dir);
+    try {
+      const inspect=new Database(db.path,{readonly:true});
+      const row=inspect.prepare("SELECT operation_id,receipt_json FROM qa_turns WHERE run_id='bounded-review' ORDER BY rowid DESC LIMIT 1").get() as {operation_id:string;receipt_json:string};inspect.close();
+      const receipt=JSON.parse(row.receipt_json);
+      const transport=db.operation(row.operation_id)!.result as {rawDigest:string;rawBytes:number;retainedRawBytes:number};
+      assert.equal(receipt.rawResponseDigest,transport.rawDigest);
+      assert.equal(receipt.cleanedResponseDigest,transport.rawDigest);
+      const bytes=db.getEvidence(transport.rawDigest)!;
+      assert.ok(bytes.length<=maximum);assert.equal(bytes.toString().includes("�"),false);
+      assert.equal(transport.rawBytes,Buffer.byteLength(raw));
+      const events=db.getEvidence(receipt.eventStreamDigest)!;
+      assert.ok(events.length<=maximum);assert.equal(events.toString().includes('"result"'),false);
+    } finally {db.close();}
+  } finally {rmSync(dir,{recursive:true,force:true});}
 });

@@ -5,6 +5,8 @@ import { realpathSync as realpath } from "node:fs";
 import type { ManagerActionRequestV1 } from "rafi-spec";
 import { validateManagerActionRequestV1 } from "rafi-spec";
 import { registerHandbackWriter } from "./qaHandbackMigration.js";
+import { registerQaGraphJournalWriter } from "./qaDeliveryJournal.js";
+import { assertStructuredCutoverComplete, STRUCTURED_CUTOVER_REASON } from "./structuredCutover.js";
 import { assertAdmittedWork } from "./buildWorkAdmission.js";
 
 export type InstructionRecipient = "builder" | "qa";
@@ -74,6 +76,11 @@ export class BuildInterventionControl {
     this.db = new Database(join(projectDir,".rafi/recovery.sqlite3"),{fileMustExist:true});
     try {
       registerHandbackWriter(this.db);
+      registerQaGraphJournalWriter(this.db);
+      assertStructuredCutoverComplete(this.db);
+      const run = this.db.prepare("SELECT legacy,checkpoint,state_json FROM workflow_runs WHERE run_id=?").get(runId) as { legacy: number; checkpoint: string; state_json: string } | undefined;
+      if (!run || run.legacy || run.checkpoint === STRUCTURED_CUTOVER_REASON || JSON.parse(run.state_json).structuredCommunicationCutover)
+        throw new Error("Cutover workflow cannot receive Manager controls");
       if (this.db.pragma("user_version",{simple:true}) !== 4) throw new Error("Manager controls require the work-admission upgrade");
       const project = this.db.prepare("SELECT canonical_root FROM build_project_identity").get() as {canonical_root:string};
       if (project.canonical_root !== realpath(projectDir)) throw new Error("Control project identity mismatch");

@@ -13,6 +13,9 @@ import { WorkflowDb } from "../../packages/ai-foreman/src/workflowDb.js";
 import { collectManagerDiagnostics } from "../../packages/ai-foreman/src/diagnostics.js";
 import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
 
+import { runSupervisedStructuredLive, trackStructuredLiveChild } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("build-stalls", async (supervisor) => {
 if (process.env.RAFI_LIVE_BUILD_STALLS !== "1") throw new Error("Set RAFI_LIVE_BUILD_STALLS=1 only after authorizing provider usage.");
 const samples = Number(process.env.RAFI_LIVE_SAMPLES ?? "5");
 if (!Number.isInteger(samples) || samples < 1 || samples > 20) throw new Error("RAFI_LIVE_SAMPLES must be between 1 and 20");
@@ -65,6 +68,7 @@ async function run(provider: "codex" | "claude", scenario: string, sample: numbe
   const args = [join(workspace, "packages/ai-foreman/dist/index.js"), "start", dir, "--steps", "1", "--yes", "--agent", provider,
     ...(scenario === "current" ? ["--no-qa"] : ["--branch-per-ticket", "--completion", "none", "--keep-worktrees"])];
   const child = activeChild = spawn(process.execPath, args, { cwd: workspace, env: { ...process.env, RAFI_BUILD_WORKER_RUN: "", RAFI_DETACHED_SUPERVISOR_RUN: "" }, stdio: ["ignore", fd, fd] });
+    trackStructuredLiveChild(child);
   closeSync(fd);
   const checkSource = () => {
     if (firstImplementationMs !== undefined) return;
@@ -135,3 +139,6 @@ for (const provider of providers) {
 save();
 console.log(JSON.stringify({ kind: "canary-finished", results: join(root, "results.json") }));
 if (shutdownSignal) process.exitCode = 130;
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

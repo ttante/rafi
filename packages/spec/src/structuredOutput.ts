@@ -18,7 +18,7 @@ function schemaValidator(schema: Record<string, unknown>, root = schema) {
 
 /** Versions are independent of product, persistence and provider versions. */
 export interface OutputContract<T = unknown> {
-  protocolVersion: 1;
+  protocolVersion: 2;
   operation: string;
   schemaVersion: number;
   schemaDigest: string;
@@ -50,7 +50,39 @@ export interface ProviderWireContract<Canonical = unknown, Wire = unknown> {
   normalize: (wire: Wire) => Canonical;
   descriptorDigest: string;
   guidanceId: string;
-  guidance: (contract: OutputContract<Canonical>) => string;
+  /**
+   * Guidance is rendered and frozen with the descriptor.  Keeping a callback
+   * here used to let a deployment change the prompt without changing the
+   * descriptor digest.
+   */
+  guidance: string;
+  guidanceDigest: string;
+}
+
+/** The exact immutable authority selected before a native provider dispatch. */
+export interface SelectedDispatchTupleV2 {
+  readonly protocolVersion: 2;
+  readonly operation: string;
+  readonly schemaVersion: number;
+  readonly schemaDigest: string;
+  readonly provider: StructuredProvider;
+  readonly profile: string;
+  readonly variant: string;
+  readonly descriptorDigest: string;
+  readonly wireSchemaDigest: string;
+  readonly guidanceDigest: string;
+  readonly normalizerId: string;
+  readonly normalizerVersion: number;
+  readonly maximumSchemaBytes: number;
+  readonly maximumResponseBytes: number;
+  readonly maximumPageBytes: number | null;
+  readonly instructionDigest: string;
+  readonly actionId: string;
+  readonly dispatchId: string;
+  /** A tuple may only be sealed after the provider session is prepared. */
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly digest: string;
 }
 
 const wireGuidanceBegin = "<!-- rafi:selected-provider-wire";
@@ -63,7 +95,7 @@ const wireGuidanceEnd = "<!-- /rafi:selected-provider-wire -->";
  * prose for Rafi's canonical envelope.
  */
 export function renderProviderWireInstruction(instruction: string, selected: ProviderWireContract): string {
-  const guidance = selected.guidance(selected.canonical).trim();
+  const guidance = selected.guidance.trim();
   if (!guidance) throw new Error(`Provider wire contract ${selected.profile} has no guidance`);
   const block = `${wireGuidanceBegin} profile=${selected.profile} variant=${selected.variant} descriptor=${selected.descriptorDigest} bytes=${selected.maximumResponseBytes} -->\n${guidance}\n${wireGuidanceEnd}`;
   if (!instruction.includes(wireGuidanceBegin)) return `${instruction.trimEnd()}\n\n${block}`;
@@ -71,85 +103,114 @@ export function renderProviderWireInstruction(instruction: string, selected: Pro
   throw new Error("Native instruction already contains guidance for a different or malformed provider wire contract");
 }
 
-const wireContracts = new Map<string, ProviderWireContract<any>>();
+interface StaticProviderWireRegistry {
+  readonly active: readonly ProviderWireContract<any>[];
+  readonly historic: readonly ProviderWireContract<any>[];
+}
+let staticWireRegistry: StaticProviderWireRegistry | undefined;
 const wireKey = (contract: OutputContract, provider: StructuredProvider, variant: string) =>
   `${contract.operation}:${contract.schemaVersion}:${contract.schemaDigest}:${provider}:${variant}`;
 
-function defaultGuidance(contract: OutputContract): string {
-  return `Return exactly one native JSON result for ${contract.operation}. Follow the selected schema; do not add prose delimiters or host-owned identifiers.`;
-}
+type ProviderWireContractInput<Canonical, Wire> = Omit<ProviderWireContract<Canonical, Wire>, "wireSchemaDigest" | "descriptorDigest" | "guidance" | "guidanceDigest"> & {
+  /** A function is accepted only at construction for source compatibility. */
+  guidance: string | ((contract: OutputContract<Canonical>) => string);
+};
 
-export function createProviderWireContract<Canonical, Wire = Canonical>(input: Omit<ProviderWireContract<Canonical, Wire>, "wireSchemaDigest" | "descriptorDigest">): ProviderWireContract<Canonical, Wire> {
+export function createProviderWireContract<Canonical, Wire = Canonical>(input: ProviderWireContractInput<Canonical, Wire>): ProviderWireContract<Canonical, Wire> {
   const wireSchema = freezeJson(structuredClone(input.wireSchema));
+  const guidance = (typeof input.guidance === "function" ? input.guidance(input.canonical) : input.guidance).trim();
   const maximumSchemaBytes = input.maximumSchemaBytes;
   const maximumResponseBytes = input.maximumResponseBytes;
-  if (!input.profile || !input.variant || !input.normalizerId || !input.guidanceId || typeof input.guidance !== "function" || !Number.isSafeInteger(input.wireVersion) || input.wireVersion < 1 ||
+  if (!input.profile || !input.variant || !input.normalizerId || !input.guidanceId || !guidance || !Number.isSafeInteger(input.wireVersion) || input.wireVersion < 1 ||
     !Number.isSafeInteger(maximumSchemaBytes) || maximumSchemaBytes < 1 || !Number.isSafeInteger(maximumResponseBytes) || maximumResponseBytes < 1) {
     throw new Error("Invalid provider wire contract descriptor");
   }
   if (Buffer.byteLength(canonicalJson(wireSchema)) > maximumSchemaBytes) throw new Error("Provider wire schema exceeds descriptor byte limit");
   const wireSchemaDigest = structuredDigest(wireSchema);
+  const guidanceDigest = structuredDigest(guidance);
   const descriptorDigest = structuredDigest({ operation: input.canonical.operation, schemaVersion: input.canonical.schemaVersion,
     schemaDigest: input.canonical.schemaDigest, provider: input.provider, profile: input.profile, variant: input.variant,
     wireVersion: input.wireVersion, wireSchemaDigest, maximumSchemaBytes, maximumResponseBytes,
     maximumPageBytes: input.maximumPageBytes ?? null, normalizerId: input.normalizerId,
-    normalizerVersion: input.normalizerVersion, guidanceId: input.guidanceId });
-  return Object.freeze({ ...input, wireSchema, wireSchemaDigest, descriptorDigest });
-}
-
-/** Register a reviewed profile. Duplicate keys with different bytes are a deployment error. */
-export function registerProviderWireContract<T>(contract: ProviderWireContract<T>): ProviderWireContract<T> {
-  const key = wireKey(contract.canonical, contract.provider, contract.variant);
-  const existing = wireContracts.get(key);
-  if (existing && existing.descriptorDigest !== contract.descriptorDigest) throw new Error(`Conflicting provider wire contract ${key}`);
-  wireContracts.set(key, contract as ProviderWireContract<any>);
-  return contract;
+    normalizerVersion: input.normalizerVersion, guidanceId: input.guidanceId, guidanceDigest });
+  return Object.freeze({ ...input, guidance, guidanceDigest, wireSchema, wireSchemaDigest, descriptorDigest });
 }
 
 /**
- * Compatibility is explicit and retained only for existing descriptors that
- * have not yet received a reviewed profile. New callers can require a
- * registered descriptor via `requireRegistered`.
+ * Called once by the spec-private declaration module.  It is intentionally
+ * not a registration API: production cannot add, replace, or remove a
+ * descriptor after module initialization.
  */
-function compatibilityWireContract<T>(contract: OutputContract<T>, provider: StructuredProvider): ProviderWireContract<T> {
-  const schema = (provider === "codex" ? projectCodexSchema(contract.jsonSchema) : contract.jsonSchema) as Record<string, unknown>;
-  return createProviderWireContract({ canonical: contract, provider, profile: `${provider}-json-schema-v1`, variant: "compatibility",
-    wireVersion: 1, wireSchema: schema, maximumSchemaBytes: 1_000_000, maximumResponseBytes: 2_000_000,
-    normalizerId: provider === "codex" ? "codex-optional-properties" : "identity", normalizerVersion: 1,
-    normalize: (value: unknown) => (provider === "codex" ? decodeCodexOptionalProperties(contract.jsonSchema, value) : value) as T,
-    guidanceId: "compatibility-envelope-v1", guidance: defaultGuidance });
+export function installStaticProviderWireContracts(registry: StaticProviderWireRegistry): void {
+  if (staticWireRegistry) throw new Error("Static provider wire registry was already installed");
+  const digests = new Set<string>();
+  for (const contract of registry.historic) {
+    // Historic replay intentionally permits a retired and active descriptor
+    // for the same canonical/provider/variant identity.  The descriptor
+    // digest, not a mutable profile or the active-selection key, identifies
+    // the exact shipped wire contract on replay.
+    if (digests.has(contract.descriptorDigest)) throw new Error(`Duplicate static provider wire descriptor digest ${contract.descriptorDigest}`);
+    digests.add(contract.descriptorDigest);
+  }
+  const historic = Object.freeze([...registry.historic]);
+  const active = Object.freeze([...registry.active]);
+  for (const contract of active) {
+    if (!historic.some(entry => entry.descriptorDigest === contract.descriptorDigest)) throw new Error("Active provider wire descriptor is absent from historic registry");
+  }
+  staticWireRegistry = Object.freeze({ active, historic });
 }
 
-export function providerWireContract<T>(contract: OutputContract<T>, provider: StructuredProvider, variant = "default", options: { requireRegistered?: boolean } = {}): ProviderWireContract<T> {
+function installedWireRegistry(): StaticProviderWireRegistry {
+  if (!staticWireRegistry) throw new Error("Static provider wire registry is unavailable");
+  return staticWireRegistry;
+}
+
+/** Descriptor selection is deliberately fail-closed. */
+export function providerWireContract<T>(contract: OutputContract<T>, provider: StructuredProvider, variant = "default", _options: { requireRegistered?: boolean } = {}): ProviderWireContract<T> {
   if (structuredDigest(contract.jsonSchema) !== contract.schemaDigest) throw new Error("Output contract schema changed after selection");
-  const selected = wireContracts.get(wireKey(contract, provider, variant)) as ProviderWireContract<T> | undefined;
+  const selected = installedWireRegistry().active.find(entry => wireKey(entry.canonical, entry.provider, entry.variant) === wireKey(contract, provider, variant)) as ProviderWireContract<T> | undefined;
   if (selected) return selected;
-  if (options.requireRegistered) throw new Error(`No selected provider wire contract for ${contract.operation}/${provider}/${variant}`);
-  return compatibilityWireContract(contract, provider);
+  throw new Error(`No selected provider wire contract for ${contract.operation}/${provider}/${variant}`);
+}
+
+/** Resolve a persisted descriptor identity for replay.  New dispatch must use
+ * providerWireContract; this path deliberately cannot select a replacement. */
+export function historicProviderWireContract<T>(contract: OutputContract<T>, tuple: Pick<SelectedDispatchTupleV2, "provider" | "variant" | "descriptorDigest">): ProviderWireContract<T> {
+  const descriptor = installedWireRegistry().historic.find(entry => entry.canonical.operation === contract.operation &&
+    entry.canonical.schemaVersion === contract.schemaVersion && entry.canonical.schemaDigest === contract.schemaDigest &&
+    entry.provider === tuple.provider && entry.variant === tuple.variant && entry.descriptorDigest === tuple.descriptorDigest) as ProviderWireContract<T> | undefined;
+  if (!descriptor) throw new Error("Persisted structured descriptor is not available for historic replay");
+  return descriptor;
+}
+
+/** Exact persisted identity lookup, including retired schemas and providers. Never selects new work. */
+export function persistedProviderWireContract(value: SelectedDispatchTupleV2): ProviderWireContract {
+  const tuple = parseSelectedDispatchTupleV2(value);
+  const { digest, ...fields } = tuple;
+  if (structuredDigest(fields) !== digest) throw new Error("Persisted structured tuple digest mismatch");
+  const descriptor = installedWireRegistry().historic.find(entry => entry.canonical.operation === tuple.operation &&
+    entry.canonical.schemaVersion === tuple.schemaVersion && entry.canonical.schemaDigest === tuple.schemaDigest &&
+    entry.provider === tuple.provider && entry.variant === tuple.variant && entry.descriptorDigest === tuple.descriptorDigest);
+  if (!descriptor) throw new Error("Persisted structured descriptor is not available for historic replay");
+  return descriptor;
 }
 
 export function providerWireContracts(): readonly ProviderWireContract[] {
-  return [...wireContracts.values()].sort((a, b) => a.descriptorDigest.localeCompare(b.descriptorDigest));
+  return [...installedWireRegistry().active].sort((a, b) => a.descriptorDigest.localeCompare(b.descriptorDigest));
 }
 
-/** Explicit temporary profile registration for migrated operations awaiting a purpose-built wire shape. */
-export function registerCompatibilityProviderWireContracts<T>(contract: OutputContract<T>, family = "operation"): void {
-  registerProviderWireContract(createProviderWireContract({
-    canonical: contract, provider: "claude", profile: `claude-${family}-compat-v1`, variant: "default", wireVersion: 1,
-    wireSchema: contract.jsonSchema, maximumSchemaBytes: 1_000_000, maximumResponseBytes: 2_000_000,
-    normalizerId: "identity", normalizerVersion: 1, normalize: value => value,
-    guidanceId: `${family}-envelope-v1`, guidance: defaultGuidance,
-  }));
-  registerProviderWireContract(createProviderWireContract({
-    canonical: contract, provider: "codex", profile: `codex-${family}-compat-v1`, variant: "default", wireVersion: 1,
-    wireSchema: projectCodexSchema(contract.jsonSchema) as Record<string, unknown>, maximumSchemaBytes: 1_000_000, maximumResponseBytes: 2_000_000,
-    normalizerId: "codex-optional-properties", normalizerVersion: 1, normalize: value => decodeCodexOptionalProperties(contract.jsonSchema, value) as T,
-    guidanceId: `${family}-envelope-v1`, guidance: defaultGuidance,
-  }));
+export function selectedDispatchTupleV2(input: Omit<SelectedDispatchTupleV2, "protocolVersion" | "digest">): SelectedDispatchTupleV2 {
+  if (!input.operation || !input.schemaDigest || !input.descriptorDigest || !input.guidanceDigest || !input.instructionDigest || !input.actionId || !input.dispatchId ||
+    !input.sessionId || !Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1 ||
+    !Number.isSafeInteger(input.generation) || input.generation < 0) {
+    throw new Error("Invalid selected dispatch tuple v2");
+  }
+  const immutable = { protocolVersion: 2 as const, ...input };
+  return parseSelectedDispatchTupleV2({ ...immutable, digest: structuredDigest(immutable) });
 }
 
 function receiptWireContract<T>(contract: OutputContract<T>, profile: string, variant?: string): ProviderWireContract<T> | undefined {
-  const matches = [...wireContracts.values()].filter(entry =>
+  const matches = installedWireRegistry().historic.filter(entry =>
     entry.canonical.operation === contract.operation && entry.canonical.schemaVersion === contract.schemaVersion &&
     entry.canonical.schemaDigest === contract.schemaDigest && entry.profile === profile &&
     (variant === undefined || entry.variant === variant)) as unknown as ProviderWireContract<T>[];
@@ -181,7 +242,7 @@ function freezeJson<T>(value: T): T {
 export function outputContract<T>(operation: string, schema: z.ZodType<T>, schemaVersion = 1): OutputContract<T> {
   if (!/^[a-z][a-z0-9-]{0,99}$/.test(operation) || !Number.isSafeInteger(schemaVersion) || schemaVersion < 1) throw new Error("Invalid output contract identity");
   const jsonSchema = z.toJSONSchema(schema, { target: "draft-7", io: "input" }) as Record<string, unknown>;
-  return Object.freeze({ protocolVersion: 1 as const, operation, schemaVersion, schemaDigest: structuredDigest(jsonSchema), schema, jsonSchema: freezeJson(jsonSchema) });
+  return Object.freeze({ protocolVersion: 2 as const, operation, schemaVersion, schemaDigest: structuredDigest(jsonSchema), schema, jsonSchema: freezeJson(jsonSchema) });
 }
 
 /** Preserve existing JSON Schema constraints verbatim; no lossy schema conversion. */
@@ -203,7 +264,7 @@ export function jsonOutputContract<T>(operation: string, jsonSchema: Record<stri
         message: `JSON Schema validation failed: ${detail}`.slice(0, 500) });
     }
   });
-  return Object.freeze({ protocolVersion: 1 as const, operation, schemaVersion, jsonSchema, schemaDigest: structuredDigest(jsonSchema), schema });
+  return Object.freeze({ protocolVersion: 2 as const, operation, schemaVersion, jsonSchema, schemaDigest: structuredDigest(jsonSchema), schema });
 }
 
 /** Change oneOf only after proving disjointness. Never relax host validation. */
@@ -320,14 +381,16 @@ export function boundedJson(value: unknown, representation: "json-text" | "decod
 
 export type StructuredCandidate = {
   state: "candidate";
-  protocolVersion: 1;
+  protocolVersion: 2;
   operation: string;
   schemaVersion: number;
   schemaDigest: string;
   wireSchemaDigest: string;
   profile: string;
-  wireContractDigest?: string;
-  wireVariant?: string;
+  wireContractDigest: string;
+  wireVariant: string;
+  /** Digest of the immutable tuple that authorized this exact provider turn. */
+  selectedDispatchDigest: string;
   dispatchId: string;
   sessionId: string;
   nativeTurnId: string;
@@ -353,17 +416,43 @@ export function validateProviderWireValue<Canonical, Wire>(descriptor: ProviderW
 }
 
 /** Transport validation only. Product authority/evidence checks belong to the operation owner. */
-export function validateStructuredCandidate<T>(contract: OutputContract<T>, candidate: StructuredResponse | undefined, selected?: ProviderWireContract<T>): T {
+export function parseSelectedDispatchTupleV2(value: unknown): SelectedDispatchTupleV2 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Selected dispatch tuple is not an object");
+  const tuple = value as Partial<SelectedDispatchTupleV2>;
+  const fields: Array<keyof SelectedDispatchTupleV2> = ["operation", "schemaVersion", "schemaDigest", "provider", "profile", "variant", "descriptorDigest", "wireSchemaDigest", "guidanceDigest", "normalizerId", "normalizerVersion", "maximumSchemaBytes", "maximumResponseBytes", "maximumPageBytes", "instructionDigest", "actionId", "dispatchId", "sessionId", "generation", "digest"];
+  if (tuple.protocolVersion !== 2 || Object.keys(tuple).length !== fields.length + 1 || fields.some(field => !(field in tuple))) throw new Error("Selected dispatch tuple is incomplete or has unknown fields");
+  if (tuple.provider !== "claude" && tuple.provider !== "codex" || typeof tuple.operation !== "string" || typeof tuple.profile !== "string" || typeof tuple.variant !== "string" || typeof tuple.sessionId !== "string" || !tuple.sessionId ||
+    !tuple.operation || !tuple.profile || !tuple.variant || typeof tuple.normalizerId !== "string" || !tuple.normalizerId ||
+    [tuple.schemaVersion, tuple.normalizerVersion, tuple.maximumSchemaBytes, tuple.maximumResponseBytes].some(entry => !Number.isSafeInteger(entry) || (entry ?? 0) < 1) ||
+    !Number.isSafeInteger(tuple.generation) || (tuple.generation ?? -1) < 0 ||
+    (tuple.maximumPageBytes !== null && (!Number.isSafeInteger(tuple.maximumPageBytes) || (tuple.maximumPageBytes ?? 0) < 1)) ||
+    [tuple.schemaDigest, tuple.descriptorDigest, tuple.wireSchemaDigest, tuple.guidanceDigest, tuple.instructionDigest, tuple.actionId, tuple.dispatchId, tuple.digest].some(entry => typeof entry !== "string" || !entry)) throw new Error("Selected dispatch tuple has invalid fields");
+  return Object.freeze({ ...tuple } as SelectedDispatchTupleV2);
+}
+
+export function verifyStructuredReceiptTuple<T>(contract: OutputContract<T>, candidate: StructuredCandidate, descriptor: ProviderWireContract<T>, value: SelectedDispatchTupleV2): void {
+  const tuple = parseSelectedDispatchTupleV2(value);
+  const { digest, ...canonicalTuple } = tuple;
+  if (digest !== structuredDigest(canonicalTuple)) throw new Error("Selected dispatch tuple digest mismatch");
+  if (tuple.operation !== contract.operation || tuple.schemaVersion !== contract.schemaVersion || tuple.schemaDigest !== contract.schemaDigest ||
+    tuple.provider !== descriptor.provider || tuple.profile !== descriptor.profile || tuple.variant !== descriptor.variant ||
+    tuple.descriptorDigest !== descriptor.descriptorDigest || tuple.wireSchemaDigest !== descriptor.wireSchemaDigest ||
+    tuple.guidanceDigest !== descriptor.guidanceDigest || tuple.normalizerId !== descriptor.normalizerId ||
+    tuple.normalizerVersion !== descriptor.normalizerVersion || tuple.maximumSchemaBytes !== descriptor.maximumSchemaBytes ||
+    tuple.maximumResponseBytes !== descriptor.maximumResponseBytes || tuple.maximumPageBytes !== (descriptor.maximumPageBytes ?? null) ||
+    tuple.dispatchId !== candidate.dispatchId || tuple.sessionId !== candidate.sessionId ||
+    candidate.selectedDispatchDigest !== tuple.digest) throw new Error("Structured result does not match selected dispatch tuple v2");
+}
+
+export function validateStructuredCandidate<T>(contract: OutputContract<T>, candidate: StructuredResponse | undefined, selected: ProviderWireContract<T>, tuple: SelectedDispatchTupleV2): T {
   if (!candidate || candidate.state !== "candidate") throw new Error(`No completed structured result: ${candidate?.detail ?? "missing receipt"}`);
-  if (candidate.protocolVersion !== 1 || candidate.terminal !== "completed" || !candidate.dispatchId || !candidate.sessionId || !candidate.nativeTurnId ||
+  if (candidate.protocolVersion !== 2 || candidate.terminal !== "completed" || !candidate.dispatchId || !candidate.sessionId || !candidate.nativeTurnId ||
     candidate.operation !== contract.operation || candidate.schemaVersion !== contract.schemaVersion || candidate.schemaDigest !== contract.schemaDigest) throw new Error("Structured result contract or receipt mismatch");
-  const provider = candidate.profile === "codex-json-schema-v1" ? "codex" : candidate.profile === "claude-json-schema-v1" ? "claude" : undefined;
-  const descriptor = selected ?? receiptWireContract(contract, candidate.profile, candidate.wireVariant) ??
-    (provider ? providerWireContract(contract, provider, candidate.wireVariant ?? "default") : undefined);
-  if (!descriptor) throw new Error("Structured result wire profile mismatch");
+  const descriptor = selected;
   if (candidate.profile !== descriptor.profile || candidate.wireSchemaDigest !== descriptor.wireSchemaDigest ||
-    candidate.wireContractDigest !== undefined && candidate.wireContractDigest !== descriptor.descriptorDigest ||
-    candidate.wireVariant !== undefined && candidate.wireVariant !== descriptor.variant) throw new Error("Structured result wire profile mismatch");
+    candidate.wireContractDigest !== descriptor.descriptorDigest ||
+    candidate.wireVariant !== descriptor.variant) throw new Error("Structured result wire profile mismatch");
+  verifyStructuredReceiptTuple(contract, candidate, descriptor, tuple);
   const raw = boundedJson(candidate.value, candidate.representation, descriptor.maximumResponseBytes);
   validateProviderWireValue(descriptor, raw);
   const decoded = descriptor.normalize(raw);

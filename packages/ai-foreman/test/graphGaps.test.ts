@@ -1,5 +1,5 @@
-import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
-import type { TurnPolicy } from "../src/adapters/types.js";
+import { nativeFixtureTurn, workFixtureTurn, rawProviderFixtureTurn, prepareFixtureAdapter } from "./helpers/nativeOutput.js";
+import type { TurnRequest } from "../src/adapters/types.js";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { DEFAULT_GRAPH_CONFIG, type GraphExchangeV1 } from "rafi-spec";
+import { workReportOutput, DEFAULT_GRAPH_CONFIG, type GraphExchangeV1 } from "rafi-spec";
 import { adoptGraph, disableGraph } from "../src/graph/maintenance.js";
 import { captureGraphCorpus, graphExclusions } from "../src/graph/corpus.js";
 import { loadGraphConfig } from "../src/graph/config.js";
@@ -26,26 +26,30 @@ function fixture(git = true): string {
   return root;
 }
 const turn = (text: string): TurnResult => ({ text, isError: false, numTurns: 1, costUsd: 0.1, costAuthoritative: true, usage: { scope: "turn-delta", inputTokens: 20, outputTokens: 10 } });
-const request = JSON.stringify({ kind: "rafi_graph_request", version: 1, requestId: "r", operations: [{ operation: "query", query: "main" }] });
+const graphRequest = { kind: "graph-request", request: { kind: "rafi_graph_request", version: 1, requestId: "r", operations: [{ operation: "query", query: "main" }] } };
+const nativeTurn = (policy: TurnRequest | undefined, session: string, alternative?: unknown): TurnResult => ({
+  ...workFixtureTurn(policy, session, "codex", alternative), ...turn("Presentation only"),
+});
+const policy = { output: workReportOutput };
 for (const failure of ["provider", "continuity", "protocol", "request-reuse"] as const) test(`failed graph exchange retains all usage: ${failure}`, async () => {
   const root = fixture();
   try {
     let calls = 0;
-    const adapter = { agent: "codex", sessionId: () => "usage-session", sendTurn: async () => {
+    const adapter = { agent: "codex", sessionId: () => "usage-session", sendTurn: async (_text: string, selected?: TurnRequest) => {
       calls++;
-      if (failure === "protocol") return turn('{"kind":"rafi_graph_request",oops');
-      if (calls === 1) return turn(request);
+      if (failure === "protocol") return { ...rawProviderFixtureTurn(selected, "usage-session", { invalid: true }, "codex"), ...turn("Malformed native fixture") };
+      if (calls === 1) return nativeTurn(selected, "usage-session", graphRequest);
       if (failure === "provider") return { ...turn("provider failed"), isError: true };
       if (failure === "continuity") return { ...turn("invalid continuity"), continuityErrors: ["missing record"] };
-      return turn(request.replace('"main"', '"changed"'));
+      return nativeTurn(selected, "usage-session", { ...graphRequest, request: { ...graphRequest.request, operations: [{ operation: "query", query: "changed" }] } });
     } } as unknown as BuilderAdapter;
-    const result = await sendGraphTurn(adapter, "work", graphContext(root, root, "implementation", "work"));
+    prepareFixtureAdapter(adapter, root);
+    const result = await sendGraphTurn(adapter, "work", graphContext(root, root, "implementation", "work"), policy);
     assert.equal(result.isError, true);
-    assert.equal(calls, 2);
-    assert.equal(result.numTurns, 2);
-    assert.equal(result.costUsd, 0.2);
-    assert.equal(result.usage?.inputTokens, 40);
-    assert.equal(result.usage?.outputTokens, 20);
+    const turns = failure === "protocol" ? 1 : 2;
+    assert.equal(calls, turns); assert.equal(result.numTurns, turns);
+    assert.equal(result.costUsd, turns * 0.1);
+    assert.equal(result.usage?.inputTokens, turns * 20); assert.equal(result.usage?.outputTokens, turns * 10);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 test("Git-style Graphify exclusions preserve escapes, anchors, classes and excluded parents", () => {
@@ -81,30 +85,31 @@ test("bound recovery resumes only the saved undispatched continuation and preser
     const adapter = { agent: "codex", sessionId: () => "bound-session", contextUsage: async () => {
       if (++probes === 2 && crash) throw new Error("simulated host crash before dispatch intent");
       return undefined;
-    }, sendTurn: async (prompt: string) => { prompts.push(prompt); return turn(prompts.length === 1 ? request : "STEP_STATUS: done"); } } as unknown as BuilderAdapter;
+    }, sendTurn: async (prompt: string, selected?: TurnRequest) => { prompts.push(prompt); return nativeTurn(selected, "bound-session", prompts.length === 1 ? graphRequest : undefined); } } as unknown as BuilderAdapter;
+    prepareFixtureAdapter(adapter, root);
     const context = graphContext(root, root, "implementation", "fixed work", { operationId: "recovery", logicalTaskId: "assignment" });
-    await assert.rejects(sendGraphTurn(adapter, "fixed work", context), /simulated host crash/);
+    await assert.rejects(sendGraphTurn(adapter, "fixed work", context, policy), /simulated host crash/);
     const db = new WorkflowDb(root);
     try { assert.equal(db.graphStore().get<GraphExchangeV1>("exchange", "recovery")?.value.state, "read-completed"); } finally { db.close(); }
-    await assert.rejects(sendGraphTurn(adapter, "different work", context), /cannot be replayed/);
+    await assert.rejects(sendGraphTurn(adapter, "different work", context, policy), /cannot be replayed/);
     crash = false;
-    const result = await sendGraphTurn(adapter, "fixed work", context);
+    const result = await sendGraphTurn(adapter, "fixed work", context, policy);
     assert.equal(prompts.length, 2);
     assert.match(prompts[1], /Continue the same frozen action/);
     assert.equal(result.numTurns, 2);
     assert.equal(result.usage?.inputTokens, 40);
     assert.equal(result.costUsd, 0.2);
-    await assert.rejects(sendGraphTurn(adapter, "fixed work", context), /cannot be replayed/);
+    await assert.rejects(sendGraphTurn(adapter, "fixed work", context, policy), /cannot be replayed/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
-test("malformed requests get one source fallback and cannot recursively consume repair turns", async () => {
+test("malformed native requests cannot dispatch a source fallback or formatting repair", async () => {
   const root = fixture();
   try {
     const prompts: string[] = [];
-    const adapter = { agent: "codex", sessionId: () => "s", sendTurn: async (prompt: string) => { prompts.push(prompt); return turn('{"kind":"rafi_graph_request",oops'); } } as unknown as BuilderAdapter;
-    const result = await sendGraphTurn(adapter, "work", graphContext(root, root, "implementation", "work"));
-    assert.equal(prompts.length, 2);
-    assert.match(prompts[1], /No further graph requests/);
+    const adapter = { agent: "codex", sessionId: () => "s", sendTurn: async (prompt: string, selected?: TurnRequest) => { prompts.push(prompt); return rawProviderFixtureTurn(selected, "s", { invalid: true }, "codex"); } } as unknown as BuilderAdapter;
+    prepareFixtureAdapter(adapter, root);
+    const result = await sendGraphTurn(adapter, "work", graphContext(root, root, "implementation", "work"), policy);
+    assert.equal(prompts.length, 1);
     assert.equal(result.isError, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -113,8 +118,9 @@ test("round exhaustion gives a terminal limitation followed by a normal business
   try {
     adoptGraph(root, { authorization: "explicit", config: { ...loadGraphConfig(root).config!, limits: { rounds: 1 } } });
     const prompts: string[] = [];
-    const adapter = { agent: "codex", sessionId: () => "s", sendTurn: async (prompt: string) => { prompts.push(prompt); return turn(prompts.length < 3 ? request : "STEP_STATUS: done"); } } as unknown as BuilderAdapter;
-    const result = await sendGraphTurn(adapter, "work", graphContext(root, root, "implementation", "work"));
+    const adapter = { agent: "codex", sessionId: () => "s", sendTurn: async (prompt: string, selected?: TurnRequest) => { prompts.push(prompt); return nativeTurn(selected, "s", prompts.length < 3 ? graphRequest : undefined); } } as unknown as BuilderAdapter;
+    prepareFixtureAdapter(adapter, root);
+    const result = await sendGraphTurn(adapter, "work", graphContext(root, root, "implementation", "work"), policy);
     assert.equal(result.isError, false);
     assert.equal(result.numTurns, 3);
     assert.match(prompts[2], /round budget exhausted/);
@@ -126,11 +132,11 @@ test("native semantic usage is retained and completed chunks reuse without provi
     let count = 0;
     let request: { operationId: string; inputDigest: string };
     const host = { agent: "codex", graphRuntimeSettings: () => ({ model: "fixture-model" }) } as unknown as BuilderAdapter;
-    const semantic = graphSemanticHost(root, host, async () => ({ agent: "codex", sessionId: () => "semantic-session", close: async () => {}, sendTurn: async (text: string, policy?: TurnPolicy) => {
+    const semantic = graphSemanticHost(root, host, async () => prepareFixtureAdapter({ agent: "codex", sessionId: () => "semantic-session", close: async () => {}, sendTurn: async (text: string, policy?: TurnRequest) => {
       count++;
       request = JSON.parse(text.split("\n")[0]!);
       return { ...turn("Presentation only"), ...nativeFixtureTurn(policy, "semantic-session", { kind: "rafi_graph_semantic_result", version: 1, operationId: request.operationId, inputDigest: request.inputDigest, nodes: [{ id: "x", source_file: "doc.md" }], edges: [], origin: { provider: "codex", operationId: request.operationId } }, "codex"), costUsd: 0.1 };
-    } } as unknown as BuilderAdapter))!;
+    } } as unknown as BuilderAdapter, root))!;
     const chunks = [{ path: "doc.md", digest: "captured", text: "Requirement" }];
     await semantic(chunks, "semantic-job");
     await semantic(chunks, "semantic-job");
@@ -163,7 +169,7 @@ test("semantic deadline bounds an unresponsive provider independently of close",
   try {
     let closed = 0;
     const host = { agent: "codex", graphRuntimeSettings: () => ({ model: "fixture" }) } as unknown as BuilderAdapter;
-    const semantic = graphSemanticHost(root, host, async () => ({ sessionId: () => "hung", sendTurn: () => new Promise(() => {}), close: async () => { closed++; } } as unknown as BuilderAdapter))!;
+    const semantic = graphSemanticHost(root, host, async () => prepareFixtureAdapter({ agent: "codex", sessionId: () => "hung", sendTurn: () => new Promise(() => {}), close: async () => { closed++; } } as unknown as BuilderAdapter, root))!;
     const started = Date.now();
     await assert.rejects(semantic([{ path: "doc.md", digest: "x", text: "requirement" }], "hung-operation", { deadline: Date.now() + 500 }), /deadline exceeded/);
     assert.ok(Date.now() - started < 3000);

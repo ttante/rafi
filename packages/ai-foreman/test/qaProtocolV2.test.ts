@@ -1,4 +1,4 @@
-import { admitFixtureWork, seedQaReceipt } from "./helpers/workAdmission.js";
+import { admitFixtureWork, seedQaReceipt, seedRemediationReceipt } from "./helpers/workAdmission.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -35,7 +35,13 @@ test("QA V2 durable head is CAS fenced and pass certificates are scoped and sing
     assert.throws(() => db.transitionQa("run", "T1", 0, { type: "review-ready", reviewBasisDigest: "b", sessionGeneration: 0 }), /stale QA transition/);
     head = db.transitionQa("run", "T1", head.revision, { type: "review-ready", reviewBasisDigest: "b", sessionGeneration: 0 });
     head = db.transitionQa("run", "T1", head.revision, { type: "turn-intended", slot: "initial" });
-    const certificate = db.issueQaPassCertificate({ runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: "s", reviewBasisDigest: "b", turnReceiptDigest: seedQaReceipt(db,"run","T1",head.reviewNumber,"s","b") });
+    const input = { runId: "run", ticketId: "T1", qaRevision: head.revision + 1, sourceStateDigest: "s", reviewBasisDigest: "b", turnReceiptDigest: seedQaReceipt(db,"run","T1",head.reviewNumber,"s","b") };
+    assert.throws(() => db.issueQaPassCertificate({ ...input, turnReceiptDigest: "legacy-or-foreign" }), /persisted sealed native/);
+    const readEvidence = db.getEvidence.bind(db);
+    db.getEvidence = () => undefined;
+    assert.throws(() => db.issueQaPassCertificate(input), /evidence is missing/);
+    db.getEvidence = readEvidence;
+    const certificate = db.issueQaPassCertificate(input);
     head = db.transitionQa("run", "T1", head.revision, { type: "review-passed", passCertificateId: certificate.certificateId });
     db.consumeQaPassCertificate("run", "T1", certificate.certificateId, "test");
     assert.throws(() => db.consumeQaPassCertificate("run", "T1", certificate.certificateId, "again"), /already been consumed/);
@@ -109,12 +115,12 @@ test("accepted failure, remediation, and pass boundaries commit their durable fa
     }, { attemptId: "remediation-1", runId: "run", ticketId: "T1", reviewAttemptId: "review-1", generation: 1, mode: "validated-report", requestDigest: "request-1" });
     assert.equal(head.state, "remediation-intended");
     assert.equal(db.qaRemediationAttempt("remediation-1")?.status, "started");
+    const nativeReceipt = seedRemediationReceipt(db, "remediation-1");
+    assert.throws(() => db.recordBuilderRemediationReceipt({ ...nativeReceipt, version: 2 }), /Legacy Builder receipt/);
     head = db.commitQaRemediationOutcome({
       recoveryAttemptId: "recovery-1", remediationAttemptId: "remediation-1", outcome: "succeeded",
-      responseDigest: "response-1", summaryDigest: "summary-1", expectedRevision: head.revision,
-      receipt: { version: 2, operationId: "remediation-1", runId: "run", ticketId: "T1", reportDigest: "report-1",
-        sourceStateDigest: "source-1", requestDigest: "request-1", responseDigest: "response-1", summaryDigest: "summary-1",
-        providerTurnId: "builder-turn-1", completedAt: new Date(1).toISOString() },
+      responseDigest: nativeReceipt.responseDigest, summaryDigest: nativeReceipt.summaryDigest, expectedRevision: head.revision,
+      receipt: nativeReceipt,
     });
     assert.equal(head.state, "recheck-required");
     assert.equal(db.qaRemediationAttempt("remediation-1")?.status, "succeeded");

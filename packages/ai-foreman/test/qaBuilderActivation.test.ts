@@ -24,6 +24,7 @@ class Adapter implements BuilderAdapter {
   constructor(private ref: ProviderSessionRefV1, private refuse = false) {}
   sessionId() { return this.ref.sessionId; }
   sessionRef() { return this.ref; }
+  async prepareSession() { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1) { this.ref = ref; }
   async sendTurn(text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     this.turns.push({ text, responseOnly: policy?.responseOnly });

@@ -486,7 +486,7 @@ export class Foreman {
     instruction += `\n\n${operationInstruction(output)}`;
     const send = async (text: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> => {
       this.assertNotInterrupted();
-      policy = nativePolicy(output, { ...policy, dispatchId: undefined, journalRunId: this.qaRunId, journalRole: mode });
+      policy = nativePolicy(output, { ...policy, dispatchId: undefined, journalRunId: this.qaRunId });
       const context = ticket && this.projectDir ? renderBuildWorkContext(this.ticketForQa(0, ticket), loadTicketSetupConfigWithDefaults(this.projectDir).build.validation_checklist) : "";
       const contractContext = ticket && this.projectDir ? await ensureBuilderContract(this.projectDir, this.qaRunId, ticket, this.builderWorktree ?? this.projectDir, adapter, this.qaFactory ? (...args) => this.createOwnedQa(...args) : undefined) : "";
       this.assertNotInterrupted();

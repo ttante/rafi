@@ -45,7 +45,7 @@ import { SessionUnavailableError, recoverableBuilderTurnError } from "../adapter
 import { SessionUnavailableContinuityError } from "../continuity.js";
 import type { QaRecoveryPacket } from "../qaRecovery.js";
 
-export interface DeliveryUnitSession { runId?: string; unitId: string; branch: string; worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1; ticket: string; }
+export interface DeliveryUnitSession { communicationProtocolVersion?: 2; runId?: string; unitId: string; branch: string; worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1; ticket: string; }
 export type BaseWorktreePolicy = "enforce" | "warn" | "skip";
 
 export function readDeliveryUnitSession(projectDir: string, unitId: string): DeliveryUnitSession | undefined {
@@ -53,6 +53,7 @@ export function readDeliveryUnitSession(projectDir: string, unitId: string): Del
   if (!existsSync(path)) return undefined;
   try {
     const cached = JSON.parse(readFileSync(path, "utf8")) as DeliveryUnitSession;
+    if (cached.communicationProtocolVersion !== 2) return undefined;
     const reader = new WorkflowReader(projectDir);
     try {
       const known = reader.branchResumeSessions(false);
@@ -469,7 +470,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           if (node.deliveryUnitId) {
             const path = deliverySessionPath(opts.projectDir, node.deliveryUnitId);
             mkdirSync(join(opts.projectDir, ".foreman", "delivery-sessions"), { recursive: true });
-            writeFileSync(path, `${JSON.stringify({ runId: opts.runId, unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, sessionRef: builder.sessionRef?.(), ticket: node.ticket.id }, null, 2)}\n`, "utf8");
+            writeFileSync(path, `${JSON.stringify({ communicationProtocolVersion: 2, runId: opts.runId, unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, sessionRef: builder.sessionRef?.(), ticket: node.ticket.id }, null, 2)}\n`, "utf8");
           }
         }
       }

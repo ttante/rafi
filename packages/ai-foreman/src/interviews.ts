@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { WorkflowDb } from "./workflowDb.js";
 
 export const INTERVIEW_STATE_VERSION = 2;
 export const INTERVIEW_DIRECTORY = ".rafi/interviews";
@@ -45,6 +46,8 @@ export interface InterviewFailure {
 }
 
 export interface InterviewRecord {
+  communicationProtocolVersion?: 2;
+  structuredCommunicationCutover?: { version: 2; reason: string; archiveDigest?: string; kind?: string };
   version: number;
   id: string;
   journeyId: string;
@@ -106,6 +109,7 @@ export function createInterviewRecord(input: {
   const stamp = (input.now ?? new Date()).toISOString();
   return {
     version: INTERVIEW_STATE_VERSION,
+    communicationProtocolVersion: 2,
     id: randomUUID(),
     journeyId: input.journeyId ?? randomUUID(),
     parentId: input.parentId,
@@ -140,6 +144,19 @@ export function ensureInterviewGitignore(projectDir: string): void {
 }
 
 export function saveInterviewRecord(projectDir: string, record: InterviewRecord, now = new Date()): InterviewRecord {
+  const existingPath = interviewRecordPath(projectDir, record.id);
+  if (!existsSync(existingPath)) {
+    // Repair historic projections before the new native workflow starts
+    // persisting its prepared session. A version flag cannot legitimize an
+    // already existing projection during migration.
+    const workflow = new WorkflowDb(projectDir);
+    workflow.close();
+  }
+  if (existsSync(existingPath)) {
+    const existing = JSON.parse(readFileSync(existingPath, "utf8")) as InterviewRecord;
+    if (existing.structuredCommunicationCutover || existing.communicationProtocolVersion !== 2)
+      throw new Error("structured-communication-v2-cutover: this interview cannot resume; start a new native dispatch");
+  }
   validateRecord(record);
   const directory = interviewDirectory(projectDir);
   mkdirSync(directory, { recursive: true });
@@ -291,7 +308,7 @@ function fingerprintFile(projectDir: string, path: string): string | null {
 function parseInterviewRecord(value: unknown): InterviewRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid interview record");
   const record = value as Partial<InterviewRecord>;
-  if (record.version === 1) return migrateV1Record(value as Record<string, unknown>);
+  if (record.version === 1) return { ...migrateV1Record(value as Record<string, unknown>), status: "incompatible" };
   if (record.version !== INTERVIEW_STATE_VERSION) {
     // Preserve it on disk. The caller can show it and require an explicit discard.
     if (typeof record.id === "string" && typeof record.workflow === "string") {
@@ -300,6 +317,7 @@ function parseInterviewRecord(value: unknown): InterviewRecord {
     throw new Error(`unsupported interview record version: ${String(record.version)}`);
   }
   validateRecord(record as InterviewRecord);
+  if (record.communicationProtocolVersion !== 2 || record.structuredCommunicationCutover) return { ...record, status: "incompatible" } as InterviewRecord;
   return record as InterviewRecord;
 }
 

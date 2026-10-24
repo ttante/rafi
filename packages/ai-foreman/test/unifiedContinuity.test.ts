@@ -1,7 +1,6 @@
-import { nativeFixtureTurn, fixtureOperationValue } from "./helpers/nativeOutput.js";
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
 import { nativePolicy, operationPayload } from "../src/structuredOperation.js";
 import { workReportOutput, qaVerdictOutput } from "rafi-spec";
-import { parseContinuityDelta } from "../src/continuity.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -9,7 +8,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
-import { parseQaResponseContract, type ContinuityDelta, type ProviderSessionRefV1, type ResolvedAgentSettings } from "rafi-spec";
+import { type ContinuityDelta, type ProviderSessionRefV1, type ResolvedAgentSettings } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, TurnResult } from "../src/adapters/types.js";
 import { ContinuityAdapter } from "../src/continuity.js";
 import { HANDOFF_ACCEPTED, HandoffAcceptanceError, HandoffLoopError, HandoffService } from "../src/handoffs.js";
@@ -22,6 +21,7 @@ import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { SessionUnavailableError } from "../src/adapters/sessionFailure.js";
 import { providerSessionKey } from "../src/sessionIdentity.js";
+import { assertActiveProviderDispatch } from "../src/structuredDispatchAuthority.js";
 
 const EMPTY_DELTA: ContinuityDelta = {
   version: 1,
@@ -45,7 +45,7 @@ class FakeAdapter implements BuilderAdapter {
   policy?: NativeAutoCompactionPolicy;
   constructor(
     private readonly id: string | undefined,
-    private readonly turns: TurnResult[] = [],
+    private readonly turns: Array<TurnResult & { nativeAlternative?: unknown; nativeContinuity?: unknown }> = [],
     private readonly usages: ContextUsage[] = [{ used: 10, maximum: 100, percentage: 10 }],
     private readonly compactResult: CompactResult = { ok: true },
     agent: "claude" | "codex" = "codex",
@@ -56,17 +56,24 @@ class FakeAdapter implements BuilderAdapter {
     const response = provided ?? { text: `${HANDOFF_ACCEPTED}\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 };
     if (!policy?.output || response.isError || response.structured) return response;
     if (policy.output.operation === "handoff-acceptance") {
-      if (provided && response.text.startsWith("STEP_STATUS: blocked")) return nativeFixtureTurn(policy, this.id!, null, this.agent, fixtureOperationValue("handoff-acceptance", response.text).result, EMPTY_DELTA);
+      if (provided?.nativeAlternative) return nativeFixtureTurn(policy, this.id!, null, this.agent, provided.nativeAlternative, EMPTY_DELTA);
       if (provided && !response.text.startsWith(`${HANDOFF_ACCEPTED}\n`)) return response;
       const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(_text ?? "");
       if (!match) throw new Error("Missing host handoff binding");
       return { ...nativeFixtureTurn(policy, this.id!, { manifestDigest: match[1], generation: Number(match[2]), missingResources: [] }, this.agent, undefined, EMPTY_DELTA), text: response.text };
     }
-    const envelope = fixtureOperationValue(policy.output.operation, response.text);
-    return { ...nativeFixtureTurn(policy, this.id!, null, this.agent, envelope.result, envelope.continuity), text: response.text, rawResponse: response.text };
+    const payload = policy.output.operation === "session-initialization" ? { ready: true }
+      : policy.output.operation === "qa-verdict" ? { kind: "passed", coverage: null, verifiedInstructionIds: [] }
+      : { disposition: "modified", evidence: ["Fixture source inspection"], coverage: null, graphMaintenance: null };
+    return { ...nativeFixtureTurn(policy, this.id!, payload, this.agent, provided?.nativeAlternative, provided ? provided.nativeContinuity ?? null : EMPTY_DELTA), text: response.text, rawResponse: response.text };
 
   }
   sessionId(): string | undefined { return this.id; }
+  async prepareSession(): Promise<ProviderSessionRefV1> {
+    const ref = this.sessionRef();
+    if (!ref) throw new Error("Fixture has no prepared session");
+    return ref;
+  }
   sessionRef(): ProviderSessionRefV1 | undefined {
     return this.adoptedRef ?? (this.id ? {
       version: 1, provider: this.agent, sessionId: this.id, role: "builder", stream: "builder", generation: 0,
@@ -501,7 +508,7 @@ test("handoff rejection reports the precise typed cause and retains the predeces
 
   await assert.rejects(
     service.acceptStaged(staged, successor),
-    (error: unknown) => error instanceof HandoffAcceptanceError && error.code === "missing-acknowledgement" && /predecessor retains the lease/.test(error.message),
+    (error: unknown) => error instanceof HandoffAcceptanceError && error.code === "provider-turn-failed" && /predecessor retains the lease/.test(error.message),
   );
   const after = new WorkflowDb(projectDir);
   assert.equal(after.roleMutationLease("run-1", "builder")?.providerSessionId, "session-1");
@@ -534,7 +541,7 @@ test("rejected handoff successors reach a bounded preservation pause", async () 
   db.ensureRun("run-1"); db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 }); db.claimInitialRoleLease("run-1", "builder", "predecessor"); db.close();
   let successors = 0, choices = 0;
   await assert.rejects(new HandoffService(projectDir).transfer({ runId: "run-1", role: "builder", reason: "bounded refusal", predecessorSessionId: "predecessor", compactionCount: 0, compactMaximum: 10 }, async () => {
-    successors++; return new FakeAdapter(`successor-${successors}`, [{ text: 'STEP_STATUS: blocked | reason="Cannot accept packet" next="Reconcile packet"', isError: false, numTurns: 1, costUsd: 0 }]);
+    successors++; return new FakeAdapter(`successor-${successors}`, [{ text: 'Presentation: cannot accept packet', nativeAlternative: { kind: "blocked", reason: "Cannot accept packet", nextAction: "Reconcile packet" }, isError: false, numTurns: 1, costUsd: 0 }]);
   }, { choose: async error => { assert.equal(error.code, "provider-refused-acknowledgement"); choices++; return "retry"; } }), /Three successors rejected acceptance.*restart-current/);
   assert.equal(successors, 3); assert.equal(choices, 2);
   const after = new WorkflowDb(projectDir);
@@ -627,7 +634,8 @@ for (const role of ["builder", "qa"] as const) test(`${role} missing composed co
     assert.equal(result.rawResponse, text); assert.equal(result.structured?.state, "candidate");
     assert.equal(provider.turnPolicies.length, 1);
     const db = new WorkflowDb(projectDir);
-    try { assert.equal(db.handoffs("run-1").length, 0); assert.equal(db.unresolvedRoleDispatches("run-1", role).length, 0); assert.equal(db.roleMutationLease("run-1", role)?.providerSessionId, "session-1"); } finally { db.close(); }
+    try { assert.equal(db.handoffs("run-1").length, 0); assert.equal(db.pendingStructuredPostprocessing("run-1").length, 1, "missing continuity leaves confirmed transport pending domain processing");
+      assert.equal(db.operations("run-1").find(operation => operation.kind === "provider-dispatch")?.status, "confirmed"); assert.equal(db.roleMutationLease("run-1", role)?.providerSessionId, "session-1"); } finally { db.close(); }
   } finally { await wrapper.close(); }
 });
 
@@ -646,8 +654,9 @@ test("native continuity preserves the exact provider instruction and payload wit
     try {
       assert.equal(db.continuityHead("run-1", "builder")?.state, "current");
       const event = db.continuityEvents("run-1").find(item => item.kind === "provider_response_received")!;
-      const receipt = JSON.parse(db.getEvidence((event.payload as { responseDigest: string }).responseDigest)!.toString());
-      assert.deepEqual(operationPayload<{ evidence: string[] }>(receipt, workReportOutput).evidence, ["token: absent"]);
+      const response = db.replayStructuredDispatch((event.payload as { dispatchId: string }).dispatchId, workReportOutput);
+      assert.equal(response.result.kind, "completed");
+      if (response.result.kind === "completed") assert.deepEqual(response.result.payload.evidence, ["token: absent"]);
     } finally { db.close(); }
   } finally { await wrapper.close(); }
 });
@@ -658,34 +667,49 @@ test("continuity refuses an uncontracted dispatch before provider work", async (
   try { await assert.rejects(wrapper.sendTurn("work"), /native.*contract/i); assert.equal(provider.turnPolicies.length, 0); } finally { await wrapper.close(); }
 });
 
-for (const role of ["builder", "qa"] as const) for (const outcome of ["valid", "invalid", "error", "unknown"] as const) test(`fresh recovery validates new ownership before context probes: ${role}/${outcome}`, async () => {
+for (const provider of ["codex", "claude"] as const) for (const role of ["builder", "qa"] as const) for (const outcome of ["valid", "invalid", "error", "unknown", "no-decision", "stale-decision", "owner-drift", "session-drift", "worktree-drift", "blocked"] as const) test(`fresh recovery validates new ownership before context probes: ${provider}/${role}/${outcome}`, async () => {
   const { rmSync } = await import("node:fs");
   const projectDir = root("rafi-fresh-owner-");
   const db = new WorkflowDb(projectDir);
   try {
-    db.claimInitialRoleLease("run", role, { ...new FakeAdapter("old").sessionRef()!, role });
+    const predecessor = { ...new FakeAdapter("old").sessionRef()!, provider, role, stream: role, cwd: projectDir };
+    db.claimInitialRoleLease("run", role, predecessor);
+    const decision = { version: 1 as const, mode: "fresh-recovery-only" as const, runId: "run", role,
+      tickets: [], authoritativeStateDigest: "fixture", settings: { ...SETTINGS, make: provider, role }, worktree: projectDir,
+      predecessorSessionId: "old", predecessorSessionRef: predecessor, planUpdateApproval: "review" as const, decidedAt: new Date().toISOString() };
+    if (outcome !== "no-decision") db.recordRecoveryDecision(decision);
     if (outcome === "unknown") {
       db.planOperation({ runId: "run", idempotencyKey: "old-dispatch", kind: "provider-dispatch", intent: { role } });
       db.updateOperation("old-dispatch", "in_progress");
       db.updateOperation("old-dispatch", "uncertain");
     }
     let turns = 0;
-    const adapter = new FakeAdapter("fresh");
-    adapter.adoptSessionRef({ ...adapter.sessionRef()!, role });
+    const adapter = new FakeAdapter("fresh", [], undefined, undefined, provider);
+    adapter.adoptSessionRef({ ...adapter.sessionRef()!, role, stream: role, cwd: outcome === "worktree-drift" ? join(projectDir, "foreign") : projectDir });
+    const prepare = adapter.prepareSession.bind(adapter);
+    adapter.prepareSession = async () => {
+      if (outcome === "stale-decision") db.recordRecoveryDecision({ ...decision, decidedAt: new Date(Date.now() + 1000).toISOString() });
+      return prepare();
+    };
     adapter.sendTurn = async (...args: unknown[]) => {
+      assertActiveProviderDispatch(args[1] as Parameters<BuilderAdapter["sendTurn"]>[1] & {}, args[0] as string, provider, adapter.sessionRef());
       turns++;
       assert.equal((args[1] as { responseOnly?: boolean }).responseOnly, true);
-      return { ...nativeFixtureTurn(args[1] as Parameters<BuilderAdapter["sendTurn"]>[1], "fresh", { ready: true }, "codex", undefined, outcome === "invalid" ? null : EMPTY_DELTA), isError: outcome === "error" };
+      if (outcome === "owner-drift") db.moveRoleLeaseAfterValidatedRecovery("run", role, { ...predecessor, sessionId: "other" }, "concurrent recovery");
+      if (outcome === "session-drift") adapter.adoptSessionRef({ ...adapter.sessionRef()!, generation: 1 });
+      return { ...nativeFixtureTurn(args[1] as Parameters<BuilderAdapter["sendTurn"]>[1], "fresh", { ready: true }, provider,
+        outcome === "blocked" ? { kind: "blocked", reason: "cannot initialize", nextAction: "inspect", branchDependency: null } : undefined,
+        outcome === "invalid" ? null : EMPTY_DELTA), isError: outcome === "error" };
     };
-    const continuous = new ContinuityAdapter({ adapter, projectDir, runId: "run", role, settings: { ...SETTINGS, role }, durableSingleTurn: role === "qa", replaceRecoveryLeaseAfterCheckpoint: true });
+    const continuous = new ContinuityAdapter({ adapter, projectDir, runId: "run", role, settings: { ...SETTINGS, make: provider, role }, durableSingleTurn: role === "qa", replaceRecoveryLeaseAfterCheckpoint: true });
     if (outcome === "valid") {
       await continuous.validateFreshRecovery();
       assert.equal(db.roleMutationLease("run", role)?.providerSessionId, "fresh");
       await continuous.validateFreshRecovery(); assert.equal(turns, 1);
     } else {
-      await assert.rejects(continuous.validateFreshRecovery(), /checkpoint|completion/);
-      assert.equal(db.roleMutationLease("run", role)?.providerSessionId, "old");
-      assert.equal(turns, outcome === "unknown" ? 0 : 1);
+      await assert.rejects(continuous.validateFreshRecovery(), /checkpoint|completion|recovery decision|predecessor changed/);
+      assert.equal(db.roleMutationLease("run", role)?.providerSessionId, outcome === "owner-drift" ? "other" : "old");
+      assert.equal(turns, ["unknown", "no-decision", "stale-decision", "worktree-drift"].includes(outcome) ? 0 : 1);
       assert.equal(adapter.closed, true, "failed validation must close the unused replacement");
     }
     await continuous.close();

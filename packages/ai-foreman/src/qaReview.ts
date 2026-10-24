@@ -1,6 +1,9 @@
+import { describeLegacyQaTranscript } from "./legacyCommunicationDisplay.js";
+import { BoundedTurnEvents, boundedUtf8, receiptFingerprint } from "./boundedTurnEvidence.js";
 import { qaStructuredResponse, qaStructuredStatus } from "./qaStructuredResponse.js";
-import { operationInstruction, operationPayload, operationResponse, nativePolicy } from "./structuredOperation.js";
-import { providerWireContract, qaVerdictOutput, qaRecoveryOutput, initializationOutput, type OutputContract, type QaVerdictPayload } from "rafi-spec";
+import { journalStructuredDispatch, operationInstruction, operationPayload, operationResponse, nativePolicy } from "./structuredOperation.js";
+import { durableOwnerDispatch } from "./structuredDispatchAuthority.js";
+import { providerWireContract, qaVerdictOutput, qaRecoveryOutput, initializationOutput, remediationOutput, type OutputContract, type QaVerdictPayload } from "rafi-spec";
 import { withGraphDerivedAccess } from "./graph/derived.js";
 import { dispatchWithGraphAccess } from "./graph/session.js";
 import { finalQaRoleInstructions, QA_COMMAND_DISCIPLINE, resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
@@ -10,14 +13,14 @@ import { finalReviewContractContext } from "./qaContractDelivery.js";
 import { qaCommandOutputExcerptsAllowed, retainedQaCommandObservations } from "./qaReviewEvidence.js";
 import { retainedHostBuilderObservations } from "./qaBuilderEvidence.js";
 import { qaHostGraphFact } from "./qaHostFacts.js";
-import { graphContext, parseGraphRequest, prepareGraphInstruction, sendGraphTurn } from "./graph/turn.js";
+import { graphContext, prepareGraphInstruction, sendGraphTurn } from "./graph/turn.js";
 import { BuildControlBoundary } from "./buildInterventions.js";
 import { formatRecoveryCommand } from "./recoveryGuidance.js";
 import { assertBuildAssignmentReconciled, BuildAssignmentRejected, captureBuildSource, type BuilderGuidanceFollowup } from "./buildAssignment.js";
 import { checkQaPrerequisites } from "./qaPrerequisites.js";
 import { boundedQaHistory } from "./qaHandbackHistory.js";
 import {
-  QA_FAILURE_REPORT_END, QA_FAILURE_REPORT_START, parseQaResponseContract, qaFailureReportV1Schema,
+  QA_FAILURE_REPORT_END, QA_FAILURE_REPORT_START, qaFailureReportV1Schema,
   type ProviderSessionRefV1, type QaFailureReportV1, type QaFindingRefV2, type SessionStrategy,
 } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent, CompactResult, TurnResult } from "./adapters/types.js";
@@ -648,14 +651,19 @@ function finishQaFixAttempt(opts: IsolatedQaOptions, attempt: { recoveryId: stri
   if (!opts.recovery || !attempt) return;
   const db = new WorkflowDb(opts.recovery.projectDir);
   try {
-    const responseDigest = typeof response === "string" ? db.putEvidence("qa", Buffer.from(response)) : undefined;
-    const summaryDigest = typeof summary === "string" ? db.putEvidence("qa", Buffer.from(boundedBuilderSummary(summary))) : undefined;
+    let responseDigest = typeof response === "string" ? db.putEvidence("qa", Buffer.from(response)) : undefined;
+    let summaryDigest = typeof summary === "string" ? db.putEvidence("qa", Buffer.from(boundedBuilderSummary(summary))) : undefined;
     const head = db.qaTicketHead(opts.recovery.runId, opts.ticket.id);
-    let receipt: import("./qaProtocolV2.js").BuilderRemediationReceiptV2 | undefined;
+    let receipt: import("./qaProtocolV2.js").BuilderRemediationReceiptV3 | undefined;
     if (outcome === "succeeded") {
-      if (!responseDigest || !summaryDigest) throw new Error("successful Builder remediation is missing response evidence");
-      if (!providerTurnId) throw new Error("successful Builder remediation is missing its provider turn identity");
-      receipt = { version: 2, operationId: attempt.operationId, runId: opts.recovery.runId, ticketId: opts.ticket.id, reportDigest: attempt.reportDigest, sourceStateDigest: attempt.sourceStateDigest, requestDigest: attempt.requestDigest, responseDigest, summaryDigest, providerTurnId, completedAt: new Date().toISOString() };
+      const turn = db.qaDeliveryTurns(attempt.operationId).at(-1);
+      if (!turn || turn.status !== "completed" || !turn.sealedDispatch || !turn.rawResponseDigest || turn.providerTurnId !== providerTurnId)
+        throw new Error("successful Builder remediation requires its persisted native delivery receipt");
+      const native = db.replayStructuredDispatch(turn.turnRecordId, remediationOutput) as import("rafi-spec").OperationResponse<import("rafi-spec").RemediationPayload>;
+      if (native.result.kind !== "completed" || native.result.payload.status !== "done") throw new Error("Builder remediation has no completed native result");
+      responseDigest = turn.rawResponseDigest;
+      summaryDigest = db.putEvidence("qa", native.result.payload.report.summary);
+      receipt = { version: 3, operationId: attempt.operationId, runId: opts.recovery.runId, ticketId: opts.ticket.id, reportDigest: attempt.reportDigest, reportOccurrenceId: turn.reportOccurrenceId, turnRecordId: turn.turnRecordId, sourceStateDigest: attempt.sourceStateDigest, requestDigest: attempt.requestDigest, responseDigest, summaryDigest, providerTurnId: turn.providerTurnId!, completedAt: new Date().toISOString() };
     }
     db.commitQaRemediationOutcome({ recoveryAttemptId: attempt.recoveryId, remediationAttemptId: attempt.remediationId, outcome, detail, responseDigest, summaryDigest, receipt, expectedRevision: head.revision });
   } finally { db.close(); }
@@ -807,8 +815,8 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
     }
     let graphSubturn=0;
     const activeGraphBinding=qaTurnBindings.get(qa)!;
-    const turn = await sendGraphTurn(qa,handoff,{...graphReviewContext,reviewBasisRef:activeGraphBinding.reviewBasisDigest},nativePolicy(qaVerdictOutput, { journaled: true }),
-      (prompt)=>sendDurableQaTurn(qa!,prompt,qaEvents,graphSubturn++===0?"initial":`graph-evidence-${graphSubturn}`),
+    const turn = await sendGraphTurn(qa,handoff,{...graphReviewContext,reviewBasisRef:activeGraphBinding.reviewBasisDigest},nativePolicy(qaVerdictOutput),
+      durableOwnerDispatch(activeGraphBinding.projectDir, qaVerdictOutput, { runId: activeGraphBinding.runId, actionId: activeGraphBinding.reviewAttemptId }, (prompt: string)=>sendDurableQaTurn(qa!,prompt,qaEvents,graphSubturn++===0?"initial":`graph-evidence-${graphSubturn}`)),
       {...graphPrepared,instruction:activeGraphBinding.reviewInstruction}); const status = qaStructuredStatus(turn);
     recoveryContext = qaTurnBindings.get(qa)?.recoveryContext;
     try {
@@ -995,11 +1003,11 @@ async function retainInvalidQaResponse(
       "builder-response-history": { value: (opts.state.builderResponseHistory ?? []).filter((entry) => entry.ticketId === opts.ticket.id), purpose: "Every exact host-observed Builder completion/remediation response and its bounded prompt summary" },
       "original-host-prompt": { value: originalTurn.hostInstruction ?? reviewPrompt, purpose: "Exact host-requested original QA instruction", exactText: true },
       "original-provider-prompt": { value: originalTurn.providerInstruction ?? { unavailable: "adapter did not expose provider-dispatched instruction" }, purpose: "Exact provider-dispatched original QA instruction or explicit unavailable marker", exactText: typeof originalTurn.providerInstruction === "string" },
-      "original-raw-response": { value: originalTurn.rawResponse ?? originalResponse, purpose: "Exact raw provider response before cleanup", exactText: true },
-      "original-cleaned-response": { value: originalResponse, purpose: "Exact cleaned original response used for contract validation", exactText: true },
+      "original-raw-response": { value: originalTurn.transportEvidence ?? { unavailable: true }, purpose: "Retained bounded transport references" },
+      "original-cleaned-response": { value: originalTurn.transportEvidence ?? { unavailable: true }, purpose: "Retained bounded cleaned evidence references" },
       "original-validation": { value: { errors: originalErrors, parsedStatus: parseStepStatus(originalResponse), responseBytes: Buffer.byteLength(originalResponse), turn: turnMetadata(originalTurn) }, purpose: "Parsed status, validator result, and complete host-observable turn metadata" },
       "qa-history": { value: opts.qaHistory ?? [], purpose: "Earlier valid reports, observations, fixes, and unresolved history" },
-      "tool-events": { value: qaEvents.length ? qaEvents : { unavailable: true }, purpose: "All QA tool/activity events available through BuilderEvent, or an explicit unavailable marker" },
+      "tool-events": { value: qaEvents instanceof BoundedTurnEvents ? qaEvents.metadata() : { unavailable: true }, purpose: "All QA tool/activity events available through BuilderEvent, or an explicit unavailable marker" },
       continuity: { value: continuity, purpose: "Cumulative continuity checkpoints, later host facts, handoff lineage, and recovery history" },
       settings: { value: { runtime: originalQa.agent, session: qaHandle.sessionIdentity(), runtimeSettings: qaHandle.runtimeContext, effectiveRoleInstructions: qaHandle.effectiveRoleInstructions, roleInstructionDigest: sha(qaHandle.effectiveRoleInstructions), loadedSkills: qaHandle.skills, handoffReceipt: qaHandle.handoffReceipt }, purpose: "Effective QA role instructions, actual loaded skills, runtime settings, and handoff receipt captured at session creation" },
       "context-usage": { value: await originalQa.contextUsage?.().catch(() => undefined) ?? { unavailable: true }, purpose: "Provider context usage sample or explicit unavailable marker" },
@@ -1023,7 +1031,7 @@ async function exhausted(
   unavailableOperatorReason?: string,
   requireFreshReviewReason?: string,
 ): Promise<{ outcome: "failed"; result: IsolatedQaResult } | { outcome: "retry" } | { outcome: "manual"; qa: BuilderAdapter; snapshot?: Awaited<ReturnType<typeof createDisposableQaSnapshotAsync>>; report: QaFailureReportV1 } | { outcome: "operator"; decision: Extract<QaReportRecoveryDecision, { action: "fresh" | "guidance" }>; packet: QaRecoveryPacket }> {
-  const synopsis = parseQaResponseContract(originalResponse).fields.issues?.trim();
+  const synopsis = describeLegacyQaTranscript(originalResponse).issues?.trim();
   let currentPrefix = prefix;
   if (packet.manifest.pendingAction !== "operator-menu") {
     packet = updateQaRecoveryPosition(packet, "operator-menu", packet.manifest.correctionTurns, "operator-menu");
@@ -1149,7 +1157,7 @@ interface QaEventRecorderState {
 const qaEventRecorders = new WeakMap<BuilderEvent[], QaEventRecorderState>();
 
 function startQaEventRecorder(adapter: BuilderAdapter): BuilderEvent[] {
-  const events: BuilderEvent[] = [];
+  const events: BuilderEvent[] = new BoundedTurnEvents(providerWireContract(qaVerdictOutput, adapter.agent).maximumResponseBytes);
   qaEventRecorders.set(events, { waits: new Map(), activePumps: 0 });
   attachQaEventRecorder(events, adapter);
   return events;
@@ -1204,10 +1212,10 @@ async function appendTurnObservation(packet: QaRecoveryPacket, label: string, tu
   let next = appendQaRecoveryResource(packet, `turns/${label}/host-prompt.${hostPrompt === undefined ? "json" : "txt"}`, hostPrompt ?? { unavailable: "adapter did not expose the host-requested instruction" }, { purpose: `Host-requested QA instruction for ${label}`, exact: hostPrompt !== undefined });
   const providerPrompt = turn.providerInstruction;
   next = appendQaRecoveryResource(next, `turns/${label}/provider-prompt.${providerPrompt === undefined ? "json" : "txt"}`, providerPrompt ?? { unavailable: "adapter did not expose the provider-dispatched instruction" }, { purpose: `Provider-dispatched QA instruction for ${label}`, exact: providerPrompt !== undefined });
-  next = appendQaRecoveryResource(next, `turns/${label}/raw-response.txt`, turn.rawResponse ?? turn.text, { purpose: `Raw provider QA response for ${label}`, exact: true });
-  next = appendQaRecoveryResource(next, `turns/${label}/cleaned-response.txt`, effectiveTurnText(turn), { purpose: `Cleaned QA response used for contract validation for ${label}`, exact: true });
+  next = appendQaRecoveryResource(next, `turns/${label}/raw-response.json`, turn.transportEvidence ?? { unavailable: true }, { purpose: `Retained bounded transport references for ${label}` });
+  next = appendQaRecoveryResource(next, `turns/${label}/cleaned-response.json`, turn.transportEvidence ?? { unavailable: true }, { purpose: `Retained bounded QA evidence for ${label}` });
   next = appendQaRecoveryResource(next, `turns/${label}/metadata.json`, { stage, validationErrors: errors, turn: turnMetadata(turn), eventCompletion: turn.turnId ? events.some((event) => event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === turn.turnId) ? "complete" : "incomplete" : "unavailable" }, { purpose: `Turn metadata, validation result, and event completeness for ${label}` });
-  return appendQaRecoveryResource(next, `turns/${label}/events.json`, events.length ? events : { unavailable: true }, { purpose: `Complete host-observed event set through ${label}` });
+  return appendQaRecoveryResource(next, `turns/${label}/events.json`, events instanceof BoundedTurnEvents ? events.metadata() : { unavailable: true }, { purpose: `Complete host-observed event set through ${label}` });
 }
 
 async function performRecoveryAcknowledgement(
@@ -1560,20 +1568,27 @@ async function sendDurableQaTurnOwned(adapter: BuilderAdapter, instruction: stri
   // Reading the sealed QA packet is ordinary confined read-only QA work.
   // Only formatting repair and ownership acceptance are response-only; the
   // first resource-inspection turn cannot truthfully read with tools disabled.
-  try { result = await adapter.sendTurn(instruction, nativePolicy(output, { dispatchId: operationId, logicalActionId: binding.reviewAttemptId, journaled: true, journalRunId: binding.runId, ...(slot === "session-initialization" ? { purpose: "initialization" as const, responseOnly: true } : {}) })); }
+  try { result = await journalStructuredDispatch(
+    binding.projectDir,
+    adapter,
+    instruction,
+    nativePolicy(output, { dispatchId: operationId, logicalActionId: binding.reviewAttemptId, journalRunId: binding.runId, ...(slot === "session-initialization" ? { purpose: "initialization" as const, responseOnly: true } : {}) }),
+    (text, policy) => adapter.sendTurn(text, policy),
+  ); }
   catch (error) {
     const failedDb = new WorkflowDb(binding.projectDir);
     try {
       const receipt: QaTurnReceiptV2 = {
         version: 2, operationId, dispatch: "uncertain", terminalEventObserved: false,
-        eventStreamDigest: failedDb.putEvidence("qa", Buffer.from(canonicalJson(events))),
+        eventStreamDigest: failedDb.putEvidence("qa", Buffer.from(canonicalJson(events instanceof BoundedTurnEvents ? events.metadata() : []))),
         sourceStateDigest: binding.sourceStateDigest, reviewBasisDigest: binding.reviewBasisDigest, completedAt: new Date().toISOString(),
       };
+      failedDb.recordCommunicationEvidenceRefs(operationId, [receipt.rawResponseDigest, receipt.cleanedResponseDigest, receipt.eventStreamDigest].filter((digest): digest is string => Boolean(digest)));
       failedDb.finishQaTurn(receipt);
       const head = failedDb.qaTicketHead(binding.runId, binding.ticketId);
       if (head.state === "turn-intended") failedDb.transitionQa(binding.runId, binding.ticketId, head.revision, { type: "turn-uncertain" });
     } finally { failedDb.close(); }
-    ensureUncertainQaTurnPacket(binding, instruction, error instanceof Error ? error.message : String(error));
+    ensureUncertainQaTurnPacket(binding, instruction, boundedUtf8(error instanceof Error ? error.message : String(error), 4096).toString());
     throw error;
   }
   await awaitQaTurnEvent(events, result);
@@ -1596,13 +1611,17 @@ async function sendDurableQaTurnOwned(adapter: BuilderAdapter, instruction: stri
       const receipt: QaTurnReceiptV2 = {
         version: 2, operationId, dispatch: "uncertain", terminalEventObserved: false,
         providerTurnId: result.turnId,
-        rawResponseDigest: failedDb.putEvidence("qa", Buffer.from(result.rawResponse ?? result.text)),
-        structuredResponseDigest: result.structured ? failedDb.putEvidence("qa", Buffer.from(JSON.stringify(result.structured))) : undefined,
-        cleanedResponseDigest: failedDb.putEvidence("qa", Buffer.from(result.cleanedResponse ?? result.text)),
+        rawResponseDigest: (failedDb.operation(operationId)?.result as { rawDigest?: string } | undefined)?.rawDigest,
+        sealedDispatch: failedDb.structuredOwnerDispatch(operationId),
+        structuredResponseDigest: (failedDb.operation(operationId)?.result as { responseDigest?: string } | undefined)?.responseDigest,
+        cleanedResponseDigest: failedDb.putEvidence("qa", boundedUtf8(result.cleanedResponse ?? result.text, expectedWire.maximumResponseBytes)),
+        retainedEvidence: { rawOriginalBytes: result.transportEvidence?.rawBytes, rawRetainedBytes: result.transportEvidence?.retainedRawBytes,
+          cleanedOriginalBytes: Buffer.byteLength(result.cleanedResponse ?? result.text), cleanedRetainedBytes: boundedUtf8(result.cleanedResponse ?? result.text, expectedWire.maximumResponseBytes).length },
         providerInstructionDigest: failedDb.putEvidence("qa", Buffer.from(result.providerInstruction ?? result.hostInstruction ?? instruction)),
-        eventStreamDigest: failedDb.putEvidence("qa", Buffer.from(canonicalJson({ events, rejectedProviderMetadata: result.providerMetadata, activeSession }))),
+        eventStreamDigest: failedDb.putEvidence("qa", Buffer.from(canonicalJson({ observation: events instanceof BoundedTurnEvents ? events.metadata() : [], rejectedSessionId: boundedUtf8(result.providerMetadata?.sessionId ?? "unavailable", 256).toString(), activeSessionId: boundedUtf8(activeSession?.sessionId ?? "unavailable", 256).toString() }))),
         sourceStateDigest: binding.sourceStateDigest, reviewBasisDigest: binding.reviewBasisDigest, completedAt: new Date().toISOString(),
       };
+      failedDb.recordCommunicationEvidenceRefs(operationId, [receipt.rawResponseDigest, receipt.cleanedResponseDigest, receipt.eventStreamDigest].filter((digest): digest is string => Boolean(digest)));
       failedDb.finishQaTurn(receipt);
       const head = failedDb.qaTicketHead(binding.runId, binding.ticketId);
       if (head.state === "turn-intended") failedDb.transitionQa(binding.runId, binding.ticketId, head.revision, { type: "turn-uncertain" });
@@ -1611,24 +1630,28 @@ async function sendDurableQaTurnOwned(adapter: BuilderAdapter, instruction: stri
     throw new Error(detail);
   }
   const completedAt = new Date().toISOString();
-  const terminalEventObserved = Boolean(result.turnId && result.failure?.dispatchState !== "unknown"
+  const terminalEventObserved = Boolean(!(events instanceof BoundedTurnEvents && events.terminalOverflow) && result.turnId && result.failure?.dispatchState !== "unknown"
     && events.filter(event => event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === result.turnId).length === 1
     && events.some(event => event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === result.turnId &&
-      qaDigest("structured-receipt", event.result.structured ?? null) === qaDigest("structured-receipt", result.structured ?? null)));
+      receiptFingerprint(event.result) === receiptFingerprint(result)));
   const receiptDb = new WorkflowDb(binding.projectDir);
   try {
-    const rawResponseDigest = receiptDb.putEvidence("qa", Buffer.from(result.rawResponse ?? result.text));
-    const structuredResponseDigest = result.structured ? receiptDb.putEvidence("qa", Buffer.from(JSON.stringify(result.structured))) : undefined;
+    const rawResponseDigest = (receiptDb.operation(operationId)?.result as { rawDigest: string }).rawDigest;
+    const structuredResponseDigest = (receiptDb.operation(operationId)?.result as { responseDigest?: string } | undefined)?.responseDigest;
     const providerInstruction = result.providerInstruction ?? result.hostInstruction ?? instruction;
     const providerInstructionDigest = receiptDb.putEvidence("qa", Buffer.from(providerInstruction));
-    const cleanedResponseDigest = receiptDb.putEvidence("qa", Buffer.from(result.cleanedResponse ?? result.text));
-    const eventStreamDigest = receiptDb.putEvidence("qa", Buffer.from(canonicalJson(events)));
+    const cleanedResponseDigest = receiptDb.putEvidence("qa", boundedUtf8(result.cleanedResponse ?? result.text, expectedWire.maximumResponseBytes));
+    const eventStreamDigest = receiptDb.putEvidence("qa", Buffer.from(canonicalJson(events instanceof BoundedTurnEvents ? events.metadata() : [])));
     const receipt: QaTurnReceiptV2 = {
-      version: 2, operationId, dispatch: terminalEventObserved ? "completed" : "uncertain", providerTurnId: result.turnId,
+      version: 2, operationId, dispatch: terminalEventObserved && !result.isError && !result.failure ? "completed" : "uncertain", providerTurnId: result.turnId,
+      sealedDispatch: receiptDb.structuredOwnerDispatch(operationId),
       providerInstructionDigest, rawResponseDigest, cleanedResponseDigest, eventStreamDigest, structuredResponseDigest,
+      retainedEvidence: { rawOriginalBytes: result.transportEvidence?.rawBytes, rawRetainedBytes: result.transportEvidence?.retainedRawBytes,
+        cleanedOriginalBytes: Buffer.byteLength(result.cleanedResponse ?? result.text), cleanedRetainedBytes: boundedUtf8(result.cleanedResponse ?? result.text, expectedWire.maximumResponseBytes).length },
       terminalEventObserved, sourceStateDigest: binding.sourceStateDigest, reviewBasisDigest: binding.reviewBasisDigest, completedAt,
     };
     receiptDb.atomic(() => {
+      receiptDb.recordCommunicationEvidenceRefs(operationId, [rawResponseDigest, cleanedResponseDigest, eventStreamDigest]);
       receiptDb.finishQaTurn(receipt);
       const metricAdmission = receiptDb.admittedWork(binding.runId, binding.ticketId);
       if (metricAdmission) receiptDb.qaPreparationStore().metric(binding.runId, binding.ticketId, metricAdmission.requirementsDigest, `metric:qa-turn:${operationId}`, slot?.includes("correction") ? "format-repair" : "phase-observation", { phase: slot?.includes("correction") || slot === "session-initialization" ? "repair" : "review", durationMs: Math.max(0, Date.now() - providerStartedAt), costUsd: result.costAuthoritative ? result.costUsd : null, inputTokens: result.inputTokens ?? null, outputTokens: result.outputTokens ?? null });
@@ -1772,7 +1795,7 @@ export async function beginQaFinalization(projectDir: string, sourceWorktree: st
 export async function verifyPendingQaFinalizationSource(projectDir: string, sourceWorktree: string, runId: string, ticketId: string, allowProjection = false, projectionOperationId?: string): Promise<void> {
   assertBuildAssignmentReconciled(projectDir, runId);
   const controlDb = new WorkflowDb(projectDir);
-  try {controlDb.assertFinalizationControls(runId,ticketId);} finally {controlDb.close();}
+  try {controlDb.assertFinalizationControls(runId,ticketId);controlDb.assertQaFinalizationAuthority(runId,ticketId);} finally {controlDb.close();}
   const db = new WorkflowDb(projectDir);
   let step: ReturnType<WorkflowDb["qaFinalizationSteps"]>[number] | undefined;
   let projectionAuthorized = !projectionOperationId;
@@ -1819,7 +1842,7 @@ function turnMetadata(turn: TurnResult): unknown {
     inputTokens: turn.inputTokens ?? "unavailable",
     outputTokens: turn.outputTokens ?? "unavailable",
     usage: turn.usage ?? { unavailable: true },
-    failure: turn.failure ?? null,
+    failure: turn.failure ? { ...turn.failure, diagnostics: boundedUtf8(turn.failure.diagnostics, 4096).toString() } : null,
     provider: turn.providerMetadata ?? { unavailable: true },
   };
 }
@@ -1833,5 +1856,9 @@ function qaContinuityRecoveryContext(opts: IsolatedQaOptions): unknown {
       handoffs: db.handoffs(opts.recovery.runId),
       recoveryAttempts: db.recoveryAttempts(opts.recovery.runId).filter((attempt) => attempt.ticket === opts.ticket.id),
     };
+  } catch (error) {
+    if (/revoked graph-derived evidence|Graph access changed/.test(String(error)))
+      return { unavailable: "graph-access-revoked", detail: "Historical graph-derived continuity is withheld; explicit source-based recovery is required" };
+    throw error;
   } finally { db.close(); }
 }

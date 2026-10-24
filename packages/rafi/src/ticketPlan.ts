@@ -1,4 +1,5 @@
-import { operationContract, validateStructuredCandidate, type StructuredResponse } from "rafi-spec";
+import { WorkflowDb } from "ai-foreman/workflow-db.js";
+import { ticketPlanOutput } from "rafi-spec";
 import { operationInstruction, operationPayload, operationResponse, operationStatus, nativePolicy, sendRoleGraphTurn, withGraphDerivedAccess } from "ai-foreman/agent-run.js";
 import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
@@ -20,7 +21,6 @@ import {
   readTicketPlanningContext,
   ticketPlanningFingerprint,
   validateTicketPlanProposal,
-  ticketPlanProposalV1Schema,
   type TicketPlanProposal,
 } from "ai-foreman/ticket-planning.js";
 import type { ProjectConfig, ProjectSourceEntry, SourceRegistryConfig, TicketBuildBranchStrategy } from "rafi-spec";
@@ -86,8 +86,6 @@ export interface TicketPlanInstructionOptions {
   branchPrefix?: string;
   unattended?: boolean;
 }
-
-export const ticketPlanOutput = operationContract("ticket-plan", ticketPlanProposalV1Schema, { sources: true });
 
 export function buildTicketPlanInstruction(opts: TicketPlanInstructionOptions): string {
   return `You are Rafi's read-only guided ticket planner. Use the planner role and ticket-maker schema guidance.${opts.grill === "exhaustive" ? " Use the grill-me skill exhaustively. There is no arbitrary minimum question count." : " Use a standard focused interview."}
@@ -323,6 +321,32 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
     if (rebuildingLostContinuity) {
       console.warn("rafi tickets plan: planner-session continuity was lost; rebuilding from the saved brief and grill-me decisions without repeating completed verification");
     }
+    const planningRunId = interview ? `ticket-plan:${interview.id}` : undefined;
+    let savedPlanningResult: Awaited<ReturnType<typeof sendRoleGraphTurn>> | undefined;
+    const savedReceipt = resumingInterview ? interview?.decisions.structuredResponse : undefined;
+    const savedText = resumingInterview ? interview?.decisions.proposalResponse : undefined;
+    const savedDispatch = resumingInterview ? interview?.decisions.nativeDispatch as Record<string, unknown> | undefined : undefined;
+    if (!rebuildingLostContinuity && (savedReceipt !== undefined || savedText && !savedDispatch))
+      throw new Error("Stored ticket-plan receipt has no persisted v2 tuple and cannot be resumed");
+    if (savedDispatch !== undefined && !rebuildingLostContinuity) {
+      if (!savedDispatch || typeof savedDispatch !== "object" || Array.isArray(savedDispatch)) throw new Error("Saved ticket-plan dispatch reference is malformed");
+      if (savedDispatch.version !== 2 || savedDispatch.runId !== planningRunId || typeof savedDispatch.dispatchId !== "string" ||
+        typeof savedDispatch.tupleDigest !== "string" || Object.keys(savedDispatch).length !== 4)
+        throw new Error("Saved ticket-plan dispatch reference is invalid or belongs to another interview");
+      const db = new WorkflowDb(projectDir);
+      try {
+        if (db.operation(savedDispatch.dispatchId)?.runId !== planningRunId) throw new Error("Saved ticket-plan dispatch belongs to a foreign run");
+        savedPlanningResult = db.retainedStructuredTurn(savedDispatch.dispatchId);
+        if (savedPlanningResult.selectedDispatch?.digest !== savedDispatch.tupleDigest || savedPlanningResult.selectedDispatch.operation !== ticketPlanOutput.operation)
+          throw new Error("Saved ticket-plan tuple does not match its durable reference");
+      } finally { db.close(); }
+    }
+    const planningDecisions = (result: Awaited<ReturnType<typeof sendRoleGraphTurn>>, attempts: number) => {
+      if (!result.selectedDispatch) throw new Error("Ticket planning result omitted its selected tuple");
+      const { structuredResponse: _legacyReceipt, proposalResponse: _legacyText, ...decisions } = interview?.decisions ?? {};
+      return { ...decisions, nativeDispatch: { version: 2, runId: planningRunId, dispatchId: result.selectedDispatch.dispatchId,
+        tupleDigest: result.selectedDispatch.digest }, correctionAttempts: attempts };
+    };
     const role = await (opts.createPlanner ?? createRoleBuilder)({
       projectDir,
       role: "planner",
@@ -344,7 +368,7 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
     });
     roleRef = role;
     activeRole = role;
-    const sendPlanningTurn = (instruction: string, responseOnly = false) => sendRoleGraphTurn(role, `${instruction}\n\n${operationInstruction(ticketPlanOutput)}`, "planning", nativePolicy(ticketPlanOutput, { purpose: responseOnly ? "response-repair" : "planning", responseOnly }));
+    const sendPlanningTurn = (instruction: string, responseOnly = false) => sendRoleGraphTurn(role, `${instruction}\n\n${operationInstruction(ticketPlanOutput)}`, "planning", nativePolicy(ticketPlanOutput, { purpose: responseOnly ? "response-repair" : "planning", responseOnly, journalRunId: planningRunId }));
     console.log(`rafi tickets plan: project ${String(config.appName ?? "unnamed")} at ${projectDir}`);
     console.log(`rafi tickets plan: runtime=${role.runtime} model=${role.model ?? role.roleBundle.model ?? "runtime default"} effort=${role.effort ?? "runtime default"}`);
     console.log(`rafi tickets plan: interview=${grill}; agent changes are disabled\n`);
@@ -354,23 +378,17 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
     const priorAttempts = resumingInterview ? interview?.decisions.correctionAttempts ?? 0 : 0;
     if (!Number.isSafeInteger(priorAttempts) || Number(priorAttempts) < 0 || Number(priorAttempts) > 3) throw new Error("Saved proposal correction budget is invalid; reconcile the planning record before resuming");
     let correctionAttempts = Number(priorAttempts);
-    const savedReceipt = resumingInterview ? interview?.decisions.structuredResponse as StructuredResponse | undefined : undefined;
-    const savedText = typeof interview?.decisions.proposalResponse === "string" ? interview.decisions.proposalResponse : "";
-    if (resumingInterview && savedText && !savedReceipt && !rebuildingLostContinuity) throw new Error("Saved proposal uses the historical text protocol. Review that proposal with plan:doctor and start a new native planning action; it cannot be accepted or automatically repaired as a native result");
-    if (savedReceipt && !rebuildingLostContinuity) validateStructuredCandidate(ticketPlanOutput, savedReceipt);
-    let result = savedReceipt && !rebuildingLostContinuity
-      ? { text: savedText, structured: savedReceipt, isError: false, numTurns: 0, costUsd: 0 }
-      : await sendPlanningTurn(rebuildingLostContinuity && grillState.answers.length
+    let result = savedPlanningResult ?? await sendPlanningTurn(rebuildingLostContinuity && grillState.answers.length
       ? `${baseInstruction}\n\n${buildAuditAnswersContinuation(grillState)}`
       : baseInstruction);
     while (true) {
-      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: { ...interview.decisions, proposalResponse: result.text, structuredResponse: result.structured, correctionAttempts } });
       if (result.isError) throw new Error(`planning agent failed: ${result.text.slice(0, 300)}`);
+      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: planningDecisions(result, correctionAttempts) });
       const marker = operationStatus(result, ticketPlanOutput);
       if (marker.kind === "needs_input") {
         if (!interactive) {
           const issue = `unattended ticket planning cannot accept a needs_input question: ${marker.question?.trim() || "planner omitted its question"}`;
-          if (interview) interview = checkpointInterview(projectDir, interview, { decisions: { ...interview.decisions, proposalResponse: result.text, structuredResponse: result.structured, validationIssues: [issue], correctionAttempts } });
+          if (interview) interview = checkpointInterview(projectDir, interview, { decisions: { ...planningDecisions(result, correctionAttempts), validationIssues: [issue] } });
           throw new Error(`${issue}; resume interactively to supply the missing decision`);
         }
         console.log(result.text);
@@ -389,7 +407,7 @@ async function runTicketPlanOwned(opts: TicketPlanOptions, rawArgv = process.arg
       // substantive domain issues may consume a bounded correction turn.
       let proposal = operationPayload<TicketPlanProposal>(result, ticketPlanOutput);
       const issues = [...validateTicketPlanProposal(proposal, context.tickets, { futureWorkIds: context.futureWork.flatMap((item) => typeof item.id === "number" ? [item.id] : []) }), ...validateProposalSourceRefs(proposal, stagedSources, projectDir)];
-      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: { ...interview.decisions, proposalResponse: result.text, structuredResponse: result.structured, validationIssues: issues!, correctionAttempts } });
+      if (interview) interview = checkpointInterview(projectDir, interview, { runtime: { runtime: role.runtime, model: role.model, sessionId: role.builder.sessionId() }, decisions: { ...planningDecisions(result, correctionAttempts), validationIssues: issues! } });
       if (issues!.length) {
         if (correctionAttempts >= 3) throw new Error(`Ticket planning could not correct its proposal after 3 attempts:\n${issues!.join("\n")}\nRun \`rafi plan:doctor\` to recover this saved session.`);
         correctionAttempts++;

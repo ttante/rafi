@@ -1,3 +1,4 @@
+import { structuredPlanOutput } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -7,7 +8,6 @@ import {
   materializeStructuredPlan, readAndValidateStructuredPlanPair, regenerateStructuredPlanMarkdown,
   readNamedApprovedPlan, renderStructuredPlanMarkdown, validateMaterializedPlan, writeStructuredPlanArtifacts,
   validateStructuredPlanProposal,
-  extractStructuredPlanProposal,
   type StructuredPlanProposalV1,
 } from "../src/structuredPlan.js";
 
@@ -91,13 +91,11 @@ test("structured plan proposal validation rejects malformed delivery units clear
   assert.ok(issues.includes("delivery unit ui.slice_refs must be a string array"));
 });
 
-test("structured plan extraction rejects provider-added fields at the contract boundary", () => {
+test("native structured plan rejects provider-added fields and literal marker envelopes", () => {
   const value = proposal() as unknown as Record<string, unknown>;
   value.provider_claimed_plan_id = "pln_provider";
-  assert.throws(
-    () => extractStructuredPlanProposal(`RAFI_PLAN_PROPOSAL_START\n${JSON.stringify(value)}\nRAFI_PLAN_PROPOSAL_END`),
-    /invalid structured plan proposal contract.*provider_claimed_plan_id/s,
-  );
+  assert.equal(structuredPlanOutput.schema.safeParse({ version: 1, operation: "structured-plan", continuity: null, result: { kind: "completed", summary: "Plan", payload: value } }).success, false);
+  assert.equal(structuredPlanOutput.schema.safeParse(`RAFI_PLAN_PROPOSAL_START\n${JSON.stringify(proposal())}\nRAFI_PLAN_PROPOSAL_END`).success, false);
 });
 
 test("structured plan proposal validation rejects invalid dependencies and source refs without throwing", () => {

@@ -37,7 +37,7 @@ test("assignment conflict retains large existing and changed product files withi
     const assignment = beginBuildAssignment(root, "run", "T002", root, "Implement T002");
     writeFileSync(path, after);
     const response = 'STEP_STATUS: done | ticket="T001" summary="foreign work"';
-    assert.match(finishBuildAssignment(root, assignment, { text: response, isError: false, numTurns: 1, costUsd: 0 }, { kind: "done", ticket: "T001" })!, /structured result|native work-report/i);
+    assert.match(finishBuildAssignment(root, assignment, { text: response, isError: false, numTurns: 1, costUsd: 0 }, { kind: "done", ticket: "T001" })!, /native result|native work-report/i);
     const db = new WorkflowDb(root);
     try {
       const operation = db.operations("run")[0]!;
@@ -99,12 +99,14 @@ for (const boundary of ["budget", "requirements", "withdraw", "rollback"] as con
         if(boundary==="rollback") {const user="/request-attempt run T1 One follow-up";control.enqueue(parseManagerAction(user,"extra",control.revision())!,user);authorizationId=db.consumeInstructionControls("run","T1","attempts");assert.ok(authorizationId);}
       }finally{control.close();}
     }finally{db.close();}
+    const before = new WorkflowDb(root);
+    const beforeOperations = before.operations("run"); before.close();
     const original=WorkflowDb.prototype.planOperation;
     if(boundary==="rollback")WorkflowDb.prototype.planOperation=function(){throw new Error("Injected failure after budget and certificate writes");};
     try {assert.throws(()=>beginBuildAssignment(root,"run","T1",root,"Follow waiting guidance",{reviewAttemptId:"passed-review",requirementsDigest:boundary==="requirements"?"foreign":qaDigest("admitted-requirements",{id:"T1"}),maximum:boundary==="budget"?0:1,authorizationId}),/budget exhausted|requirements changed|No eligible|Injected failure/);}finally{WorkflowDb.prototype.planOperation=original;}
     const check=new WorkflowDb(root);
     try {
-      assert.equal(check.qaTicketHead("run","T1").state,"passed");assert.equal(check.qaAutomaticRemediationCount("run","T1"),0);assert.equal(check.operations("run").length,0);
+      assert.equal(check.qaTicketHead("run","T1").state,"passed");assert.equal(check.qaAutomaticRemediationCount("run","T1"),0);assert.deepEqual(check.operations("run"),beforeOperations);
       if(authorizationId)assert.equal(check.consumeInstructionControls("run","T1","attempts"),authorizationId);
       check.consumeQaPassCertificate("run","T1",certificateId!,"unchanged-pass");
     }finally{check.close();}

@@ -47,8 +47,38 @@ for (const scenario of ["invalid-assessment-shape", "material-future-concern"] a
     assert.notEqual(store.head(initial.runId, initial.workId, initial.admissionDigest).state, "ready");
     if (scenario === "material-future-concern" && result.status === "blocked") {
       assert.match(result.detail, /host-owned routing/);
-      assert.match(result.nextAction, /postimplementation check/);
+      assert.match(result.nextAction, /Revise and approve the affected plan or ticket verification intent/);
       assert.equal(store.budget(initial.runId, initial.workId, initial.admissionDigest)!.reservations.length, 2);
     }
   } finally { db.close(); }
+});
+
+test("legacy QA and remediation text cannot enter native authority consumers", async () => {
+  const { qaStructuredResponse, remediationStructuredResponse } = await import("../../packages/ai-foreman/src/qaStructuredResponse.js");
+  for (const text of [
+    "STEP_STATUS: qa_pass",
+    'STEP_STATUS: blocked | reason="dependency"',
+    "RAFI_QA_FAILURE_REPORT_START\n{}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail",
+    "RAFI_BUILDER_QA_REMEDIATION_START\n{}\nRAFI_BUILDER_QA_REMEDIATION_END\nSTEP_STATUS: done",
+    '```json\n{"version":3,"findings":[]}\n```',
+  ]) {
+    const turn: TurnResult = { text, rawResponse: text, isError: false, numTurns: 1, costUsd: 0 };
+    assert.equal(qaStructuredResponse(turn).valid, false, text);
+    assert.equal(remediationStructuredResponse(turn, {}).valid, false, text);
+  }
+});
+
+test("native remediation preserves blocker and outcome consistency checks", async () => {
+  const { remediationOutput } = await import("../../packages/spec/src/qaOutputContracts.js");
+  const { remediationStructuredResponse } = await import("../../packages/ai-foreman/src/qaStructuredResponse.js");
+  const { canonicalFixtureTurn } = await import("../../packages/ai-foreman/test/helpers/nativeOutput.js");
+  const finding = { finding_key: "key", raw_id: "QA-1", disposition: "blocked", changes: ["Partial progress retained"], evidence: "Registry unavailable", verification: [{ check: "install", outcome: "not_run", evidence: "Registry unavailable" }], blocker: { category: "environment", reason: "Registry unavailable", recovery: "Restore registry access", capability: "registry", evidence: "ENOTFOUND" } };
+  const report = { version: 3, handoff_id: "handoff", summary: "Partial result", findings: [finding], observations: [] };
+  const policy = nativePolicy(remediationOutput);
+  const turn = (payload: unknown) => canonicalFixtureTurn(policy, "session", payload);
+  const payload = { status: "blocked", reason: "Registry unavailable", report, coverage: null };
+  assert.equal(remediationStructuredResponse(turn(payload), {}).valid, true);
+  assert.equal(remediationStructuredResponse(turn({ ...payload, status: "done", reason: null }), {}).valid, false);
+  const { blocker: _blocker, ...withoutBlocker } = finding;
+  assert.equal(remediationStructuredResponse(turn({ ...payload, report: { ...report, findings: [withoutBlocker] } }), {}).valid, false);
 });

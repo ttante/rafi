@@ -169,7 +169,7 @@ for (const text of ["Preparing the requested review now", envelope("RAFI_QA_CAND
   try {
     const result = await prepareVerificationContract(initial, initial.requirements, { store, now: () => 1000, inputsCurrent: () => true, dispatch: async () => { calls++; return { sessionId: "author", text }; } });
     assert.equal(result.status, "incomplete"); assert.equal(calls, 1);
-    if (result.status === "incomplete") assert.match(result.detail, /missing receipt/);
+    if (result.status === "incomplete") assert.match(result.detail, /no sealed v2 dispatch tuple/);
   } finally { db.close(); }
 });
 
@@ -215,7 +215,7 @@ test("snapshot path conversion excludes outside directories and escaping symlink
     mkdirSync(snapshot); mkdirSync(inside); mkdirSync(outside); symlinkSync(outside, join(snapshot, "escape"));
     const draft = candidate();
     draft.checks[0]!.verification = [snapshot, inside, outside, join(snapshot, "escape")].map(cwd => ({ kind: "command", argv: ["node"], cwd, fixtures: [], expectedOutcome: "Pass", runtime: "node", timeoutMs: 1000 }));
-    const mapping = mapSnapshotWorkingDirectories(envelope("RAFI_QA_CANDIDATE", draft), snapshot);
+    const mapping = mapSnapshotWorkingDirectories(draft, snapshot);
     assert.deepEqual(mapping, { [snapshot]: ".", [inside]: "tests" });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

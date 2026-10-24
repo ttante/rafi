@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { operationContract, operationJsonContract } from "./operationContracts.js";
-import { registerCompatibilityProviderWireContracts, type OutputContract } from "./structuredOutput.js";
+import { canonicalJson, createProviderWireContract, decodeCodexOptionalProperties, projectCodexSchema, type OutputContract, type ProviderWireContract } from "./structuredOutput.js";
 import { qaContractCoverageV1Schema } from "./qaPreparationSchemas.js";
 import { qaFailureReportV1Schema, builderQaRemediationReportV3Schema } from "./schemas.js";
 import type { QaContractCoverageV1 } from "./qaPreparation.js";
 import { qaRecoveryAcknowledgementV1Schema, qaAcceptanceAcknowledgementV1Schema, qaSegmentAcknowledgementV1Schema } from "./providerContracts.js";
+import { assessmentOutput, challengeOutput, depthOutput, draftOutput } from "./qaPreparationOutputContracts.js";
 
 const coverage = qaContractCoverageV1Schema as Record<string, any>;
 const row = structuredClone(coverage.properties.checks.items);
@@ -55,8 +56,24 @@ export const handoffAcceptanceOutput = operationContract("handoff-acceptance", z
   manifestDigest: z.string().min(1).max(200), generation: z.number().int().min(0), missingResources: z.array(z.string().min(1).max(2048)).max(100),
 }), { graph: false });
 
-([
+export function qaProviderWireContracts(): readonly ProviderWireContract[] {
+  return ([
   builderCoverageOutput, workReportOutput, preflightOutput, initializationOutput,
   qaRecoveryOutput, remediationOutput, qaVerdictOutput, contractAcceptanceOutput,
-  contractSegmentOutput, handoffAcceptanceOutput,
-] as OutputContract[]).forEach(contract => registerCompatibilityProviderWireContracts(contract, "qa"));
+  contractSegmentOutput, handoffAcceptanceOutput, draftOutput, assessmentOutput,
+  challengeOutput, depthOutput,
+] as OutputContract[]).flatMap(contract => {
+  const register = (provider: "claude" | "codex") => {
+    const wireSchema = (provider === "codex" ? projectCodexSchema(contract.jsonSchema) : contract.jsonSchema) as Record<string, unknown>;
+    const schemaBytes = Buffer.byteLength(canonicalJson(wireSchema));
+    return createProviderWireContract({
+      canonical: contract, provider, profile: `${provider}-${contract.operation}-v2`, variant: "default", wireVersion: 2,
+      wireSchema, maximumSchemaBytes: schemaBytes + 1024, maximumResponseBytes: Math.max(65_536, Math.min(1_000_000, schemaBytes * 16)),
+      normalizerId: provider === "codex" ? "codex-optional-properties" : "identity", normalizerVersion: 1,
+      normalize: value => provider === "codex" ? decodeCodexOptionalProperties(contract.jsonSchema, value) : value,
+      guidanceId: `${contract.operation}-${provider}-v2`, guidance: `Return one native ${contract.operation} JSON envelope. Do not invent host identifiers or fields outside the selected schema.`,
+    });
+  };
+  return [register("claude"), register("codex")];
+});
+}

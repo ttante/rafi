@@ -1,5 +1,10 @@
+import { persistedProviderWireContract } from "rafi-spec";
+import { verifyCheckpointOrigin, verifyContinuityHeads, type CheckpointOrigin } from "./continuityOrigin.js";
 import { registerQaGraphJournalWriter, ensureQaGraphJournalGuards } from "./qaDeliveryJournal.js";
 import { canonicalJson } from "./qaProtocolV2.js";
+import { hydrateStructuredReceipt, persistedDispatchTuple, sealedDispatchRecord, verifyPersistedDispatch, type SealedDispatchRecordV2, type RetainedStructuredReceiptV2 } from "./structuredDispatchRecord.js";
+import { assertStructuredCutoverComplete, cutoverOwnershipMatrix, invalidStructuredRun, purgeStructuredRun, STRUCTURED_CUTOVER_MATRIX_VERSION, STRUCTURED_CUTOVER_REASON, STRUCTURED_AUDIT_CLOSURE } from "./structuredCutover.js";
+import { communicationFileEvidenceReferences, quarantineCommunicationFiles } from "./structuredCutoverFiles.js";
 import { resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
 import { registerGraphDerived, graphDerivedAllowed, currentGraphDerivedAccess, type GraphDerivedAccess } from "./graph/derived.js";
 import { bindCoverageHostFields, validateContractCoverage } from "./qaContractCoverage.js";
@@ -23,7 +28,7 @@ import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
-import { validateQaFailureReport, validateStructuredCandidate, qaVerdictOutput, type QaVerdictPayload, type OperationResponse } from "rafi-spec";
+import { validateQaFailureReport, validateStructuredCandidate, qaVerdictOutput, remediationOutput, providerWireContracts, type QaVerdictPayload, type OperationResponse } from "rafi-spec";
 import { migrateQaHandback, registerHandbackWriter, reportOccurrenceId } from "./qaHandbackMigration.js";
 import type {
   BuildRecoveryDecisionReceipt,
@@ -50,7 +55,7 @@ import type {
   WorkflowIssue,
 } from "rafi-spec";
 import type { QaDeliveryTurn, QaDeliveryOutcome, QaDeliveryInvocationV3 } from "./qaDeliveryJournal.js";
-import { providerSessionKey } from "./sessionIdentity.js";
+import { providerSessionKey, canonicalSessionPath } from "./sessionIdentity.js";
 import { captureFrozenQaSource } from "./qaSnapshot.js";
 import { loadTicketsConfig, resolveTicketPaths } from "./tickets/config.js";
 import { loadTickets } from "./tickets/ticketLoader.js";
@@ -171,6 +176,11 @@ export interface RoleMutationLease {
   sessionRef?: ProviderSessionRefV1;
   sessionKey?: string;
   movedAt: string;
+}
+
+export interface FreshRecoveryValidation {
+  decisionDigest: string;
+  predecessor: RoleMutationLease;
 }
 
 export interface QaRecoveryHeadRecord {
@@ -351,7 +361,7 @@ export class WorkflowDb {
     this.path = path;
     if (existsSync(path)) {
       const preview = new Database(path, { readonly: true, fileMustExist: true });
-      try { checkBuildOwnershipSchema(preview); } finally { preview.close(); }
+      try { if (readinessAccess) assertStructuredCutoverComplete(preview); checkBuildOwnershipSchema(preview); } finally { preview.close(); }
     }
     if (!readinessAccess) {
       mkdirSync(dirname(path), { recursive: true });
@@ -376,8 +386,8 @@ export class WorkflowDb {
     this.db.pragma("synchronous = FULL");
     this.db.pragma("foreign_keys = ON");
     try {
-      if (readinessAccess) this.restrictReadinessConnection(readinessAccess);
-      else { this.migrate(); migrateQaPreparation(this.db); migrateBuildAdmission(this.db); this.importLegacyOnce(); migrateBuildWork(this.db, projectDir); migrateBuildInterventions(this.db); migrateQaPreparationGuards(this.db); }
+      if (readinessAccess) { assertStructuredCutoverComplete(this.db); this.restrictReadinessConnection(readinessAccess); }
+      else { this.migrate(); this.applyStructuredCommunicationV2Cutover(); migrateQaPreparation(this.db); migrateBuildAdmission(this.db); this.importLegacyOnce(); migrateBuildWork(this.db, projectDir); migrateBuildInterventions(this.db); migrateQaPreparationGuards(this.db); }
     } catch (error) { this.db.close(); throw error; }
   }
 
@@ -408,6 +418,7 @@ export class WorkflowDb {
     } finally { this.workAuthority--; }
   }
   private assertInstructionOwner(runId: string): void {
+    this.assertNativeRunAdmission(runId);
     if(this.writerAuthority) {assertAdmission(this.db,this.writerAuthority);if(this.writerAuthority.runId!==runId&&!this.db.prepare("SELECT 1 FROM build_child_runs WHERE child=? AND parent=?").get(runId,this.writerAuthority.runId))throw new Error("Instruction execution authority belongs to another run");return;}
     if(this.buildAdmission())throw new Error("Instruction consumption requires the original build owner");
     if(this.db.prepare("SELECT 1 FROM build_runtime_runs WHERE run_id=?").get(runId)) {
@@ -505,7 +516,7 @@ export class WorkflowDb {
     try { this.db.prepare("INSERT INTO build_assignments VALUES(?,?,?,?,?)").run(operationId,runId,workId,operationId,json(record)); } finally {this.workAuthority--;}
   }
   admittedWork(runId: string, workId: string) { return admittedWork(this.db, runId, workId); }
-  assertAdmittedWork(runId: string, workId: string) { return assertAdmittedWork(this.db, runId, workId); }
+  assertAdmittedWork(runId: string, workId: string) { this.assertNativeRunAdmission(runId); return assertAdmittedWork(this.db, runId, workId); }
 
   /** Atomic local changes only; never await provider or filesystem work here. */
   atomic<T>(work: () => T): T { return this.db.transaction(work).immediate(); }
@@ -574,6 +585,7 @@ export class WorkflowDb {
     if ((this.db.prepare("SELECT version FROM build_ownership_schema").get() as {version:number}).version !== 3) throw new Error("Ownership migration is pending legacy execution cleanup; use rafi resume before starting work");
   }
   acquireBuildAdmission(runId: string, phase: BuildAdmission["phase"]): BuildAdmission {
+    this.assertNativeRunAdmission(runId);
     return this.atomic(() => {
       this.assertNoLegacyBuildOwner();
       const lease = this.currentLease();
@@ -598,6 +610,7 @@ export class WorkflowDb {
     });
   }
   acquireBuildRecoveryAdmission(runId: string): BuildAdmission {
+    this.assertNativeRunAdmission(runId);
     return this.atomic(() => {
       this.assertExecutionProtocol();
       this.assertNoLegacyBuildOwner();
@@ -924,6 +937,11 @@ export class WorkflowDb {
       originalWork: input.originalWork ?? {}, remainingWork: input.remainingWork ?? input.originalWork ?? {}, state: input.state ?? {},
       legacy: Boolean(input.legacy), createdAt: at, updatedAt: at,
     };
+    if (run.legacy) {
+      run.status = "superseded";
+      run.checkpoint = STRUCTURED_CUTOVER_REASON;
+      run.state = { ...run.state, structuredCommunicationCutover: { version: 2, reason: STRUCTURED_CUTOVER_REASON, at } };
+    }
     this.db.transaction(() => {
       if (this.writerAuthority) assertAdmission(this.db, this.writerAuthority);
       this.db.prepare(`INSERT INTO workflow_runs(run_id,kind,status,checkpoint,original_work_json,remaining_work_json,state_json,legacy,created_at,updated_at)
@@ -991,6 +1009,7 @@ export class WorkflowDb {
   }
 
   transition(runId: string, update: { status?: WorkflowRunStatus; checkpoint: string; remainingWork?: unknown; state?: Record<string, unknown>; event?: string; payload?: unknown }, now = new Date()): WorkflowRunSnapshot {
+    this.assertNativeRunAdmission(runId);
     const at = now.toISOString();
     return this.db.transaction(() => {
       if (!this.coordinatorTransition && (this.writerAuthority || this.buildAdmission())) {
@@ -1128,6 +1147,12 @@ export class WorkflowDb {
     return rows.map(continuityEventFromRow);
   }
 
+  providerCheckpoint(dispatchId: string, publicationKind: string): ContinuityCheckpoint | undefined {
+    const row = this.db.prepare("SELECT c.* FROM continuity_checkpoints c JOIN continuity_checkpoint_origins o USING(checkpoint_id) WHERE o.dispatch_id=? AND o.publication_kind=?").get(dispatchId, publicationKind) as DbContinuityCheckpoint | undefined;
+    if (row) verifyCheckpointOrigin(this.db, this.projectDir, row.checkpoint_id);
+    return row ? continuityCheckpointFromRow(row) : undefined;
+  }
+
   publishContinuityCheckpoint(input: {
     runId: string;
     role: "builder" | "qa";
@@ -1136,11 +1161,29 @@ export class WorkflowDb {
     authoritativeStateRevision: number;
     sessionRef?: ProviderSessionRefV1;
     sessionKey?: string;
+    origin?: CheckpointOrigin;
+    hostEventKind?: "role-baseline" | "operator-recovery" | "source-reconciliation";
+    inputCheckpointDigests?: string[];
   }, now = new Date()): ContinuityCheckpoint {
     this.ensureRun(input.runId, "build", now);
     return this.db.transaction(() => {
       const at = now.toISOString();
+      if (input.origin?.kind === "provider") {
+        const prior = this.db.prepare("SELECT c.* FROM continuity_checkpoints c JOIN continuity_checkpoint_origins o USING(checkpoint_id) WHERE c.run_id=? AND c.role=? AND o.dispatch_id=? AND o.publication_kind=?")
+          .get(input.runId, input.role, input.origin.dispatchId, input.origin.publicationKind) as DbContinuityCheckpoint | undefined;
+        if (prior) {
+          verifyCheckpointOrigin(this.db, this.projectDir, prior.checkpoint_id);
+          if (canonicalJson(parseJson(prior.delta_json)) !== canonicalJson(input.delta)) throw new Error("Conflicting repeated checkpoint publication");
+          return continuityCheckpointFromRow(prior);
+        }
+      }
       const previous = this.continuityHead(input.runId, input.role);
+      let origin = input.origin;
+      if (!origin) {
+        const event = this.appendContinuityEvent({ runId: input.runId, role: "host", kind: input.hostEventKind ?? "host_checkpoint", authoritativeStateRevision: input.authoritativeStateRevision,
+          payload: { checkpointDeltaDigest: createHash("sha256").update(json(sanitizeContinuityValue(input.delta))).digest("hex"), role: input.role } });
+        origin = { kind: "host", eventSequence: event.sequence, inputCheckpointDigests: input.inputCheckpointDigests ?? (previous ? [previous.digest] : []) };
+      }
       const latestEvent = this.db.prepare("SELECT COALESCE(MAX(sequence),0) AS sequence FROM continuity_events WHERE run_id=?").get(input.runId) as { sequence: number };
       const safeDelta = sanitizeContinuityValue(input.delta) as unknown as ContinuityDelta;
       const graphAccess = currentGraphDerivedAccess();
@@ -1149,6 +1192,10 @@ export class WorkflowDb {
       const digest = digestJson({ runId: input.runId, role: input.role, sequence: latestEvent.sequence, predecessorDigest: previous?.digest, delta: safeDelta, authoritativeStateRevision: input.authoritativeStateRevision, sessionKey: session.key });
       const result = this.db.prepare(`INSERT INTO continuity_checkpoints(run_id,role,event_sequence,state,delta_json,digest,predecessor_digest,authoritative_state_revision,session_key,session_ref_json,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(input.runId, input.role, latestEvent.sequence, input.state ?? "current", json(safeDelta), digest, previous?.digest ?? null, input.authoritativeStateRevision, session.key, session.refJson, at);
+      const checkpointId = Number(result.lastInsertRowid);
+      this.db.prepare("INSERT INTO continuity_checkpoint_origins(checkpoint_id,run_id,origin_json,delta_digest,dispatch_id,publication_kind) VALUES(?,?,?,?,?,?)")
+        .run(checkpointId, input.runId, json(origin), createHash("sha256").update(json(safeDelta)).digest("hex"), origin.kind === "provider" ? origin.dispatchId : null, origin.kind === "provider" ? origin.publicationKind : null);
+      verifyCheckpointOrigin(this.db, this.projectDir, checkpointId);
       const checkpoint: ContinuityCheckpoint = {
         checkpointId: Number(result.lastInsertRowid), runId: input.runId, role: input.role,
         sequence: latestEvent.sequence, state: input.state ?? "current", delta: safeDelta, digest,
@@ -1167,13 +1214,13 @@ export class WorkflowDb {
     const rows = role
       ? this.db.prepare("SELECT * FROM continuity_checkpoints WHERE run_id=? AND role=? ORDER BY checkpoint_id").all(runId, role)
       : this.db.prepare("SELECT * FROM continuity_checkpoints WHERE run_id=? ORDER BY checkpoint_id").all(runId);
-    for (const row of rows as DbContinuityCheckpoint[]) this.assertGraphContinuityAccess(row.delta_json);
+    for (const row of rows as DbContinuityCheckpoint[]) { this.assertGraphContinuityAccess(row.delta_json); verifyCheckpointOrigin(this.db, this.projectDir, row.checkpoint_id); }
     return (rows as DbContinuityCheckpoint[]).map(continuityCheckpointFromRow);
   }
 
   latestContinuityCheckpoint(runId: string, role: "builder" | "qa"): ContinuityCheckpoint | undefined {
     const row = this.db.prepare("SELECT * FROM continuity_checkpoints WHERE run_id=? AND role=? ORDER BY checkpoint_id DESC LIMIT 1").get(runId, role) as DbContinuityCheckpoint | undefined;
-    if (row) this.assertGraphContinuityAccess(row.delta_json);
+    if (row) { this.assertGraphContinuityAccess(row.delta_json); verifyCheckpointOrigin(this.db, this.projectDir, row.checkpoint_id); }
     return row ? continuityCheckpointFromRow(row) : undefined;
   }
 
@@ -1185,6 +1232,7 @@ export class WorkflowDb {
 
   continuityHead(runId: string, role: "builder" | "qa" | "run"): ContinuityHead | undefined {
     const row = this.db.prepare("SELECT * FROM continuity_heads WHERE run_id=? AND role=?").get(runId, role) as DbContinuityHead | undefined;
+    if (row) verifyContinuityHeads(this.db, this.projectDir, runId);
     return row ? continuityHeadFromRow(row) : undefined;
   }
 
@@ -1429,7 +1477,12 @@ export class WorkflowDb {
   }
 
   planOperation(input: { runId: string; idempotencyKey: string; kind: string; intent: unknown }, now = new Date()): OperationRecord {
+    this.assertNativeRunAdmission(input.runId);
     const at = now.toISOString();
+    const run = this.getRun(input.runId);
+    if (input.kind === "provider-dispatch" && run?.checkpoint === "structured-communication-v2-cutover") {
+      throw new Error("This run was fenced by the structured-communication v2 cutover; start a new native dispatch");
+    }
     if (input.kind === "provider-dispatch" && this.unresolvedPreparationProcesses(input.runId).length) throw new Error("Readiness cleanup must be reconciled before provider dispatch");
     this.db.prepare(`INSERT INTO operation_journal(idempotency_key,run_id,kind,status,intent_json,created_at,updated_at)
       VALUES(?,?,?,'planned',?,?,?) ON CONFLICT(idempotency_key) DO NOTHING`).run(input.idempotencyKey, input.runId, input.kind, json(input.intent), at, at);
@@ -1440,9 +1493,265 @@ export class WorkflowDb {
     return operation;
   }
 
+  /** Seal a previously persisted non-authoritative preparation intent.  This
+   * is intentionally legal only before provider content dispatch begins. */
+  sealPlannedOperationIntent(idempotencyKey: string, intent: unknown, now = new Date()): OperationRecord {
+    const prior = this.operation(idempotencyKey);
+    if (!prior || prior.status !== "planned" || prior.kind !== "provider-dispatch") throw new Error("Only a planned provider dispatch may be sealed");
+    const preparing = prior.intent as { protocolVersion?: unknown; state?: unknown };
+    if (preparing.protocolVersion !== 2 || preparing.state !== "preparing") throw new Error("Provider dispatch did not begin as a v2 preparation intent");
+    this.db.prepare("UPDATE operation_journal SET intent_json=?,updated_at=? WHERE idempotency_key=? AND status='planned'")
+      .run(json(intent), now.toISOString(), idempotencyKey);
+    return this.operation(idempotencyKey)!;
+  }
+
+  /** Called in the gateway's sealing transaction, before the send capability exists. */
+  sealStructuredOwnerDispatch(key: string, tuple: import("rafi-spec").SelectedDispatchTupleV2, renderedInstruction: string): void {
+    const sealedDispatch = sealedDispatchRecord(tuple);
+    const transportSession = (this.operation(key)?.intent as { sessionRef?: ProviderSessionRefV1 } | undefined)?.sessionRef;
+    const matchesSession = (session: Pick<ProviderSessionRefV1, "provider" | "sessionId" | "role" | "stream" | "generation" | "cwd" | "configRoot">): boolean => Boolean(transportSession
+      && (["provider", "sessionId", "role", "stream", "generation", "cwd", "configRoot"] as const).every(field => session[field] === transportSession[field]));
+    const review = this.db.prepare("SELECT intent_json,status FROM qa_turns WHERE operation_id=?").get(key) as { intent_json: string; status: string } | undefined;
+    if (review) {
+      const intent = parseJson(review.intent_json) as QaTurnIntentV2;
+      if (review.status !== "intended" || intent.sealedDispatch || !matchesSession(intent.providerSession) || intent.providerSession.sessionId !== tuple.sessionId || intent.providerSession.generation !== tuple.generation)
+        throw new Error("QA review owner cannot seal a foreign or already dispatched session");
+      this.db.prepare("UPDATE qa_turns SET intent_json=? WHERE operation_id=?").run(json({ ...intent, sealedDispatch }), key);
+    }
+    const delivery = this.db.prepare("SELECT record_json,status FROM qa_delivery_turns WHERE turn_record_id=?").get(key) as { record_json: string; status: string } | undefined;
+    if (delivery) {
+      const turn = parseJson(delivery.record_json) as QaDeliveryTurn;
+      if (delivery.status !== "intended" || turn.sealedDispatch || !matchesSession(turn.intendedSession) || turn.intendedSession.sessionId !== tuple.sessionId || turn.intendedSession.generation !== tuple.generation)
+        throw new Error("QA remediation owner cannot seal a foreign or already dispatched session");
+      this.db.prepare("UPDATE qa_delivery_turns SET record_json=? WHERE turn_record_id=?").run(json({ ...turn, sealedDispatch }), key);
+      const attempt = this.db.prepare("SELECT record_json FROM qa_remediation_attempts WHERE attempt_id=?").get(turn.operationId) as { record_json: string } | undefined;
+      if (!attempt) throw new Error("Remediation dispatch has no durable owner attempt");
+      const fields = parseJson(attempt.record_json) as Record<string, unknown>;
+      const dispatches = (fields.sealedDispatches ?? {}) as Record<string, SealedDispatchRecordV2>;
+      if (dispatches[key]) throw new Error("Remediation dispatch already sealed");
+      this.db.prepare("UPDATE qa_remediation_attempts SET record_json=? WHERE attempt_id=?").run(json({ ...fields, sealedDispatches: { ...dispatches, [key]: sealedDispatch } }), turn.operationId);
+    }
+    this.putEvidence("handoff", Buffer.from(renderedInstruction));
+  }
+
+  structuredOwnerDispatch(key: string): SealedDispatchRecordV2 {
+    const transport = this.operation(key)?.intent as { sealedDispatch?: SealedDispatchRecordV2 } | undefined;
+    const verifyOwner = (record: SealedDispatchRecordV2): void => {
+      persistedDispatchTuple(record);
+      if (json(transport?.sealedDispatch) !== json(record)) throw new Error("Domain owner tuple differs from its transport intent");
+    };
+    const review = this.db.prepare("SELECT intent_json FROM qa_turns WHERE operation_id=?").get(key) as { intent_json: string } | undefined;
+    if (review) {
+      const record = (parseJson(review.intent_json) as QaTurnIntentV2).sealedDispatch;
+      if (!record) throw new Error("QA owner has no sealed dispatch");
+      verifyOwner(record);
+      return record;
+    }
+    const delivery = this.db.prepare("SELECT record_json FROM qa_delivery_turns WHERE turn_record_id=?").get(key) as { record_json: string } | undefined;
+    if (delivery) {
+      const turn = parseJson(delivery.record_json) as QaDeliveryTurn;
+      const record = turn.sealedDispatch;
+      if (!record) throw new Error("Remediation owner has no sealed dispatch");
+      verifyOwner(record);
+      const attempt = this.db.prepare("SELECT record_json FROM qa_remediation_attempts WHERE attempt_id=?").get(turn.operationId) as { record_json: string } | undefined;
+      const sealed = attempt && (parseJson(attempt.record_json) as { sealedDispatches?: Record<string, SealedDispatchRecordV2> }).sealedDispatches?.[key];
+      if (json(sealed) !== json(record)) throw new Error("Remediation attempt tuple differs from its delivery intent");
+      return record;
+    }
+    const intent = this.operation(key)?.intent as { tuple?: import("rafi-spec").SelectedDispatchTupleV2; sealedDispatch?: SealedDispatchRecordV2 } | undefined;
+    if (!intent?.sealedDispatch) throw new Error("Generic owner has no sealed dispatch");
+    persistedDispatchTuple(intent.sealedDispatch);
+    if (canonicalJson(intent.tuple) !== intent.sealedDispatch.tupleJson) throw new Error("Generic intent tuple differs from its sealed canonical bytes");
+    return intent.sealedDispatch;
+  }
+
+  assertStructuredDispatchAdmission(runId: string, dispatchId: string, parentId: string | undefined, operation: string): void {
+    const processing = this.pendingStructuredPostprocessing(runId);
+    const transfers = this.db.prepare("SELECT * FROM structured_handoff_lineage WHERE run_id=? AND state<>'completed'").all(runId) as Array<Record<string, any>>;
+    const linked = transfers.length === 1 && transfers[0]!.predecessor_id === parentId &&
+      (operation === "handoff-acceptance" && transfers[0]!.state === "acceptance-pending" && !transfers[0]!.acceptance_id ||
+       transfers[0]!.state === "continuation-planned" && transfers[0]!.continuation_id === dispatchId);
+    if (processing.some(id => id !== parentId) || (processing.length || transfers.length) && !linked)
+      throw new Error("Confirmed dispatch postprocessing or handoff is pending; reconcile before unrelated work");
+  }
+  beginStructuredHandoff(predecessorId: string): void {
+    const operation = this.operation(predecessorId);
+    if (!operation || operation.status !== "confirmed") throw new Error("Handoff predecessor must be confirmed");
+    const changed = this.db.prepare("INSERT OR IGNORE INTO structured_handoff_lineage(predecessor_id,run_id,state) VALUES(?,?,'acceptance-pending')").run(predecessorId, operation.runId);
+    if (changed.changes !== 1) throw new Error("Handoff acceptance already started; reconcile persisted lineage before recovery");
+  }
+  linkStructuredHandoffDispatch(dispatchId: string, parentId: string | undefined, operation: string): void {
+    if (!parentId) return;
+    const row = this.db.prepare("SELECT * FROM structured_handoff_lineage WHERE predecessor_id=?").get(parentId) as Record<string, any> | undefined;
+    if (!row) return;
+    if (operation === "handoff-acceptance") {
+      if (row.state !== "acceptance-pending" || row.acceptance_id) throw new Error("Handoff acceptance already dispatched");
+      this.db.prepare("UPDATE structured_handoff_lineage SET acceptance_id=? WHERE predecessor_id=?").run(dispatchId, parentId);
+    } else if (row.state !== "continuation-planned" || row.continuation_id !== dispatchId) throw new Error("Foreign handoff continuation");
+  }
+  planStructuredContinuation(predecessorId: string, successor: ProviderSessionRefV1): string {
+    return this.atomic(() => {
+      const row = this.db.prepare("SELECT * FROM structured_handoff_lineage WHERE predecessor_id=?").get(predecessorId) as Record<string, any> | undefined;
+      if (!row || row.state !== "acceptance-pending" || !row.acceptance_id || this.operation(row.acceptance_id)?.status !== "confirmed") throw new Error("Successor lacks confirmed native handoff acceptance lineage");
+      const origin = this.db.prepare("SELECT checkpoint_id FROM continuity_checkpoint_origins WHERE dispatch_id=? AND publication_kind='handoff_acceptance'").get(row.acceptance_id) as {checkpoint_id:number}|undefined;
+      if (!origin) throw new Error("Successor acceptance checkpoint is missing");
+      verifyCheckpointOrigin(this.db, this.projectDir, origin.checkpoint_id);
+      this.assertAcceptedStructuredSuccessor(row.run_id, origin.checkpoint_id, successor);
+      const accepted = this.retainedStructuredTurn(row.acceptance_id).selectedDispatch!;
+      if (accepted.sessionId !== successor.sessionId || accepted.provider !== successor.provider) throw new Error("Successor differs from the accepted provider session");
+      const continuationId = randomUUID();
+      this.db.prepare("UPDATE structured_handoff_lineage SET state='continuation-planned',successor_json=?,continuation_id=? WHERE predecessor_id=?")
+        .run(json(successor), continuationId, predecessorId);
+      return continuationId;
+    });
+  }
+  structuredContinuation(runId: string, role: "builder" | "qa"): {predecessorId:string;continuationId:string;state:string;successor:ProviderSessionRefV1} | undefined {
+    const row = this.db.prepare("SELECT * FROM structured_handoff_lineage WHERE run_id=? AND successor_json IS NOT NULL AND json_extract(successor_json,'$.role')=? ORDER BY rowid DESC LIMIT 1").get(runId,role) as Record<string,any>|undefined;
+    if (!row) return;
+    const origin = this.db.prepare("SELECT checkpoint_id FROM continuity_checkpoint_origins WHERE dispatch_id=? AND publication_kind='handoff_acceptance'").get(row.acceptance_id) as {checkpoint_id:number}|undefined;
+    if (!origin) throw new Error("Handoff continuation lacks its accepted checkpoint");
+    verifyCheckpointOrigin(this.db,this.projectDir,origin.checkpoint_id);
+    this.assertAcceptedStructuredSuccessor(runId, origin.checkpoint_id, parseJson(row.successor_json) as ProviderSessionRefV1);
+    return {predecessorId:row.predecessor_id,continuationId:row.continuation_id,state:row.state,successor:parseJson(row.successor_json) as ProviderSessionRefV1};
+  }
+
+  finishStructuredContinuation(dispatchId: string): void {
+    if (this.operation(dispatchId)?.status !== "confirmed") throw new Error("Unconfirmed continuation cannot complete");
+    this.db.prepare("UPDATE structured_handoff_lineage SET state='completed' WHERE continuation_id=?").run(dispatchId);
+  }
+
+  private assertAcceptedStructuredSuccessor(runId: string, checkpointId: number, successor: ProviderSessionRefV1): void {
+    const handoff = this.db.prepare("SELECT acceptance_receipt_digest FROM handoffs WHERE run_id=? AND successor_session_key=? AND state='accepted'")
+      .get(runId, providerSessionKey(successor)) as {acceptance_receipt_digest:string}|undefined;
+    const checkpoint = this.db.prepare("SELECT digest FROM continuity_checkpoints WHERE checkpoint_id=? AND run_id=?").get(checkpointId, runId) as {digest:string}|undefined;
+    const bytes = handoff?.acceptance_receipt_digest && this.getEvidence(handoff.acceptance_receipt_digest);
+    if (!bytes || createHash("sha256").update(bytes).digest("hex") !== handoff!.acceptance_receipt_digest) throw new Error("Successor lacks retained accepted ownership evidence");
+    const receipt = parseJson(bytes.toString()) as HandoffAcceptanceReceiptV1;
+    if (receipt.runId !== runId || receipt.acceptanceCheckpointDigest !== checkpoint?.digest
+      || providerSessionKey(receipt.successorSessionRef) !== providerSessionKey(successor)) throw new Error("Successor ownership differs from accepted checkpoint lineage");
+  }
+
+  requireStructuredPostprocessing(dispatchId: string, context: unknown): void {
+    const operation = this.operation(dispatchId)!;
+    this.db.prepare("INSERT INTO structured_dispatch_processing(dispatch_id,run_id,state,context_json) VALUES(?,?,'pending',?)")
+      .run(dispatchId, operation.runId, json(context));
+  }
+  structuredProcessingContext(dispatchId: string): { instruction: string; policy: import("./adapters/types.js").TurnRequest } {
+    const row = this.db.prepare("SELECT context_json FROM structured_dispatch_processing WHERE dispatch_id=?").get(dispatchId) as { context_json: string } | undefined;
+    if (!row) throw new Error("Missing persisted post-confirmation intent");
+    return parseJson(row.context_json) as { instruction: string; policy: import("./adapters/types.js").TurnRequest };
+  }
+  failStructuredPostprocessing(dispatchId: string, error: string): void {
+    this.db.prepare("UPDATE structured_dispatch_processing SET error=? WHERE dispatch_id=?").run(error.slice(0,4000), dispatchId);
+  }
+  completeStructuredPostprocessing(dispatchId: string): void {
+    if (this.operation(dispatchId)?.status !== "confirmed") throw new Error("Cannot process an unconfirmed dispatch");
+    this.db.prepare("UPDATE structured_dispatch_processing SET state='completed',error=NULL WHERE dispatch_id=?").run(dispatchId);
+  }
+  pendingStructuredPostprocessing(runId: string): string[] {
+    return (this.db.prepare("SELECT dispatch_id FROM structured_dispatch_processing WHERE run_id=? AND state='pending'").all(runId) as Array<{dispatch_id:string}>).map(row => row.dispatch_id);
+  }
+  retainedStructuredTurn(dispatchId: string): import("./adapters/types.js").TurnResult {
+    const owner = this.structuredOwnerDispatch(dispatchId), tuple = persistedDispatchTuple(owner);
+    const descriptor = persistedProviderWireContract(tuple);
+    if (!descriptor) throw new Error("Missing historic dispatch descriptor");
+    this.replayStructuredDispatch(dispatchId, descriptor.canonical);
+    const result = this.operation(dispatchId)!.result as {responseDigest: string;rawDigest?:string};
+    const retained = JSON.parse(this.getEvidence(result.responseDigest)!.toString()) as RetainedStructuredReceiptV2;
+    return { text: result.rawDigest ? this.getEvidence(result.rawDigest)?.toString() ?? "" : "", isError: false, numTurns: 1, costUsd: 0,
+      turnId: retained.hostTurnId, selectedDispatch: tuple, structured: hydrateStructuredReceipt(retained, digest => this.getEvidence(digest)) ?? undefined };
+  }
+
+  /** A claim is never recycled, even if transport fails before writing bytes. */
+  claimStructuredSubmission(tuple: import("rafi-spec").SelectedDispatchTupleV2, session?: ProviderSessionRefV1): string {
+    return this.atomic(() => {
+      const operation = this.operation(tuple.dispatchId);
+      if (!operation || operation.status !== "in_progress" || this.structuredOwnerDispatch(tuple.dispatchId).tupleJson !== canonicalJson(tuple))
+        throw new Error("Cannot mint a send capability without a committed sealed owner intent");
+      this.assertNativeRunAdmission(operation.runId);
+      const frozen = (operation.intent as { sessionRef: ProviderSessionRefV1 }).sessionRef;
+      if (!session || canonicalJson(frozen) !== canonicalJson(session)) throw new Error("Submission claim requires the frozen provider session");
+      const continuation = this.db.prepare("SELECT successor_json FROM structured_handoff_lineage WHERE continuation_id=? AND state='continuation-planned'").get(tuple.dispatchId) as {successor_json:string}|undefined;
+      if (continuation && canonicalJson(parseJson(continuation.successor_json)) !== canonicalJson(session)) throw new Error("Continuation session differs from accepted lineage");
+      const claimId = randomUUID();
+      const changed = this.db.prepare(`INSERT OR IGNORE INTO structured_submission_claims(dispatch_id,run_id,tuple_digest,claim_id,session_json,state,created_at)
+        VALUES(?,?,?,?,?,'claimed',?)`).run(tuple.dispatchId, operation.runId, tuple.digest, claimId, canonicalJson(session), new Date().toISOString());
+      if (changed.changes !== 1) throw new Error("Structured dispatch already has a submission claim; reconcile before a new dispatch");
+      this.db.prepare("UPDATE structured_handoff_lineage SET state='continuation-claimed' WHERE continuation_id=?").run(tuple.dispatchId);
+      return claimId;
+    });
+  }
+
+  consumeStructuredSubmission(tuple: import("rafi-spec").SelectedDispatchTupleV2, claimId: string, session?: ProviderSessionRefV1): void {
+    this.atomic(() => {
+      const operation = this.operation(tuple.dispatchId);
+      if (!operation || operation.status !== "in_progress" || this.structuredOwnerDispatch(tuple.dispatchId).tupleJson !== canonicalJson(tuple))
+        throw new Error("Submission owner is no longer in progress or sealed");
+      this.assertNativeRunAdmission(operation.runId);
+      const frozen = (operation.intent as { sessionRef: ProviderSessionRefV1 }).sessionRef;
+      if (!session || canonicalJson(frozen) !== canonicalJson(session)) throw new Error("Submission session changed after sealing");
+      const owner = this.roleMutationLease(operation.runId, session.role as "builder" | "qa");
+      if (!(tuple.operation === "handoff-acceptance" && (operation.intent as {purpose?:string}).purpose === "contract-acceptance") && owner && (owner.providerSessionId !== session.sessionId || owner.sessionKey && owner.sessionKey !== providerSessionKey(session))) {
+        this.assertFreshRecoveryValidation(tuple.dispatchId, session);
+      }
+      const changed = this.db.prepare(`UPDATE structured_submission_claims SET state='consumed',consumed_at=?
+        WHERE dispatch_id=? AND run_id=? AND tuple_digest=? AND claim_id=? AND session_json=? AND state='claimed'`)
+        .run(new Date().toISOString(), tuple.dispatchId, operation.runId, tuple.digest, claimId, canonicalJson(session));
+      if (changed.changes !== 1) throw new Error("Structured submission claim already consumed or revoked");
+    });
+  }
+
+  assertNativeRunAdmission(runId: string): void {
+    assertStructuredCutoverComplete(this.db);
+    const run = this.getRun(runId);
+    if (run?.legacy || run?.checkpoint === STRUCTURED_CUTOVER_REASON || run?.state.structuredCommunicationCutover)
+      throw new Error("structured-communication-v2-cutover: start a new native dispatch; this workflow cannot resume");
+  }
+
+  recordCommunicationEvidenceRefs(ownerId: string, digests: string[]): void {
+    for (const digest of new Set(digests)) this.db.prepare("INSERT OR IGNORE INTO communication_evidence_refs(owner_kind,owner_id,evidence_digest,created_at) VALUES('provider-dispatch',?,?,?)").run(ownerId, digest, new Date().toISOString());
+  }
+
+  replayStructuredDispatch<T>(key: string, contract: import("rafi-spec").OutputContract<T>): T {
+    const operation = this.operation(key);
+    const result = operation?.result as { responseDigest?: string; validation?: string } | undefined;
+    if (operation?.status !== "confirmed" || result?.validation !== "accepted" || !result.responseDigest) throw new Error("Structured dispatch has no confirmed persisted receipt");
+    return this.verifyRetainedStructuredDispatch(key, contract, result.responseDigest);
+  }
+
+  private assertStructuredProviderTurn(key: string, providerTurnId: string | undefined): void {
+    const result = this.operation(key)?.result as { responseDigest?: string } | undefined;
+    const bytes = result?.responseDigest ? this.getEvidence(result.responseDigest) : undefined;
+    if (!bytes) throw new Error("Structured dispatch receipt evidence is missing");
+    const retained = JSON.parse(bytes.toString()) as RetainedStructuredReceiptV2;
+    if (!providerTurnId || retained?.receipt?.state !== "candidate" || retained.hostTurnId !== providerTurnId)
+      throw new Error("Domain receipt has a foreign native provider turn identity");
+  }
+
+  private verifyRetainedStructuredDispatch<T>(key: string, contract: import("rafi-spec").OutputContract<T>, responseDigest: string): T {
+    const readVerifiedEvidence = (digest: string): Buffer | undefined => {
+      const bytes = this.getEvidence(digest);
+      if (bytes && (!graphDerivedAllowed(this.db, this.projectDir, digest) || createHash("sha256").update(bytes).digest("hex") !== digest)) throw new Error("Structured receipt evidence digest mismatch");
+      return bytes;
+    };
+    const bytes = readVerifiedEvidence(responseDigest);
+    if (!bytes) throw new Error("Structured dispatch receipt evidence is missing");
+    const retained = JSON.parse(bytes.toString()) as RetainedStructuredReceiptV2;
+    const owner = this.structuredOwnerDispatch(key);
+    if (retained.version !== 2 || retained.tupleDigest !== owner.tupleDigest) throw new Error("Stored receipt does not match persisted owner tuple");
+    return verifyPersistedDispatch(contract, owner, hydrateStructuredReceipt(retained, readVerifiedEvidence));
+  }
+
   updateOperation(idempotencyKey: string, status: OperationLifecycle, details: { result?: unknown; externalId?: string; error?: string } = {}, now = new Date()): OperationRecord {
     const prior = this.operation(idempotencyKey); if (prior?.kind === "provider-dispatch" && status === "in_progress" && this.unresolvedPreparationProcesses(prior.runId).length) throw new Error("Readiness cleanup must be reconciled before provider dispatch");
     if (!prior) throw new Error(`operation not found: ${idempotencyKey}`);
+    if (prior.kind === "provider-dispatch" && status === "confirmed") {
+      const owner = this.structuredOwnerDispatch(idempotencyKey), tuple = persistedDispatchTuple(owner);
+      const descriptor = persistedProviderWireContract(tuple);
+      const result = details.result as { validation?: string; responseDigest?: string } | undefined;
+      if (!descriptor || result?.validation !== "accepted" || !result.responseDigest) throw new Error("Provider confirmation requires verified persisted receipt evidence");
+      this.verifyRetainedStructuredDispatch(idempotencyKey, descriptor.canonical, result.responseDigest);
+    }
     const allowed: Record<OperationLifecycle, OperationLifecycle[]> = {
       planned: ["planned", "in_progress", "failed"],
       in_progress: ["in_progress", "confirmed", "failed", "uncertain"],
@@ -1500,6 +1809,72 @@ export class WorkflowDb {
     const graphAccess = currentGraphDerivedAccess();
     if (graphAccess && (kind === "qa" || kind === "handoff")) registerGraphDerived(this.db, bytes, graphAccess);
     return digest;
+  }
+
+  /** Create an append-only provider page artifact before its first dispatch. */
+  populationPageRecords(artifactId: string): string[] {
+    return (this.db.prepare("SELECT content FROM page_ledger_pages WHERE artifact_id=? ORDER BY ordinal").all(artifactId) as Array<{ content: Buffer }>)
+      .map(row => row.content.toString("utf8"));
+  }
+
+  populationPageLedger(artifactId: string): { tupleDigest: string; state: string; pageCount: number } | undefined {
+    const row = this.db.prepare("SELECT tuple_digest,state,page_count FROM page_ledgers WHERE artifact_id=?").get(artifactId) as { tuple_digest: string; state: string; page_count: number } | undefined;
+    return row && { tupleDigest: row.tuple_digest, state: row.state, pageCount: row.page_count };
+  }
+
+  beginPageLedger(input: { artifactId: string; runId: string; lineageId: string; tupleDigest: string; leaseId: string }, now = new Date()): void {
+    if (!/^[A-Za-z0-9_.:-]{1,256}$/.test(input.artifactId) || !/^[A-Za-z0-9_.:-]{1,256}$/.test(input.lineageId) || !/^[A-Za-z0-9_.:-]{1,256}$/.test(input.leaseId) || !/^[a-f0-9]{64}$/.test(input.tupleDigest)) throw new Error("Invalid page ledger identity");
+    this.ensureRun(input.runId);
+    this.db.prepare(`INSERT INTO page_ledgers(artifact_id,run_id,lineage_id,tuple_digest,lease_id,state,page_count,total_bytes,created_at,updated_at)
+      VALUES(?,?,?,?,?,'open',0,0,?,?) ON CONFLICT(artifact_id) DO NOTHING`).run(input.artifactId, input.runId, input.lineageId, input.tupleDigest, input.leaseId, now.toISOString(), now.toISOString());
+    const row = this.db.prepare("SELECT run_id,lineage_id,tuple_digest,lease_id FROM page_ledgers WHERE artifact_id=?").get(input.artifactId) as { run_id: string; lineage_id: string; tuple_digest: string; lease_id: string };
+    if (row.run_id !== input.runId || row.lineage_id !== input.lineageId || row.tuple_digest !== input.tupleDigest || row.lease_id !== input.leaseId) throw new Error("Page ledger identity collision");
+  }
+
+  /**
+   * Atomically appends a page.  Duplicate delivery is accepted only when every
+   * immutable byte and linkage field agrees; a provider cannot fill gaps,
+   * rewrite history, or append after the terminal page.
+   */
+  appendPageLedger(input: { artifactId: string; lineageId: string; tupleDigest: string; leaseId: string; ordinal: number; predecessorDigest: string | null; content: string; terminal: boolean }, now = new Date()): { digest: string; duplicate: boolean } {
+    if (!Number.isInteger(input.ordinal) || input.ordinal < 0 || input.ordinal >= 60) throw new Error("Page ordinal exceeds the 60-page limit");
+    let canonical: string;
+    let ticketCount: number;
+    try {
+      const parsed = JSON.parse(input.content) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("page must be a JSON object");
+      const tickets = (parsed as Record<string, unknown>).tickets;
+      if (!Array.isArray(tickets)) throw new Error("page must contain tickets");
+      ticketCount = tickets.length;
+      canonical = canonicalJson(parsed);
+    } catch (error) {
+      throw new Error(`Page ledger content must be canonical ticket-page JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (canonical !== input.content) throw new Error("Page ledger content must use canonical JSON bytes");
+    if (ticketCount > 150) throw new Error("Page exceeds the 150-ticket limit");
+    const bytes = Buffer.byteLength(input.content);
+    if (bytes > 750 * 1024) throw new Error("Page exceeds the 750 KiB limit");
+    const digest = createHash("sha256").update(input.content).digest("hex");
+    return this.atomic(() => {
+      const header = this.db.prepare("SELECT lineage_id,tuple_digest,lease_id,state,page_count,total_bytes FROM page_ledgers WHERE artifact_id=?").get(input.artifactId) as { lineage_id: string; tuple_digest: string; lease_id: string; state: string; page_count: number; total_bytes: number } | undefined;
+      if (!header || header.lineage_id !== input.lineageId || header.tuple_digest !== input.tupleDigest || header.lease_id !== input.leaseId) throw new Error("Unknown or foreign page ledger");
+      const existing = this.db.prepare("SELECT predecessor_digest,content_digest,content,terminal FROM page_ledger_pages WHERE artifact_id=? AND ordinal=?").get(input.artifactId, input.ordinal) as { predecessor_digest: string | null; content_digest: string; content: Buffer; terminal: number } | undefined;
+      if (existing) {
+        if (existing.terminal) throw new Error("Duplicate terminal page");
+        if (existing.predecessor_digest === input.predecessorDigest && existing.content_digest === digest && existing.content.equals(Buffer.from(input.content)) && Boolean(existing.terminal) === input.terminal) return { digest, duplicate: true };
+        throw new Error("Conflicting duplicate page");
+      }
+      if (header.state !== "open") throw new Error("Cannot append after terminal page");
+      if (input.ordinal !== header.page_count) throw new Error("Page ordinal is out of order or has a gap");
+      const prior = input.ordinal === 0 ? null : this.db.prepare("SELECT content_digest FROM page_ledger_pages WHERE artifact_id=? AND ordinal=?").get(input.artifactId, input.ordinal - 1) as { content_digest: string } | undefined;
+      if ((prior?.content_digest ?? null) !== input.predecessorDigest) throw new Error("Page predecessor digest does not match");
+      if (header.total_bytes + bytes > 6 * 1024 * 1024) throw new Error("Page ledger exceeds the 6 MiB aggregate limit");
+      this.db.prepare("INSERT INTO page_ledger_pages(artifact_id,ordinal,predecessor_digest,content_digest,content,terminal,created_at) VALUES(?,?,?,?,?,?,?)")
+        .run(input.artifactId, input.ordinal, input.predecessorDigest, digest, Buffer.from(input.content), input.terminal ? 1 : 0, now.toISOString());
+      this.db.prepare("UPDATE page_ledgers SET page_count=?,total_bytes=?,state=?,updated_at=? WHERE artifact_id=?")
+        .run(header.page_count + 1, header.total_bytes + bytes, input.terminal ? "terminal" : "open", now.toISOString(), input.artifactId);
+      return { digest, duplicate: false };
+    });
   }
 
   registerGraphEvidence(value: string | Buffer, access: GraphDerivedAccess | GraphDerivedAccess[]): void { registerGraphDerived(this.db,value,access); }
@@ -1565,9 +1940,10 @@ export class WorkflowDb {
       const receipt = parseJson(row.receipt_json) as QaTurnReceiptV2;
       const response = receipt.structuredResponseDigest && this.getEvidence(receipt.structuredResponseDigest);
       if (!receipt.terminalEventObserved || !response) return false;
-      try { const value = validateStructuredCandidate(qaVerdictOutput, JSON.parse(response.toString())) as OperationResponse;
-        return value.result.kind === "blocked" || value.result.kind === "needs-input";
-      } catch { return false; }
+      // A retained response alone is not authority in v2: this legacy receipt
+      // has no sealed tuple/descriptor record to verify.  It may be inspected,
+      // but cannot advance a review state.
+      return false;
     });
     if (admission && (next.status === "passed" || next.status === "failed" || terminalBlock)) this.qaPreparationStore().metric(next.runId, next.ticketId, admission.requirementsDigest, `metric:review:${attemptId}`, "substantive-review", { status: next.status === "passed" ? "passed" : next.status === "failed" ? "failed" : "blocked", at: now.toISOString(), evidenceRefs: next.reportDigest ? [next.reportDigest] : [] });
     return next;
@@ -1612,8 +1988,9 @@ export class WorkflowDb {
   updateQaRemediationAttempt(attemptId: string, status: QaRemediationAttemptRecord["status"], patch: Partial<Pick<QaRemediationAttemptRecord, "responseDigest" | "summaryDigest" | "detail">> = {}, now = new Date()): QaRemediationAttemptRecord {
     const prior = this.qaRemediationAttempt(attemptId); if (!prior) throw new Error(`QA remediation attempt not found: ${attemptId}`);
     const next = { ...prior, ...patch, status, updatedAt: now.toISOString() };
+    const raw = this.db.prepare("SELECT record_json FROM qa_remediation_attempts WHERE attempt_id=?").get(attemptId) as { record_json: string };
     this.db.prepare("UPDATE qa_remediation_attempts SET status=?,response_digest=?,summary_digest=?,record_json=?,updated_at=? WHERE attempt_id=?")
-      .run(status, next.responseDigest ?? null, next.summaryDigest ?? null, json({ detail: next.detail, recoveryAttemptId: next.recoveryAttemptId }), next.updatedAt, attemptId);
+      .run(status, next.responseDigest ?? null, next.summaryDigest ?? null, json({ ...(parseJson(raw.record_json) as Record<string, unknown>), detail: next.detail, recoveryAttemptId: next.recoveryAttemptId }), next.updatedAt, attemptId);
     return next;
   }
 
@@ -1637,6 +2014,10 @@ export class WorkflowDb {
     if (turn.version === 4) ensureQaGraphJournalGuards(this.db);
     const prior = this.qaDeliveryTurns(turn.operationId).find(t => t.turnRecordId === turn.turnRecordId);
     if (prior) {
+      if (prior.sealedDispatch) {
+        if (turn.sealedDispatch && json(turn.sealedDispatch) !== json(prior.sealedDispatch)) throw new Error("Delivery owner tuple is immutable");
+        turn.sealedDispatch = prior.sealedDispatch;
+      }
       if (prior.status !== "intended") {
         if (json(prior) !== json(turn)) throw new Error(`conflicting completed delivery turn ${turn.turnRecordId}`);
         return;
@@ -1644,6 +2025,14 @@ export class WorkflowDb {
       for (const key of ["operationId", "reportOccurrenceId", "turnIndex", "kind", "hostInstructionDigest", "hostInstructionBytes", "startedAt"] as const) {
         if (prior[key] !== turn[key]) throw new Error(`delivery turn intent mismatch: ${key}`);
       }
+    }
+    if (turn.status === "completed") {
+      const transport = this.operation(turn.turnRecordId);
+      if (!prior?.sealedDispatch || json(turn.sealedDispatch) !== json(prior.sealedDispatch)
+        || turn.structuredResponseDigest !== (transport?.result as { responseDigest?: string } | undefined)?.responseDigest)
+        throw new Error("Completed delivery requires its persisted sealed native receipt");
+      this.replayStructuredDispatch(turn.turnRecordId, remediationOutput);
+      this.assertStructuredProviderTurn(turn.turnRecordId, turn.providerTurnId);
     }
     this.db.prepare(`INSERT INTO qa_delivery_turns(turn_record_id,operation_id,report_occurrence_id,turn_index,kind,status,record_json,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(turn_record_id) DO UPDATE SET status=excluded.status,record_json=excluded.record_json,updated_at=excluded.updated_at`)
@@ -1788,6 +2177,7 @@ export class WorkflowDb {
 
   /** Compare-and-swap the authoritative QA reducer head and append its event atomically. */
   transitionQa(runId: string, ticketId: string, expectedRevision: number, event: QaReducerEventV2, now = new Date()): QaReducerStateV2 {
+    this.assertNativeRunAdmission(runId);
     this.ensureRun(runId);
     return this.db.transaction(() => {
       const current = this.qaTicketHead(runId, ticketId);
@@ -1887,7 +2277,15 @@ export class WorkflowDb {
     return row?.receipt_json ? parseJson(row.receipt_json) as HandoffAcceptanceReceiptV2 : undefined;
   }
 
-  enableStructuredCommunication(): void { ensureQaGraphJournalGuards(this.db); }
+  /**
+   * Structured authority is admitted only after the one-way v2 cutover has
+   * committed.  Keeping this at the common admission boundary prevents a
+   * caller that opens WorkflowDb directly from bypassing the migration.
+   */
+  enableStructuredCommunication(): void {
+    this.applyStructuredCommunicationV2Cutover();
+    ensureQaGraphJournalGuards(this.db);
+  }
 
   beginQaTurn(intent: QaTurnIntentV2): void {
     if (intent.outputContract) this.enableStructuredCommunication();
@@ -1980,8 +2378,19 @@ export class WorkflowDb {
 
   finishQaTurn(receipt: QaTurnReceiptV2): void {
     this.db.transaction(() => {
-      const prior = this.db.prepare("SELECT source_state_digest,review_basis_digest,status FROM qa_turns WHERE operation_id=?").get(receipt.operationId) as { source_state_digest: string; review_basis_digest: string; status: string } | undefined;
+      const prior = this.db.prepare("SELECT source_state_digest,review_basis_digest,status,intent_json FROM qa_turns WHERE operation_id=?").get(receipt.operationId) as { source_state_digest: string; review_basis_digest: string; status: string; intent_json: string } | undefined;
       if (!prior) throw new Error(`QA turn intent not found: ${receipt.operationId}`);
+      const intent = parseJson(prior.intent_json) as QaTurnIntentV2;
+      if (receipt.dispatch === "completed") {
+        if (!intent.outputContract) throw new Error("Completed QA receipt requires its sealed native contract");
+        const owner = this.structuredOwnerDispatch(receipt.operationId);
+        if (json(receipt.sealedDispatch) !== json(owner)) throw new Error("QA receipt differs from sealed owner intent");
+        if (receipt.structuredResponseDigest !== (this.operation(receipt.operationId)?.result as { responseDigest?: string } | undefined)?.responseDigest) throw new Error("QA receipt references foreign native evidence");
+        const descriptor = persistedProviderWireContract(persistedDispatchTuple(owner));
+        if (!descriptor) throw new Error("QA receipt contract is unavailable");
+        this.replayStructuredDispatch(receipt.operationId, descriptor.canonical);
+        this.assertStructuredProviderTurn(receipt.operationId, receipt.providerTurnId);
+      }
       if (prior.source_state_digest !== receipt.sourceStateDigest || prior.review_basis_digest !== receipt.reviewBasisDigest) throw new Error("QA turn receipt binding mismatch");
       if (prior.status === "completed") {
         const existing = this.db.prepare("SELECT receipt_json FROM qa_turns WHERE operation_id=?").get(receipt.operationId) as { receipt_json: string };
@@ -2140,12 +2549,20 @@ export class WorkflowDb {
     return row ? parseJson(row.receipt_json) as BuilderRemediationReceiptV2 | BuilderRemediationReceiptV3 : undefined;
   }
 
+  verifiedBuilderRemediationReceipt(operationId: string): BuilderRemediationReceiptV3 | undefined {
+    const receipt = this.builderRemediationReceipt(operationId);
+    if (!receipt) return undefined;
+    this.assertBuilderRemediationReceipt(receipt);
+    return receipt as BuilderRemediationReceiptV3;
+  }
+
   hasConfirmedQaRemediationForRecheck(runId: string, ticketId: string): boolean {
     const head = this.qaTicketHead(runId, ticketId);
     const attempt = this.qaRemediationAttempts(runId, ticketId).at(-1);
     if (head.state !== "recheck-required" || !attempt || attempt.status !== "succeeded"
       || attempt.generation !== head.remediationGeneration || this.unresolvedRoleDispatches(runId, "builder").length) return false;
     const receipt = this.builderRemediationReceipt(attempt.attemptId);
+    if (receipt) this.assertBuilderRemediationReceipt(receipt);
     const review = this.qaReviewAttempt(attempt.reviewAttemptId);
     const transition = this.db.prepare("SELECT to_revision,event_json FROM qa_transitions WHERE run_id=? AND ticket_id=? ORDER BY to_revision DESC LIMIT 1").get(runId, ticketId) as { to_revision: number; event_json: string } | undefined;
     return Boolean(receipt && review && review.status === "failed" && receipt.runId === runId && receipt.ticketId === ticketId
@@ -2156,6 +2573,7 @@ export class WorkflowDb {
   }
 
   recordBuilderRemediationReceipt(receipt: BuilderRemediationReceiptV2 | BuilderRemediationReceiptV3): void {
+    this.assertBuilderRemediationReceipt(receipt);
     const text = json(receipt);
     const existing = this.db.prepare("SELECT receipt_json FROM qa_remediation_receipts WHERE operation_id=?").get(receipt.operationId) as { receipt_json: string } | undefined;
     if (existing && json(parseJson(existing.receipt_json)) !== text) throw new Error(`Builder remediation receipt collision: ${receipt.operationId}`);
@@ -2165,6 +2583,30 @@ export class WorkflowDb {
     if (!occurrence) throw new Error("Builder receipt missing report occurrence");
     this.db.prepare("INSERT OR IGNORE INTO qa_remediation_receipts(operation_id,run_id,ticket_id,report_digest,report_occurrence_id,receipt_json,created_at) VALUES(?,?,?,?,?,?,?)")
       .run(receipt.operationId, receipt.runId, receipt.ticketId, receipt.reportDigest, occurrence.reportOccurrenceId, text, receipt.completedAt);
+  }
+
+  private assertBuilderRemediationReceipt(receipt: BuilderRemediationReceiptV2 | BuilderRemediationReceiptV3): void {
+    if (receipt.version !== 3) throw new Error("Legacy Builder receipt cannot authorize native remediation");
+    this.assertNativeRunAdmission(receipt.runId);
+    const attempt = this.qaRemediationAttempt(receipt.operationId);
+    const review = attempt && this.qaReviewAttempt(attempt.reviewAttemptId);
+    const turn = this.qaDeliveryTurns(receipt.operationId).find(value => value.turnRecordId === receipt.turnRecordId);
+    if (!attempt || !review || !turn || turn.status !== "completed" || attempt.status !== "succeeded"
+      || attempt.runId !== receipt.runId || attempt.ticketId !== receipt.ticketId
+      || review.sourceDigest !== receipt.sourceStateDigest || review.reportDigest !== receipt.reportDigest
+      || attempt.requestDigest !== receipt.requestDigest || attempt.responseDigest !== receipt.responseDigest
+      || attempt.summaryDigest !== receipt.summaryDigest || turn.rawResponseDigest !== receipt.responseDigest
+      || turn.providerTurnId !== receipt.providerTurnId || turn.reportOccurrenceId !== receipt.reportOccurrenceId)
+      throw new Error("Builder receipt differs from its persisted remediation owner");
+    const transport = this.operation(turn.turnRecordId);
+    if (turn.structuredResponseDigest !== (transport?.result as { responseDigest?: string } | undefined)?.responseDigest)
+      throw new Error("Builder receipt has a foreign native evidence reference");
+    const result = this.replayStructuredDispatch(turn.turnRecordId, remediationOutput) as OperationResponse<import("rafi-spec").RemediationPayload>;
+    this.assertStructuredProviderTurn(turn.turnRecordId, receipt.providerTurnId);
+    const handoff = this.db.prepare("SELECT handoff_id FROM qa_failure_handoffs WHERE operation_id=?").get(receipt.operationId) as { handoff_id: string } | undefined;
+    if (result.result.kind !== "completed" || result.result.payload.status !== "done" || result.result.payload.report.handoff_id !== handoff?.handoff_id
+      || createHash("sha256").update(result.result.payload.report.summary).digest("hex") !== receipt.summaryDigest)
+      throw new Error("Builder receipt requires its completed native remediation result and summary");
   }
 
   commitBuilderRemediationSuccess(receipt: BuilderRemediationReceiptV2 | BuilderRemediationReceiptV3, expectedRevision: number, now = new Date()): QaReducerStateV2 {
@@ -2205,11 +2647,46 @@ export class WorkflowDb {
     })();
   }
 
+  private assertNativeQaCertificate(input: Pick<QaPassCertificateV2, "runId" | "ticketId" | "qaRevision" | "sourceStateDigest" | "reviewBasisDigest" | "turnReceiptDigest">, phase: "issue" | "consume" | "resume", certificateId?: string): void {
+    this.assertNativeRunAdmission(input.runId);
+    const head = this.qaTicketHead(input.runId, input.ticketId);
+    const rows = this.db.prepare("SELECT * FROM qa_turns WHERE run_id=? AND ticket_id=? AND source_state_digest=? AND review_basis_digest=? AND status='completed'")
+      .all(input.runId, input.ticketId, input.sourceStateDigest, input.reviewBasisDigest) as Array<Record<string, any>>;
+    const row = rows.find(row => {
+      try { return qaDigest("turn-receipt", parseJson(row.receipt_json)) === input.turnReceiptDigest; } catch { return false; }
+    });
+    if (!row) throw new Error("Pass requires the persisted sealed native QA owner receipt");
+    const receipt = parseJson(row.receipt_json) as QaTurnReceiptV2;
+    const intent = parseJson(row.intent_json) as QaTurnIntentV2;
+    if (!receipt.terminalEventObserved || receipt.dispatch !== "completed" || receipt.operationId !== row.operation_id || intent.operationId !== row.operation_id ||
+      intent.runId !== input.runId || intent.ticketId !== input.ticketId || intent.reviewNumber !== head.reviewNumber || intent.reviewNumber !== row.review_number || intent.sessionGeneration !== head.sessionGeneration ||
+      intent.sourceStateDigest !== input.sourceStateDigest || intent.reviewBasisDigest !== input.reviewBasisDigest ||
+      receipt.sourceStateDigest !== input.sourceStateDigest || receipt.reviewBasisDigest !== input.reviewBasisDigest ||
+      !receipt.sealedDispatch || canonicalJson(receipt.sealedDispatch) !== canonicalJson(this.structuredOwnerDispatch(receipt.operationId)))
+      throw new Error("Native pass owner/source/review binding mismatch");
+    this.assertStructuredProviderTurn(receipt.operationId, receipt.providerTurnId);
+    const verdict = this.replayStructuredDispatch(receipt.operationId, qaVerdictOutput) as OperationResponse<QaVerdictPayload>;
+    if (verdict.result.kind !== "completed" || verdict.result.payload.kind !== "passed") throw new Error("Pass requires a verified native passed verdict");
+    const operation = this.operation(receipt.operationId)!;
+    const tuple = persistedDispatchTuple(this.structuredOwnerDispatch(receipt.operationId));
+    if (operation.runId !== input.runId || intent.providerSession.sessionId !== tuple.sessionId || intent.providerSession.generation !== tuple.generation || intent.providerSession.provider !== tuple.provider)
+      throw new Error("Native pass session/tuple binding mismatch");
+    const attempt = this.qaReviewAttempt((operation.intent as { logicalActionId?: string }).logicalActionId ?? "");
+    if ((operation.intent as {logicalActionId?:string}).logicalActionId && !attempt) throw new Error("Native pass review attempt is missing");
+    if (attempt && (attempt.runId !== input.runId || attempt.ticketId !== input.ticketId || attempt.reviewNumber !== head.reviewNumber || attempt.sourceDigest !== input.sourceStateDigest || attempt.status !== "passed"))
+      throw new Error("Native pass review attempt is not completed and bound");
+    if (head.sourceStateDigest !== input.sourceStateDigest || head.reviewBasisDigest !== input.reviewBasisDigest ||
+      (phase === "issue" ? head.state !== "turn-intended" || input.qaRevision !== head.revision + 1 :
+        head.passCertificateId !== certificateId || (phase === "consume" ? head.state !== "passed" || input.qaRevision !== head.revision : head.state !== "finalizing" || input.qaRevision + 1 !== head.revision)))
+      throw new Error("Native pass certificate does not match the reducer phase/revision");
+  }
+
   private assertContractCertificate(input: Pick<QaPassCertificateV2, "runId" | "ticketId" | "sourceStateDigest" | "reviewBasisDigest" | "turnReceiptDigest" | "contractCoverage">): void {
     const store = this.qaPreparationStore();
     if (store.policy(input.runId)?.mode !== "enforce") return;
     const binding = input.contractCoverage;
     if (!binding || binding.version !== 1) throw new Error("Enforcing pass requires tagged contract coverage authority");
+    const verifiedBinding = binding;
     const admission = this.assertAdmittedWork(input.runId, input.ticketId);
     const head = store.head(input.runId, input.ticketId, admission.requirementsDigest);
     if (head.state !== "ready" || head.digest !== binding.contractDigest) throw new Error("Pass contract is stale or incomplete");
@@ -2224,13 +2701,13 @@ export class WorkflowDb {
     if (digest !== qaDigest("review-basis-fields", fields) || basis.contractBinding?.digest !== contract.contentDigest || basis.contractBinding.admissionDigest !== admission.requirementsDigest) throw new Error("Pass basis/contract binding mismatch");
     const configuredMake = (this.getRun(input.runId)?.state as { qa?: { settings?: { make?: "claude" | "codex" } } })?.qa?.settings?.make;
     if (configuredMake && resolveEffectiveQaConfiguration(this.projectDir, { make: configuredMake }).digest !== basis.contractBinding.commonConfigDigest) throw new Error("Effective QA configuration changed before pass authority; reconcile contract");
-    const attempt = this.qaReviewAttempt(binding.attemptId);
+    const attempt = this.qaReviewAttempt(verifiedBinding.attemptId);
     if (!attempt || attempt.runId !== input.runId || attempt.ticketId !== input.ticketId || attempt.sourceDigest !== input.sourceStateDigest || attempt.reviewNumber !== this.qaTicketHead(input.runId, input.ticketId).reviewNumber) throw new Error("Coverage review attempt is stale or foreign");
-    const coverage = store.artifact<import("rafi-spec").QaContractCoverageV1>(binding.coverageDigest, "final-coverage");
+    const coverage = store.artifact<import("rafi-spec").QaContractCoverageV1>(verifiedBinding.coverageDigest, "final-coverage");
     for (const check of contract.checks) for (const method of check.verification) if (method.equivalentAuthorityId && !store.equivalentResolver()(method.equivalentAuthorityId, contract, check, method, input.sourceStateDigest)) throw new Error("Equivalent verification authority is stale or foreign");
     const initialTurns = this.db.prepare("SELECT intent_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND review_number=? AND source_state_digest=? AND review_basis_digest=?").all(input.runId, input.ticketId, attempt.reviewNumber, input.sourceStateDigest, input.reviewBasisDigest) as Array<{ intent_json: string }>;
     const initial = initialTurns.map(row => parseJson(row.intent_json) as QaTurnIntentV2).find(turn => turn.slot === "initial");
-    if (!initial || initial.providerSession.sessionId !== binding.sessionId) throw new Error("Coverage lacks the actual fresh review dispatch identity");
+    if (!initial || initial.providerSession.sessionId !== verifiedBinding.sessionId) throw new Error("Coverage lacks the actual fresh review dispatch identity");
     const dispatchedInstruction = this.getEvidence(initial.instructionDigest)?.toString();
     const envelope = `\nImmutable input-basis digest: ${basis.digest}. Coverage must bind this inputBasisDigest.`;
     if (basis.contractBinding.transportVersion !== 1 || !dispatchedInstruction?.endsWith(envelope) || qaDigest("instruction", dispatchedInstruction.slice(0, -envelope.length)) !== basis.instructionDigest) throw new Error("Actual review dispatch differs from frozen base instruction and tagged input-basis envelope");
@@ -2238,22 +2715,24 @@ export class WorkflowDb {
     const receipt = receipts.map(row => parseJson(row.receipt_json) as QaTurnReceiptV2).find(row => qaDigest("turn-receipt", row) === input.turnReceiptDigest && row.terminalEventObserved);
     const response = receipt?.structuredResponseDigest ? this.getEvidence(receipt.structuredResponseDigest) : undefined;
     if (!response || !receipt) throw new Error("Pass requires a retained native QA verdict receipt");
-    const nativeReceipt = JSON.parse(response.toString());
-    if (nativeReceipt.dispatchId !== receipt.operationId || nativeReceipt.sessionId !== binding.sessionId) throw new Error("Pass native receipt has a foreign dispatch or session");
-    const verdict = validateStructuredCandidate(qaVerdictOutput, nativeReceipt) as OperationResponse<QaVerdictPayload>;
+    const owner = this.structuredOwnerDispatch(receipt.operationId);
+    if (json(receipt.sealedDispatch) !== json(owner)) throw new Error("Pass receipt lacks its persisted v2 owner tuple");
+    if (persistedDispatchTuple(owner).sessionId !== verifiedBinding.sessionId) throw new Error("Pass native receipt has a foreign session");
+    const verdict = this.replayStructuredDispatch(receipt.operationId, qaVerdictOutput) as OperationResponse<QaVerdictPayload>;
     if (verdict.result.kind !== "completed" || verdict.result.payload.kind !== "passed" || !verdict.result.payload.coverage) throw new Error("Pass requires complete coverage in the retained native passed verdict");
     const retainedProviderCoverage = bindCoverageHostFields(verdict.result.payload.coverage as import("rafi-spec").QaContractCoverageV1, contract, {
       phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest,
-      attemptId: binding.attemptId, sessionId: binding.sessionId,
+      attemptId: verifiedBinding.attemptId, sessionId: verifiedBinding.sessionId,
     });
     let retainedCoverage = retainedProviderCoverage;
     let retainedHostComparison: { result: import("./hostQaComparison.js").HostQaComparisonV1; resultDigest: string } | undefined;
     const hostCheck = findHostQaCheck(contract);
-    if (hostCheck) {
-      const hostDigest = hostComparisonDigestFromCoverage(coverage, hostCheck.id);
+    if (hostCheck !== undefined) {
+      const hostDigest = hostComparisonDigestFromCoverage(coverage, hostCheck!.id);
       if (!hostDigest) throw new Error("Coverage is missing the host-owned comparison artifact reference");
-      const hostResult = hostQaComparisonV1Schema.parse(store.artifact(hostDigest, "host-qa-comparison"));
-      retainedHostComparison = { result: hostResult, resultDigest: hostDigest };
+      const verifiedHostDigest: string = hostDigest!;
+      const hostResult = hostQaComparisonV1Schema.parse(store.artifact(verifiedHostDigest, "host-qa-comparison"));
+      retainedHostComparison = { result: hostResult, resultDigest: verifiedHostDigest };
     }
     const commandObservations = [
       ...retainedQaCommandObservations(this.projectDir, input.runId, input.ticketId, false),
@@ -2264,8 +2743,9 @@ export class WorkflowDb {
     if (graphCheck) {
       const graphDigest = hostGraphApplicabilityDigestFromCoverage(coverage, graphCheck.id);
       if (!graphDigest) throw new Error("Coverage is missing the host-owned Graphify applicability artifact reference");
-      const graphResult = hostGraphApplicabilityV1Schema.parse(store.artifact(graphDigest, "host-graph-applicability"));
-      retainedHostGraph = { result: graphResult, resultDigest: graphDigest };
+      const verifiedGraphDigest: string = graphDigest!;
+      const graphResult = hostGraphApplicabilityV1Schema.parse(store.artifact(verifiedGraphDigest, "host-graph-applicability"));
+      retainedHostGraph = { result: graphResult, resultDigest: verifiedGraphDigest };
     }
     if (retainedCoverage) retainedCoverage = assembleFinalQaCoverage({
       providerCoverage: retainedCoverage,
@@ -2276,12 +2756,13 @@ export class WorkflowDb {
       hostGraph: retainedHostGraph,
     });
     if (!retainedCoverage) throw new Error("Coverage lacks the retained terminal review receipt and authorized host augmentation");
-    const errors = validateContractCoverage(contract, retainedCoverage, { phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest, attemptId: binding.attemptId, sessionId: binding.sessionId });
+    const errors = validateContractCoverage(contract, retainedCoverage, { phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest, attemptId: verifiedBinding.attemptId, sessionId: verifiedBinding.sessionId });
     if (errors.length) throw new Error(errors.join("; "));
     if (!receipt || !retainedCoverage || canonicalJson(retainedCoverage) !== canonicalJson(coverage)) throw new Error("Coverage is not bound to the retained terminal review receipt and authorized host augmentation");
   }
 
   issueQaPassCertificate(input: Omit<QaPassCertificateV2, "version" | "certificateId" | "unresolvedReportCount" | "issuedAt">, now = new Date()): QaPassCertificateV2 {
+    this.assertNativeQaCertificate(input, "issue");
     this.assertContractCertificate(input);
     if (this.unresolvedQaReports(input.runId, input.ticketId).length) throw new Error("cannot issue QA pass certificate while reports remain unresolved");
     const certificate: QaPassCertificateV2 = { version: 2, certificateId: qaDigest("pass-certificate", { ...input, issuedAt: now.toISOString() }), ...input, unresolvedReportCount: 0, issuedAt: now.toISOString() };
@@ -2322,9 +2803,14 @@ export class WorkflowDb {
 
   consumeQaPassCertificate(runId: string, ticketId: string, certificateId: string, consumer: string, now = new Date()): QaPassCertificateV2 {
     return this.db.transaction(() => {
-      const row = this.db.prepare("SELECT certificate_json,consumed_at FROM qa_pass_certificates WHERE certificate_id=? AND run_id=? AND ticket_id=?").get(certificateId, runId, ticketId) as { certificate_json: string; consumed_at: string | null } | undefined;
+      const row = this.db.prepare("SELECT * FROM qa_pass_certificates WHERE certificate_id=? AND run_id=? AND ticket_id=?").get(certificateId, runId, ticketId) as Record<string, any> | undefined;
       if (!row) throw new Error("QA pass certificate is missing or scoped to another run/ticket");
       if (row.consumed_at) throw new Error("QA pass certificate has already been consumed");
+      const value = parseJson(row.certificate_json) as QaPassCertificateV2;
+      if (value.certificateId !== row.certificate_id || value.runId !== runId || value.ticketId !== ticketId || value.qaRevision !== row.qa_revision ||
+        value.sourceStateDigest !== row.source_state_digest || value.reviewBasisDigest !== row.review_basis_digest || value.turnReceiptDigest !== row.turn_receipt_digest || value.issuedAt !== row.issued_at)
+        throw new Error("Pass certificate SQL identity mismatch");
+      this.assertNativeQaCertificate(value, "consume", certificateId);
       this.assertContractCertificate(parseJson(row.certificate_json) as QaPassCertificateV2);
       if (this.unresolvedQaReports(runId, ticketId).length) throw new Error("QA pass certificate cannot be consumed with unresolved reports");
       const at = now.toISOString();
@@ -2377,6 +2863,24 @@ export class WorkflowDb {
           allowedProjectionPaths: [...input.allowedProjectionPaths].sort(), reducerRevision: next.revision } }, now);
       return next;
     })();
+  }
+
+  assertQaFinalizationAuthority(runId: string, ticketId: string): void {
+    const steps = this.qaFinalizationSteps(runId, ticketId).filter(step => step.status !== "invalidated");
+    if (!steps.length) throw new Error("QA finalization intent is missing");
+    for (const step of steps) {
+      const row = this.db.prepare("SELECT * FROM qa_pass_certificates WHERE certificate_id=? AND run_id=? AND ticket_id=?")
+        .get(step.certificateId, runId, ticketId) as Record<string, any> | undefined;
+      if (!row || !row.consumed_at || row.consumed_by !== step.kind) throw new Error("Finalization certificate consumer binding mismatch");
+      const certificate = parseJson(row.certificate_json) as QaPassCertificateV2;
+      if (certificate.consumedAt !== row.consumed_at || certificate.consumedBy !== row.consumed_by
+        || certificate.certificateId !== row.certificate_id || certificate.runId !== row.run_id || certificate.ticketId !== row.ticket_id
+        || certificate.qaRevision !== row.qa_revision || certificate.sourceStateDigest !== row.source_state_digest
+        || certificate.reviewBasisDigest !== row.review_basis_digest || certificate.turnReceiptDigest !== row.turn_receipt_digest
+        || certificate.issuedAt !== row.issued_at) throw new Error("Finalization certificate SQL identity mismatch");
+      this.assertNativeQaCertificate(certificate, "resume", step.certificateId);
+      this.assertContractCertificate(certificate);
+    }
   }
 
   planQaFinalizationStep(input: { operationId: string; runId: string; ticketId: string; certificateId: string; kind: string; intent: unknown }, now = new Date()): void {
@@ -2434,6 +2938,7 @@ export class WorkflowDb {
   completeQaFinalization(runId: string, ticketId: string, expectedRevision: number, receipt: unknown, now = new Date()): QaReducerStateV2 {
     return this.db.transaction(() => {
       this.assertFinalizationControls(runId,ticketId);
+      this.assertQaFinalizationAuthority(runId,ticketId);
       const head = this.qaTicketHead(runId, ticketId);
       if (head.revision !== expectedRevision || head.state !== "finalizing") throw new Error(`QA finalization completion raced for ${runId}/${ticketId}`);
       this.finishPendingQaFinalizationSteps(runId, ticketId, receipt, now);
@@ -2703,6 +3208,33 @@ export class WorkflowDb {
     return row.count;
   }
 
+  freshRecoveryValidation(runId: string, role: "builder" | "qa"): FreshRecoveryValidation {
+    const decision = this.recoveryDecisions(runId).at(-1);
+    const predecessor = this.roleMutationLease(runId, role);
+    if (!decision || decision.mode !== "fresh-recovery-only" || decision.role !== role || !predecessor)
+      throw new Error("Fresh recovery validation requires an explicit current recovery decision and predecessor lease");
+    return { decisionDigest: digestJson(decision), predecessor };
+  }
+
+  /** This grants one response-only initialization, never ownership or business work. */
+  assertFreshRecoveryValidation(dispatchId: string, session: ProviderSessionRefV1): void {
+    const operation = this.operation(dispatchId);
+    const intent = operation?.intent as { operation?: string; responseOnly?: boolean; sessionRef?: ProviderSessionRefV1; freshRecoveryValidation?: FreshRecoveryValidation } | undefined;
+    const authorization = intent?.freshRecoveryValidation;
+    const decision = operation && this.recoveryDecisions(operation.runId).at(-1);
+    if (!operation || !authorization || !decision || intent?.operation !== "session-initialization" || intent.responseOnly !== true ||
+      canonicalJson(intent.sessionRef) !== canonicalJson(session) ||
+      (session.role !== "builder" && session.role !== "qa") || decision.mode !== "fresh-recovery-only" || decision.role !== session.role ||
+      authorization.decisionDigest !== digestJson(decision) || dispatchId !== `fresh-recovery:${authorization.decisionDigest}` ||
+      canonicalJson(this.roleMutationLease(operation.runId, session.role)) !== canonicalJson(authorization.predecessor) ||
+      decision.runId !== operation.runId || canonicalSessionPath(session.cwd) !== canonicalSessionPath(decision.worktree) ||
+      session.provider !== (decision.requestedSuccessor?.agent ?? decision.settings.make) ||
+      session.sessionId === authorization.predecessor.providerSessionId ||
+      decision.predecessorSessionId && decision.predecessorSessionId !== authorization.predecessor.providerSessionId ||
+      decision.predecessorSessionRef && providerSessionKey(decision.predecessorSessionRef) !== authorization.predecessor.sessionKey)
+      throw new Error("Submission session no longer owns its role: fresh recovery decision or predecessor changed");
+  }
+
   recordRecoveryDecision(receipt: BuildRecoveryDecisionReceipt): void {
     this.ensureRun(receipt.runId);
     const digest = digestJson(receipt);
@@ -2865,11 +3397,11 @@ export class WorkflowDb {
         if (this.db.prepare("SELECT 1 FROM legacy_imports WHERE source_path=? AND digest=?").get(path, digest)) continue;
         let parsed: unknown; try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch { parsed = { unreadable: true }; }
         const record = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
+        if (record?.communicationProtocolVersion === 2) continue;
         const isBuild = (record?.version === 1 || record?.version === 2) && typeof record.runId === "string";
         const runId = isBuild ? String(record!.runId) : `legacy_${digest.slice(0, 24)}`;
         if (!this.getRun(runId)) {
           this.createRun({ runId, kind: isBuild ? "build" : "legacy", checkpoint: isBuild && typeof record?.checkpoint === "string" ? record.checkpoint : "legacy-imported", originalWork: isBuild ? { tickets: record?.tickets ?? [] } : { source: path }, remainingWork: isBuild ? { tickets: record?.tickets ?? [] } : {}, state: isBuild ? record! : { source: path, record: parsed }, legacy: true }, now);
-          if (!isBuild) this.transition(runId, { status: "superseded", checkpoint: "legacy-imported", remainingWork: {}, event: "legacy_record_preserved" }, now);
         }
         this.db.prepare("INSERT INTO legacy_imports(source_path,digest,run_id,imported_at) VALUES(?,?,?,?)").run(path, digest, runId, now.toISOString()); count += 1;
       }
@@ -2995,6 +3527,100 @@ export class WorkflowDb {
     const existingMigration = this.db.prepare("SELECT completed_at FROM recovery_schema_migrations WHERE migration=?").get(`${migration}:${migrationDigest}`);
     if (!existingMigration) this.db.prepare("INSERT INTO recovery_schema_migrations(migration,completed_at) VALUES(?,?)").run(`${migration}:${migrationDigest}`, new Date().toISOString());
     migrateQaHandback(this.db);
+  }
+
+  /**
+   * One-way cutover fence.  We deliberately do not attempt to convert an old
+   * receipt into authority: any pre-existing run with legacy state or a
+   * provider dispatch that lacks a sealed tuple is terminally superseded.
+   * User/project artifacts remain in their own tables; only workflow authority
+   * is fenced.  The marker is committed atomically with the classification.
+   */
+  private applyStructuredCommunicationV2Cutover(): void {
+    const migration = STRUCTURED_AUDIT_CLOSURE;
+    this.db.transaction(() => {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS structured_communication_cutover(migration TEXT PRIMARY KEY,completed_at TEXT NOT NULL,details_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS structured_cutover_quarantine(run_id TEXT NOT NULL,table_name TEXT NOT NULL,row_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS structured_handoff_lineage(predecessor_id TEXT PRIMARY KEY REFERENCES operation_journal(idempotency_key),run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),state TEXT NOT NULL,acceptance_id TEXT UNIQUE,successor_json TEXT,continuation_id TEXT UNIQUE);
+        CREATE TABLE IF NOT EXISTS continuity_checkpoint_origins(checkpoint_id INTEGER PRIMARY KEY REFERENCES continuity_checkpoints(checkpoint_id),run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),origin_json TEXT NOT NULL,delta_digest TEXT NOT NULL,dispatch_id TEXT,publication_kind TEXT,UNIQUE(run_id,dispatch_id,publication_kind));
+        CREATE TABLE IF NOT EXISTS structured_dispatch_processing(dispatch_id TEXT PRIMARY KEY REFERENCES operation_journal(idempotency_key),run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),state TEXT NOT NULL CHECK(state IN ('pending','completed')),context_json TEXT NOT NULL,error TEXT);
+        CREATE TABLE IF NOT EXISTS structured_submission_claims(dispatch_id TEXT PRIMARY KEY REFERENCES operation_journal(idempotency_key),run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),tuple_digest TEXT NOT NULL,claim_id TEXT NOT NULL UNIQUE,session_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('claimed','consumed')),created_at TEXT NOT NULL,consumed_at TEXT);
+        CREATE TABLE IF NOT EXISTS communication_evidence_refs(owner_kind TEXT NOT NULL,owner_id TEXT NOT NULL,evidence_digest TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(owner_kind,owner_id,evidence_digest));
+        CREATE TABLE IF NOT EXISTS page_ledgers(artifact_id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),lineage_id TEXT NOT NULL,tuple_digest TEXT NOT NULL,lease_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('open','terminal','cancelled')),page_count INTEGER NOT NULL,total_bytes INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS page_ledger_pages(artifact_id TEXT NOT NULL REFERENCES page_ledgers(artifact_id),ordinal INTEGER NOT NULL,predecessor_digest TEXT,content_digest TEXT NOT NULL,content BLOB NOT NULL,terminal INTEGER NOT NULL CHECK(terminal IN (0,1)),created_at TEXT NOT NULL,PRIMARY KEY(artifact_id,ordinal));`);
+      const prior = this.db.prepare("SELECT details_json FROM structured_communication_cutover WHERE migration=?").get(migration) as { details_json: string } | undefined;
+      if (this.db.prepare("SELECT 1 FROM structured_communication_cutover WHERE migration='003_structured_communication_v2_cutover'").get() && prior && JSON.parse(prior.details_json).ownershipMatrixVersion === STRUCTURED_CUTOVER_MATRIX_VERSION) return;
+      // Upgrade only an unambiguous host baseline. Historical provider deltas
+      // without an exact dispatch origin remain fenced; timestamps are not proof.
+      for (const checkpoint of this.db.prepare(`SELECT c.* FROM continuity_checkpoints c JOIN workflow_runs r USING(run_id)
+        WHERE json_valid(r.state_json) AND c.session_ref_json IS NULL
+        AND NOT EXISTS(SELECT 1 FROM continuity_checkpoint_origins o WHERE o.checkpoint_id=c.checkpoint_id)`).all() as DbContinuityCheckpoint[]) {
+        let delta: ContinuityDelta;
+        try { delta = parseJson(checkpoint.delta_json) as ContinuityDelta; } catch { continue; }
+        if (!delta || delta.version !== 1 || delta.nextAction !== "Await the first role action." ||
+          [delta.decisions,delta.constraints,delta.discoveries,delta.completedActions,delta.evidence,delta.failures,delta.blockers,delta.openWork].some(items => !Array.isArray(items) || items.length)) continue;
+        const baseline = this.db.prepare("SELECT sequence,payload_json FROM continuity_events WHERE run_id=? AND role='host' AND kind='role_baseline' AND sequence<=? ORDER BY sequence DESC LIMIT 1")
+          .get(checkpoint.run_id, checkpoint.event_sequence) as {sequence:number;payload_json:string}|undefined;
+        if (!baseline || JSON.parse(baseline.payload_json).role !== checkpoint.role) continue;
+        const deltaDigest = createHash("sha256").update(checkpoint.delta_json).digest("hex");
+        const event = this.appendContinuityEvent({runId:checkpoint.run_id,role:"host",kind:"host_checkpoint",authoritativeStateRevision:checkpoint.authoritative_state_revision,
+          payload:{checkpointDeltaDigest:deltaDigest,sourceBaselineSequence:baseline.sequence,role:checkpoint.role}});
+        this.db.prepare("INSERT INTO continuity_checkpoint_origins(checkpoint_id,run_id,origin_json,delta_digest) VALUES(?,?,?,?)")
+          .run(checkpoint.checkpoint_id,checkpoint.run_id,json({kind:"host",eventSequence:event.sequence,inputCheckpointDigests:[]}),deltaDigest);
+      }
+      const matrix = cutoverOwnershipMatrix(this.db);
+      const fileReferences = communicationFileEvidenceReferences(this.projectDir);
+      const affected = (this.db.prepare("SELECT * FROM workflow_runs").all() as Array<Record<string, any>>).filter(run => invalidStructuredRun(this.db, run, this.projectDir));
+      const lease = this.db.prepare("SELECT run_id,pid,process_start,host FROM project_lease WHERE singleton=1").get() as { run_id: string; pid: number; process_start: string; host: string } | undefined;
+      if (lease && affected.some(run => run.run_id === lease.run_id) && classifyProcess(lease.pid, lease.process_start, lease.host).state !== "dead")
+        throw new Error("v2-cutover-pending: stop the existing workflow owner before structured communication cutover");
+      if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='build_owned_processes'").get()) {
+        const processes = this.db.prepare("SELECT run_id,pid,process_start,host FROM build_owned_processes WHERE state<>'quiescent'").all() as Array<{ run_id: string; pid: number | null; process_start: string | null; host: string }>;
+        if (processes.some(process => affected.some(run => run.run_id === process.run_id)
+          && (!process.pid || !process.process_start || classifyProcess(process.pid, process.process_start, process.host).state !== "dead")))
+          throw new Error("v2-cutover-pending: reconcile owned build processes before structured communication cutover");
+      }
+      if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='build_admission'").get()) {
+        const row = this.db.prepare("SELECT record_json FROM build_admission WHERE singleton=1").get() as { record_json: string } | undefined;
+        if (row) {
+          let admission: BuildAdmission;
+          try { admission = JSON.parse(row.record_json); }
+          catch { throw new Error("v2-cutover-pending: malformed build admission requires reconciliation"); }
+          if (affected.some(run => run.run_id === admission.runId) && classifyProcess(admission.pid, admission.processStart, admission.host).state !== "dead")
+            throw new Error("v2-cutover-pending: stop the existing build owner before structured communication cutover");
+        }
+      }
+      // Existing domain guards must not block the authorized cutover. Restore
+      // them in this same transaction, omitting only superseded v1 comms guards.
+      const triggers = this.db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND sql IS NOT NULL").all() as Array<{ name: string; sql: string }>;
+      for (const trigger of triggers) {
+        if (!/^[a-zA-Z_][a-zA-Z_0-9]*$/.test(trigger.name)) throw new Error("Unexpected cutover trigger identity");
+        this.db.exec(`DROP TRIGGER "${trigger.name}"`);
+      }
+      const now = new Date().toISOString();
+      for (const { run_id } of affected) {
+        const row = this.db.prepare("SELECT state_json FROM workflow_runs WHERE run_id=?").get(run_id) as { state_json: string };
+        const originalBytesDigest = createHash("sha256").update(row.state_json).digest("hex");
+        this.db.prepare("INSERT INTO structured_cutover_quarantine(run_id,table_name,row_json) VALUES(?,?,?)").run(run_id, "workflow_runs.state_json", json({ originalBytes: row.state_json, originalBytesDigest }));
+        let original: Record<string, unknown> = {};
+        try { const parsed = parseJson(row.state_json); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) original = parsed as Record<string, unknown>; } catch { /* quarantined verbatim above */ }
+        const state = { ...original, structuredCommunicationCutover: { version: 2, reason: "structured-communication-v2-cutover", originalBytesDigest, at: now } };
+        purgeStructuredRun(this.db, run_id, matrix, fileReferences);
+        this.db.prepare("UPDATE workflow_runs SET status='superseded',checkpoint='structured-communication-v2-cutover',state_json=?,updated_at=? WHERE run_id=?")
+          .run(json(state), now, run_id);
+      }
+      quarantineCommunicationFiles(this.projectDir, this.db);
+      for (const trigger of triggers) if (!trigger.name.startsWith("structured_comms_v1_")) this.db.exec(trigger.sql);
+      this.db.prepare("INSERT INTO structured_communication_cutover(migration,completed_at,details_json) VALUES(?,?,?) ON CONFLICT(migration) DO UPDATE SET completed_at=excluded.completed_at,details_json=excluded.details_json")
+        .run(migration, now, json({ ownershipMatrixVersion: STRUCTURED_CUTOVER_MATRIX_VERSION, ownershipMatrix: matrix, fencedRuns: affected.map(row => row.run_id), policy: "legacy-or-unsealed-provider-authority-is-non-resumable" }));
+      this.db.prepare("INSERT OR IGNORE INTO structured_communication_cutover(migration,completed_at,details_json) VALUES(?,?,?)")
+        .run("003_structured_communication_v2_cutover", now, json({ ownershipMatrixVersion: STRUCTURED_CUTOVER_MATRIX_VERSION }));
+      ensureQaGraphJournalGuards(this.db);
+      this.db.exec(`CREATE TRIGGER IF NOT EXISTS structured_cutover_terminal_run BEFORE UPDATE ON workflow_runs
+        WHEN OLD.checkpoint='structured-communication-v2-cutover'
+        BEGIN SELECT CASE WHEN NEW.status<>'superseded' OR NEW.checkpoint<>OLD.checkpoint OR NEW.state_json<>OLD.state_json
+          THEN RAISE(ABORT,'structured-communication-v2-cutover: workflow permanently non-resumable') END; END;`);
+    })();
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {

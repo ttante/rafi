@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { servicePendingHumanDecisions } from "../src/humanDecision.js";
 import { WorkflowDb } from "../src/workflowDb.js";
+import { seedQaReceipt } from "./helpers/workAdmission.js";
 import { BuildInterventionControl, parseManagerAction } from "../src/buildInterventions.js";
 
 function fixture(run:(db:WorkflowDb,control:BuildInterventionControl)=>void) {
@@ -130,8 +131,11 @@ for(const dispatch of ["completed","not-dispatched","uncertain"] as const)test(`
   const queued=control.enqueue(parseManagerAction(user,"guide",0)!,user);
   const reserved=db.reserveGuidance("run","T1","qa","qa-operation","source","Complete mandatory review");
   const instructionDigest=db.putEvidence("qa",Buffer.from(reserved.text));
+  if(dispatch==="completed")seedQaReceipt(db,"run","T1",1,"source","basis",{operationId:"qa-operation",instruction:reserved.text});
+  else {
   db.beginQaTurn({version:2,operationId:"qa-operation",runId:"run",ticketId:"T1",reviewNumber:1,sessionGeneration:0,slot:"initial",sourceStateDigest:"source",reviewBasisDigest:"basis",instructionDigest,intendedAt:new Date().toISOString(),providerSession:{version:2,provider:"codex",sessionId:"qa-session",role:"qa",stream:"qa",generation:0,cwd:"/tmp",configRoot:"/tmp",createdAt:new Date().toISOString(),validatedAt:new Date().toISOString()}});
-  db.finishQaTurn({version:2,operationId:"qa-operation",dispatch,terminalEventObserved:dispatch==="completed",...(dispatch==="completed"?{providerTurnId:"actual-turn"}:{}),providerInstructionDigest:instructionDigest,sourceStateDigest:"source",reviewBasisDigest:"basis",completedAt:new Date().toISOString()});
+  db.finishQaTurn({version:2,operationId:"qa-operation",dispatch,terminalEventObserved:false,providerInstructionDigest:instructionDigest,sourceStateDigest:"source",reviewBasisDigest:"basis",completedAt:new Date().toISOString()});
+  }
   db.reconcileInstructionDeliveries("run","T1");
   const expected=dispatch==="completed"?"applied":dispatch==="not-dispatched"?"rejected":"uncertain";
   assert.equal(db.instruction(queued.instructionId)?.deliveries[0]?.state,expected);
@@ -250,16 +254,17 @@ for(const boundary of ["intent","dispatch","receipt"] as const)test(`SIGKILL aft
   const root=join(db.path,"..","..");
   const code=`
     import {WorkflowDb} from ${JSON.stringify(new URL("../dist/workflowDb.js",import.meta.url).href)};
+    import {seedQaReceipt} from ${JSON.stringify(new URL("./helpers/workAdmission.ts",import.meta.url).href)};
     import {appendFileSync} from 'node:fs';import {join} from 'node:path';
     const root=process.argv[1],boundary=process.argv[2],db=new WorkflowDb(root);db.acquireLease('run');
     const reserved=db.reserveGuidance('run','T1','qa','crash-operation','source','Full mandatory independent review');
     const digest=db.putEvidence('qa',Buffer.from(reserved.text)),at=new Date().toISOString();
-    db.beginQaTurn({version:2,operationId:'crash-operation',runId:'run',ticketId:'T1',reviewNumber:1,sessionGeneration:0,slot:'initial',sourceStateDigest:'source',reviewBasisDigest:'basis',instructionDigest:digest,intendedAt:at,providerSession:{version:2,provider:'codex',sessionId:'qa-session',role:'qa',stream:'qa',generation:0,cwd:root,configRoot:root,createdAt:at,validatedAt:at}});
+    if(boundary!=='receipt')db.beginQaTurn({version:2,operationId:'crash-operation',runId:'run',ticketId:'T1',reviewNumber:1,sessionGeneration:0,slot:'initial',sourceStateDigest:'source',reviewBasisDigest:'basis',instructionDigest:digest,intendedAt:at,providerSession:{version:2,provider:'codex',sessionId:'qa-session',role:'qa',stream:'qa',generation:0,cwd:root,configRoot:root,createdAt:at,validatedAt:at}});
     if(boundary!=='intent')appendFileSync(join(root,'test-dispatches'),'one\\n');
-    if(boundary==='receipt')db.finishQaTurn({version:2,operationId:'crash-operation',dispatch:'completed',providerTurnId:'actual-turn',terminalEventObserved:true,providerInstructionDigest:digest,sourceStateDigest:'source',reviewBasisDigest:'basis',completedAt:at});
+    if(boundary==='receipt')seedQaReceipt(db,'run','T1',1,'source','basis',{operationId:'crash-operation',instruction:reserved.text});
     process.kill(process.pid,'SIGKILL');
   `;
-  const child=spawnSync(process.execPath,["--input-type=module","-e",code,root,boundary],{encoding:"utf8",timeout:10000});
+  const child=spawnSync(process.execPath,["--import","tsx","--input-type=module","-e",code,root,boundary],{encoding:"utf8",timeout:30000});
   assert.equal(child.signal,"SIGKILL",child.stderr);
   const lease=db.acquireLease("run");
   try {

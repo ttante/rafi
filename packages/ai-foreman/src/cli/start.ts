@@ -1271,7 +1271,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           try {
             const revision = countDb.continuityHead(runId, "builder")?.authoritativeStateRevision ?? settings.settings_revision;
             countDb.appendContinuityEvent({ runId, role: "builder", kind: "builder_requested_handoff_delta", payload: request.delta, authoritativeStateRevision: revision });
-            countDb.publishContinuityCheckpoint({ runId, role: "builder", delta: request.delta, authoritativeStateRevision: revision });
+
             compactionCount = countDb.successfulCompactionCount(runId, "builder", predecessor.sessionRef?.() ?? sessionId);
           }
           finally { countDb.close(); }
@@ -1282,6 +1282,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
             predecessorSessionId: sessionId,
             predecessorSessionRef: predecessor.sessionRef?.(),
             requestedByBuilder: true,
+            predecessorDispatchId: request.predecessorDispatchId,
             roleState: {
               ...request.roleState,
               frozenActionDigest: createHash("sha256").update(frozenAction).digest("hex"),
@@ -1298,7 +1299,8 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
             resources: [{ label: "frozen-action", content: frozenAction, authoritative: true }],
           }, (_handoff, runtime) => createBuilderForSettings(builderCwd, settingsForRequestedRuntime(effectiveSettings, runtime)), handoffRecoveryOptions("builder"));
           log.write("handoff-transfer", {
-            requestedByBuilder: true, reason: request.reason, generation: transfer.manifest.generation,
+            requestedByBuilder: true,
+            predecessorDispatchId: request.predecessorDispatchId, reason: request.reason, generation: transfer.manifest.generation,
             predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
             acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest,
           });

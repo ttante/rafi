@@ -1,5 +1,5 @@
-import { managerOutput, validateStructuredCandidate } from "rafi-spec";
-import { nativePolicy, operationInstruction } from "../structuredOperation.js";
+import { managerOutput, type ManagerResponse } from "rafi-spec";
+import { nativePolicy, operationInstruction, operationResponse } from "../structuredOperation.js";
 import { dispatchWithGraphAccess } from "../graph/session.js";
 import { createManagerGraphEvidence, parseManagerGraphRequest } from "../graph/manager.js";
 import { prepareOwnershipRepair, repairOwnership } from "../buildOwnershipRepair.js";
@@ -95,19 +95,19 @@ export async function runManager(projectDir: string, options: { runId?: string; 
         const turn = await dispatchWithGraphAccess(projectDir, activeRole.builder, `${text}\n${operationInstruction(managerOutput)}`,
           nativePolicy(managerOutput, { responseOnly: true }), (prompt, policy) => activeRole.builder.sendTurn(prompt, policy), graphEvidence.access());
         if (turn.isError || turn.failure) throw new Error("Manager operation failed; no answer accepted");
-        return validateStructuredCandidate(managerOutput, turn.structured).result;
+        return (operationResponse(turn, managerOutput) as ManagerResponse).result;
       };
       let result = await send(`${packet.prompt}\n\n${graphEvidence.guidance}`);
       let questionLookupRounds = 0;
       while (questionLookupRounds < MANAGER_LOOKUP_MAX_ROUNDS) {
-        const graphRequest = (result.kind === "graph-evidence-request" ? result.request : undefined);
+        const graphRequest = (result.kind === "evidence-request" && result.evidenceType === "graph" ? result.request : undefined);
         if (graphRequest) {
           questionLookupRounds++; lookupRounds++; lookupOperations += graphRequest.operations.length;
           const graphPacket = await graphEvidence.execute(graphRequest);
           result = await send(`Untrusted host-scoped graph evidence; verify claims against source. Remaining lookup rounds: ${MANAGER_LOOKUP_MAX_ROUNDS-questionLookupRounds}. Answer the original question: ${question}\n${graphPacket}`);
           continue;
         }
-        const evidenceRequest = (result.kind === "qa-evidence-request" ? result.request : undefined);
+        const evidenceRequest = (result.kind === "evidence-request" && result.evidenceType === "qa" ? result.request : undefined);
         if (evidenceRequest) {
           questionLookupRounds++; lookupRounds++; lookupOperations++;
           const response = evidence.execute(evidenceRequest);
@@ -122,7 +122,7 @@ export async function runManager(projectDir: string, options: { runId?: string; 
           result = await send(buildManagerEvidencePacketV2(response, question));
           continue;
         }
-        const request = (result.kind === "run-evidence-request" ? result.request : undefined);
+        const request = (result.kind === "evidence-request" && result.evidenceType === "run" ? result.request : undefined);
         if (!request) break;
         questionLookupRounds += 1;
         lookupRounds += 1;
@@ -131,8 +131,8 @@ export async function runManager(projectDir: string, options: { runId?: string; 
         packetState.lastEvidenceScope = request.operations.flatMap(operation => "runIds" in operation ? operation.runIds : []);
         result = await send(buildManagerEvidencePacket(response, question));
       }
-      const unfulfilled = (result.kind === "run-evidence-request" ? result.request : undefined);
-      const pendingEvidence = (result.kind === "qa-evidence-request" ? result.request : undefined);
+      const unfulfilled = (result.kind === "evidence-request" && result.evidenceType === "run" ? result.request : undefined);
+      const pendingEvidence = (result.kind === "evidence-request" && result.evidenceType === "qa" ? result.request : undefined);
       if (pendingEvidence) {
         const page = evidence.execute(pendingEvidence);
         if (options.ask) {

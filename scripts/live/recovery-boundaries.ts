@@ -10,9 +10,12 @@ import { WorkflowDb } from "../../packages/ai-foreman/src/workflowDb.js";
 import { PermissionPolicy } from "../../packages/ai-foreman/src/permissions/policy.js";
 import { DEFAULT_CONFIG } from "../../packages/ai-foreman/src/config.js";
 import type { BuilderAdapter, BuilderAdapterOptions } from "../../packages/ai-foreman/src/adapters/types.js";
-import type { ContinuityDelta } from "rafi-spec";
+import type { ContinuityDelta } from "../../packages/spec/src/index.js";
 import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
 
+import { runSupervisedStructuredLive } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("recovery-boundaries", async (supervisor) => {
 if (process.env.RAFI_LIVE_RECOVERY !== "1") throw new Error("Explicit provider authorization and RAFI_LIVE_RECOVERY=1 are required.");
 const providers = (process.env.RAFI_LIVE_PROVIDERS ?? "claude,codex").split(",");
 if (providers.some(provider => !["claude", "codex"].includes(provider))) throw new Error("Unknown provider");
@@ -98,3 +101,6 @@ try {
   }
 } catch (error) { records.push({ status: "fail", error: String(error) }); save(); throw error; }
 console.log(JSON.stringify({ results: records }));
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

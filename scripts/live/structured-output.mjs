@@ -7,10 +7,14 @@ import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createLiveWorkspace } from "./workspace.mjs";
 import { wireSchema } from "../comms/contracts.mjs";
-import { CodexRpc, probeConfig, providerVersions } from "./structured-output-support.mjs";
+import { CodexRpc, createStructuredSpendLedger, createStructuredRetainedEvidenceDirectory, probeConfig, providerVersions } from "./structured-output-support.mjs";
 
-const { deadline, providers, profile, maximumHostDispatches } = probeConfig();
-const { workspaceRoot: cwd, evidenceRoot } = createLiveWorkspace("structured-output");
+import { runSupervisedStructuredLive } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("structured-output", async (supervisor) => {
+const { deadline, providers, profile, maximumHostDispatches, liveValidation } = supervisor.config;
+const spend = createStructuredSpendLedger(5, supervisor.config.requireAuthoritativeCost);
+const { workspaceRoot: cwd, evidenceRoot } = createLiveWorkspace("structured-output", { evidenceRoot: supervisor.evidenceRoot });
 execFileSync("git", ["init", "-q"], { cwd });
 const nonce = randomUUID();
 const results = [];
@@ -19,7 +23,8 @@ const report = { kind: "live-interface-preflight", profile, node: process.versio
   sourceHashes: Object.fromEntries([import.meta.url, new URL("../comms/contracts.mjs", import.meta.url).href, new URL("./structured-output-support.mjs", import.meta.url).href].map(path =>
     [path, createHash("sha256").update(readFileSync(new URL(path))).digest("hex")])),
   cwd, deadline: new Date(deadline).toISOString(), limits: { turnTimeoutMs: 90_000, maximumHostDispatches,
-    claudeQueryBudgetUsd: 0.5, claudeSdkMaxTurnsPerQuery: 4, codexDollarCap: null, codexLimitBasis: "bounded host dispatches, deadlines, tiny responses; no native dollar cap" },
+    maximumSpendUsd: supervisor.config.maximumSpendUsd, claudeSdkMaxTurnsPerQuery: 4,
+    costTelemetryRequired: supervisor.config.requireAuthoritativeCost, codexLiveStatus: "enabled" },
   versions: { ...providerVersions(providers, execFileSync, process.env.RAFI_LIVE_CLAUDE_EXECUTABLE),
     ...(providers.includes("claude") ? { sdk: JSON.parse(readFileSync(new URL("../../node_modules/@anthropic-ai/claude-agent-sdk/package.json", import.meta.url))).version } : {}) }, results };
 const save = () => { writeFileSync(join(evidenceRoot, "results.json"), JSON.stringify(report, null, 2));
@@ -36,7 +41,11 @@ async function scenario(provider, name, fn) {
 }
 
 async function claudeTurn(prompt, outputSchema, resume, interrupt = false) {
+  const lease = supervisor.reserveQuery("claude");
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  supervisor.signal.addEventListener("abort", abort, { once: true });
+  const release = supervisor.track(() => { controller.abort(); stream?.close(); });
   const timer = setTimeout(() => controller.abort(), remaining());
   let stream;
   let terminal, interrupted = false, sessionId;
@@ -45,7 +54,7 @@ async function claudeTurn(prompt, outputSchema, resume, interrupt = false) {
     stream = query({ prompt, options: { cwd, pathToClaudeCodeExecutable: process.env.RAFI_LIVE_CLAUDE_EXECUTABLE ?? "claude",
       model: process.env.RAFI_LIVE_CLAUDE_MODEL ?? "sonnet", settingSources: ["user"], tools: [],
       permissionMode: "default", canUseTool: async () => ({ behavior: "deny", message: "No domain tools in this probe" }),
-      maxTurns: 4, maxBudgetUsd: 0.5, abortController: controller,
+      maxTurns: 4, maxBudgetUsd: lease.maximumSpendUsd, abortController: controller,
       ...(resume ? { resume } : {}), ...(outputSchema ? { outputFormat: { type: "json_schema", schema: outputSchema } } : {}) } });
     for await (const message of stream) {
       messages.push(message); events.push({ provider: "claude", message });
@@ -53,13 +62,14 @@ async function claudeTurn(prompt, outputSchema, resume, interrupt = false) {
       if (interrupt && !interrupted && message.type === "system" && message.subtype === "init") {
         interrupted = true; controller.abort();
       }
-      if (message.type === "result") terminal = message;
+      if (message.type === "result") { terminal = message; lease.record(message.total_cost_usd); }
     }
   } catch (error) { if (!interrupt || !interrupted) throw error; }
-  finally { clearTimeout(timer); stream?.close(); save(); }
+  finally { clearTimeout(timer); stream?.close(); lease.close(); release(); supervisor.signal.removeEventListener("abort", abort); save(); }
   assert.ok(messages.every(m => m.type !== "assistant" || m.message.content.every(c => c.type !== "tool_use" || c.name === "StructuredOutput")), "Unexpected domain tool");
   if (interrupt) { assert.ok(interrupted); assert.ok(!terminal || terminal.subtype !== "success"); return { interrupted, sessionId, terminalSubtype: terminal?.subtype ?? "absent" }; }
   assert.equal(terminal?.subtype, "success", JSON.stringify(terminal));
+  spend.record("claude", terminal.total_cost_usd);
   return { sessionId, value: terminal.structured_output, text: terminal.result,
     costUsd: terminal.total_cost_usd, numTurns: terminal.num_turns,
     models: [...new Set(messages.flatMap(m => m.type === "assistant" ? [m.message.model] : []))] };
@@ -68,6 +78,7 @@ async function claudeTurn(prompt, outputSchema, resume, interrupt = false) {
 
 for (const provider of providers) {
   try {
+    spend.assertProviderIsAuditable(provider);
     if (profile === "contracts") {
       const drafts = {
         "work-report": { kind: "completed", summary: "Already verified", change: "already-satisfied", evidenceIds: ["fixture-result"] },
@@ -122,3 +133,6 @@ for (const provider of providers) {
   } catch (error) { report.failures ??= []; report.failures.push({ provider, error: String(error) }); process.exitCode = 1; save(); }
 }
 report.finishedAt = new Date().toISOString(); save();
+
+if (process.exitCode) throw new Error("Structured live runner recorded a failure");
+});

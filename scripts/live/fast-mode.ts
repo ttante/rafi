@@ -7,6 +7,9 @@ import { CodexAdapter } from "../../packages/ai-foreman/src/adapters/codex.js";
 import type { BuilderAdapterOptions } from "../../packages/ai-foreman/src/adapters/types.js";
 import { createLiveWorkspace } from "./workspace.mjs";
 
+import { runSupervisedStructuredLive } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("fast-mode", async (supervisor) => {
 if (process.env.RAFI_LIVE_FAST_MODE !== "1") throw new Error("Set RAFI_LIVE_FAST_MODE=1 after authorizing live provider usage.");
 const liveWorkspace = createLiveWorkspace("rafi-live-fast-mode-");
 const root = liveWorkspace.evidenceRoot;
@@ -72,3 +75,6 @@ try {
   }
   console.log(JSON.stringify({ passed: results.length, results }));
 } catch (error) { results.push({ failure: String(error) }); save(); throw error; }
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

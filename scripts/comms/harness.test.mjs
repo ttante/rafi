@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommands, pnpmCommand } from "./baseline.mjs";
-import { CodexRpc, probeConfig, providerVersions } from "../live/structured-output-support.mjs";
+import { CodexRpc, assertStructuredLiveProvidersAuditable, createStructuredSpendLedger, createStructuredRetainedEvidenceDirectory, probeConfig, providerVersions } from "../live/structured-output-support.mjs";
 import { completedJourneyTickets } from "../live/journey-completion.mjs";
 import { verifyFrozenCli } from "../live/frozen-cli.mjs";
 
@@ -69,11 +69,35 @@ test("pnpm launches its JS entry directly on Windows without a command shell", (
 });
 
 test("probe rejects repeated providers and calculates bounds for the selected profile", () => {
-  const env = { RAFI_LIVE_STRUCTURED: "1", RAFI_LIVE_DEADLINE: new Date(Date.now() + 60_000).toISOString() };
+  const env = { RAFI_LIVE_STRUCTURED: "1", RAFI_LIVE_DEADLINE: new Date(Date.now() + 60_000).toISOString(), RAFI_LIVE_CREDENTIAL_SCOPE: "release-fixture", RAFI_LIVE_RETAINED_LOG_DIRECTORY: "/tmp/rafi-live-fixture" };
   assert.throws(() => probeConfig({ ...env, RAFI_LIVE_PROVIDERS: "codex,codex" }), /Duplicate providers/);
   assert.equal(probeConfig(env).maximumHostDispatches, 9);
   assert.equal(probeConfig({ ...env, RAFI_LIVE_PROVIDERS: "codex" }).maximumHostDispatches, 5);
   assert.equal(probeConfig({ ...env, RAFI_LIVE_PROVIDERS: "claude", RAFI_LIVE_STRUCTURED_PROFILE: "contracts" }).maximumHostDispatches, 3);
+});
+
+test("structured live probes fail closed without retained evidence configuration and at the shared time/spend limits", () => {
+  const now = Date.now();
+  assert.throws(() => probeConfig({ RAFI_LIVE_STRUCTURED: "1", RAFI_LIVE_DEADLINE: new Date(now + 60_000).toISOString() }, now), /CREDENTIAL_SCOPE/);
+  const configured = { RAFI_LIVE_STRUCTURED: "1", RAFI_LIVE_CREDENTIAL_SCOPE: "release-fixture", RAFI_LIVE_RETAINED_LOG_DIRECTORY: "/tmp/rafi-live-fixture" };
+  assert.throws(() => probeConfig({ ...configured, RAFI_LIVE_DEADLINE: new Date(now + 31 * 60_000).toISOString() }, now), /30 minute/);
+  const ledger = createStructuredSpendLedger(5, true);
+  assert.equal(ledger.record("claude", 4.5), 4.5);
+  assert.throws(() => ledger.record("claude", 0.6), /\$5/);
+  assert.throws(() => ledger.assertProviderIsAuditable("codex"), /authoritative spend meter/);
+  assert.doesNotThrow(() => assertStructuredLiveProvidersAuditable(["claude"]));
+  assert.throws(() => assertStructuredLiveProvidersAuditable(["codex"], true), /authoritative spend meter/);
+  assert.doesNotThrow(() => assertStructuredLiveProvidersAuditable(["claude", "codex"]));
+  assert.equal(createStructuredSpendLedger().record("codex", undefined), null);
+});
+
+test("structured live evidence is placed below the configured retention root", () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-retained-evidence-"));
+  try {
+    const evidence = createStructuredRetainedEvidenceDirectory({ credentialScope: "fixture", retainedLogDirectory: root }, "structured-output");
+    assert.ok(evidence.startsWith(root));
+    assert.ok(existsSync(evidence));
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("single-provider probe does not require the unselected CLI", () => {

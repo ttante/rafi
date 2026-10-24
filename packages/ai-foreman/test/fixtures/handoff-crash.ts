@@ -23,6 +23,7 @@ class Adapter implements BuilderAdapter {
   constructor(id: string, generation: number) { this.ref = { version: 1, provider: "codex", sessionId: id, role: "builder", stream: "builder", generation, cwd: root, configRoot: root, workspaceIdentity: "fixture", source: "observed", createdAt: new Date(0).toISOString(), validatedAt: new Date(0).toISOString() }; }
   sessionId() { return this.ref.sessionId; }
   sessionRef() { return this.ref; }
+  async prepareSession() { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1) { this.ref = ref; }
   async sendTurn(instruction: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]) {
     // The strict acceptance protocol deliberately precedes the handoff packet,
@@ -62,7 +63,9 @@ if (phase === "receipt-before-commit") WorkflowDb.prototype.appendContinuityEven
 const beforeAtomic = WorkflowDb.prototype.atomic;
 if (phase === "completed-before-checkpoint") WorkflowDb.prototype.atomic = function<T>(work: () => T): T {
   const result = beforeAtomic.call(this, work) as T;
-  if (hasWorkReceipt(this)) kill();
+  const confirmed = this.operations("run").some(operation => operation.status === "confirmed" &&
+    (operation.intent as { operation?: string }).operation === "work-report");
+  if (hasWorkReceipt(this) && confirmed) kill();
   return result;
 };
 const beforeCheckpoint = WorkflowDb.prototype.publishContinuityCheckpoint;

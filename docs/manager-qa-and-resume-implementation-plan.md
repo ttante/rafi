@@ -118,7 +118,7 @@ Any requirements change enters the existing scope-approval flow and supersedes/i
 
 **Files:** existing suites listed in the brief; `packages/ai-foreman/test/fixtures/`, `packages/rafi/test/`, packaged CLI fixture helpers, and a validation record alongside this plan.
 
-Record checkout status, runtime, package versions, compiled exports and actual failures. Preserve unrelated untracked plans and `.github/`. Build dependencies before baseline tests because CLI source imports resolve `ai-foreman` through `dist`. Use installed Node 20.19.0 for the present SQLite binary; test other supported runtimes in isolated installations with matching native binaries, not by rebuilding the shared dependency tree during diagnosis.
+Record checkout status, runtime, package versions, compiled exports and actual failures. Preserve unrelated untracked plans and `.github/`. Build dependencies before baseline tests because CLI source imports resolve `ai-foreman` through `dist`. Use Node 24 with a matching native SQLite binary; retain the historical Node 20 evidence separately and do not rebuild the shared dependency tree during diagnosis.
 
 Recreate the brief's production T002 assignment/T001 response/real recovery packet/resume reproduction with simulated provider boundaries. First record the old failure, then convert it into a desired-behavior regression: zero wrong-ticket QA, zero wrong-ticket tracker writes, retained response/work evidence, recoverable assigned work. Add completion/blocking, missing/unknown identities, empty queue and removed definition variants. Tests use temporary projects and production persistence/checkpoint/CLI services, not substitutes that bypass admission.
 

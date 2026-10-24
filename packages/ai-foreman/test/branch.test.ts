@@ -1,4 +1,4 @@
-import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
+import { workFixtureTurn } from "./helpers/nativeOutput.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -96,7 +96,7 @@ class FakeBuilder implements BuilderAdapter {
       mkdirSync(join(this.cwd, "src"), { recursive: true });
       writeFileSync(join(this.cwd, "src", "ticket.txt"), `turn ${this.turnCount}\n`, "utf8");
     }
-    return nativeFixtureFromText(policy, this.id, 'STEP_STATUS: done | summary="implemented"', "codex");
+    return workFixtureTurn(policy, this.id);
   }
 
   sessionId(): string | undefined {
@@ -256,7 +256,7 @@ test("branch answers resume the preserved ticket once and release deferred depen
           calls.push(ticket);
           if (calls.length === 1) {
             firstWorktree = cwd;
-            return nativeFixtureFromText(policy, `session-${ticket}`, 'STEP_STATUS: needs_input | question="Which registry?" choices="Public|Local"', "codex");
+            return workFixtureTurn(policy, `session-${ticket}`, "codex", { kind: "needs-input", question: "Which registry?", choices: ["Public", "Local"] });
           }
           if (ticket === "T003") {
             const db = new WorkflowDb(project);
@@ -265,7 +265,7 @@ test("branch answers resume the preserved ticket once and release deferred depen
           }
           if (ticket === "T001") { assert.equal(cwd, firstWorktree); assert.match(instruction, /Answer: Use the local mirror/); }
           writeFileSync(join(cwd, `${ticket}.txt`), "implemented\n");
-          return nativeFixtureFromText(policy, `session-${ticket}`, 'STEP_STATUS: done | summary="implemented"', "codex");
+          return workFixtureTurn(policy, `session-${ticket}`);
         };
         return builder;
       },

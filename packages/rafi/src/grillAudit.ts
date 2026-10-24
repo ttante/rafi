@@ -11,11 +11,11 @@ import {
   isGrillMeProviderQuestion,
   type AnsweredProviderQuestion,
 } from "ai-foreman/provider-questions.js";
-import { operationContract, grillAuditVerdictV1Schema, parseProviderContract } from "rafi-spec";
+import { grillAuditOutput, grillAuditVerdictV1Schema, parseProviderContract } from "rafi-spec";
 
 export { GRILL_ME_STOP_CHOICE } from "ai-foreman/provider-questions.js";
 
-export const grillAuditOutput = operationContract("grill-audit", grillAuditVerdictV1Schema);
+export { grillAuditOutput } from "rafi-spec";
 
 export const GRILL_AUDIT_START = "RAFI_GRILL_AUDIT_START";
 export const GRILL_AUDIT_END = "RAFI_GRILL_AUDIT_END";
@@ -214,26 +214,6 @@ Or, when material user decisions are missing:
 Return one to five highest-impact questions, each with one recommendation and one to three alternatives. Rafi adds the stop option.`;
 }
 
-export function parseGrillAuditVerdict(output: string): GrillAuditVerdict {
-  const startCount = output.split(GRILL_AUDIT_START).length - 1;
-  const endCount = output.split(GRILL_AUDIT_END).length - 1;
-  if (startCount !== 1 || endCount !== 1) throw new Error("auditor must return exactly one verdict envelope");
-  const before = output.slice(0, output.indexOf(GRILL_AUDIT_START)).trim();
-  const after = output.slice(output.indexOf(GRILL_AUDIT_END) + GRILL_AUDIT_END.length).trim();
-  if (before || after) throw new Error("auditor returned text outside the verdict envelope");
-  const body = output.slice(output.indexOf(GRILL_AUDIT_START) + GRILL_AUDIT_START.length, output.indexOf(GRILL_AUDIT_END)).trim();
-  let parsed: unknown;
-  try { parsed = JSON.parse(body); } catch { throw new Error("auditor verdict is not valid JSON"); }
-  const contract = parseProviderContract(grillAuditVerdictV1Schema, parsed, "grill audit verdict");
-  if (contract.status === "complete") return { status: "complete", evidence: contract.evidence.trim() };
-  if (contract.status === "needs_user_input") {
-    const questions = contract.questions.map(parseAuditQuestion);
-    if (new Set(questions.map((question) => question.id)).size !== questions.length) throw new Error("audit question ids must be unique");
-    return { status: "needs_user_input", questions };
-  }
-  throw new Error("auditor verdict status must be complete or needs_user_input");
-}
-
 export async function runIndependentGrillAudit(opts: RunGrillAuditOptions): Promise<GrillAuditRunResult> {
   let state = opts.initialState ?? defaultGrillVerificationState(true);
   const digest = candidateDigest(opts.candidate);
@@ -348,22 +328,6 @@ ${JSON.stringify(answered, null, 2)}
 User stopped further questions: ${state.stopped ? "yes" : "no"}
 
 Return a full replacement candidate that incorporates these decisions. Preserve all other validated work. Use the host-selected native structured operation and return the complete replacement proposal in its completed payload, with continuity at the top level. Do not append status markers or external proposal delimiters. Do not ask more grill-me questions; the one-time independent audit is complete for this exhaustive activation.`;
-}
-
-function parseAuditQuestion(value: unknown): GrillAuditQuestion {
-  if (!isAuditQuestion(value)) throw new Error("audit question is malformed");
-  const question = value as GrillAuditQuestion;
-  if (question.alternatives.length < 1 || question.alternatives.length > 3) throw new Error("audit question requires one to three alternatives");
-  if (new Set([question.recommendation, ...question.alternatives].map((entry) => entry.trim().toLowerCase())).size !== question.alternatives.length + 1) {
-    throw new Error("audit recommendation and alternatives must be distinct");
-  }
-  return {
-    id: question.id.trim(),
-    question: question.question.trim(),
-    recommendation: question.recommendation.trim(),
-    rationale: question.rationale.trim(),
-    alternatives: question.alternatives.map((entry) => entry.trim()),
-  };
 }
 
 function isAuditQuestion(value: unknown): value is GrillAuditQuestion {

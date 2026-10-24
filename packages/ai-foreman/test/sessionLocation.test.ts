@@ -1,7 +1,7 @@
-import { nativeFixtureTurn, nativeFixtureFromText } from "./helpers/nativeOutput.js";
+import { nativeFixtureTurn, workFixtureTurn } from "./helpers/nativeOutput.js";
 import { nativePolicy } from "../src/structuredOperation.js";
 import { workReportOutput } from "rafi-spec";
-import { runAuthorizedQa } from "./helpers/workAdmission.js";
+import { runAuthorizedQa, nativeQaFix } from "./helpers/workAdmission.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -15,7 +15,7 @@ import { ClaudeAdapter, probeClaudeSession } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import { RecoveringAdapter } from "../src/adapters/recovering.js";
 import { SessionUnavailableError } from "../src/adapters/sessionFailure.js";
-import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, TurnPolicy, TurnResult } from "../src/adapters/types.js";
+import type { BuilderAdapter, BuilderAdapterOptions, BuilderEvent, TurnRequest, TurnResult } from "../src/adapters/types.js";
 import { CurrentWorkflowGuardAdapter, captureCurrentWorkflowSessionIdentity } from "../src/branch/currentGuard.js";
 import { buildRunSessionBinding, createBuildRun, persistBuildSession, projectBuildRecovery, releaseBuildLease } from "../src/buildRuns.js";
 import { ContinuityAdapter, SessionUnavailableContinuityError } from "../src/continuity.js";
@@ -41,17 +41,19 @@ class StaticAdapter implements BuilderAdapter {
 
   constructor(
     private readonly id: string | undefined,
-    private readonly result: TurnResult,
+    private readonly result: TurnResult & { nativeAlternative?: unknown; nativePayload?: unknown },
     private ref?: ProviderSessionRefV1,
     agent: "claude" | "codex" = "codex",
   ) { this.agent = agent; }
 
-  async sendTurn(instruction: string, policy?: TurnPolicy): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: TurnRequest): Promise<TurnResult> {
     this.sends += 1;
     const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(instruction);
     const native = policy?.output && !this.result.isError && !this.result.failure
       ? match ? nativeFixtureTurn(policy, this.id!, { manifestDigest: match[1], generation: Number(match[2]), missingResources: [] }, this.agent, undefined, { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: ["continue"], nextAction: "continue" })
-        : nativeFixtureFromText(policy, this.id!, this.result.text, this.agent)
+        : policy.output.operation === "qa-verdict"
+          ? nativeFixtureTurn(policy, this.id!, this.result.nativePayload ?? { kind: "passed", coverage: null, verifiedInstructionIds: [] }, this.agent)
+          : workFixtureTurn(policy, this.id!, this.agent, this.result.nativeAlternative)
       : this.result;
     const result = { ...native, turnId: native.turnId ?? `${this.id ?? "session"}-turn-${this.sends}` };
     this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
@@ -59,6 +61,10 @@ class StaticAdapter implements BuilderAdapter {
     return result;
   }
   sessionId(): string | undefined { return this.id; }
+  async prepareSession(): Promise<ProviderSessionRefV1> {
+    if (!this.ref) throw new Error("Fixture has no prepared scope");
+    return this.ref;
+  }
   sessionRef(): ProviderSessionRefV1 | undefined { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.ref = ref; }
   async *events(): AsyncIterable<BuilderEvent> {
@@ -304,7 +310,7 @@ test("continuity does not issue a repair turn after uncertain exact-session loss
   });
   const provider = new StaticAdapter("session-1", {
     text: failure.message, isError: true, numTurns: 0, costUsd: 0, failure: failure.failure,
-  });
+  }, scopedRef("codex", projectDir, "session-1"));
   const adapter = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-1", role: "builder", settings: SETTINGS });
   await assert.rejects(adapter.sendTurn("one side effect", nativePolicy(workReportOutput)), (error: unknown) => {
     assert.ok(error instanceof SessionUnavailableContinuityError);
@@ -327,7 +333,7 @@ test("pre-dispatch exact-session loss pauses without degrading or issuing a repa
   });
   const provider = new StaticAdapter("thread-1", {
     text: failure.message, isError: true, numTurns: 0, costUsd: 0, failure: failure.failure,
-  });
+  }, scopedRef("codex", projectDir, "thread-1"));
   const adapter = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-1", role: "builder", settings: SETTINGS });
   await assert.rejects(adapter.sendTurn("safe to transfer later", nativePolicy(workReportOutput)), (error: unknown) => {
     assert.ok(error instanceof SessionUnavailableContinuityError);
@@ -448,13 +454,15 @@ test("each disposable QA cycle creates a fresh provider session in a different s
       created += 1;
       cws.push(cwd);
       resumeIds.push(resumeId);
+      const report = { version: 1, summary: "retry", checks_run: [{ check: "review", outcome: "failed", evidence: "retry needed" }], findings: [{ id: "QA-1", requirement: "isolated", locations: ["README.md"], problem: "retry", evidence: "review evidence", expected: "clean", fix_direction: "fix it", verification: ["review again"] }], observations: [] };
       return qaHandle(new StaticAdapter(`qa-${created}`, {
-        text: created === 1 ? `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify({ version: 1, summary: "retry", checks_run: [{ check: "review", outcome: "failed", evidence: "retry needed" }], findings: [{ id: "QA-1", requirement: "isolated", locations: ["README.md"], problem: "retry", evidence: "review evidence", expected: "clean", fix_direction: "fix it", verification: ["review again"] }], observations: [] })}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="retry"` : 'STEP_STATUS: qa_pass | summary="clean"',
+        text: created === 1 ? "Retry needed" : "Clean",
+        nativePayload: created === 1 ? { kind: "failed", report, coverage: null, verifiedInstructionIds: [] } : { kind: "passed", coverage: null, verifiedInstructionIds: [] },
         isError: false, numTurns: 1, costUsd: 0,
       }), cwd);
     },
     sessionBoundary: unavailableQaBoundary,
-    fix: async () => ({ ok: true, outcome: "remediation-reported" as const, response: 'STEP_STATUS: done | summary="fixed"', summary: "fixed", providerTurnId: "builder-fix-1" }),
+    fix: async () => nativeQaFix(projectDir, "qa-fresh-test", "fixed", "Native remediation completed", "T001"),
     observeNativeCompactions: async (adapter) => { if (adapter.sessionId()) observedQaSessions.push(adapter.sessionId()!); },
   });
   assert.equal(result.outcome, "passed");
@@ -512,7 +520,7 @@ test("session loss withholds exact recovery without discarding preserved worktre
   assert.equal(buildRunSessionBinding(run, "qa"), undefined, "legacy QA mirrors are never exact candidates");
 });
 
-test("additive migration retains legacy raw sessions and is idempotent", () => {
+test("cutover quarantines legacy raw sessions and is idempotent", () => {
   const projectDir = temp("rafi-session-migration-");
   const recoveryDir = join(projectDir, ".rafi");
   mkdirSync(recoveryDir);
@@ -533,8 +541,9 @@ test("additive migration retains legacy raw sessions and is idempotent", () => {
   assert.ok(columns.includes("session_key"));
   assert.ok(columns.includes("session_ref_json"));
   assert.ok(migrated.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_session_bindings'").get());
-  assert.deepEqual(migrated.prepare("SELECT session_id,session_key,session_ref_json FROM provider_sessions WHERE run_id='run-1'").get(), {
-    session_id: "legacy-id", session_key: null, session_ref_json: null,
-  });
+  assert.equal(migrated.prepare("SELECT 1 FROM provider_sessions WHERE run_id='run-1'").get(), undefined);
+  const archived = migrated.prepare("SELECT row_json FROM structured_cutover_quarantine WHERE run_id='run-1' AND table_name='provider_sessions'").get() as { row_json: string };
+  assert.equal(JSON.parse(archived.row_json).session_id, "legacy-id");
+  assert.equal((migrated.prepare("SELECT checkpoint FROM workflow_runs WHERE run_id='run-1'").get() as { checkpoint: string }).checkpoint, "structured-communication-v2-cutover");
   migrated.close();
 });

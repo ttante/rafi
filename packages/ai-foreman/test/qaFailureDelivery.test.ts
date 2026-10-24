@@ -1,4 +1,4 @@
-import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
+import { canonicalFixtureTurn } from "./helpers/nativeOutput.js";
 import { withGraphDerivedAccess } from "../src/graph/derived.js";
 import { graphExclusions } from "../src/graph/corpus.js";
 import { loadGraphConfig } from "../src/graph/config.js";
@@ -83,6 +83,8 @@ class FakeBuilder implements BuilderAdapter {
   correctionItemType = "text";
   emitTestLifecycle = false;
   ref: ProviderSessionRefV1;
+  private handoffId?: string;
+  private findingKey?: string;
 
   constructor(cwd: string, private readonly graphEnabled = false) {
     const now = new Date(0).toISOString();
@@ -115,6 +117,8 @@ class FakeBuilder implements BuilderAdapter {
       const findingKey = /QA-1 -> ([a-f0-9]{64})/.exec(instruction)?.[1];
       assert.ok(handoffId);
       assert.ok(findingKey);
+      this.handoffId = handoffId;
+      this.findingKey = findingKey;
       this.response = [
         BUILDER_QA_REMEDIATION_START,
         JSON.stringify({
@@ -135,9 +139,25 @@ class FakeBuilder implements BuilderAdapter {
         'STEP_STATUS: done | summary="fixed"',
       ].join("\n");
     }
-    const wire = this.graphEnabled && this.instructions.length===1 ? JSON.stringify({kind:"rafi_graph_request",version:1,requestId:"impact",operations:[{operation:"query",query:"input"}]}) : this.response;
-    const result: TurnResult = {
-      ...nativeFixtureFromText(policy, this.ref.sessionId, wire, "codex"),
+    const graphRequest = this.graphEnabled && this.instructions.length === 1;
+    const alternative = graphRequest
+      ? { kind: "graph-request", request: { kind: "rafi_graph_request", version: 1, requestId: "impact", operations: [{ operation: "query", query: "input" }] } }
+      : { kind: "completed", summary: "Fixed empty input.", payload: {
+        status: "done", reason: null, coverage: null,
+        report: {
+          version: 3, handoff_id: this.handoffId, summary: "Fixed empty input.",
+          findings: [{
+            finding_key: this.findingKey, raw_id: "QA-1", disposition: "fixed",
+            changes: ["Added empty input guard."], evidence: "input.ts changed",
+            verification: [{ check: "pnpm test", outcome: "passed", evidence: "passed" }],
+          }], observations: [],
+        },
+      } };
+    // Text is presentation-only.  The fixture authority is an explicitly
+    // authored native v2 envelope, never a parser-derived marker response.
+    const wire = graphRequest ? JSON.stringify(alternative.request) : this.response;
+    let result: TurnResult = {
+      ...canonicalFixtureTurn(policy, this.ref.sessionId, undefined, "codex", alternative),
       text: wire,
       isError: false,
       numTurns: 1,
@@ -159,6 +179,7 @@ class FakeBuilder implements BuilderAdapter {
 
   sessionId(): string | undefined { return this.ref.sessionId; }
   sessionRef(): ProviderSessionRefV1 | undefined { return this.ref; }
+  async prepareSession(): Promise<ProviderSessionRefV1> { return this.ref; }
   async *events(): AsyncIterable<BuilderEvent> { while (!this.closed || this.queue.length) { const event = this.queue.shift(); if (event) yield event; else break; } }
   async close(): Promise<void> { this.closed = true; }
 }
@@ -217,17 +238,17 @@ for (const scenario of [false, true, "test-observation", "retained-repair", "rev
       try { db.registerGraphEvidence(key, [access]); db.graphStore().put("session-access", key, { grants: [access] }); } finally { db.close(); }
       const send = builder.sendTurn.bind(builder);
       builder.sendTurn = async (prompt, policy) => {
-        const result = await send(prompt, policy);
+        let result = await send(prompt, policy);
         if (builder.instructions.length === 1) {
           result.text = result.rawResponse = result.cleanedResponse = "Malformed remediation report";
-          result.structured = { state: "rejected", reason: "invalid-contract", detail: "Malformed native remediation", dispatchId: policy!.dispatchId! };
+          result = { ...result, selectedDispatch: policy!.selectedDispatch!, structured: { state: "rejected", reason: "invalid-contract", detail: "Malformed native remediation", dispatchId: policy!.dispatchId! } };
         }
         return result;
       };
     }
     const service = new QaFailureDeliveryService(scenario === "revoked-repair" ? { afterResponseStored: () => disableGraph(root) } : {});
     const inherited = scenario === "inherited-report" ? [{ policyDigest: loadGraphConfig(root).policyDigest, workspace: root, paths: ["input.ts"], exclusionsDigest: digest("exclusions", graphExclusions(root, ["input.ts"]).text), sourceVersions: {} }] : [];
-    const delivery = withGraphDerivedAccess(inherited, () => service.deliver({
+    const deliveryInput = {
       projectDir: root,
       runId: "run",
       ticket,
@@ -241,7 +262,8 @@ for (const scenario of [false, true, "test-observation", "retained-repair", "rev
       remediationGeneration: 0,
       latestBuilderResult: "implemented",
       history: [],
-    }, { adapter: () => builder, sessionStrategy: "compact" }));
+    };
+    const delivery = withGraphDerivedAccess(inherited, () => service.deliver(deliveryInput, { adapter: () => builder, sessionStrategy: "compact" }));
 
     if (scenario === "revoked-repair") {
       await assert.rejects(delivery, /Graph access changed|revoked graph evidence/);
@@ -251,7 +273,7 @@ for (const scenario of [false, true, "test-observation", "retained-repair", "rev
     const result = await delivery;
     if (repair) {
       assert.equal(result.ok, false);
-      assert.match(result.detail ?? "", /Malformed native remediation/);
+      assert.match(result.detail ?? "", /Malformed (?:native )?remediation/);
       const observed = new WorkflowDb(root);
       try {
         const turns = observed.qaDeliveryTurns(result.operationId!);
@@ -266,6 +288,18 @@ for (const scenario of [false, true, "test-observation", "retained-repair", "rev
     assert.match(builder.instructions[0] ?? "", /Remediation chunk:/);
     assert.match(builder.instructions[0] ?? "", /finalIndependentReviewRequired/);
     assert.match(builder.instructions[0] ?? "", new RegExp(findingRefs[0]!.findingKey));
+
+    if (scenario === false) {
+      const sent = builder.instructions.length;
+      assert.equal((await service.deliver(deliveryInput, { adapter: () => builder, sessionStrategy: "compact" })).ok, true);
+      assert.equal(builder.instructions.length, sent, "Verified replay never redispatches");
+      const replay = WorkflowDb.prototype.replayStructuredDispatch;
+      WorkflowDb.prototype.replayStructuredDispatch = function () { throw new Error("Tampered retained native evidence"); };
+      try {
+        await assert.rejects(service.deliver(deliveryInput, { adapter: () => builder, sessionStrategy: "compact" }), /Tampered retained native evidence/);
+        assert.equal(builder.instructions.length, sent, "Unverifiable replay never redispatches");
+      } finally { WorkflowDb.prototype.replayStructuredDispatch = replay; }
+    }
 
     const finalDb = new WorkflowDb(root);
     try {

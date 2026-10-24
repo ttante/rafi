@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { registerHandbackWriter } from "../src/qaHandbackMigration.js";
+import { registerQaGraphJournalWriter } from "../src/qaDeliveryJournal.js";
 import { BuildProjectIdentityMismatchError, migrateBuildWork } from "../src/buildWorkMigration.js";
 import { inspectBuildProjectIdentity, rebindBuildProjectIdentity } from "../src/stateTransfer.js";
 import { makeLegacyWorkFixture } from "./helpers/legacyWork.js";
@@ -19,15 +20,15 @@ for(const boundary of ["beforeGuards","beforeCommit"] as const)test(`work upgrad
     const seed=new WorkflowDb(root);admitFixtureWork(seed,"run","T1");
     const bytes=Buffer.from("exact retained QA bytes\n");const digest=seed.putEvidence("qa",bytes);const path=seed.path;seed.close();
     makeLegacyWorkFixture(path);
-    let db=new Database(path);registerHandbackWriter(db);db.function("rafi_protocol_v3",()=>1);
+    let db=new Database(path);registerHandbackWriter(db);registerQaGraphJournalWriter(db);db.function("rafi_protocol_v3",()=>1);
     assert.throws(()=>migrateBuildWork(db,root,{[boundary]:()=>{throw new Error("simulated crash");}}),/simulated crash/);
     assert.equal(db.pragma("user_version",{simple:true}),3);
     assert.equal(db.prepare("SELECT 1 FROM sqlite_master WHERE name='build_work_scope'").get(),undefined);
     assert.deepEqual((db.prepare("SELECT content FROM content_refs WHERE digest=?").get(digest) as {content:Buffer}).content,bytes);
-    db.close();db=new Database(path);registerHandbackWriter(db);db.function("rafi_work_authority",()=>0);db.function("rafi_protocol_v3",()=>1);
+    db.close();db=new Database(path);registerHandbackWriter(db);registerQaGraphJournalWriter(db);db.function("rafi_work_authority",()=>0);db.function("rafi_protocol_v3",()=>1);
     migrateBuildWork(db,root);assert.equal(db.pragma("user_version",{simple:true}),4);
     assert.equal(db.pragma("integrity_check",{simple:true}),"ok");assert.deepEqual(db.pragma("foreign_key_check"),[]);db.close();
-    const old=spawnSync(process.execPath,["--input-type=module","-e",`import Database from 'better-sqlite3';const db=new Database(process.argv[1]);db.function('rafi_writer_protocol',()=>3);db.function('rafi_protocol_v3',()=>1);db.function('rafi_build_writer_run',()=>"");db.function('rafi_build_writer_token',()=>"");db.function('rafi_build_lease_owner',()=>"");db.function('rafi_build_lease_generation',()=>-1);try{db.prepare("UPDATE workflow_runs SET checkpoint='old-writer'").run();process.exitCode=1;}catch(error){if(!String(error).includes('incompatible'))throw error;}finally{db.close();}`,path],{cwd:process.cwd(),encoding:"utf8"});
+    const old=spawnSync(process.execPath,["--input-type=module","-e",`import Database from 'better-sqlite3';const db=new Database(process.argv[1]);db.function('rafi_writer_protocol',()=>3);db.function('rafi_structured_communication_protocol',()=>2);db.function('rafi_protocol_v3',()=>1);db.function('rafi_build_writer_run',()=>"");db.function('rafi_build_writer_token',()=>"");db.function('rafi_build_lease_owner',()=>"");db.function('rafi_build_lease_generation',()=>-1);try{db.prepare("UPDATE workflow_runs SET checkpoint='old-writer'").run();process.exitCode=1;}catch(error){if(!String(error).includes('no such function: rafi_structured_authority_revision'))throw error;}finally{db.close();}`,path],{cwd:process.cwd(),encoding:"utf8"});
     assert.equal(old.status,0,old.stderr);
   }finally{rmSync(root,{recursive:true,force:true});}
 });

@@ -101,7 +101,7 @@ function responseFor(instruction, schema) {
   const operation = schema.properties.operation.const;
   let payload;
   if (operation === "structured-plan") payload = planProposal();
-  else if (operation === "ticket-population") {
+  else if (operation === "ticket-population" || operation === "ticket-population-page") {
     if (instruction.includes("Correct the existing ticket population proposal only")) {
       if (!lastTicketProposal) throw new Error("Correction without a prior proposal");
       payload = structuredClone(lastTicketProposal);
@@ -126,6 +126,7 @@ function responseFor(instruction, schema) {
     fs.writeFileSync(path.join(cwd, "implemented.txt"), "scripted implementation\n");
     payload = { disposition: "modified", evidence: ["implemented.txt"], coverage: null, graphMaintenance: null };
   } else throw new Error(`Fixture has no native response for ${operation}`);
+  if (operation === "ticket-population-page") { const { version: _version, ...page } = payload; payload = { ...page, terminal: true }; }
   return JSON.stringify(wire(schema, { version: 1, operation, result: { kind: "completed", summary: "Scripted fixture completed", payload }, continuity: delta }));
 }
 

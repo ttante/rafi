@@ -524,7 +524,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
         const laterEvents = db.continuityEvents(selected.runId, checkpoint?.sequence ?? 0);
         const delta = await collectGuidedCheckpoint({ projectDir: root, role, run: selected, settings, projection, checkpoint, laterEvents });
         db.appendContinuityEvent({ runId: selected.runId, role: "host", kind: "guided_recovery", payload: { role, delta }, authoritativeStateRevision: head?.authoritativeStateRevision ?? 0 });
-        db.publishContinuityCheckpoint({ runId: selected.runId, role, delta, state: "current", authoritativeStateRevision: head?.authoritativeStateRevision ?? 0 });
+        db.publishContinuityCheckpoint({ runId: selected.runId, role, delta, state: "current", hostEventKind: "operator-recovery", inputCheckpointDigests: checkpoint ? [checkpoint.digest] : [], authoritativeStateRevision: head?.authoritativeStateRevision ?? 0 });
         head = db.continuityHead(selected.runId, role);
         reconstructable = true;
       }

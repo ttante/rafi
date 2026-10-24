@@ -13,7 +13,7 @@ import { OperationDeadline } from "./util/deadline.js";
 import { sendPreparationGraphTurn } from "./graph/preparation.js";
 import { withGraphDerivedAccess } from "./graph/derived.js";
 import { randomUUID } from "node:crypto";
-import type { ContractInputRef, QaContractCandidateV1, QaPreparationDepthDecisionV1 } from "rafi-spec";
+import { assessmentOutput, challengeOutput, depthOutput, draftOutput, type ContractInputRef, type QaContractCandidateV1, type QaPreparationDepthDecisionV1 } from "rafi-spec";
 import type { BuilderAdapter, TurnResult } from "./adapters/types.js";
 import type { QaSessionHandle } from "./qaReview.js";
 import { WorkflowDb } from "./workflowDb.js";
@@ -22,7 +22,7 @@ import { captureBuildSource, assertBuildAssignmentReconciled, BuildAssignmentRej
 import { createDisposableQaSnapshotAsync } from "./qaSnapshot.js";
 import { allocateStableCheckIds, authoritativeInventory, bindUniqueBaselineCheckIds, contractDigest, ensureHostScopeCheck, mapSnapshotWorkingDirectories, normalizeSnapshotPaths, renderVerificationContract, rewriteProviderHostScopeChecks } from "./qaVerificationContract.js";
 import { loadQaPreparationPolicy, resolveEffectiveQaConfiguration } from "./qaEffectiveConfig.js";
-import { prepareVerificationContract, draftOutput, depthOutput, assessmentOutput, challengeOutput } from "./qaPreparation.js";
+import { prepareVerificationContract } from "./qaPreparation.js";
 import { qaHostGraphFact } from "./qaHostFacts.js";
 import { actualContractSession, assertContractReceipt, deliverVerificationContract } from "./qaContractDelivery.js";
 import { BUILDER_WORK_COVERAGE_INSTRUCTIONS } from "./qaContractCoverage.js";
@@ -214,7 +214,7 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
             if (captureBuildSource(workspace).contentDigest !== before.contentDigest) throw new Error("Product source changed during confined planning; reconcile retained dispatch");
             const payload = preparationTurnPayload(turn);
             if (turn.isError || turn.failure || !role.builder.sessionId()) throw new Error(`planner-unavailable: ${turn.text}`);
-            return { text: payload.text, structured: turn.structured, output, graphReceiptRefs: turn.graphReceiptRefs, sessionId: role.builder.sessionId()!, usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
+            return { text: payload.text, structured: turn.structured, selectedDispatch: turn.selectedDispatch, output, graphReceiptRefs: turn.graphReceiptRefs, sessionId: role.builder.sessionId()!, usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
           } finally { await role.builder.close(); }
         }
         const snapshot = await createDisposableQaSnapshotAsync(workspace);
@@ -232,7 +232,7 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
           payload.text = normalizeSnapshotPaths(payload.text);
           if (turn.isError || turn.failure || !adapter.sessionId()) throw new Error(`Preparation provider unavailable: ${turn.text}`);
           if (captureBuildSource(workspace).contentDigest !== before.contentDigest) throw new Error("Source changed during preparation; retained dispatch requires reconciliation");
-          return { text: payload.text, structured: turn.structured, output, graphReceiptRefs: turn.graphReceiptRefs, sessionId: adapter.sessionId()!, workspacePaths: mapSnapshotWorkingDirectories(operationPayload<Partial<QaContractCandidateV1>>(turn, output), snapshot.path), usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
+          return { text: payload.text, structured: turn.structured, selectedDispatch: turn.selectedDispatch, output, graphReceiptRefs: turn.graphReceiptRefs, sessionId: adapter.sessionId()!, workspacePaths: mapSnapshotWorkingDirectories(operationPayload<Partial<QaContractCandidateV1>>(turn, output), snapshot.path), usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
         } finally { try { await adapter?.close(); } finally { await snapshot.remove(); } }
       }),
     });

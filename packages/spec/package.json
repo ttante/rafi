@@ -32,7 +32,7 @@
     "test": "tsx --test test/*.test.ts"
   },
   "engines": {
-    "node": ">=22"
+    "node": "24.x"
   },
   "dependencies": {
     "ajv": "^8.20.0",

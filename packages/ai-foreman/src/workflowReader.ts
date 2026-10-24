@@ -1,9 +1,11 @@
+import { verifyContinuityHeads } from "./continuityOrigin.js";
 import { bytesDigest } from "./graph/util.js";
 import { measureQaPreparation, type QaMetricEvent } from "./qaPreparationMetrics.js";
 import { graphDerivedAllowed } from "./graph/derived.js";
 import { readGraphRecord, type GraphRecordKind } from "./graph/storage.js";
 import { type ReadinessProcess } from "./readinessCleanup.js";
 import { checkBuildOwnershipSchema, canonicalProject } from "./buildAdmission.js";
+import { assertStructuredCutoverComplete } from "./structuredCutover.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
@@ -22,7 +24,7 @@ export class WorkflowReader {
     if (!existsSync(path)) return;
     this.db = new Database(path, { readonly: true, fileMustExist: true });
     this.db.pragma("query_only = ON");
-    try { checkBuildOwnershipSchema(this.db); } catch (error) { this.db.close(); throw error; }
+    try { assertStructuredCutoverComplete(this.db); checkBuildOwnershipSchema(this.db); } catch (error) { this.db.close(); throw error; }
   }
   qaPreparation(runId: string): { mode: string; works: Array<{ workId: string; state: string; digest?: string; depth?: number; detail?: string }> } {
     if (!this.db || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='qa_preparation_policy'").get()) return { mode: "legacy", works: [] };
@@ -122,8 +124,13 @@ export class WorkflowReader {
     try { const row = this.db.prepare("SELECT record_json FROM build_admission WHERE singleton=1").get() as {record_json:string}|undefined; return row ? JSON.parse(row.record_json) : undefined; }
     catch (error) { if (!String(error).includes("no such table")) throw error; return undefined; }
   }
+  private verifyContinuityHeads(runId: string): void {
+    if (!this.db) return;
+    verifyContinuityHeads(this.db, this.projectDir, runId);
+  }
   continuityHeads(runId: string): Array<{ role: string; state: string; sequence: number; digest: string; updatedAt: string }> {
     if (!this.db) return [];
+    this.verifyContinuityHeads(runId);
     try { return (this.db.prepare("SELECT * FROM continuity_heads WHERE run_id=? ORDER BY role").all(runId) as Array<Record<string, unknown>>).map(row => ({ role: String(row.role), state: String(row.state), sequence: Number(row.event_sequence), digest: String(row.digest), updatedAt: String(row.updated_at) })); } catch { return []; }
   }
   adoptionMilestones(runId: string): Array<{ sequence: number; role: string; sessionKey?: string; at: string }> {

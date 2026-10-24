@@ -47,7 +47,6 @@ import {
 } from "ai-foreman/interviews.js";
 import { WorkflowDb, type ProjectLease } from "ai-foreman/workflow-db.js";
 import {
-  extractStructuredPlanProposal,
   normalizeStructuredPlanProposal,
   type StructuredPlanProposalV1,
   materializeStructuredPlan,
@@ -1051,63 +1050,6 @@ function plannerLog(path: string): RoleBuilder["log"] {
       appendFileSync(path, JSON.stringify({ ts: new Date().toISOString(), event, ...fields }) + "\n", "utf8");
     },
   } as never;
-}
-
-function parsePlannerStepStatus(text: string): RoleInstructionRunResult["turn"]["status"] {
-  const markerCount = (text.match(/STEP_STATUS:/g) ?? []).length;
-  if (markerCount > 1) return { kind: "unknown", error: "planner emitted multiple STEP_STATUS markers" };
-  const lines = text.trimEnd().split(/\r?\n/).filter((line) => line.trim().length > 0);
-  const last = lines[lines.length - 1] ?? "";
-  if (!last.includes("STEP_STATUS:")) {
-    if (markerCount === 1) return { kind: "unknown", error: "STEP_STATUS marker was not the final non-empty line" };
-    return { kind: "unknown" };
-  }
-  const match = last.match(/^STEP_STATUS:\s*(plan_complete|blocked|needs_input)\b\s*(?:\|\s*(.*))?$/i);
-  if (!match) return { kind: "unknown", error: "malformed STEP_STATUS marker" };
-  const fields = parsePlannerMarkerFields(match[2] ?? "");
-  if (fields instanceof Error) return { kind: "unknown", error: fields.message };
-  return {
-    kind: match[1].toLowerCase() as "plan_complete" | "blocked" | "needs_input",
-    summary: fields.summary,
-    reason: fields.reason,
-    question: fields.question,
-    choices: fields.choices ? fields.choices.split("|").map((choice) => choice.trim()).filter(Boolean) : undefined,
-  };
-}
-
-function parsePlannerMarkerFields(input: string): Record<string, string> | Error {
-  const fields: Record<string, string> = {};
-  let rest = input.trim();
-  while (rest.length > 0) {
-    const key = rest.match(/^(\w+)="/);
-    if (!key) return new Error(`malformed STEP_STATUS field near: ${rest.slice(0, 40)}`);
-    const name = key[1]!;
-    let i = key[0].length;
-    let value = "";
-    let closed = false;
-    while (i < rest.length) {
-      const ch = rest[i];
-      if (ch === "\\") {
-        const next = rest[i + 1];
-        if (next === undefined) return new Error(`unterminated escape in STEP_STATUS field: ${name}`);
-        value += next;
-        i += 2;
-        continue;
-      }
-      if (ch === "\"") {
-        closed = true;
-        i++;
-        break;
-      }
-      value += ch;
-      i++;
-    }
-    if (!closed) return new Error(`unterminated STEP_STATUS field: ${name}`);
-    if (fields[name] !== undefined) return new Error(`duplicate STEP_STATUS field: ${name}`);
-    fields[name] = value;
-    rest = rest.slice(i).trim();
-  }
-  return fields;
 }
 
 function plannerOutputLooksLikeQuestion(text: string): boolean {

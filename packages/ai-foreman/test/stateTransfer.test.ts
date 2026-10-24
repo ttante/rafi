@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { stringify } from "yaml";
 import { cmdInit, cmdUpdate } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
@@ -349,10 +350,21 @@ test("state import rollback restores replaced state and removes newly imported f
     writeFileSync(join(source, ".tickets", "tickets.yaml"), oneTicketYaml("NEW"), "utf8");
     writeFileSync(join(source, ".foreman", "new.jsonl"), "new\n", "utf8");
     mkdirSync(join(source, ".foreman", "runs"), { recursive: true });
-    writeFileSync(join(source, ".foreman", "runs", "bad.json"), "{bad json", "utf8");
+    writeFileSync(join(source, ".foreman", "runs", "bad.json"), JSON.stringify({ communicationProtocolVersion: 2 }), "utf8");
     mkdirSync(join(source, ".rafi", "compiled"), { recursive: true });
     writeFileSync(join(source, ".rafi", "compiled", "new.md"), "new\n", "utf8");
     await exportStateBundle(source, bundle, { packageVersion: "test" });
+
+    // Current exports reject malformed communication projections. Build a
+    // digest-consistent historical archive to exercise import rollback itself.
+    const archive = readArchive(bundle), malformed = Buffer.from("{bad json");
+    const path = ".foreman/runs/bad.json";
+    archive.entries.find((entry: any) => entry.path === path).data = malformed.toString("base64");
+    const manifestEntry = archive.entries.find((entry: any) => entry.path === "rafi-state-manifest.v1.json");
+    const manifest = JSON.parse(Buffer.from(manifestEntry.data, "base64").toString());
+    Object.assign(manifest.files.find((file: any) => file.path === path), { size: malformed.length, sha256: createHash("sha256").update(malformed).digest("hex") });
+    manifestEntry.data = Buffer.from(JSON.stringify(manifest)).toString("base64");
+    writeArchive(bundle, archive);
 
     await importStateBundle(target, baseBundle, { yes: true });
     writeFileSync(join(target, "outside.txt"), "untouched\n", "utf8");

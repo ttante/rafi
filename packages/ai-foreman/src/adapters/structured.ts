@@ -1,8 +1,8 @@
-import { boundedJson, structuredDigest, providerWireContract, validateStructuredCandidate, type OutputContract, type StructuredResponse } from "rafi-spec";
+import { boundedJson, structuredDigest, providerWireContract, validateStructuredCandidate, type OutputContract, type SelectedDispatchTupleV2, type StructuredResponse } from "rafi-spec";
 
 export function structuredReceipt(contract: OutputContract, provider: "claude" | "codex", value: unknown,
-  identity: { dispatchId: string; sessionId?: string; nativeTurnId?: string; nativeItemId?: string },
-  representation: "json-text" | "decoded-json", selected = providerWireContract(contract, provider)): StructuredResponse {
+  identity: { dispatchId: string; sessionId: string; nativeTurnId?: string; nativeItemId?: string },
+  representation: "json-text" | "decoded-json", selected: ReturnType<typeof providerWireContract>, tuple: SelectedDispatchTupleV2): StructuredResponse {
   if (value === undefined) return { state: "rejected", reason: "missing-result", detail: "Successful provider terminal omitted its structured result", dispatchId: identity.dispatchId };
   let observedValue: { representation: "json-text" | "decoded-json"; value: unknown; digest: string } | undefined;
   try {
@@ -11,11 +11,14 @@ export function structuredReceipt(contract: OutputContract, provider: "claude" |
     else if (representation === "decoded-json") observedValue = { representation, value: boundedJson(value, representation, selected.maximumResponseBytes), digest: structuredDigest(value) };
     if (!identity.sessionId || !identity.nativeTurnId) throw new Error("Missing native receipt identity");
     boundedJson(value, representation, selected.maximumResponseBytes);
-    const candidate: StructuredResponse = { state: "candidate", protocolVersion: 1, operation: contract.operation,
+    if (tuple.provider !== provider || tuple.operation !== contract.operation || tuple.schemaDigest !== contract.schemaDigest || tuple.descriptorDigest !== selected.descriptorDigest ||
+      tuple.dispatchId !== identity.dispatchId || tuple.sessionId !== identity.sessionId) throw new Error("Receipt identity does not match selected dispatch tuple v2");
+    const candidate: StructuredResponse = { state: "candidate", protocolVersion: 2, operation: contract.operation,
       schemaVersion: contract.schemaVersion, schemaDigest: contract.schemaDigest, wireSchemaDigest: selected.wireSchemaDigest, profile: selected.profile,
       wireContractDigest: selected.descriptorDigest, wireVariant: selected.variant,
+      selectedDispatchDigest: tuple.digest,
       ...identity, sessionId: identity.sessionId, nativeTurnId: identity.nativeTurnId, terminal: "completed", representation, value };
-    const normalized = validateStructuredCandidate(contract, candidate, selected);
+    const normalized = validateStructuredCandidate(contract, candidate, selected, tuple);
     candidate.normalization = { version: 1, rawDecodedDigest: structuredDigest(boundedJson(value, representation, selected.maximumResponseBytes)), canonicalDigest: structuredDigest(normalized) };
     return candidate;
   } catch (error) {
@@ -41,6 +44,7 @@ export class CodexTurnCollector {
     this.turnId = turnId;
     this.onProgress?.();
     const early = this.early; this.early = [];
+    this.bytes = 0; // Early transport was already bounded; count result bytes once while draining.
     for (const event of early) this.ingest(event.method, event.params);
     this.settle();
   }

@@ -13,33 +13,37 @@ import type { BuilderAdapter, BuilderAdapterOptions } from "../../packages/ai-fo
 import { WorkflowDb } from "../../packages/ai-foreman/src/workflowDb.js";
 import { HandoffService } from "../../packages/ai-foreman/src/handoffs.js";
 import { ContinuityAdapter, baselineContinuityDelta } from "../../packages/ai-foreman/src/continuity.js";
-import { nativePolicy, operationPayload } from "../../packages/ai-foreman/src/structuredOperation.js";
+import { journalStructuredDispatch, nativePolicy, operationPayload } from "../../packages/ai-foreman/src/structuredOperation.js";
 import { deliverVerificationContract, actualContractSession, assertContractReceipt } from "../../packages/ai-foreman/src/qaContractDelivery.js";
 import { assembleContract } from "../../packages/ai-foreman/src/qaVerificationContract.js";
 import { candidate, assessment } from "../../packages/ai-foreman/test/qaPreparationFixtures.js";
-// @ts-expect-error bounded shared live harness
-import { probeConfig, providerVersions } from "./structured-output-support.mjs";
-// @ts-expect-error bounded shared live harness
+import { assertStructuredLiveProvidersAuditable, createStructuredRetainedEvidenceDirectory, probeConfig, providerVersions } from "./structured-output-support.mjs";
 import { createLiveWorkspace } from "./workspace.mjs";
-const { providers, deadline } = probeConfig();
-const { workspaceRoot: root, evidenceRoot } = createLiveWorkspace("structured-handoffs");
+import { runSupervisedStructuredLive } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("structured-handoffs", async (supervisor) => {
+const { providers, deadline, liveValidation } = supervisor.config;
+assertStructuredLiveProvidersAuditable(providers);
+const { workspaceRoot: root, evidenceRoot } = createLiveWorkspace("structured-handoffs", { evidenceRoot: supervisor.evidenceRoot });
 const report: Record<string, any> = { kind: "production-boundary-conformance", startedAt: new Date().toISOString(), deadline, versions: providerVersions(providers, execFileSync), results: [], events: [],
   sourceHashes: Object.fromEntries(["continuity", "handoffs", "qaContractDelivery", "structuredOperation"].map(name => [name, createHash("sha256").update(readFileSync(`packages/ai-foreman/src/${name}.ts`)).digest("hex")])) };
 const save = () => writeFileSync(join(evidenceRoot, "results.json"), JSON.stringify(report, null, 2));
 console.log(`Production boundary evidence: ${evidenceRoot}`); save();
 for (const provider of providers) {
+  if (provider !== "claude" && provider !== "codex") throw new Error("Unknown provider");
   const cwd = join(root, provider); execFileSync("git", ["init", "-q", cwd]);
   const db = new WorkflowDb(cwd), adapters: BuilderAdapter[] = [], pumps: Promise<void>[] = [];
   let dispatches = 0;
   const checkDeadline = () => { if (Date.now() >= deadline) throw new Error("Live boundary deadline expired"); };
-  const create = async () => {
+  const create = async (): Promise<BuilderAdapter> => {
     checkDeadline();
-    const options: BuilderAdapterOptions = { cwd, configRoot: cwd, sessionRole: "builder", sessionStream: "builder", sessionGeneration: 0,
+    const options: BuilderAdapterOptions = { cwd, queryBudget: supervisor, configRoot: cwd, sessionRole: "builder", sessionStream: "builder", sessionGeneration: 0,
       runtimeExecutable: provider === "claude" ? process.env.RAFI_LIVE_CLAUDE_EXECUTABLE ?? "claude" : "codex",
       model: provider === "claude" ? process.env.RAFI_LIVE_CLAUDE_MODEL ?? "sonnet" : process.env.RAFI_LIVE_CODEX_MODEL,
       permission: async () => ({ behavior: "deny", message: "Transport boundary fixture: no domain tools authorized" }),
       turnDeadlineMs: Math.min(90000, deadline - Date.now()), providerIdleTimeoutMs: 90000, shutdownTimeoutMs: 10000 };
     const adapter = provider === "claude" ? await ClaudeAdapter.create(options) : new CodexAdapter(options);
+    supervisor.track(() => adapter.close());
     const send = adapter.sendTurn.bind(adapter);
     adapter.sendTurn = (instruction, policy) => { checkDeadline(); if (++dispatches > 12) throw new Error("Boundary dispatch budget exhausted"); return send(instruction, policy); };
     adapters.push(adapter);
@@ -48,9 +52,9 @@ for (const provider of providers) {
   };
   try {
     const old = await create();
-    const initialized = await old.sendTurn("Synthetic transport test. No tools. Submit completed session-initialization with payload {ready:true}, summary 'Ready', and null continuity.", nativePolicy(initializationOutput, { responseOnly: true, purpose: "initialization" }));
+    const initialized = await journalStructuredDispatch(cwd, old, "Synthetic transport test. No tools. Submit completed session-initialization with payload {ready:true}, summary 'Ready', and null continuity.", nativePolicy(initializationOutput, { responseOnly: true, purpose: "initialization" }), (text, policy) => old.sendTurn(text, policy));
     assert.deepEqual(operationPayload(initialized, initializationOutput), { ready: true });
-    const originalSession = old.sessionRef()!; assert.ok(originalSession);
+    const originalSession = old.sessionRef?.()!; assert.ok(originalSession);
     db.ensureRun("run");
     const admission = db.admitWork({ runId: "run", kind: "ticket", ticketId: "T1", definition: { id: "T1", summary: "Synthetic communication boundary test; no product changes authorized" }, approvalId: "live-fixture", scopeRevision: "1", provenance: { userTurn: "Run live end-to-end communication tests", reason: "Disposable transport fixture" } });
     db.publishContinuityCheckpoint({ runId: "run", role: "builder", delta: baselineContinuityDelta("Continue the synthetic transport fixture without product work"), authoritativeStateRevision: 1, sessionRef: originalSession });
@@ -59,7 +63,7 @@ for (const provider of providers) {
       resources: [{ label: "authorized-fixture", authoritative: true, requiredForRecovery: true, content: "Only synthetic communication verification is authorized. No implementation or domain tools.", purpose: "Exact authorized remaining work", mediaType: "text/plain" }] }, create);
     assert.notEqual(transferred.successorSessionId, originalSession.sessionId);
     assert.equal(db.roleMutationLease("run", "builder")?.providerSessionId, transferred.successorSessionId);
-    report.results.push({ provider, stage: "actual-handoff", accepted: true, predecessor: originalSession, successor: transferred.successor.sessionRef(), checkpoint: transferred.acceptanceCheckpointDigest }); save();
+    report.results.push({ provider, stage: "actual-handoff", accepted: true, predecessor: originalSession, successor: transferred.successor.sessionRef?.(), checkpoint: transferred.acceptanceCheckpointDigest }); save();
     await old.close();
     const active = transferred.successor;
     const draft = candidate(); draft.admissionDigest = admission.requirementsDigest;
@@ -89,3 +93,6 @@ for (const provider of providers) {
   finally { for (const adapter of adapters) await adapter.close().catch(() => {}); await Promise.all(pumps); db.close(); save(); }
 }
 report.finishedAt = new Date().toISOString(); save();
+
+if (process.exitCode) throw new Error("Structured live runner recorded a failure");
+});

@@ -7,12 +7,13 @@ import type {
   RoleInstructionRunOptions,
   RoleInstructionRunResult,
 } from "ai-foreman/agent-run.js";
+import { operationResponse } from "ai-foreman/agent-run.js";
 import type {
   CaptureResult,
   LoadedSourceRegistry,
   StructuredSourceRequest,
 } from "ai-foreman/sources/source-registry.js";
-import { discoveryEnvelopeV1Schema, discoveryOutput, parseProviderContract, validateStructuredCandidate, type OperationResponse, type ProjectSourceEntry, type SourceRegistryConfig } from "rafi-spec";
+import { discoveryEnvelopeV1Schema, discoveryOutput, parseProviderContract, type OperationResponse, type ProjectSourceEntry, type SourceRegistryConfig } from "rafi-spec";
 import { findNearestRafiProject, RAFI_CONFIG_FILE, resolveExplicitRafiProject } from "./project.js";
 
 export const DISCOVERY_ENVELOPE_START = "RAFI_DISCOVERY_REPORT_START";
@@ -178,7 +179,7 @@ export async function runDiscovery(opts: DiscoveryOptions): Promise<DiscoveryRes
   let result = await runRole(buildDiscoveryRunOptions({ ...opts, projectDir, instruction }));
   const nativeResponse = (run: RoleInstructionRunResult): OperationResponse<DiscoveryEnvelope> | undefined => {
     if (run.turn.result.isError || run.turn.result.failure) return undefined;
-    try { return validateStructuredCandidate(discoveryOutput, run.turn.result.structured) as OperationResponse<DiscoveryEnvelope>; } catch { return undefined; }
+    try { return operationResponse(run.turn.result, discoveryOutput) as OperationResponse<DiscoveryEnvelope>; } catch { return undefined; }
   };
   let response = nativeResponse(result);
   let output = result.turn.result.text;
@@ -445,16 +446,6 @@ export function discoveryEnvelopeStack(
   };
 }
 
-export function extractDiscoveryEnvelope(output: string): DiscoveryEnvelope | undefined {
-  const start = output.lastIndexOf(DISCOVERY_ENVELOPE_START);
-  const end = output.lastIndexOf(DISCOVERY_ENVELOPE_END);
-  if (start < 0 || end <= start) return undefined;
-  const body = output.slice(start + DISCOVERY_ENVELOPE_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  let parsed: unknown;
-  try { parsed = JSON.parse(body); } catch { throw new Error("discovery envelope is not valid JSON"); }
-  return parseProviderContract(discoveryEnvelopeV1Schema, parsed, "discovery envelope") as DiscoveryEnvelope;
-}
-
 export function buildLocalInventory(projectDir: string, docsRoot = "docs", limit = 400): DiscoveryInventoryEntry[] {
   const root = resolve(projectDir);
   const entries = new Map<string, DiscoveryInventoryEntry>();
@@ -696,14 +687,6 @@ Final output requirements:
 - Include confidence and gaps.
 - Submit the complete native discovery payload.
 - Use the selected native output schema; source requests are intermediate results.`;
-}
-
-function tryExtractDiscoveryEnvelope(output: string): DiscoveryEnvelope | undefined {
-  try {
-    return extractDiscoveryEnvelope(output);
-  } catch {
-    return undefined;
-  }
 }
 
 function hasUnresolvedSourceRequest(

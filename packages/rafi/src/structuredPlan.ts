@@ -80,32 +80,6 @@ export function normalizeStructuredPlanProposal(input: StructuredPlanProposalV1)
   };
 }
 
-export function extractStructuredPlanProposal(output: string): StructuredPlanProposalV1 {
-  const start = output.lastIndexOf(PLAN_PROPOSAL_START);
-  const end = output.lastIndexOf(PLAN_PROPOSAL_END);
-  if (start < 0 || end <= start) throw new Error(`planner output is missing ${PLAN_PROPOSAL_START}/${PLAN_PROPOSAL_END}`);
-  const json = output.slice(start + PLAN_PROPOSAL_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  let parsed: unknown;
-  try { parsed = JSON.parse(json); } catch (error) { throw new Error(`structured plan proposal is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
-  const validated = structuredPlanProposalV1Schema.safeParse(parsed);
-  const contractIssues = validated.success ? [] : zodIssues(validated.error);
-  // Preserve the established repair diagnostics for missing/mistyped fields,
-  // but surface unknown provider-owned fields as contract violations at the
-  // extraction boundary.
-  if (contractIssues.some((issue) => issue.includes("Unrecognized key"))) {
-    throw new Error(`invalid structured plan proposal contract:\n${contractIssues.map((issue) => `- ${issue}`).join("\n")}`);
-  }
-  if (!validated.success) {
-    const issues = validateStructuredPlanProposal(parsed);
-    if (issues.length) throw new Error(`invalid structured plan proposal:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
-    throw new Error(`invalid structured plan proposal contract:\n${contractIssues.map((issue) => `- ${issue}`).join("\n")}`);
-  }
-  const normalized = normalizeStructuredPlanProposal(validated.data);
-  const issues = validateStructuredPlanProposal(normalized);
-  if (issues.length) throw new Error(`invalid structured plan proposal:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
-  return normalized;
-}
-
 export function validateStructuredPlanProposal(value: unknown): string[] {
   const issues: string[] = [];
   const contract = structuredPlanProposalV1Schema.safeParse(value);

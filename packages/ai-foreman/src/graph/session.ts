@@ -1,5 +1,6 @@
 import type { BuilderAdapter, TurnResult } from "../adapters/types.js";
 import { journalStructuredDispatch } from "../structuredOperation.js";
+import { assertSealedDispatch } from "../structuredDispatchAuthority.js";
 import { WorkflowDb } from "../workflowDb.js";
 import { WorkflowReader } from "../workflowReader.js";
 import { canonical, bytesDigest, digest } from "./util.js";
@@ -35,7 +36,8 @@ export async function dispatchWithGraphAccess(root: string, adapter: BuilderAdap
   protect([text]);
   assertAccess();
   try {
-    const result = await withGraphDerivedAccess(grants, () => policy?.output && writable
+    if (policy?.dispatchCapability) assertSealedDispatch(root, policy.dispatchCapability, policy.selectedDispatch, text);
+    const result = await withGraphDerivedAccess(grants, () => policy?.output && writable && !policy.dispatchCapability
       ? journalStructuredDispatch(root, adapter, text, policy, dispatch) : dispatch(text, policy));
     // Recovery may reveal or replace the native session during dispatch. Its
     // retained history must be checked before the response leaves this boundary.

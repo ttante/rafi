@@ -1,4 +1,4 @@
-import { nativeFixtureFromText } from "./helpers/nativeOutput.js";
+import { canonicalFixtureTurn } from "./helpers/nativeOutput.js";
 import { runAuthorizedQa as runIsolatedQa } from "./helpers/workAdmission.js";
 import { admitFixtureWork } from "./helpers/workAdmission.js";
 // Desired invariants converted from all 26 October 2026 defect characterizations.
@@ -60,9 +60,10 @@ for (const scenario of [
       const observers = new Set<(event: BuilderEvent) => void>();
       const emit = (event: BuilderEvent) => { events.push(event); for (const observer of observers) observer(event); };
       let envelope = "";
+      let nativeReport: unknown;
       const builder: BuilderAdapter = {
         observeEvents: listener => { observers.add(listener); return () => { observers.delete(listener); }; },
-        agent: "codex", sessionId: () => ref.sessionId, sessionRef: () => ref, async *events() { yield* events; }, close: async () => {},
+        agent: "codex", sessionId: () => ref.sessionId, sessionRef: () => ref, prepareSession: async () => ref, async *events() { yield* events; }, close: async () => {},
         sendTurn: async (prompt, policy): Promise<TurnResult> => {
           prompts.push(prompt);
           if (prompt.startsWith("Continuity protocol repair only.")) {
@@ -72,7 +73,8 @@ for (const scenario of [
           if (!envelope) {
             const handoff = /QA failure handoff ID: ([a-f0-9]{64})/.exec(prompt)?.[1];
             assert.ok(handoff);
-            envelope = [START, JSON.stringify({ version: 3, handoff_id: handoff, summary: scenario === "disputed" ? "Valid finding, registry unavailable, no fix possible" : "Remediation reported", findings: [{ finding_key: refs[0]!.findingKey, raw_id: "QA-1", disposition: scenario === "disputed" ? "disputed" : "fixed", changes: ["No source change in this diagnostic fixture"], evidence: "Registry unavailable", verification: [{ check: "install", outcome: "not_run", evidence: "Registry unavailable" }] }], observations: [] }), END, 'STEP_STATUS: done | summary="reported"'].join("\n");
+            nativeReport = { version: 3, handoff_id: handoff, summary: scenario === "disputed" ? "Valid finding, registry unavailable, no fix possible" : "Remediation reported", findings: [{ finding_key: refs[0]!.findingKey, raw_id: "QA-1", disposition: scenario === "disputed" ? "disputed" : "fixed", changes: ["No source change in this diagnostic fixture"], evidence: "Registry unavailable", verification: [{ check: "install", outcome: "not_run", evidence: "Registry unavailable" }] }], observations: [] };
+            envelope = "Remediation reported";
           }
           const correction = prompts.length > 1;
           if (correction && scenario === "correction-dispatch-error") throw new Error("fixture correction connection lost");
@@ -86,9 +88,11 @@ for (const scenario of [
             : correction && scenario === "trailing-brace" ? `${envelope}}` : envelope;
           if (scenario === "wrapped-valid") text = text.replace("STEP_STATUS:", `RAFI_CONTINUITY_DELTA: ${JSON.stringify(baselineContinuityDelta())}\nSTEP_STATUS:`);
           const reportedRef = scenario === "foreign-turn-metadata" ? { ...ref, sessionId: "foreign-session" } : ref;
-          const result: TurnResult = { ...nativeFixtureFromText(policy, reportedRef.sessionId, text, "codex"), text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: correction && (scenario === "errored-correction" || scenario === "wrapped-repair-error"), numTurns: 1, costUsd: 0, turnId: !correction && scenario === "missing-initial-turn" ? undefined : policy?.dispatchId, providerMetadata: { provider: "codex", sessionId: reportedRef.sessionId, sessionRef: reportedRef }, ...(scenario === "failure-metadata" ? { failure: { runtime: "codex" as const, phase: "turn" as const, category: "network" as const, executable: "fixture", cwd: root, diagnostics: "fixture failure despite isError=false", dispatchState: "unknown" as const } } : {}) };
+          const alternative = scenario === "blocked" || correction && scenario === "blocked-correction" ? { kind: "blocked", reason: "Registry DNS unavailable", nextAction: "Restore approved registry access" }
+            : scenario === "needs-input" && !correction ? { kind: "needs-input", question: "Which registry may I use?", choices: [] } : undefined;
+          let result: TurnResult = { ...canonicalFixtureTurn(policy, reportedRef.sessionId, { status: "done", reason: null, coverage: null, report: nativeReport }, "codex", alternative, scenario === "wrapped-valid" ? baselineContinuityDelta() : null), text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: correction && (scenario === "errored-correction" || scenario === "wrapped-repair-error"), numTurns: 1, costUsd: 0, turnId: !correction && scenario === "missing-initial-turn" ? undefined : policy?.dispatchId, providerMetadata: { provider: "codex", sessionId: reportedRef.sessionId, sessionRef: reportedRef }, ...(scenario === "failure-metadata" ? { failure: { runtime: "codex" as const, phase: "turn" as const, category: "network" as const, executable: "fixture", cwd: root, diagnostics: "fixture failure despite isError=false", dispatchState: "unknown" as const } } : {}) };
           if (correctionScenarios.has(scenario) && !["prologue", "trailing-brace", "needs-input", "missing-initial-turn"].includes(scenario)) {
-            result.structured = { state: "rejected", reason: "invalid-contract", detail: "Fixture native contract violation", dispatchId: policy!.dispatchId! };
+            result = { ...result, selectedDispatch: policy!.selectedDispatch!, structured: { state: "rejected", reason: "invalid-contract", detail: "Fixture native contract violation", dispatchId: policy!.dispatchId! } };
           }
           emit({ kind: "turn-complete", result, turnId: result.turnId });
           return result;
@@ -195,7 +199,7 @@ function failingQaHandle(cwd: string, reviewReport: QaFailureReportV1): QaSessio
   let closed = false;
   let wake: (() => void) | undefined;
   const adapter: BuilderAdapter = {
-    agent: "codex", sessionId: () => ref.sessionId, sessionRef: () => ref,
+    agent: "codex", sessionId: () => ref.sessionId, sessionRef: () => ref, prepareSession: async () => ref,
     async *events() {
       while (!closed || queue.length) {
         if (!queue.length) await new Promise<void>(resolve => { wake = resolve; });
@@ -206,7 +210,7 @@ function failingQaHandle(cwd: string, reviewReport: QaFailureReportV1): QaSessio
     close: async () => { closed = true; wake?.(); },
     sendTurn: async (prompt, policy) => {
       const text = `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify(reviewReport)}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="Lockfile missing"`;
-      const result: TurnResult = { ...nativeFixtureFromText(policy, ref.sessionId, text, "codex"), text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: false, numTurns: 1, costUsd: 0, turnId: policy?.dispatchId, providerMetadata: { provider: "codex", sessionId: ref.sessionId, sessionRef: ref } };
+      let result: TurnResult = { ...canonicalFixtureTurn(policy, ref.sessionId, { kind: "failed", report: reviewReport, coverage: null, verifiedInstructionIds: [] }, "codex"), text, rawResponse: text, cleanedResponse: text, hostInstruction: prompt, providerInstruction: prompt, isError: false, numTurns: 1, costUsd: 0, turnId: policy?.dispatchId, providerMetadata: { provider: "codex", sessionId: ref.sessionId, sessionRef: ref } };
       queue.push({ kind: "turn-complete", result, turnId: result.turnId });
       wake?.();
       return result;

@@ -33,7 +33,7 @@ function claudeFixture(input: { supports?: boolean; enableError?: string; reject
           if (input.toolBeforeReject) stream.push({ type: "assistant", message: { content: [{ type: "tool_use", id: "already-used", name: "Bash", input: {} }] } });
           stream.push({ type: "assistant", error: "invalid_request", message: { content: [{ type: "text", text: input.rejectTurn }] } });
           stream.push({ type: "result", is_error: true, errors: [input.rejectTurn], num_turns: 1, total_cost_usd: 0 });
-        } else stream.push({ type: "result", subtype: "success", result: "OK", is_error: false, num_turns: 1, total_cost_usd: 0 });
+        } else stream.push({ type: "result", subtype: "success", result: "OK", is_error: false, num_turns: message.message.content.startsWith("/model ") ? 0 : 1, total_cost_usd: 0 });
       }
     })();
     return {

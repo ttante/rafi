@@ -1,4 +1,5 @@
-import { operationJsonContract, operationContract, validateStructuredCandidate, type OutputContract, type StructuredResponse, type OperationResponse, QA_RISK_MINIMUMS, parseProviderContract, qaContractCandidateV1Schema, qaPreparationEscalationProposalV1Schema, qaSemanticAssessmentV1Schema, qaChallengeReceiptV1Schema, qaUnresolvedConcernSchema, qaPreparationDepthDecisionV1Schema as qaDepthDecisionSchema } from "rafi-spec";
+import { qaHostTransformation } from "./qaHostTransformation.js";
+import { historicProviderWireContract, validateStructuredCandidate, type OutputContract, type SelectedDispatchTupleV2, type StructuredResponse, type OperationResponse, QA_RISK_MINIMUMS, parseProviderContract, qaContractCandidateV1Schema, qaSemanticAssessmentV1Schema, qaChallengeReceiptV1Schema, qaPreparationEscalationProposalV1Schema, qaPreparationDepthDecisionV1Schema as qaDepthDecisionSchema, providerDraftSchema, type ProviderDraftPayload, depthProposalSchema, draftOutput, assessmentOutput, challengeOutput, depthOutput } from "rafi-spec";
 import { createHash, randomUUID } from "node:crypto";
 import { Ajv } from "ajv";
 import type { QaContractCandidateV1, QaPreparationDepthDecisionV1, QaSemanticAssessmentV1, QaChallengeReceiptV1, RequirementRef, QaVerificationContractV1 } from "rafi-spec";
@@ -6,7 +7,10 @@ import type { QaPreparationStore, LogicalPreparationBudget } from "./qaPreparati
 import { depthObligations, validateDepthDecision } from "./qaPreparationPolicy.js";
 import { canonicalContractJson, contractDigest, assembleContract, draftDigest, inventoryDigest, validateAssessment, validateCandidate } from "./qaVerificationContract.js";
 
-export interface PreparationProviderResult { output?: OutputContract; structured?: StructuredResponse; operationId?: string; text: string; sessionId: string; graphReceiptRefs?: string[]; workspacePaths?: Record<string, string>; usage?: Partial<LogicalPreparationBudget["usage"]> }
+/** Compatibility re-exports; canonical contract ownership is rafi-spec. */
+export { draftOutput, assessmentOutput, challengeOutput, depthOutput } from "rafi-spec";
+
+export interface PreparationProviderResult { output?: OutputContract; structured?: StructuredResponse; selectedDispatch?: SelectedDispatchTupleV2; operationId?: string; text: string; sessionId: string; graphReceiptRefs?: string[]; workspacePaths?: Record<string, string>; usage?: Partial<LogicalPreparationBudget["usage"]> }
 export interface PreparationDependencies {
   store: QaPreparationStore; now(): number;
   /** Provider-specific wording is allowed; contract ownership is not. */
@@ -33,57 +37,6 @@ export function normalizeAssessmentMetadata<T extends QaSemanticAssessmentV1>(as
   delete copy.policyVersion_note;
   return copy;
 }
-
-// The provider proposes verification work; the host owns contract identity,
-// approved inputs, requirement text, depth, timestamps and evidence hashes.
-const durableFields = qaContractCandidateV1Schema.properties;
-const providerEvidence = { type: "object", additionalProperties: false, required: ["obligation", "references", "analysis"], properties: {
-  obligation: { type: "string", minLength: 1 }, analysis: { type: "string", minLength: 1 },
-  references: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, required: ["path", "locator"], properties: { path: { type: "string", minLength: 1 }, locator: { type: "string", minLength: 1 } } } },
-} };
-const providerBaseline = { type: "object", additionalProperties: false, required: ["id", "runtime", "procedure", "status", "relevance", "expectedTransition"], properties: {
-  id: { type: "string", minLength: 1 }, checkId: { type: "string", minLength: 1 }, applicability: { enum: ["applicable", "not-applicable", "unresolved"] }, predicateEvidence: { type: "array", items: { type: "string" } }, runtime: { type: "string", minLength: 1 }, procedure: { type: "string", minLength: 1 }, status: { enum: ["passed", "failed", "blocked", "not-run"] }, relevance: { type: "string", minLength: 1 }, expectedTransition: { type: "string", minLength: 1 },
-} };
-const providerConcerns = { type: "array", maxItems: 10000, items: { ...qaUnresolvedConcernSchema, required: Object.keys(qaUnresolvedConcernSchema.properties) } };
-const providerChecks = structuredClone(durableFields.checks) as Record<string, any>;
-delete providerChecks.items.properties.hostKind;
-export const providerDraftSchema = { type: "object", additionalProperties: false, required: ["checks", "coverage", "baseline", "preparationEvidence", "unresolved"], properties: {
-  checks: providerChecks, coverage: durableFields.coverage, baseline: { type: "array", items: providerBaseline }, preparationEvidence: { type: "array", minItems: 1, items: providerEvidence }, unresolved: providerConcerns,
-} };
-/**
- * A preparation turn has exactly one business outcome.  Keeping escalation as
- * an optional sibling of a normal draft made the wire shape easy to confuse
- * with the operation envelope's `result` object (which has its own `kind`).
- * A tagged payload keeps the native schema unambiguous for every provider and
- * prevents accepting a partial draft alongside a depth-change request.
- */
-export const providerDraftPayloadSchema = { oneOf: [
-  { type: "object", additionalProperties: false, required: ["kind", ...providerDraftSchema.required], properties: { kind: { const: "draft" }, ...providerDraftSchema.properties } },
-  { type: "object", additionalProperties: false, required: ["kind", "escalation"], properties: { kind: { const: "escalation" }, escalation: { ...qaDepthEscalationJson() } } },
-] };
-export type ProviderDraftPayload =
-  | ({ kind: "draft" } & Pick<Partial<QaContractCandidateV1>, "checks" | "coverage" | "baseline" | "preparationEvidence" | "unresolved">)
-  | { kind: "escalation"; escalation: unknown };
-export const draftOutput = operationJsonContract<ProviderDraftPayload>("qa-preparation-draft", providerDraftPayloadSchema);
-function qaDepthEscalationJson(): Record<string, unknown> {
-  return operationContract("escalation", qaPreparationEscalationProposalV1Schema).jsonSchema.properties
-    ? (operationContract("escalation", qaPreparationEscalationProposalV1Schema).jsonSchema as any).properties.result.oneOf[0].properties.payload : {};
-}
-function proposalSchema(schema: Record<string, any>, hostFields: string[]): Record<string, any> {
-  const proposal = structuredClone(schema);
-  for (const field of hostFields) delete proposal.properties[field];
-  if (proposal.properties.concerns) proposal.properties.concerns = providerConcerns;
-  if (proposal.properties.approachConcerns) proposal.properties.approachConcerns = providerConcerns;
-  proposal.required = proposal.required.filter((field: string) => !hostFields.includes(field));
-  return proposal;
-}
-const assessmentHostFields = ["draftPayloadDigest", "inventoryDigest", "policyVersion", "operationId", "sessionId", "authorSessionId"];
-export const assessmentProposalSchema = proposalSchema(qaSemanticAssessmentV1Schema, assessmentHostFields);
-export const challengeProposalSchema = proposalSchema(qaChallengeReceiptV1Schema, assessmentHostFields);
-export const depthProposalSchema = proposalSchema(qaDepthDecisionSchema, ["plannerOperationId", "plannerIdentity"]);
-export const assessmentOutput = operationJsonContract<QaSemanticAssessmentV1>("qa-preparation-assessment", assessmentProposalSchema);
-export const challengeOutput = operationJsonContract<QaChallengeReceiptV1>("qa-preparation-challenge", challengeProposalSchema);
-export const depthOutput = operationJsonContract<QaPreparationDepthDecisionV1>("qa-preparation-depth", depthProposalSchema);
 
 /**
  * The assessor's owner/nextAction text is diagnostic evidence, not routing
@@ -193,15 +146,20 @@ export async function prepareVerificationContract(initial: QaContractCandidateV1
   };
   const parsed = async <T>(result: PreparationProviderResult, _tag: string): Promise<T> => {
     if (!result.output) throw new Error("Preparation result has no selected output contract");
-    const response = validateStructuredCandidate(result.output, result.structured) as OperationResponse<T>;
+    if (!result.selectedDispatch) throw new Error("Preparation result has no sealed v2 dispatch tuple");
+    const response = validateStructuredCandidate(result.output, result.structured, historicProviderWireContract(result.output, result.selectedDispatch), result.selectedDispatch) as OperationResponse<T>;
     if (response.result.kind !== "completed") throw new Error(response.result.kind === "blocked" ? response.result.reason : `Preparation returned ${response.result.kind}`);
     return response.result.payload;
   };
   const parsedContract = async <T>(result: PreparationProviderResult, tag: string, validate: ((value: unknown) => boolean) & { errors?: unknown[] | null }, name: string, normalize?: (value: T, response: PreparationProviderResult) => T): Promise<{ value: T; response: PreparationProviderResult }> => {
     const payload = await parsed<T>(result, tag);
     const value = normalize ? normalize(payload, result) : payload;
-    if (normalize) store.putArtifact("host-normalization", { version: 1, rule: "preparation-assessment-host-bindings-v1", operationId: result.operationId, runId: initial.runId, workId: initial.workId,
-      beforeDigest: contractDigest("normalization-input", payload), afterDigest: contractDigest("normalization-output", value) });
+    if (normalize) {
+      const record = qaHostTransformation({ rule: "assessment-host-bindings-v1", operation: result.output!.operation,
+        tupleDigest: result.selectedDispatch!.digest, before: payload, after: value });
+      store.putArtifact("host-normalization", { ...record,
+        inputRef: store.putArtifact("host-transformation-input", payload), outputRef: store.putArtifact("host-transformation-output", value) });
+    }
     if (!validate(value)) throw new Error(`${name} contract validation failed: ${JSON.stringify(validate.errors)}`);
     return { value, response: result };
   };
@@ -211,12 +169,16 @@ export async function prepareVerificationContract(initial: QaContractCandidateV1
       for (let attempt = 0; attempt < 3; attempt++) {
         const response = await run("planner", attempt ? "repair" : "planning", `Read-only depth assessment of admitted scope. Select Standard or higher unless explicit Focused low-risk evidence is established. Return the native depth payload with QaPreparationDepthDecisionV1. Schema: ${JSON.stringify(depthProposalSchema)}. Policy qa-preparation-v1. Host minimums: interactions/compatibility/state/external dependencies=3; authorization/security/data/migration/concurrency/recovery/deployment=4; unresolved architectural uncertainty=5. Do not change the admitted scope, inputs, requirements, or risk evidence. Every riskFactors.category must appear verbatim in minimumReasons. ${attempt ? `Correct these validation issues from the previous response: ${JSON.stringify(plannerIssues)}` : ""}\n${JSON.stringify(initial)}`);
         const proposed = await parsed<QaPreparationDepthDecisionV1>(response, "RAFI_QA_DEPTH");
+        const depthBefore = structuredClone(proposed);
         proposed.plannerOperationId = response.operationId!; proposed.plannerIdentity = response.sessionId;
         // minimumReasons is a host-validated restatement of the planner's
         // riskFactors. Fill only omitted exact category labels; never alter
         // the selected level, risk evidence, or rationale.
         const requiredReasons = proposed.riskFactors.map(risk => risk.category);
         proposed.minimumReasons = [...proposed.minimumReasons, ...requiredReasons.filter(category => !proposed.minimumReasons.includes(category))];
+        store.putArtifact("host-normalization", { ...qaHostTransformation({ rule: "depth-host-bindings-v1", operation: response.output!.operation,
+          tupleDigest: response.selectedDispatch!.digest, before: depthBefore, after: proposed }),
+          inputRef: store.putArtifact("host-transformation-input", depthBefore), outputRef: store.putArtifact("host-transformation-output", proposed) });
         plannerIssues = validateDepthDecision(proposed);
         if (!plannerIssues.length) { candidate.depthDecision = proposed; store.reviseDepth(budget, candidate.depthDecision); break; }
         if (attempt === 2) throw new Error(`depth-decision-incomplete: ${plannerIssues.join("; ")}`);
@@ -231,7 +193,12 @@ export async function prepareVerificationContract(initial: QaContractCandidateV1
         const request = parseProviderContract(qaPreparationEscalationProposalV1Schema, payload.escalation, "QA preparation escalation");
         const minimum = Math.max(candidate.depthDecision.level, ...request.riskFactors.map(risk => QA_RISK_MINIMUMS[risk.category]));
         const revision = await run("planner", "escalation", `Revise only the QA depth for this admitted scope. Do not expand product scope. Host minimum ${minimum}; keep predecessorDecisionId ${candidate.depthDecision.decisionId}. Return the native depth payload following ${JSON.stringify(qaDepthDecisionSchema)}. Previous decision: ${JSON.stringify(candidate.depthDecision)}; cited risk evidence: ${JSON.stringify(request)}`);
-        const decision = await parsed<QaPreparationDepthDecisionV1>(revision, "RAFI_QA_DEPTH"); decision.plannerIdentity = revision.sessionId; decision.plannerOperationId = revision.operationId!;
+        const decision = await parsed<QaPreparationDepthDecisionV1>(revision, "RAFI_QA_DEPTH");
+        const before = structuredClone(decision);
+        decision.plannerIdentity = revision.sessionId; decision.plannerOperationId = revision.operationId!;
+        store.putArtifact("host-normalization", { ...qaHostTransformation({ rule: "depth-host-bindings-v1", operation: revision.output!.operation,
+          tupleDigest: revision.selectedDispatch!.digest, before, after: decision }),
+          inputRef: store.putArtifact("host-transformation-input", before), outputRef: store.putArtifact("host-transformation-output", decision) });
         const errors = validateDepthDecision(decision, candidate.depthDecision);
         if (decision.level < minimum || request.riskFactors.some(risk => !decision.riskFactors.some(actual => actual.category === risk.category))) errors.push("Planner revision does not address evidenced risk minimum");
         if (errors.length) throw new Error(`depth-decision-incomplete: ${errors.join("; ")}`);
@@ -255,10 +222,13 @@ export async function prepareVerificationContract(initial: QaContractCandidateV1
         draft.requirements.push(...inventory.filter(item => !present.has(item.id)).map(item => structuredClone(item)));
       }
       try {
-        candidate = enforceMandatoryCoverage(deps.normalizeDraft ? deps.normalizeDraft(draft, response) : draft);
-        store.putArtifact("host-normalization", { version: 1, rule: "preparation-draft-authority-and-evidence-v1", operationId: response.operationId, runId: initial.runId, workId: initial.workId,
-          beforeDigest: contractDigest("normalization-input", draft), afterDigest: contractDigest("normalization-output", candidate),
-          changes: ["host invariant tags", "stable check IDs", "observed source/session/evidence bindings", "snapshot-relative paths", "mandatory coverage consistency"] });
+        const before = structuredClone(draft);
+        const normalized = enforceMandatoryCoverage(deps.normalizeDraft ? deps.normalizeDraft(draft, response) : draft);
+        const record = qaHostTransformation({ rule: "draft-host-bindings-v1", operation: response.output!.operation,
+          tupleDigest: response.selectedDispatch!.digest, before, after: normalized, workspacePaths: response.workspacePaths });
+        store.putArtifact("host-normalization", { ...record, workspacePaths: response.workspacePaths,
+          inputRef: store.putArtifact("host-transformation-input", before), outputRef: store.putArtifact("host-transformation-output", normalized) });
+        candidate = normalized;
       }
       catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
