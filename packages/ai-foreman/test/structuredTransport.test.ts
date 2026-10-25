@@ -329,3 +329,122 @@ for (const provider of ["claude", "codex"] as const) test(`${provider} selected 
   assert.doesNotThrow(() => createProviderWireContract({ ...descriptor, maximumSchemaBytes: exact }));
   assert.throws(() => createProviderWireContract({ ...descriptor, maximumSchemaBytes: exact - 1 }), /byte limit/);
 });
+
+test("Codex streamed deltas are bounded before the final item completes", async () => {
+  const collector = new CodexTurnCollector("thread", true, undefined, 64);
+  collector.bind("turn");
+  collector.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: "x".repeat(1_048_576) });
+  await assert.rejects(collector.completion, /streamed message exceeded the 64-byte result limit before completion/);
+  assert.throws(() => collector.final(), /before completion/);
+  const diagnostic = collector.streamDiagnostic();
+  assert.equal(diagnostic.authoritative, false);
+  assert.equal(diagnostic.items[0]!.bytes, 1_048_576);
+  assert.equal(Buffer.byteLength(diagnostic.items[0]!.head), 65_536);
+  assert.equal(Buffer.byteLength(diagnostic.items[0]!.tail), 8_192);
+});
+
+for (const bytes of [64, 65]) test(`Codex streamed UTF-8 bytes accept only <=64 per item (${bytes})`, async () => {
+  const collector = new CodexTurnCollector("thread", true, undefined, 64);
+  collector.bind("turn");
+  const text = "é".repeat(Math.floor(bytes / 2)) + (bytes % 2 ? "x" : "");
+  for (const char of text) collector.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: char });
+  collector.ingest("item/completed", { threadId: "thread", turnId: "turn", item: { id: "msg", type: "agentMessage", phase: "final_answer", text } });
+  collector.ingest("turn/completed", { threadId: "thread", turn: { id: "turn", status: "completed" } });
+  if (bytes > 64) await assert.rejects(collector.completion, /before completion/);
+  else { await collector.completion; assert.equal(collector.final().text, text); assert.equal(collector.streamDiagnostic().items[0]!.completed, true); }
+});
+
+test("Codex final bytes are charged once even when the same item was streamed", async () => {
+  const collector = new CodexTurnCollector("thread", true, undefined, 1024);
+  collector.bind("turn");
+  const text = "y".repeat(800);
+  for (let i = 0; i < 8; i++) collector.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: text.slice(i * 100, i * 100 + 100) });
+  collector.ingest("item/completed", { threadId: "thread", turnId: "turn", item: { id: "msg", type: "agentMessage", phase: "final_answer", text } });
+  // Late redelivery of a completed item's deltas cannot add bytes.
+  collector.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: "z".repeat(900) });
+  collector.ingest("turn/completed", { threadId: "thread", turn: { id: "turn", status: "completed" } });
+  await collector.completion;
+  assert.equal(collector.final().text, text);
+  assert.equal(collector.streamDiagnostic().streamedBytes, 800);
+});
+
+test("Codex foreign, terminal-late and early stream deltas are accounted to the exact turn", async () => {
+  const collector = new CodexTurnCollector("thread", true, undefined, 100);
+  collector.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: "a".repeat(60) });
+  collector.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: "b".repeat(30) });
+  collector.bind("turn");
+  collector.ingest("item/agentMessage/delta", { threadId: "other", turnId: "turn", itemId: "msg", delta: "f".repeat(500) });
+  collector.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "other", itemId: "msg", delta: "f".repeat(500) });
+  assert.equal(collector.streamDiagnostic().streamedBytes, 90, "early deltas count after binding; foreign deltas never do");
+  collector.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: "c".repeat(11) });
+  await assert.rejects(collector.completion, /before completion/);
+});
+
+function streamingCodex(root: string, maximumResponseBytes: number) {
+  const adapter = new CodexAdapter({ cwd: root, configRoot: root, providerIdleTimeoutMs: 5_000, turnDeadlineMs: 5_000, permission: async () => ({ behavior: "deny", message: "fixture" }) });
+  const transport = adapter as unknown as { ensureConnection(): Promise<void>; request(method: string): Promise<unknown>; handle(message: unknown): void };
+  const canonical = outputContract("stream-fixture", z.strictObject({ version: z.literal(1), value: z.string() }));
+  const base = testWire(canonical, "codex");
+  const wire = createProviderWireContract({ canonical, provider: "codex", profile: base.profile, variant: "default", wireVersion: 1, wireSchema: base.wireSchema,
+    maximumSchemaBytes: 10_000, maximumResponseBytes, normalizerId: "codex-optional-properties", normalizerVersion: 1,
+    normalize: value => decodeCodexOptionalProperties(canonical.jsonSchema, value), guidanceId: "stream-fixture-test-v1", guidance: () => "Return the selected native JSON value only." });
+  const events: Array<import("../src/adapters/types.js").BuilderEvent> = [];
+  adapter.observeEvents(event => events.push(event));
+  transport.ensureConnection = async () => {};
+  return { adapter, transport, events, policy: () => transportPolicy(canonical, "codex", "stream-dispatch", "stream-thread", wire as unknown as ReturnType<typeof testWire>) };
+}
+
+test("Codex streaming emits visible progress and retains bounded interruption evidence", async () => {
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const root = mkdtempSync(join(tmpdir(), "codex-stream-"));
+  const { adapter, transport, events, policy } = streamingCodex(root, 1_000);
+  transport.request = async method => {
+    if (method === "thread/start") return { thread: { id: "stream-thread", cwd: root } };
+    if (method === "turn/start") {
+      setTimeout(() => {
+        transport.handle({ method: "item/agentMessage/delta", params: { threadId: "stream-thread", turnId: "stream-turn", itemId: "msg", delta: '{"version":1,"value":"' } });
+        transport.handle({ method: "item/agentMessage/delta", params: { threadId: "stream-thread", turnId: "stream-turn", itemId: "msg", delta: "w".repeat(2_000) } });
+      }, 5);
+      return { turn: { id: "stream-turn" } };
+    }
+    return {};
+  };
+  try {
+    const turn = await sendTransport(adapter, "stream", policy());
+    assert.equal(turn.isError, true); assert.equal(turn.failure?.dispatchState, "unknown");
+    assert.match(turn.text, /exceeded the 1000-byte result limit before completion/);
+    assert.ok(events.some(event => event.kind === "activity" && event.state === "writing response" && event.transient), "streaming is reported as progress");
+    const files = readdirSync(join(root, ".foreman", "provider-streams"));
+    assert.equal(files.length, 1);
+    const record = JSON.parse(readFileSync(join(root, ".foreman", "provider-streams", files[0]!), "utf8"));
+    assert.equal(record.state, "interrupted"); assert.equal(record.authoritative, false);
+    assert.equal(record.nativeTurnId, "stream-turn"); assert.equal(record.dispatchId, "stream-dispatch");
+    assert.match(record.items[0].head, /^\{"version":1,"value":"w+/);
+    assert.equal(record.items[0].bytes, 2_022);
+  } finally { await adapter.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Codex short successful streams write no interruption evidence", async () => {
+  const { existsSync } = await import("node:fs");
+  const root = mkdtempSync(join(tmpdir(), "codex-stream-ok-"));
+  const { adapter, transport, policy } = streamingCodex(root, 1_000);
+  const text = '{"version":1,"value":"ok"}';
+  transport.request = async method => {
+    if (method === "thread/start") return { thread: { id: "stream-thread", cwd: root } };
+    if (method === "turn/start") {
+      setTimeout(() => {
+        transport.handle({ method: "item/agentMessage/delta", params: { threadId: "stream-thread", turnId: "stream-turn", itemId: "msg", delta: text } });
+        transport.handle({ method: "item/completed", params: { threadId: "stream-thread", turnId: "stream-turn", item: { id: "msg", type: "agentMessage", phase: "final_answer", text } } });
+        transport.handle({ method: "turn/completed", params: { threadId: "stream-thread", turn: { id: "stream-turn", status: "completed" } } });
+      }, 5);
+      return { turn: { id: "stream-turn" } };
+    }
+    return {};
+  };
+  try {
+    const turn = await sendTransport(adapter, "stream", policy());
+    assert.equal(turn.isError, false, turn.text);
+    assert.equal(turn.structured?.state, "candidate");
+    assert.equal(existsSync(join(root, ".foreman", "provider-streams")), false);
+  } finally { await adapter.close(); rmSync(root, { recursive: true, force: true }); }
+});

@@ -399,7 +399,11 @@ export class HandoffService {
             || successor.agent !== preparedRef!.provider || handoffSessionIdentity(reportedRef) !== handoffSessionIdentity(preparedRef!)))) {
           throw new HandoffAcceptanceError("successor-identity-mismatch", staged.manifest.runId, staged.manifest.generation, "acknowledgement did not come from the prepared successor identity");
         }
-        if (qaBoundary && (!response.turnId || events.terminalOverflow || events.terminalCount !== 1 || !events.some((event) => event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === response.turnId && receiptFingerprint(event.result) === receiptFingerprint(response) && rawFingerprint(event.result) === rawFingerprint(response)))) {
+        // The adapter queue can still hold terminals of earlier host-owned turns
+        // (such as provider initialization). Exactly one terminal must belong
+        // to this acknowledgement, matching the QA review receipt rule.
+        const correlated = events.filter((event) => event.kind === "turn-complete" && (event.turnId ?? event.result.turnId) === response.turnId);
+        if (qaBoundary && (!response.turnId || events.terminalOverflow || correlated.length !== 1 || !correlated.some((event) => event.kind === "turn-complete" && receiptFingerprint(event.result) === receiptFingerprint(response) && rawFingerprint(event.result) === rawFingerprint(response)))) {
           throw new HandoffAcceptanceError("missing-terminal-event", staged.manifest.runId, staged.manifest.generation, "QA acknowledgement has no correlated terminal provider event");
         }
         return response;

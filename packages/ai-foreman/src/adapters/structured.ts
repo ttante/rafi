@@ -26,12 +26,42 @@ export function structuredReceipt(contract: OutputContract, provider: "claude" |
   }
 }
 
+const STREAM_HEAD_BYTES = 65_536;
+const STREAM_TAIL_BYTES = 8_192;
+const STREAM_TEXT_ITEMS = 8;
+
+function headUtf8(text: string, maximum: number): string {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= maximum) return text;
+  let end = maximum;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString();
+}
+function tailUtf8(text: string, maximum: number): string {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= maximum) return text;
+  let start = bytes.length - maximum;
+  while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++;
+  return bytes.subarray(start).toString();
+}
+
+/** Bounded, non-authoritative view of one streamed agent message. */
+export interface CodexStreamItemDiagnostic {
+  itemId: string; bytes: number; deltas: number; completed: boolean;
+  head: string; tail: string; textRetained: boolean; startedAt: string; lastDeltaAt: string;
+}
+export interface CodexStreamDiagnostic { authoritative: false; streamedBytes: number; deltas: number; items: CodexStreamItemDiagnostic[] }
+
 /** Holds early notifications until turn/start supplies the exact turn identity. */
 export class CodexTurnCollector {
   private turnId?: string;
   private early: Array<{ method: string; params: Record<string, unknown> }> = [];
   private bytes = 0;
   private finals = new Map<string, string>();
+  private streams = new Map<string, CodexStreamItemDiagnostic>();
+  private streamedBytes = 0;
+  private streamedDeltas = 0;
+  private earlyDeltaBytes = 0;
   private terminal?: Record<string, unknown>;
   private error?: Error;
   tools = false;
@@ -51,14 +81,18 @@ export class CodexTurnCollector {
   ingest(method: string, params: Record<string, unknown>): void {
     if (params.threadId !== this.threadId) return;
     if (!this.terminal && this.turnId && params.turnId === this.turnId && method.startsWith("item/") && method.endsWith("/delta")) this.onProgress?.();
-    if (!["item/started", "item/completed", "turn/completed"].includes(method)) return;
+    if (!["item/started", "item/completed", "turn/completed", "item/agentMessage/delta"].includes(method)) return;
     if (!this.turnId) {
-      this.bytes += Buffer.byteLength(JSON.stringify(params));
-      if (this.early.length >= 10_000 || this.bytes > this.maximumResponseBytes) return this.fail(new Error("Early Codex notification limit exceeded"));
+      // Early streamed text has its own budget so a final item is never charged twice.
+      // Event count bounds overhead; content bytes bound early streamed text.
+      if (method === "item/agentMessage/delta") this.earlyDeltaBytes += typeof params.delta === "string" ? Buffer.byteLength(params.delta) : 0;
+      else this.bytes += Buffer.byteLength(JSON.stringify(params));
+      if (this.early.length >= 10_000 || this.bytes > this.maximumResponseBytes || this.earlyDeltaBytes > this.maximumResponseBytes) return this.fail(new Error("Early Codex notification limit exceeded"));
       this.early.push({ method, params }); return;
     }
     const terminal = params.turn as Record<string, unknown> | undefined;
     if ((method === "turn/completed" ? terminal?.id : params.turnId) !== this.turnId) return;
+    if (method === "item/agentMessage/delta") return this.ingestDelta(params);
     if (!this.terminal) this.onProgress?.();
     const item = params.item as Record<string, unknown> | undefined;
     if (item && ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch", "imageGeneration", "collabAgentToolCall"].includes(String(item.type))) this.tools = true;
@@ -72,11 +106,42 @@ export class CodexTurnCollector {
         this.finals.set(item.id, item.text);
       }
     }
+    if (method === "item/completed" && item?.type === "agentMessage" && typeof item.id === "string") {
+      const stream = this.streams.get(item.id);
+      if (stream) stream.completed = true;
+    }
     if (method === "turn/completed") {
       if (this.terminal && JSON.stringify(this.terminal) !== JSON.stringify(terminal)) return this.invalidate(new Error("Conflicting native terminal events"));
       this.terminal = terminal;
       this.settle();
     }
+  }
+  /**
+   * Streamed text is bounded before completion, but never becomes a result:
+   * only a completed final item is accepted and charged against the budget.
+   */
+  private ingestDelta(params: Record<string, unknown>): void {
+    if (this.terminal || this.error) return;
+    const itemId = params.itemId, delta = params.delta;
+    if (typeof itemId !== "string" || !itemId || typeof delta !== "string" || this.finals.has(itemId)) return;
+    const now = new Date().toISOString();
+    let stream = this.streams.get(itemId);
+    if (!stream) {
+      stream = { itemId, bytes: 0, deltas: 0, completed: false, head: "", tail: "", textRetained: true, startedAt: now, lastDeltaAt: now };
+      this.streams.set(itemId, stream);
+      const retained = [...this.streams.values()].filter(item => item.textRetained);
+      if (retained.length > STREAM_TEXT_ITEMS) { const oldest = retained[0]!; oldest.head = ""; oldest.tail = ""; oldest.textRetained = false; }
+    }
+    const bytes = Buffer.byteLength(delta);
+    stream.bytes += bytes; stream.deltas += 1; stream.lastDeltaAt = now;
+    this.streamedBytes += bytes; this.streamedDeltas += 1;
+    const headBytes = Buffer.byteLength(stream.head);
+    if (headBytes < STREAM_HEAD_BYTES) stream.head += headUtf8(delta, STREAM_HEAD_BYTES - headBytes);
+    stream.tail = tailUtf8(stream.tail + delta, STREAM_TAIL_BYTES);
+    if (stream.bytes > this.maximumResponseBytes) this.fail(new Error(`Codex streamed message exceeded the ${this.maximumResponseBytes}-byte result limit before completion`));
+  }
+  streamDiagnostic(): CodexStreamDiagnostic {
+    return { authoritative: false, streamedBytes: this.streamedBytes, deltas: this.streamedDeltas, items: [...this.streams.values()].map(item => ({ ...item })) };
   }
   fail(error: Error): void { this.error = error; this.reject(error); }
   private invalidate(error: Error): void { this.error = error; }

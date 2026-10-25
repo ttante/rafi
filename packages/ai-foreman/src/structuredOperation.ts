@@ -12,6 +12,18 @@ export function operationInstruction(contract: OutputContract): string {
   return `Rafi operation ${contract.operation}, protocol 2, schema ${contract.schemaVersion}. Submit only the native JSON selected by the provider wire contract appended by Rafi. Do not emit prose delimiters, status lines, host identifiers, host defaults, or fields outside that selected schema. Keep provider-authored summaries and evidence concise. Human progress is presentation only.`;
 }
 
+/**
+ * Actionable host message for a failed structured turn. The response text of an
+ * otherwise valid turn is evidence, not the error; prefer retained host
+ * failures, then the native rejection, then provider diagnostics.
+ */
+export function structuredTurnErrorMessage(turn: TurnResult, label = "Structured provider turn"): string {
+  if (turn.continuityErrors?.length) return `${label} failed continuity postprocessing: ${turn.continuityErrors.join("; ")}`;
+  if (turn.structured?.state === "rejected") return `${label} was rejected (${turn.structured.reason}): ${turn.structured.detail}`;
+  if (turn.failure) return `${label} failed (${turn.failure.category}, ${turn.failure.phase}): ${boundedUtf8(turn.failure.diagnostics, 2000).toString()}`;
+  return turn.text || `${label} failed without diagnostics`;
+}
+
 export function operationResponse<T = unknown>(turn: TurnResult, contract: OutputContract): OperationResponse<T> {
   if (turn.isError || turn.failure) throw new Error(turn.structured?.state === "rejected" ? turn.structured.detail : turn.text || "Provider execution did not complete");
   if (!turn.selectedDispatch) throw new Error("Structured provider turn has no sealed selected dispatch tuple");
@@ -50,6 +62,10 @@ export async function journalStructuredDispatch(root: string, adapter: BuilderAd
   if (!policy.output) return dispatch(instruction, policy);
   if (!adapter.prepareSession) throw new Error("Structured dispatch requires an adapter that prepares a scoped provider session");
   const selected = nativePolicy(policy.output, policy);
+  // Decorator-owned requirements (such as mandatory continuity) become part of
+  // the sealed provider instruction; they are never appended after sealing.
+  const requirement = adapter.structuredDispatchRequirement?.();
+  const providerInstruction = requirement ? `${instruction}\n\n${requirement.instruction}` : instruction;
   const key = selected.dispatchId!;
   const runId = selected.journalRunId ?? `operation:${selected.logicalActionId}`;
   const db = new WorkflowDb(root);
@@ -70,7 +86,7 @@ export async function journalStructuredDispatch(root: string, adapter: BuilderAd
     const prior = db.planOperation({ runId, idempotencyKey: key, kind: "provider-dispatch", intent: {
       protocolVersion: 2, state: "preparing", logicalActionId: selected.logicalActionId,
       operation: policy.output.operation, schemaVersion: policy.output.schemaVersion, schemaDigest: policy.output.schemaDigest,
-      instructionDigest: structuredDigest(instruction), purpose: selected.purpose ?? "implementation",
+      instructionDigest: structuredDigest(providerInstruction), purpose: selected.purpose ?? "implementation",
     } });
     if (prior.status !== "planned") throw new Error("Existing structured dispatch requires reconciliation; it cannot be replayed");
     // Session bootstrap can itself contact the provider.  The non-authoritative
@@ -81,7 +97,7 @@ export async function journalStructuredDispatch(root: string, adapter: BuilderAd
   if (policy.wireContract && policy.wireContract.descriptorDigest !== wireContract.descriptorDigest) throw new Error("New dispatch may select only the static active descriptor");
   if (wireContract.provider !== adapter.agent || wireContract.canonical.schemaDigest !== policy.output.schemaDigest) throw new Error("Structured dispatch wire contract does not match its adapter/output contract");
   if (policy.renderedWireContractDigest && policy.renderedWireContractDigest !== wireContract.descriptorDigest) throw new Error("Structured dispatch guidance does not match its selected wire contract");
-  const renderedInstruction = renderProviderWireInstruction(instruction, wireContract);
+  const renderedInstruction = renderProviderWireInstruction(providerInstruction, wireContract);
   const sealedSelection = nativePolicy(policy.output, { ...selected, wireContract, renderedWireContractDigest: wireContract.descriptorDigest });
   const before = adapter.sessionRef?.();
   if (!before || before.sessionId !== prepared.sessionId || before.generation !== prepared.generation) throw new Error("Prepared provider session is not the adapter's active scoped session");
@@ -138,7 +154,10 @@ export async function journalStructuredDispatch(root: string, adapter: BuilderAd
     if (turn.structured?.state === "rejected") turn = { ...turn, isError: true };
     else if (!turn.isError && !turn.failure) {
       try {
-        verifyPersistedDispatch(policy.output, db.structuredOwnerDispatch(key), turn.structured, tuple);
+        const response = verifyPersistedDispatch(policy.output, db.structuredOwnerDispatch(key), turn.structured, tuple);
+        // A response that cannot satisfy host requirements is rejected before
+        // confirmation instead of failing in postprocessing after it.
+        requirement?.validate(response as OperationResponse);
         receiptValidated = true;
       } catch (error) {
         turn = { ...turn, selectedDispatch: tuple, isError: true, structured: { state: "rejected", reason: "invalid-contract", detail: boundedUtf8(String(error), 4000).toString(), dispatchId: key } };

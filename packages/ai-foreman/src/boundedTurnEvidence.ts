@@ -27,7 +27,8 @@ export class BoundedTurnEvents extends Array<BuilderEvent> {
   override push(...events: BuilderEvent[]): number {
     for (const event of events) {
       this.totalCount++;
-      if (event.kind === "tool" || event.kind === "provider-item" && !["text", "agentMessage", "reasoning", "userMessage", "contextCompaction", "structuredOutput"].includes(event.itemType)) this.toolCount++;
+      // Claude reports reasoning as thinking/redacted_thinking content blocks.
+      if (event.kind === "tool" || event.kind === "provider-item" && !["text", "agentMessage", "reasoning", "thinking", "redacted_thinking", "userMessage", "contextCompaction", "structuredOutput"].includes(event.itemType)) this.toolCount++;
       let projected: BuilderEvent;
       if (event.kind === "turn-complete") {
         this.terminalCount++;

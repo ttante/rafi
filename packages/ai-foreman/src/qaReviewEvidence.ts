@@ -1,12 +1,20 @@
 import type { RunSpanV1 } from "rafi-spec";
 import { ObservabilityReader } from "./observability.js";
 
-/** Explicit authorization is scoped to one nonempty ticket ID. */
-export function qaCommandOutputExcerptsAllowed(workId: string, configuredTicket = process.env.RAFI_QA_COMMAND_OUTPUT_EXCERPTS): boolean {
-  return workId.length > 0 && configuredTicket === workId;
+/**
+ * Bounded, adapter-redacted output excerpts are host-retained evidence and are
+ * delivered to independent QA by default. RAFI_QA_COMMAND_OUTPUT_EXCERPTS=0
+ * (or off/false) disables them; a ticket ID limits them to that ticket.
+ */
+export function qaCommandOutputExcerptsAllowed(workId: string, configured = process.env.RAFI_QA_COMMAND_OUTPUT_EXCERPTS): boolean {
+  if (!workId) return false;
+  const value = configured?.trim();
+  if (!value || ["1", "on", "true"].includes(value.toLowerCase())) return true;
+  if (["0", "off", "false"].includes(value.toLowerCase())) return false;
+  return value === workId;
 }
 
-/** Excerpts are opt-in; command text is never forwarded. */
+/** Command text is never forwarded; excerpts are bounded and may be truncated. */
 export function selectQaCommandObservations(spans: RunSpanV1[], runId: string, workId: string, includeOutputExcerpts = false): unknown[] {
   const turns = new Set(spans.filter(span => span.runId === runId && span.kind === "provider_turn" && span.role === "builder" && span.ticketId === workId).map(span => span.spanId));
   return spans.filter(span => span.runId === runId && span.kind === "tool" && span.role === "builder" && span.parentSpanId && turns.has(span.parentSpanId) && span.completionKnown && span.endedAt)

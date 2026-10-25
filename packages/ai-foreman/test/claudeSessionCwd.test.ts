@@ -127,3 +127,29 @@ test("live query reserves before SDK launch, enforces native dollars and records
   } finally { await adapter.close(); rmSync(root, { recursive: true, force: true }); }
   assert.equal(settled, 1);
 });
+
+test("Claude prepared session reflects a host-adopted handoff generation for the same conversation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-adopted-gen-"));
+  const stream = new AsyncQueue<unknown>();
+  let producer: Promise<void> | undefined;
+  const Constructor = ClaudeAdapter as unknown as new (opts: BuilderAdapterOptions, query: (input: { prompt: AsyncIterable<{ message: { content: string } }> }) => unknown) => ClaudeAdapter;
+  const adapter = new Constructor({ cwd: root, sessionRole: "qa", sessionStream: "qa", permission: async () => ({ behavior: "deny", message: "fixture" }) }, ({ prompt }) => {
+    producer = (async () => {
+      for await (const _input of prompt) {
+        stream.push({ type: "system", subtype: "init", session_id: "qa-session", cwd: root });
+        stream.push({ type: "result", subtype: "success", session_id: "qa-session", result: "Local context", is_error: false, num_turns: 0, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 } });
+      }
+    })();
+    return { initializationResult: async () => ({}), supportedCommands: async () => [{ name: "context", builtin: true }], [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](), interrupt: async () => stream.close() };
+  });
+  try {
+    const initial = await adapter.prepareSession(1000);
+    assert.equal(initial.generation, 0);
+    // Handoff acceptance adopts a successor generation before structured dispatch.
+    adapter.adoptSessionRef({ ...initial, generation: 3 });
+    const prepared = await adapter.prepareSession(1000);
+    assert.equal(prepared.sessionId, "qa-session");
+    assert.equal(prepared.generation, 3);
+    assert.deepEqual(prepared, adapter.sessionRef());
+  } finally { await adapter.close(); await producer; rmSync(root, { recursive: true, force: true }); }
+});

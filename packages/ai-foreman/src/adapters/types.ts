@@ -253,9 +253,21 @@ export interface BuilderAdapterOptions {
 
 export interface ConfirmedDispatchReference { dispatchId: string; runId: string; tupleDigest: string }
 
+/**
+ * Host-owned response requirement contributed by an adapter decorator. The
+ * instruction is applied before the dispatch is sealed; validation runs on the
+ * native-validated response before the dispatch can be confirmed.
+ */
+export interface StructuredDispatchRequirement {
+  readonly instruction: string;
+  validate(response: import("rafi-spec").OperationResponse): void;
+}
+
 export interface BuilderAdapter {
   /** Receives only durable verified transport identity, after confirmation. */
   postConfirmedDispatch?(reference: ConfirmedDispatchReference): Promise<TurnResult | void>;
+  /** Requirements every structured dispatch through this adapter must satisfy. */
+  structuredDispatchRequirement?(): StructuredDispatchRequirement | undefined;
   graphRuntimeSettings?(): Pick<BuilderAdapterOptions, "model" | "effort" | "fast" | "runtimeExecutable"> | undefined;
   readonly agent: "claude" | "codex";
   contractCapabilities?(): { sameSessionAcceptance: boolean; nativeCompactionBarrier: boolean };

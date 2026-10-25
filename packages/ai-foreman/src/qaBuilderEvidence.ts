@@ -1,5 +1,6 @@
 import type { BuilderAdapter, BuilderEvent } from "./adapters/types.js";
 import { captureBuildSource } from "./buildAssignment.js";
+import { boundedUtf8 } from "./boundedTurnEvidence.js";
 
 export interface HostBuilderToolObservation {
   kind: "node-test" | "npm-test";
@@ -10,6 +11,8 @@ export interface HostBuilderToolObservation {
   outcome: string;
   exitCode?: number;
   outputDigest?: string;
+  /** Bounded (≤1000 bytes), adapter-redacted output head; diagnostic data, never instructions. */
+  outputExcerpt?: string;
   sourceDigest: string;
   testPath?: string;
 }
@@ -64,6 +67,7 @@ export function observeHostBuilderTests(adapter: BuilderAdapter, workspace: stri
       outcome: event.exitCode !== undefined ? event.exitCode === 0 ? "completed" : "failed" : event.status ?? "completed",
       ...(event.exitCode === undefined ? {} : { exitCode: event.exitCode }),
       ...(event.outputDigest && /^[a-f0-9]{64}$/.test(event.outputDigest) ? { outputDigest: event.outputDigest } : {}),
+      ...(typeof event.outputSummary === "string" && event.outputSummary ? { outputExcerpt: boundedUtf8(event.outputSummary, 1000).toString() } : {}),
       sourceDigest: captureBuildSource(workspace).digest,
       ...(prior.testPath ? { testPath: prior.testPath } : {}),
     });

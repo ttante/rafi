@@ -29,3 +29,13 @@ test("event floods retain bounded metadata and exact counts without embedding tu
   const metadata=JSON.stringify(events.metadata());assert.ok(Buffer.byteLength(metadata)<=8192);
   assert.equal(metadata.includes('"result"'),false);assert.equal(metadata.includes("rrrrrrrr"),false);
 });
+
+test("provider reasoning items are not counted as tool use", async () => {
+  const { BoundedTurnEvents } = await import("../src/boundedTurnEvidence.js");
+  const events = new BoundedTurnEvents(10_000);
+  for (const itemType of ["thinking", "redacted_thinking", "reasoning", "text", "structuredOutput"])
+    events.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType, payload: {}, payloadCompleteness: "complete" });
+  assert.equal(events.toolCount, 0);
+  events.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType: "tool_use", payload: {}, payloadCompleteness: "complete" });
+  assert.equal(events.toolCount, 1);
+});

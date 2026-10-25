@@ -49,11 +49,14 @@ test("review evidence is bounded and missing diagnostic data is harmless", () =>
   assert.deepEqual(selectQaCommandObservations([], "run", "T001"), []);
 });
 
-test("explicit opt-in includes only bounded same-ticket output excerpts", () => {
+test("bounded output excerpts are delivered by default with explicit opt-out and ticket scoping", () => {
+  assert.equal(qaCommandOutputExcerptsAllowed("T001", undefined), true);
+  assert.equal(qaCommandOutputExcerptsAllowed("T001", ""), true);
+  assert.equal(qaCommandOutputExcerptsAllowed("T001", "1"), true);
+  for (const off of ["0", "off", "FALSE"]) assert.equal(qaCommandOutputExcerptsAllowed("T001", off), false);
   assert.equal(qaCommandOutputExcerptsAllowed("T001", "T001"), true);
   assert.equal(qaCommandOutputExcerptsAllowed("T002", "T001"), false);
-  assert.equal(qaCommandOutputExcerptsAllowed("", ""), false);
-  assert.equal(qaCommandOutputExcerptsAllowed("T001", "1"), false);
+  assert.equal(qaCommandOutputExcerptsAllowed("", undefined), false);
   const turns = span({ spanId: "turn", kind: "provider_turn", ticketId: "T001" });
   const call = span({ spanId: "test", parentSpanId: "turn", attributes: { input: { command: "npm test secret-command" }, outputSummary: "output:" + "x".repeat(2000) } });
   const observations = selectQaCommandObservations([turns, call], "run", "T001", true);
@@ -61,4 +64,25 @@ test("explicit opt-in includes only bounded same-ticket output excerpts", () => 
   assert.equal(observation.outputExcerpt.length, 1000);
   assert.equal(observation.excerptMayBeTruncated, true);
   assert.doesNotMatch(JSON.stringify(observations), /secret-command/);
+});
+
+test("host Builder test observations retain a bounded output excerpt for red/green review", async () => {
+  const { observeHostBuilderTests } = await import("../src/qaBuilderEvidence.js");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const workspace = mkdtempSync(join(tmpdir(), "host-excerpt-"));
+  writeFileSync(join(workspace, "index.mjs"), "export {};\n");
+  let listener: ((event: import("../src/adapters/types.js").BuilderEvent) => void) | undefined;
+  const adapter = { observeEvents: (next: typeof listener) => { listener = next; return () => {}; } } as unknown as import("../src/adapters/types.js").BuilderAdapter;
+  const observations: import("../src/qaBuilderEvidence.js").HostBuilderToolObservation[] = [];
+  const stop = observeHostBuilderTests(adapter, workspace, observations);
+  listener!({ kind: "tool", name: "Bash", input: { command: "node --test test/subtract.test.mjs" }, lifecycle: "started", callId: "c1" });
+  listener!({ kind: "tool", name: "Bash", input: {}, lifecycle: "completed", callId: "c1", completionKnown: true, exitCode: 1, outputSummary: "not ok 1 - subtract is not a function " + "é".repeat(800) });
+  stop();
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0]!.outcome, "failed");
+  assert.match(observations[0]!.outputExcerpt!, /^not ok 1 - subtract is not a function/);
+  assert.ok(Buffer.byteLength(observations[0]!.outputExcerpt!) <= 1000);
+  assert.doesNotMatch(observations[0]!.outputExcerpt!, /�/);
 });

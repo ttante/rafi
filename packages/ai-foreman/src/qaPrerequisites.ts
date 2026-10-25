@@ -13,7 +13,8 @@ export interface QaPrerequisiteEvidence {
   checkedAt: string;
   /** Host absence is actionable; host availability never proves provider access. */
   authority: "host-preflight";
-  checks: Array<{ requirement: string; capability: string; outcome: "available" | "not_run"; evidence: string }>;
+  /** not_applicable: a typed applicability condition is false, so the requirement does not apply (never a missing prerequisite). */
+  checks: Array<{ requirement: string; capability: string; outcome: "available" | "not_run" | "not_applicable"; evidence: string }>;
   sourceDefects: string[];
 }
 
@@ -47,8 +48,8 @@ export async function checkQaPrerequisites(input: {
       evidence.checks.push({
         requirement: requirement.id,
         capability: `host-probe:executable-available:${requirement.applicability.executable}`,
-        outcome: available === expected ? "available" : "not_run",
-        evidence: `Host registry resolved executable availability=${available}; expected=${expected}; snapshot=${evidence.snapshotPath}`,
+        outcome: available === expected ? "available" : "not_applicable",
+        evidence: `Host registry resolved executable availability=${available}; expected=${expected}; ${available === expected ? "requirement applies" : "requirement does not apply"}; snapshot=${evidence.snapshotPath}`,
       });
     }
     return evidence;

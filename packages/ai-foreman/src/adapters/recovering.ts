@@ -25,6 +25,7 @@ export interface RecoveringAdapterOptions {
 /** Adds interactive recovery around structured runtime turn failures. */
 export class RecoveringAdapter implements BuilderAdapter {
   postConfirmedDispatch(reference: import("../adapters/types.js").ConfirmedDispatchReference): Promise<TurnResult | void> { return this.adapter.postConfirmedDispatch?.(reference) ?? Promise.resolve(); }
+  structuredDispatchRequirement(): import("../adapters/types.js").StructuredDispatchRequirement | undefined { return this.adapter.structuredDispatchRequirement?.(); }
   private adapter: BuilderAdapter;
   private runtime: AgentRuntime;
   private readonly eventQueue = new AsyncQueue<BuilderEvent>();

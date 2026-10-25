@@ -1,4 +1,4 @@
-import { nativePolicy, operationInstruction, operationPayload } from "../structuredOperation.js";
+import { nativePolicy, operationInstruction, operationPayload, structuredTurnErrorMessage } from "../structuredOperation.js";
 import { finalQaRoleInstructions, resolveEffectiveQaConfiguration } from "../qaEffectiveConfig.js";
 import { activateQaRecoveryBuilder } from "../qaBuilderActivation.js";
 import { graphContext, sendGraphTurn } from "../graph/turn.js";
@@ -1973,7 +1973,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
             auditBuilder = await createBuilder(cwd);
             auditViewer = printEvents(auditBuilder.events());
             const audit = await sendGraphTurn(auditBuilder, `${buildBranchAuditInstruction(plan.nodes.map((node) => node.ticket))}\n${operationInstruction(branchAuditOutput)}`, graphContext(cwd, auditBuilder.sessionRef?.()?.cwd ?? cwd, "branch-dependency-audit", plan.nodes.map(node=>node.ticket.id).join(" ")), nativePolicy(branchAuditOutput, { purpose: "planning", journalRunId: auditRunId }));
-            if (audit.isError) throw new Error(audit.text);
+            if (audit.isError) throw new Error(structuredTurnErrorMessage(audit, "Branch dependency audit"));
             const auditDependencies = operationPayload<{ dependencies: Array<{ ticket: string; dependsOn: string; reason: string }> }>(audit, branchAuditOutput).dependencies;
             const selectedIds = new Set(plan.nodes.map(node => node.ticket.id));
             if (auditDependencies.some(dep => dep.ticket === dep.dependsOn || !selectedIds.has(dep.ticket) || !selectedIds.has(dep.dependsOn))) throw new Error("Branch audit returned a foreign or self dependency");

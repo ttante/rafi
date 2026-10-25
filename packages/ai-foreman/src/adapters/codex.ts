@@ -3,7 +3,7 @@ import type { ProviderTurnPurpose } from "../providerPhase.js";
 import { OperationDeadline } from "../util/deadline.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { loadSkill } from "special-agents";
@@ -58,6 +58,10 @@ export class CodexAdapter implements BuilderAdapter {
   private closePromise?: Promise<void>;
   private activeText: string[] = [];
   private structuredCollector?: CodexTurnCollector;
+  private turnStreamedBytes = 0;
+  private streamStartedAt = 0;
+  private streamActivityAt = 0;
+  private streamDiagnosticAt = 0;
   private turnInFlight = false;
   private usage?: ContextUsage;
   private usageRevision = 0;
@@ -236,6 +240,7 @@ export class CodexAdapter implements BuilderAdapter {
       const toolsBefore = this.observedToolCalls;
       this.turnSawTool = false;
       this.activeText = [];
+      this.turnStreamedBytes = 0; this.streamStartedAt = 0; this.streamActivityAt = 0; this.streamDiagnosticAt = 0;
       this.lastTurnTokens = undefined;
       this.turnUsageBaseline = this.providerSessionUsage ? { ...this.providerSessionUsage } : undefined;
       const deadline = new OperationDeadline("Codex active turn", this.opts.turnDeadlineMs ?? 3_600_000);
@@ -281,6 +286,7 @@ export class CodexAdapter implements BuilderAdapter {
       let final: { text: string; itemId?: string } | undefined;
       let invalidFinal: string | undefined;
       try { final = collector?.final(); } catch (error) { invalidFinal = String(error); }
+      if (this.streamDiagnosticAt) this.writeStreamDiagnostic(failed || invalidFinal ? "interrupted" : "completed", failed ? `Codex terminal ${String(turn?.status)}` : invalidFinal);
       const text = final?.text ?? this.activeText.join("\n");
       if (!policy?.output && failed && !responseOnlyViolation && this.fastTier && !this.turnSawTool && !text && isFastModeUnavailable(String(error?.message ?? ""))) {
         this.disableFastMode();
@@ -320,6 +326,7 @@ export class CodexAdapter implements BuilderAdapter {
         return result;
       }
       const detail = [error instanceof Error ? error.message : String(error), this.stderr].filter(Boolean).join("\n");
+      if (this.turnStreamedBytes) this.writeStreamDiagnostic("interrupted", error instanceof Error ? error.message : String(error));
       const text = normalizeRuntimeErrorText("codex", detail, this.process?.exitCode ?? null, "builder turn");
       this.disconnect(new Error(text));
       const resumed = Boolean(this.opts.resumeSessionRef);
@@ -540,6 +547,7 @@ export class CodexAdapter implements BuilderAdapter {
   private async closeInternal(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this.turnInFlight && this.turnStreamedBytes) this.writeStreamDiagnostic("interrupted", "adapter closed during an active turn");
     const child = this.process;
     let onExit: (() => void) | undefined;
     const exited = child && child.exitCode === null ? new Promise<void>(resolve => { onExit = resolve; child.once("exit", resolve); }) : Promise.resolve();
@@ -709,7 +717,10 @@ export class CodexAdapter implements BuilderAdapter {
     // Native receipts and tool observations must belong to the same dispatch.
     // Foreign notifications remain unable to affect completion or evidence.
     if (this.structuredCollector && (params.threadId && params.threadId !== this._sessionId || this.activeNativeTurnId && params.turnId && params.turnId !== this.activeNativeTurnId)) return;
-    if (message.method === "item/started") {
+    if (message.method === "item/agentMessage/delta") {
+      if (!this.turnInFlight || params.threadId && this._sessionId && params.threadId !== this._sessionId) return;
+      this.observeAgentMessageDelta(params);
+    } else if (message.method === "item/started") {
       const item = params.item as Record<string, unknown> | undefined;
       if (item) this.eventQueue.push({ kind: "provider-item", provider: "codex", lifecycle: "started", itemType: String(item.type ?? "unknown"), payload: exactProviderItem(item), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
       if (isCodexToolItem(item)) {
@@ -869,6 +880,39 @@ export class CodexAdapter implements BuilderAdapter {
     });
   }
 
+  /** Streamed output is visible progress; it is never treated as a result. */
+  private observeAgentMessageDelta(params: Record<string, unknown>): void {
+    if (typeof params.delta !== "string") return;
+    this.turnStreamedBytes += Buffer.byteLength(params.delta);
+    const now = Date.now();
+    if (!this.streamStartedAt) this.streamStartedAt = now;
+    if (now - this.streamActivityAt >= 1_000) {
+      this.streamActivityAt = now;
+      this.eventQueue.push({ kind: "activity", provider: "codex", state: "writing response", detail: `${formatStreamBytes(this.turnStreamedBytes)} streamed`, transient: true });
+    }
+    if (now - (this.streamDiagnosticAt || this.streamStartedAt) >= 2_000) this.writeStreamDiagnostic("streaming");
+  }
+
+  /**
+   * Bounded interruption evidence for structured turns under .foreman (Rafi's
+   * git-excluded log directory). Diagnostic only: never read back as output.
+   */
+  private writeStreamDiagnostic(state: "streaming" | "completed" | "interrupted", detail?: string): void {
+    const collector = this.structuredCollector, nativeTurnId = this.activeNativeTurnId, threadId = this._sessionId;
+    if (!collector || !nativeTurnId || !threadId) return;
+    this.streamDiagnosticAt = Date.now();
+    try {
+      const safe = (value: string) => value.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 120);
+      const dir = join(this.opts.configRoot ?? this.opts.cwd, ".foreman", "provider-streams");
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, `codex-${safe(threadId)}-${safe(nativeTurnId)}.json`);
+      const body = { version: 1, provider: "codex", state, threadId, nativeTurnId, dispatchId: this.activeProviderTurnId, updatedAt: new Date().toISOString(),
+        ...(detail ? { detail: Buffer.from(detail).subarray(0, 2_000).toString() } : {}), ...collector.streamDiagnostic() };
+      writeFileSync(`${path}.tmp`, JSON.stringify(body, null, 2));
+      renameSync(`${path}.tmp`, path);
+    } catch { /* diagnostics cannot change execution */ }
+  }
+
   private traceLifecycle(phase: string, data: { method?: string; timeoutMs?: number; elapsedMs?: number } = {}): void {
     try { this.opts.onLifecycleTrace?.({ phase, at: new Date().toISOString(), sessionId: this._sessionId, ...data }); } catch { /* diagnostics cannot change execution */ }
   }
@@ -1020,4 +1064,8 @@ function loadSkillMarkdown(cwd: string, skill: string): string | undefined {
 
 function cumulativeDelta(before: number | undefined, after: number | undefined): number | undefined {
   return before !== undefined && after !== undefined && after >= before ? after - before : undefined;
+}
+
+function formatStreamBytes(bytes: number): string {
+  return bytes < 1024 ? `${bytes} B` : bytes < 1_048_576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1_048_576).toFixed(1)} MB`;
 }

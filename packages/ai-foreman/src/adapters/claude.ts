@@ -974,7 +974,11 @@ export class ClaudeAdapter implements BuilderAdapter {
         }
         return this.sessionIdentityReady;
       };
-      const ref = await Promise.race([prepare(), interrupted]);
+      const ready = await Promise.race([prepare(), interrupted]);
+      // The identity promise resolves once. A host may later adopt a new scope
+      // for the same conversation (for example a handoff generation), so the
+      // prepared session is the adapter's current reference, as for Codex.
+      const ref = this._sessionRef?.sessionId === ready.sessionId ? this._sessionRef : ready;
       if (!ref.validatedAt) throw new Error("Claude session identity was not provider-validated during initialization");
       return ref;
     } catch (error) {

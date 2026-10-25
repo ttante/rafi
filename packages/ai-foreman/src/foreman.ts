@@ -10,7 +10,7 @@ import { deliverBuilderGuidanceFollowup } from "./builderGuidanceFollowup.js";
 import { graphContext, sendGraphTurn } from "./graph/turn.js";
 import type { GraphPurpose, OutputContract } from "rafi-spec";
 import { workReportOutput, preflightOutput, qaVerdictOutput } from "rafi-spec";
-import { operationInstruction, operationStatus, operationPayload, nativePolicy } from "./structuredOperation.js";
+import { operationInstruction, operationStatus, operationPayload, nativePolicy, structuredTurnErrorMessage } from "./structuredOperation.js";
 import { qaDigest } from "./qaProtocolV2.js";
 import { BuildControlBoundary } from "./buildInterventions.js";
 import { buildScopeRevision } from "./buildApproval.js";
@@ -619,7 +619,7 @@ export class Foreman {
       costUsd: result.costUsd,
       isError: result.isError,
     });
-    if (result.isError) throw new Error(result.text);
+    if (result.isError) throw new Error(structuredTurnErrorMessage(result, "Build preflight"));
     this.preflightPlan=operationPayload<{steps:Array<{ticket:string|null;work:string}>}>(result, preflightOutput).steps.map((step,index)=>`${index+1}. ${step.ticket ? step.ticket+": " : ""}${step.work}`).join("\n");
     return this.preflightPlan!;
   }
@@ -634,7 +634,7 @@ export class Foreman {
     this.assertNotInterrupted();
     await this.observeBuilderNative(this.builder);
     this.log.write("preflight", { feedback: true, costUsd: result.costUsd, isError: result.isError });
-    if (result.isError) throw new Error(result.text);
+    if (result.isError) throw new Error(structuredTurnErrorMessage(result, "Build preflight"));
     this.preflightPlan=operationPayload<{steps:Array<{ticket:string|null;work:string}>}>(result, preflightOutput).steps.map((step,index)=>`${index+1}. ${step.ticket ? step.ticket+": " : ""}${step.work}`).join("\n");
   }
 

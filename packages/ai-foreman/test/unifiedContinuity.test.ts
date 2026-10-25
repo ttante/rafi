@@ -622,7 +622,7 @@ test("validated handback progress resets the Builder handoff limit without count
   } finally { db.close(); }
 });
 
-for (const role of ["builder", "qa"] as const) test(`${role} missing composed continuity retains the completed receipt without repair or handoff`, async () => {
+for (const role of ["builder", "qa"] as const) test(`${role} missing composed continuity is rejected before confirmation without repair or handoff`, async () => {
   const projectDir = root("rafi-native-continuity-invalid-");
   const text = role === "qa" ? 'STEP_STATUS: qa_pass | summary="reviewed"' : "STEP_STATUS: done";
   const provider = new FakeAdapter("session-1", [{ text, isError: false, numTurns: 1, costUsd: 0 }]);
@@ -630,12 +630,15 @@ for (const role of ["builder", "qa"] as const) test(`${role} missing composed co
   const wrapper = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-1", role, settings: { ...SETTINGS, role }, durableSingleTurn: role === "qa" });
   try {
     const result = await wrapper.sendTurn("perform assigned work", nativePolicy(role === "qa" ? qaVerdictOutput : workReportOutput));
-    assert.equal(result.isError, true); assert.ok(result.continuityErrors?.length);
-    assert.equal(result.rawResponse, text); assert.equal(result.structured?.state, "candidate");
+    // The session requires continuity, so a null delta fails native acceptance
+    // instead of being confirmed and then stranding postprocessing.
+    assert.equal(result.isError, true); assert.equal(result.rawResponse, text);
+    assert.equal(result.structured?.state, "rejected");
+    if (result.structured?.state === "rejected") { assert.equal(result.structured.reason, "invalid-contract"); assert.match(result.structured.detail, /continuity delta/); }
     assert.equal(provider.turnPolicies.length, 1);
     const db = new WorkflowDb(projectDir);
-    try { assert.equal(db.handoffs("run-1").length, 0); assert.equal(db.pendingStructuredPostprocessing("run-1").length, 1, "missing continuity leaves confirmed transport pending domain processing");
-      assert.equal(db.operations("run-1").find(operation => operation.kind === "provider-dispatch")?.status, "confirmed"); assert.equal(db.roleMutationLease("run-1", role)?.providerSessionId, "session-1"); } finally { db.close(); }
+    try { assert.equal(db.handoffs("run-1").length, 0); assert.equal(db.pendingStructuredPostprocessing("run-1").length, 0, "rejected transport never enters domain postprocessing");
+      assert.equal(db.operations("run-1").find(operation => operation.kind === "provider-dispatch")?.status, "uncertain"); assert.equal(db.roleMutationLease("run-1", role)?.providerSessionId, "session-1"); } finally { db.close(); }
   } finally { await wrapper.close(); }
 });
 

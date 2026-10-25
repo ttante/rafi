@@ -47,6 +47,8 @@ export class SessionUnavailableContinuityError extends Error {
   }
 }
 
+export const CONTINUITY_REQUIRED_INSTRUCTION = "Include the required bounded continuity object in the operation response; continuity cannot be null for this session.";
+
 export function validateContinuityDelta(value: unknown): ContinuityDelta {
   const problems: string[] = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ContinuityValidationError(["delta must be an object"]);
@@ -174,14 +176,20 @@ export class ContinuityAdapter implements BuilderAdapter {
 
   get agent(): "claude" | "codex" { return this.adapter.agent; }
 
+  /** Every confirmed dispatch publishes a checkpoint, so continuity is mandatory. */
+  structuredDispatchRequirement(): import("./adapters/types.js").StructuredDispatchRequirement {
+    return { instruction: CONTINUITY_REQUIRED_INSTRUCTION, validate: response => { validateContinuityDelta(response.continuity); } };
+  }
+
   async sendTurn(instruction: string, policy?: import("./adapters/types.js").TurnRequest): Promise<TurnResult> {
     if (!policy?.output) throw new Error("Continuity dispatch requires a native operation contract");
     if (policy.dispatchCapability) {
       assertSealedDispatch(this.options.projectDir, policy.dispatchCapability, policy.selectedDispatch, instruction);
       return this.sendTurnOwned(instruction, policy);
     }
+    // The continuity requirement is applied by journalStructuredDispatch through
+    // structuredDispatchRequirement(), before sealing, on every dispatch path.
     const hostInstruction = instruction;
-    instruction += "\n\nInclude the required bounded continuity object in the operation response; continuity cannot be null for this session.";
     return withGraphSessionAccess(this.options.projectDir, this.adapter, () => policy?.output
       ? journalStructuredDispatch(this.options.projectDir, this, instruction, { ...policy, journalRunId: policy.journalRunId ?? this.options.runId }, (text, selected) => this.sendTurnOwned(text, selected))
       : this.sendTurnOwned(instruction, policy)).then(result => {
