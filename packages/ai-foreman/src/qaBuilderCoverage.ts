@@ -35,8 +35,12 @@ async function collectBuilderContractCoverageOwned(projectDir: string, runId: st
     }
     // Preserve the implementation response before a failed acknowledgment or a crash.
     const implementationDigest = db.putEvidence("qa", implementation.rawResponse ?? implementation.text);
-    db.planOperation({ runId, idempotencyKey: eventId, kind: "builder-coverage", intent: { workId, contractDigest: contract.contentDigest, binding, implementationDigest, session } });
-    db.updateOperation(eventId, "in_progress");
+    // Persist host-owned command metadata before dispatching the response-only
+    // acknowledgement. This survives a process restart and does not retain
+    // commands or output, only bounded sequence/status/digest facts.
+    const hostObservationDigest = db.putEvidence("qa", JSON.stringify({ version: 1, kind: "host-builder-tool-observations", workId, operationId, observations: hostObservations }));
+    db.planOperation({ runId, idempotencyKey: eventId, kind: "builder-coverage", intent: { workId, contractDigest: contract.contentDigest, binding, implementationDigest, hostObservationDigest, session } });
+    db.updateOperation(eventId, "in_progress", { result: { hostObservationDigest } });
     try {
       const prompt = `Response-only evidence collection for completed implementation ${operationId}. Do not run tools, modify files, repeat work, or invent verification. Record failed, blocked or not-run truthfully. The implementation response is retained as ${implementationDigest}.\n${COVERAGE_INSTRUCTIONS}\nExact coverage binding: ${JSON.stringify({ version: 1, runId, workId, revision: contract.revision, contractDigest: contract.contentDigest, ...binding })}\nAll checks: ${JSON.stringify(contract.checks)}`;
       const response = await new OperationDeadline("Builder coverage acknowledgment", 120_000).run(() => dispatchWithGraphAccess(projectDir, adapter, prompt, { purpose: "response-repair", responseOnly: true }, (text, policy) => adapter.sendTurn(text, policy)), () => { void adapter.close(); });
@@ -58,7 +62,7 @@ async function collectBuilderContractCoverageOwned(projectDir: string, runId: st
       const errors = validateContractCoverage(contract, coverage, binding, false);
       if (errors.length) throw new Error(`Builder coverage invalid: ${errors.join("; ")}`);
       const coverageDigest = store.putArtifact("builder-coverage", coverage);
-      db.updateOperation(eventId, "confirmed", { result: { responseDigest, coverageDigest, binding, implementationDigest } });
+      db.updateOperation(eventId, "confirmed", { result: { responseDigest, coverageDigest, binding, implementationDigest, hostObservationDigest } });
     } catch (error) {
       throw new Error(`Builder evidence collection blocked: ${String(error)}`);
     }

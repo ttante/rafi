@@ -5,7 +5,9 @@ import { registerGraphDerived, graphDerivedAllowed, currentGraphDerivedAccess, t
 import { bindCoverageHostFields, parseContractCoverage, validateContractCoverage } from "./qaContractCoverage.js";
 import { findHostQaCheck, hostComparisonDigestFromCoverage, hostQaComparisonV1Schema } from "./hostQaComparison.js";
 import { findGraphQaChecks, hostGraphApplicabilityDigestFromCoverage, hostGraphApplicabilityV1Schema } from "./hostGraphApplicability.js";
-import { applyHostQaAugmentations } from "./hostQaAugmentation.js";
+import { assembleFinalQaCoverage } from "./qaCoverageAssembly.js";
+import { retainedQaCommandObservations } from "./qaReviewEvidence.js";
+import { retainedHostBuilderObservations } from "./qaBuilderEvidence.js";
 import { QaPreparationStore, migrateQaPreparation, migrateQaPreparationGuards } from "./qaPreparationStore.js";
 import { GraphStore, migrateGraphStore } from "./graph/storage.js";
 import { reconcileWork, type BuildOwnershipRepairV1 } from "./buildWorkReconciliation.js";
@@ -2243,20 +2245,28 @@ export class WorkflowDb {
       const hostResult = hostQaComparisonV1Schema.parse(store.artifact(hostDigest, "host-qa-comparison"));
       retainedHostComparison = { result: hostResult, resultDigest: hostDigest };
     }
+    const commandObservations = [
+      ...retainedQaCommandObservations(this.projectDir, input.runId, input.ticketId, false),
+      ...retainedHostBuilderObservations(this, input.runId, input.ticketId),
+    ];
     const graphCheck = findGraphQaChecks(contract)[0];
+    let retainedHostGraph: { result: import("./hostGraphApplicability.js").HostGraphApplicabilityV1; resultDigest: string } | undefined;
     if (graphCheck) {
       const graphDigest = hostGraphApplicabilityDigestFromCoverage(coverage, graphCheck.id);
       if (!graphDigest) throw new Error("Coverage is missing the host-owned Graphify applicability artifact reference");
       const graphResult = hostGraphApplicabilityV1Schema.parse(store.artifact(graphDigest, "host-graph-applicability"));
-      const retainedHostGraph = { result: graphResult, resultDigest: graphDigest };
-      retainedCoverage = retainedCoverage
-        ? applyHostQaAugmentations({ coverage: retainedCoverage, contract, projectDir: this.projectDir, hostComparison: retainedHostComparison, hostGraph: retainedHostGraph })
-        : undefined;
-    } else if (retainedCoverage && retainedHostComparison) {
-      retainedCoverage = applyHostQaAugmentations({ coverage: retainedCoverage, contract, projectDir: this.projectDir, hostComparison: retainedHostComparison });
+      retainedHostGraph = { result: graphResult, resultDigest: graphDigest };
     }
+    if (retainedCoverage) retainedCoverage = assembleFinalQaCoverage({
+      providerCoverage: retainedCoverage,
+      contract,
+      projectDir: this.projectDir,
+      commandObservations,
+      hostComparison: retainedHostComparison,
+      hostGraph: retainedHostGraph,
+    });
     if (!retainedCoverage) throw new Error("Coverage lacks the retained terminal review receipt and authorized host augmentation");
-    const errors = validateContractCoverage(contract, coverage, { phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest, attemptId: binding.attemptId, sessionId: binding.sessionId });
+    const errors = validateContractCoverage(contract, retainedCoverage, { phase: "qa", sourceDigest: input.sourceStateDigest, inputBasisDigest: input.reviewBasisDigest, attemptId: binding.attemptId, sessionId: binding.sessionId });
     if (errors.length) throw new Error(errors.join("; "));
     if (!receipt || !retainedCoverage || canonicalJson(retainedCoverage) !== canonicalJson(coverage)) throw new Error("Coverage is not bound to the retained terminal review receipt and authorized host augmentation");
   }

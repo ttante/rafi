@@ -31,6 +31,8 @@ import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 import {
   PLAN_PROPOSAL_END,
   PLAN_PROPOSAL_START,
+  extractStructuredPlanProposal,
+  materializeStructuredPlan,
   type StructuredPlanProposalV1,
 } from "../src/structuredPlan.js";
 import { GRILL_AUDIT_END, GRILL_AUDIT_START } from "../src/grillAudit.js";
@@ -104,6 +106,22 @@ test("--yes keeps post-plan ticket setup non-interactive", () => {
   assert.equal(ticketSetupAction(true, true, true), "next");
   assert.equal(ticketSetupAction(false, true, true), "prompt");
   assert.equal(ticketSetupAction(false, false, true), "next");
+});
+
+test("structured plan normalizes omitted QA minimum risk reasons before persistence", () => {
+  const proposal = validStructuredProposal();
+  proposal.slices[0]!.qa_preparation = {
+    ...fixtureQaDepth(),
+    level: 3,
+    minimumLevel: 3,
+    lowRisk: undefined,
+    riskFactors: [{ category: "compatibility", rationale: "Shared export behavior needs regression coverage.", references: ["src/index.mjs"] }],
+    minimumReasons: [],
+  };
+  const parsed = extractStructuredPlanProposal(planCompleteOutput(proposal));
+  assert.deepEqual(parsed.slices[0]!.qa_preparation!.minimumReasons, ["compatibility"]);
+  const plan = materializeStructuredPlan(parsed);
+  assert.deepEqual(plan.slices[0]!.qa_preparation!.minimumReasons, ["compatibility"]);
 });
 
 test("standard plan instruction excludes grill-me and keeps the output contract", () => {

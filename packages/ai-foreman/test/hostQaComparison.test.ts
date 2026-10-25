@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { applyHostQaComparison, hostQaComparisonV1Schema } from "../src/hostQaComparison.js";
 import { applyHostQaAugmentations } from "../src/hostQaAugmentation.js";
+import { assembleFinalQaCoverage } from "../src/qaCoverageAssembly.js";
 import type { QaContractCoverageV1, QaVerificationContractV1 } from "rafi-spec";
 
 const hash = (char: string) => char.repeat(64);
@@ -113,9 +114,30 @@ test("host augmentation accepts retained successful test command exit status", (
   const { contract, coverage } = fixture();
   contract.checks = [{ ...contract.checks[1]!, id: "npm-test", verification: [{ kind: "command", argv: ["npm", "test"], cwd: ".", fixtures: [], expectedOutcome: "exit 0", runtime: "npm", timeoutMs: 30_000 }] }];
   coverage.checks = [{ checkId: "npm-test", applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] }];
-  const augmented = applyHostQaAugmentations({ coverage, contract, projectDir: "/project", commandObservations: [{ spanId: "span-1", kind: "npm-test", outcome: "completed", exitCode: 0 }] });
+  const augmented = assembleFinalQaCoverage({ providerCoverage: coverage, contract, projectDir: "/project", commandObservations: [{ spanId: "span-1", kind: "npm-test", outcome: "completed", exitCode: 0 }] });
   assert.equal(augmented.checks[0]!.outcome, "passed");
   assert.equal(augmented.checks[0]!.evidence[0]!.reference, "host-command-span:span-1");
+});
+
+test("host augmentation accepts retained red-before-green evidence", () => {
+  const { contract, coverage } = fixture();
+  const finalDigest = hash("f");
+  contract.checks = [{
+    ...contract.checks[1]!,
+    id: "tdd-order",
+    expectedBehavior: "The test-first ordering is retained.",
+    verification: [{ kind: "command", argv: ["node", "--test", "test/multiply.test.mjs"], cwd: ".", fixtures: [], expectedOutcome: "exit 0", runtime: "node", timeoutMs: 30_000 }],
+  }];
+  coverage.checks = [{ checkId: "tdd-order", applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] }];
+  const augmented = applyHostQaAugmentations({
+    coverage, contract, projectDir: ".",
+    commandObservations: [
+      { kind: "node-test", sequence: 4, testPath: "test/multiply.test.mjs", outcome: "failed", sourceDigest: hash("e"), startedAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:00:01Z" },
+      { kind: "node-test", sequence: 5, testPath: "test/multiply.test.mjs", outcome: "completed", exitCode: 0, sourceDigest: finalDigest, startedAt: "2026-01-01T00:00:02Z", completedAt: "2026-01-01T00:00:03Z" },
+    ],
+  });
+  assert.equal(augmented.checks[0]!.outcome, "passed");
+  assert.match(augmented.checks[0]!.evidence[0]!.reference, /^host-test-sequence:/);
 });
 
 test("host augmentation binds the exact retained baseline evidence digest", () => {

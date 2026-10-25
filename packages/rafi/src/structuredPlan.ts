@@ -53,6 +53,30 @@ export interface StructuredPlanArtifactPaths {
   latestData: string;
 }
 
+/**
+ * Providers sometimes omit the exact risk categories from minimumReasons even
+ * though they returned those categories in riskFactors.  The categories are
+ * host-owned facts already present in the same depth decision, so repair only
+ * this redundant representation at the proposal boundary.
+ */
+export function normalizeStructuredPlanProposal(input: StructuredPlanProposalV1): StructuredPlanProposalV1 {
+  return {
+    ...input,
+    slices: input.slices.map((slice) => slice.qa_preparation
+      ? {
+        ...slice,
+        qa_preparation: {
+          ...slice.qa_preparation,
+          minimumReasons: [...new Set([
+            ...slice.qa_preparation.minimumReasons,
+            ...slice.qa_preparation.riskFactors.map((risk) => risk.category),
+          ])],
+        },
+      }
+      : slice),
+  };
+}
+
 export function extractStructuredPlanProposal(output: string): StructuredPlanProposalV1 {
   const start = output.lastIndexOf(PLAN_PROPOSAL_START);
   const end = output.lastIndexOf(PLAN_PROPOSAL_END);
@@ -68,10 +92,15 @@ export function extractStructuredPlanProposal(output: string): StructuredPlanPro
   if (contractIssues.some((issue) => issue.includes("Unrecognized key"))) {
     throw new Error(`invalid structured plan proposal contract:\n${contractIssues.map((issue) => `- ${issue}`).join("\n")}`);
   }
-  const issues = validateStructuredPlanProposal(parsed);
+  if (!validated.success) {
+    const issues = validateStructuredPlanProposal(parsed);
+    if (issues.length) throw new Error(`invalid structured plan proposal:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
+    throw new Error(`invalid structured plan proposal contract:\n${contractIssues.map((issue) => `- ${issue}`).join("\n")}`);
+  }
+  const normalized = normalizeStructuredPlanProposal(validated.data);
+  const issues = validateStructuredPlanProposal(normalized);
   if (issues.length) throw new Error(`invalid structured plan proposal:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
-  if (!validated.success) throw new Error(`invalid structured plan proposal contract:\n${contractIssues.map((issue) => `- ${issue}`).join("\n")}`);
-  return validated.data;
+  return normalized;
 }
 
 export function validateStructuredPlanProposal(value: unknown): string[] {
@@ -182,6 +211,7 @@ export function materializeStructuredPlan(
   allocate: () => string = randomUUID,
   preparationPolicy?: import("rafi-spec").QaPreparationConfigV1,
 ): StructuredPlanV1 {
+  proposal = normalizeStructuredPlanProposal(proposal);
   const issues = validateStructuredPlanProposal(proposal);
   if (issues.length) throw new Error(issues.join("; "));
   if (preparationPolicy?.mode === "enforce") for (const slice of proposal.slices) {

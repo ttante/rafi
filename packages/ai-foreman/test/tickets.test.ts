@@ -588,6 +588,35 @@ test("ticket population preserves a valid proposal when notes follow the status 
   assert.equal(acceptTicketPopulationCompletion(response)?.kind, "done");
 });
 
+test("ticket population accepts a plain JSON proposal followed by STEP_STATUS", () => {
+  const proposal = {
+    version: 1,
+    plan_id: "pln_test",
+    revision: 1,
+    tickets: [{
+      slice_ref: "slc_test",
+      title: "Test ticket",
+      area: "core",
+      priority: "P1",
+      size: "S",
+      risk: "Low",
+      summary: "test",
+      acceptance: ["works"],
+      required_tests: ["test"],
+      likely_files: [],
+      documentation: { required: false, targets: [], criteria: [] },
+      depends_on: [],
+      rollback: null,
+      notes: null,
+    }],
+    retirements: [],
+  };
+  assert.equal(
+    acceptTicketPopulationCompletion(`${JSON.stringify(proposal)}\nSTEP_STATUS: done | summary="populated"`)?.kind,
+    "done",
+  );
+});
+
 test("exhausted risk-plan correction gives an exact retry without unrelated doctor guidance", () => {
   const error = new TicketPopulationRiskCorrectionExhaustedError(["T001", "T004"], "/tmp/project with spaces", "ivw_123", "/tmp/project with spaces/.rafi/ticket-population-proposals/ivw_123.json");
   assert.match(error.message, /No tickets were published/);

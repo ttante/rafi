@@ -5,6 +5,7 @@ import { COVERAGE_INSTRUCTIONS, bindCoverageHostFields, parseContractCoverage, v
 import { contractDigest, renderVerificationContract } from "./qaVerificationContract.js";
 import { finalReviewContractContext } from "./qaContractDelivery.js";
 import { qaCommandOutputExcerptsAllowed, retainedQaCommandObservations } from "./qaReviewEvidence.js";
+import { retainedHostBuilderObservations } from "./qaBuilderEvidence.js";
 import { qaHostGraphFact } from "./qaHostFacts.js";
 import { graphContext, parseGraphRequest, prepareGraphInstruction, sendGraphTurn } from "./graph/turn.js";
 import { BuildControlBoundary } from "./buildInterventions.js";
@@ -40,7 +41,7 @@ import {
 import { canonicalJson, createQaFindingRefs, qaDigest, type FrozenQaSourceStateV2, type HandoffAcceptanceReceiptV2, type QaConfinementV2, type QaReviewBasisV2, type QaTurnIntentV2, type QaTurnReceiptV2 } from "./qaProtocolV2.js";
 import { createHostQaComparison, findHostQaCheck } from "./hostQaComparison.js";
 import { createHostGraphApplicability, findGraphQaChecks } from "./hostGraphApplicability.js";
-import { applyHostQaAugmentations } from "./hostQaAugmentation.js";
+import { assembleFinalQaCoverage } from "./qaCoverageAssembly.js";
 import { qaUnresolvedToolDecision, recordQaUnresolvedTools } from "./qaToolRecovery.js";
 
 export interface QaStreamState {
@@ -1547,7 +1548,10 @@ function beginV2Review(
             } : {}),
           }] : [];
       });
-      const commandObservations = retainedQaCommandObservations(opts.recovery.projectDir, opts.recovery.runId, opts.ticket.id, qaCommandOutputExcerptsAllowed(opts.ticket.id));
+      const commandObservations = [
+        ...retainedQaCommandObservations(opts.recovery.projectDir, opts.recovery.runId, opts.ticket.id, qaCommandOutputExcerptsAllowed(opts.ticket.id)),
+        ...retainedHostBuilderObservations(db, opts.recovery.runId, opts.ticket.id),
+      ];
       instruction += `\n${qaHostGraphFact(opts.recovery.projectDir)}\n`;
       instruction += finalReviewContractContext(contract, preparationStore, reviewedSnapshotPath, builderClaims, commandObservations);
       instruction += `\n${renderVerificationContract(contract)}\n${COVERAGE_INSTRUCTIONS}\nCoverage binding: ${JSON.stringify({ phase: "qa", runId: opts.recovery.runId, workId: opts.ticket.id, contractDigest: contract.contentDigest, revision: contract.revision, sourceDigest: source.digest, attemptId: attempt.attemptId, sessionId: handle.sessionIdentity().sessionId })}`;
@@ -1843,8 +1847,11 @@ function finishV2Pass(opts: IsolatedQaOptions, adapter: BuilderAdapter, detail: 
       const hostGraph = findGraphQaChecks(contract).length
         ? createHostGraphApplicability({ projectDir: binding.projectDir, runId: binding.runId, ticketId: binding.ticketId, contract, reviewAttemptId: binding.reviewAttemptId, reviewBasisDigest: binding.reviewBasisDigest, sourceDigest: binding.sourceStateDigest, store: db.qaPreparationStore() })
         : undefined;
-      const commandObservations = retainedQaCommandObservations(opts.recovery.projectDir, opts.recovery.runId, opts.ticket.id, false);
-      const coverage = applyHostQaAugmentations({ coverage: providerCoverage, contract, projectDir: binding.projectDir, hostComparison, hostGraph, commandObservations });
+      const commandObservations = [
+        ...retainedQaCommandObservations(opts.recovery.projectDir, opts.recovery.runId, opts.ticket.id, false),
+        ...retainedHostBuilderObservations(db, opts.recovery.runId, opts.ticket.id),
+      ];
+      const coverage = assembleFinalQaCoverage({ providerCoverage, contract, projectDir: binding.projectDir, hostComparison, hostGraph, commandObservations });
       const errors = validateContractCoverage(contract, coverage, coverageBinding);
       if (errors.length) throw new Error(`Final QA coverage incomplete: ${errors.join("; ")}`);
       const coverageDigest = db.qaPreparationStore().putArtifact("final-coverage", coverage);

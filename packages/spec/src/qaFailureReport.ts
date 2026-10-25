@@ -157,13 +157,33 @@ export function parseQaResponseContract(text: string, options: { continuityRequi
 
   let report: QaFailureReportV1 | undefined;
   let rawReportJson: string | undefined;
+  let plainReportPayload = false;
   if (start.length === 1 && end.length === 1 && start[0]! < end[0]!) {
     const parsed = parseQaFailureReport(lines.slice(start[0]! + 1, end[0]).join("\n"));
     errors.push(...parsed.validation.errors);
     report = parsed.report;
     rawReportJson = parsed.rawJson;
+  } else if (parsedStatus.status === "qa_fail" && start.length === 0 && end.length === 0 && statusLine) {
+    // The wrapper is optional for the report payload, but STEP_STATUS remains
+    // mandatory. The remaining content must be one complete JSON report.
+    const continuityPattern = /^\s*RAFI_CONTINUITY_DELTA(?:\s|$)/;
+    const payloadLines = lines.slice(0, statusLine.index);
+    const firstPayloadLine = payloadLines.findIndex((line) => line.trim() && !continuityPattern.test(line));
+    const continuityIndex = payloadLines.findIndex((line) => continuityPattern.test(line));
+    if (options.continuityRequired && continuityIndex >= 0 && firstPayloadLine >= 0 && continuityIndex > firstPayloadLine) {
+      errors.push("continuity marker must precede the failure report");
+    }
+    const body = payloadLines
+      .filter((line) => !continuityPattern.test(line))
+      .join("\n")
+      .trim();
+    plainReportPayload = true;
+    const parsed = parseQaFailureReport(body);
+    errors.push(...parsed.validation.errors);
+    report = parsed.report;
+    rawReportJson = parsed.rawJson;
   }
-  if (parsedStatus.status === "qa_fail" && start.length !== 1) errors.push("qa_fail requires one valid failure report");
+  if (parsedStatus.status === "qa_fail" && start.length !== 1 && !plainReportPayload) errors.push("qa_fail requires one valid failure report");
   if (parsedStatus.status !== "qa_fail" && start.length) errors.push(`${parsedStatus.status} must not include a failure report`);
   if (parsedStatus.status === "qa_fail" && !report && start.length === 1) errors.push("qa_fail failure report is invalid");
 
