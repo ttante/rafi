@@ -6,6 +6,26 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+## @rafi-ai/cli 0.10.0 / ai-foreman 2.0.0 / special-agents 0.9.0 / rafi-spec 0.9.0 - 2026-10-25
+
+**Breaking changes**
+
+- All packages now require Node 24 (`engines.node: 24.x`); Node 20 and 22 are no longer supported.
+- Builds, interviews, and checkpoints started on earlier versions cannot be resumed. The v2 cutover marks legacy state permanently non-resumable; start them again after upgrading. Existing project files and tickets are kept.
+
+**Changes**
+
+- Complete the Structured Communication v2 cutover: every provider turn uses a sealed, versioned contract with host-verified receipts; legacy text parsing is removed.
+- Seal the continuity requirement into the dispatched instruction and reject missing continuity before a turn is confirmed. Error messages now show the real failure cause instead of the response body.
+- Codex: bound streamed output, show "writing response" progress, keep partial stream diagnostics under `.foreman/provider-streams/`, and stop runaway whitespace output with a clean interrupt and one retry for read-only turns.
+- Claude: reuse the adopted session after a handoff, correlate handoff acceptance to its own turn, and don't count thinking blocks as tool use.
+- QA: send bounded test output to QA by default (`RAFI_QA_COMMAND_OUTPUT_EXCERPTS=0` disables it), treat host test observations as authoritative, don't block on missing per-edit history, and mark unexpected prerequisites `not_applicable`.
+- Node 24 is the required runtime (`.nvmrc`).
+- Bumped `rafi-spec` to `0.9.0`.
+- Bumped `special-agents` to `0.9.0` with its exact `rafi-spec@0.9.0` dependency.
+- Bumped `ai-foreman` to `2.0.0` with its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.10.0` with its exact `ai-foreman@2.0.0`, `rafi-spec@0.9.0`, and `special-agents@0.9.0` dependencies.
+
 ## @rafi-ai/cli 0.9.29 / ai-foreman 1.7.29 / special-agents 0.8.18 / rafi-spec 0.8.18 - 2026-10-22
 
 - Improve supervised restart/recovery behavior, QA contract coverage, host-retained evidence, and provider-process diagnostics.
