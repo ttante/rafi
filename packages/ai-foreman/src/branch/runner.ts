@@ -9,7 +9,7 @@ import { WorkflowReader } from "../workflowReader.js";
 import { buildScopeRevision } from "../buildApproval.js";
 import type { BuilderAdapter, EffortLevel } from "../adapters/types.js";
 import type { RunObserver } from "../observability.js";
-import type { ProviderSessionRefV1, SessionStrategy } from "rafi-spec";
+import { qaVerdictOutput, type ProviderSessionRefV1, type SessionStrategy } from "rafi-spec";
 import { beginQaFinalization, completeQaFinalization, verifyPendingQaFinalizationSource, compactWithRetry, runIsolatedQa, type QaNonconvergenceContext, type QaNonconvergenceDecision, type QaReportRecoveryHandler, type QaSessionBoundaryRecovery, type QaSessionHandle, type QaStreamState } from "../qaReview.js";
 import { QaFailureDeliveryService } from "../qaFailureDelivery.js";
 import { Foreman, MARKER_SPEC } from "../foreman.js";
@@ -45,7 +45,7 @@ import { SessionUnavailableError, recoverableBuilderTurnError } from "../adapter
 import { SessionUnavailableContinuityError } from "../continuity.js";
 import type { QaRecoveryPacket } from "../qaRecovery.js";
 
-export interface DeliveryUnitSession { runId?: string; unitId: string; branch: string; worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1; ticket: string; }
+export interface DeliveryUnitSession { communicationProtocolVersion?: 2; runId?: string; unitId: string; branch: string; worktreePath: string; sessionId: string; sessionRef?: ProviderSessionRefV1; ticket: string; }
 export type BaseWorktreePolicy = "enforce" | "warn" | "skip";
 
 export function readDeliveryUnitSession(projectDir: string, unitId: string): DeliveryUnitSession | undefined {
@@ -53,6 +53,7 @@ export function readDeliveryUnitSession(projectDir: string, unitId: string): Del
   if (!existsSync(path)) return undefined;
   try {
     const cached = JSON.parse(readFileSync(path, "utf8")) as DeliveryUnitSession;
+    if (cached.communicationProtocolVersion !== 2) return undefined;
     const reader = new WorkflowReader(projectDir);
     try {
       const known = reader.branchResumeSessions(false);
@@ -421,7 +422,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
             db.planOperation({ runId: opts.runId, idempotencyKey: key, kind: "decision-continuation", intent: { decisionId: decision.decisionId, ticketId: node.ticket.id } });
             db.updateOperation(key, "in_progress");
           } });
-          const response = await foreman.runInstruction(ticketInstruction);
+          const response = await foreman.runBuilderWork(ticketInstruction);
           for (const decision of continuations) db.updateOperation(`decision-continuation:${decision.decisionId}`, response.result.failure?.dispatchState === "unknown" ? "uncertain" : "confirmed", { result: { isError: response.result.isError } });
           return response;
         } finally { db.close(); }
@@ -469,7 +470,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           if (node.deliveryUnitId) {
             const path = deliverySessionPath(opts.projectDir, node.deliveryUnitId);
             mkdirSync(join(opts.projectDir, ".foreman", "delivery-sessions"), { recursive: true });
-            writeFileSync(path, `${JSON.stringify({ runId: opts.runId, unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, sessionRef: builder.sessionRef?.(), ticket: node.ticket.id }, null, 2)}\n`, "utf8");
+            writeFileSync(path, `${JSON.stringify({ communicationProtocolVersion: 2, runId: opts.runId, unitId: node.deliveryUnitId, branch: node.branch, worktreePath, sessionId, sessionRef: builder.sessionRef?.(), ticket: node.ticket.id }, null, 2)}\n`, "utf8");
           }
         }
       }
@@ -516,7 +517,7 @@ export async function runBranchPlan(opts: BranchRunnerOptions): Promise<BranchRu
           resumedRecovery: qaResumedRecovery,
           sessionBoundary: opts.qaSessionBoundary ?? (async () => { throw new Error("QA recovery requires a validated durable session boundary"); }),
           observeNativeCompactions: opts.observeQaNativeCompactions,
-          resolveBlocked: (adapter, reason) => foreman.resolveBlocker(adapter, reason, "qa"),
+          resolveBlocked: (adapter, reason) => foreman.resolveBlocker(adapter, reason, "qa", qaVerdictOutput),
           evidence: (entry) => opts.log.write("qa-evidence", { ticket: node.ticket.id, ...entry }),
           resumeBuilderGuidance: qaOnlyRecovery,
           deliverBuilderFollowup: (instruction, followup) => deliverBuilderGuidanceFollowup({ projectDir: opts.projectDir, runId: opts.runId, ticketId: node.ticket.id, worktree: worktreePath }, instruction, followup, {
@@ -1110,8 +1111,8 @@ Branch-mode rules:
 - Do not push, create PRs, or run git commit.
 - Do not edit .tickets/, ${progressDoc}, or other tracker state.
 - If a required test is denied only because you added a pipe, redirection, substitution, or wrapper, retry the exact required-test command without that extra shell syntax. Do not retry other denied actions.
-- If another selected ticket is required before this one can be completed, stop and end with STEP_STATUS: blocked | ticket="${node.ticket.id}" branch_dependency="<ticket-id>" reason="<why>".
-- End with STEP_STATUS: done | ticket="${node.ticket.id}" summary="<what changed>" when the ticket is implemented.
+- If another selected ticket is required before this one can be completed, return a native blocked result with branchDependency set to that ticket ID, reason explaining the dependency, and nextAction describing the needed resolution. Do not execute that other ticket.
+- When this ticket is implemented, return the native completed work-report with its summary, evidence, coverage, and continuity. Rafi binds the assigned ticket ID and requires independent QA before acceptance.
 
 Final QA runs independently in a separate disposable snapshot and fresh reviewer conversation.
 
@@ -1136,8 +1137,8 @@ Branch-mode rules:
 - Do not switch branches.
 - Do not push, create PRs, or run git commit.
 - Do not edit .tickets/, ${progressDoc}, or other tracker state.
-- If another selected ticket is required before this one can be completed, stop and end with STEP_STATUS: blocked | ticket="${node.ticket.id}" branch_dependency="<ticket-id>" reason="<why>".
-- End with STEP_STATUS: done | ticket="${node.ticket.id}" summary="<what changed>" when the ticket is implemented.
+- If another selected ticket is required before this one can be completed, return a native blocked result with branchDependency set to that ticket ID, reason explaining the dependency, and nextAction describing the needed resolution. Do not execute that other ticket.
+- When this ticket is implemented, return the native completed work-report with its summary, evidence, coverage, and continuity. Rafi binds the assigned ticket ID and requires independent QA before acceptance.
 
 Final QA runs independently in a separate disposable snapshot and fresh reviewer conversation.
 

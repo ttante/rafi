@@ -5,7 +5,7 @@ import {
   realpathSync, renameSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { parseProviderContract, parseQaFailureReport, qaRecoveryAcknowledgementV1Schema, type QaFailureReportV1 } from "rafi-spec";
+import { parseProviderContract, parseStrictJson, validateQaFailureReport, QA_FAILURE_REPORT_MAX_BYTES, qaRecoveryAcknowledgementV1Schema, type QaFailureReportV1 } from "rafi-spec";
 import { calculateFrozenQaStateDigest, captureFrozenQaSource, type FrozenQaSourceState, type QaSourcePathState, type QaUntrackedCapture } from "./qaSnapshot.js";
 import { WorkflowDb } from "./workflowDb.js";
 
@@ -148,6 +148,7 @@ export function canonicalizeQaRecoveryRequirements(packet: QaRecoveryPacket): Qa
 }
 
 export function loadQaRecoveryPacket(directory: string): QaRecoveryPacket {
+  if (existsSync(join(directory, ".structured-communication-v2-cutover"))) throw new Error("structured-communication-v2-cutover: this recovery packet cannot resume; start a new native dispatch");
   const root = resolve(directory);
   const manifestPath = join(root, "manifest.json");
   if (!existsSync(manifestPath) || lstatSync(manifestPath).isSymbolicLink()) throw new Error("missing or unsafe QA recovery manifest");
@@ -477,7 +478,16 @@ export function readManualQaReport(packetDirectory: string): unknown { return JS
 export function validateManualQaReport(packet: QaRecoveryPacket): { packet: QaRecoveryPacket; report?: QaFailureReportV1; errors: string[] } {
   const path = join(packet.directory, "report.json");
   const raw = existsSync(path) ? readFileSync(path) : Buffer.alloc(0);
-  const parsed = parseQaFailureReport(raw.toString());
+  let value: unknown;
+  let errors: string[] = [];
+  if (raw.length > QA_FAILURE_REPORT_MAX_BYTES) errors = [`serialized report exceeds ${QA_FAILURE_REPORT_MAX_BYTES} bytes`];
+  else {
+    try { value = parseStrictJson(raw.toString()); }
+    catch (error) { errors = [`invalid JSON: ${String(error)}`]; }
+    if (!errors.length) errors = validateQaFailureReport(value).errors;
+  }
+  const parsed = { report: errors.length ? undefined : value as QaFailureReportV1,
+    validation: { valid: errors.length === 0, errors } };
   let next = appendQaRecoveryResource(packet, `validation/manual-repair-r${packet.manifest.revision + 1}.json`, parsed.validation, { purpose: "Validation result for the latest operator-edited report.json" });
   const editable = writeEditableReport(packet.directory, raw);
   next = revise(next, { resources: next.manifest.resources.filter((resource) => resource.path !== "report.json").concat(editable).sort(resourceOrder) });
@@ -521,8 +531,8 @@ export function renderQaRecoveryAcknowledgementInstruction(packet: QaRecoveryPac
     `Packet digest: ${packet.manifest.packetDigest}`,
     `Reviewed-state digest: ${packet.manifest.reviewedStateDigest}`,
     "Required resources:", required,
-    "Reply with exactly the following acknowledgement line, followed by the required RAFI_CONTINUITY_DELTA record:",
-    `RAFI_QA_RECOVERY_ACK packet="${packet.manifest.packetDigest}" reviewed_state="${packet.manifest.reviewedStateDigest}" required_resources_read="all"`,
+    "Return the following payload in the native qa-recovery-acceptance response, with bounded continuity in the same object:",
+    JSON.stringify({ packet: packet.manifest.packetDigest, reviewed_state: packet.manifest.reviewedStateDigest, required_resources_read: "all" }),
   ].join("\n");
 }
 

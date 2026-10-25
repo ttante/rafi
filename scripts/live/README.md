@@ -25,6 +25,7 @@ variable is set.
 
 | Script | Authorization | Purpose | Platform |
 | --- | --- | --- | --- |
+| `structured-output.mjs` | `RAFI_LIVE_STRUCTURED=1` and future `RAFI_LIVE_DEADLINE` | Bounded text/structured result, schema change, session resume and interruption interface probes. See `../comms/README.md`; not a production migration gate. | macOS/Linux; selected provider CLI authenticated. |
 | `build-stalls.ts` | `RAFI_LIVE_BUILD_STALLS=1` | Disposable Builder/QA stall and activity-recovery matrix. | macOS/Linux; requires selected provider CLI. |
 | `claude-compaction.ts` | `RAFI_LIVE_COMPACTION=1` | Claude compaction control evidence; no model turn by default. | macOS/Linux; requires Claude CLI. |
 | `claude-policy-routing.ts` | `RAFI_LIVE_RECOVERY=1` | Claude project-policy versus host-policy routing. | macOS/Linux; requires Claude CLI. |
@@ -65,3 +66,13 @@ process-containment, path, virtualenv, and history operation.
 The older `scripts/live-create.mjs`, `scripts/live-ticket-plan.mjs`, and
 `scripts/live-interview.mjs` remain at the root because package commands call
 them directly. They are separate live smoke tests, not release gates.
+
+### Native handoff, large contract and compaction conformance
+
+`RAFI_LIVE_STRUCTURED=1 RAFI_LIVE_DEADLINE=<future-ISO-time> pnpm canary:structured-handoffs` exercises the actual production adapters, durable handoff service, contract delivery and continuity wrapper. Use `RAFI_LIVE_PROVIDERS=claude` or `codex` for a focused rerun. It bounds host dispatches to twelve per provider and turns to 90 seconds within the absolute deadline. The fixture denies domain tools and uses synthetic work: successful transport does not certify product behavior.
+
+Evidence includes predecessor/successor identities, exact resource transfer, a 360 KB Unicode contract context, observed native compaction, rejection of the old delivery receipt, renewal, and a final checkpoint with no unresolved dispatch. Results retain failures, provider versions and source hashes outside the provider workspace.
+
+The public `canary:incident-journeys` now freezes the compiled workspace packages into its evidence directory and records a file manifest and digest. External dependencies remain local links. This prevents concurrent packaging tests from replacing the CLI or internal package code between journey phases. Rebuild before each new candidate; do not infer freshness from Git HEAD alone in a dirty working tree.
+
+The public CLI journey requires a consumed QA certificate and completed ticket-finalization record for **each** of its two approved tickets. It follows up to two independently scheduled delivery units through the public approval/resume commands and stops if a unit makes no certified progress. A certificate without successful finalization, an invalidated certificate, or implemented source alone is insufficient. The harness supports explicitly continuing a completed unit only with the same compiled-candidate digest and predecessor evidence ledger (`RAFI_LIVE_CONTINUE_COMPLETED=1`, `RAFI_LIVE_PREDECESSOR_EVIDENCE`, and `RAFI_LIVE_CONTINUE_INTERRUPTED_PROJECT`); this never replays an uncertain failed dispatch.

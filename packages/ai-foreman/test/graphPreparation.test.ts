@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_GRAPH_CONFIG } from "rafi-spec";
+import { workReportOutput, DEFAULT_GRAPH_CONFIG } from "rafi-spec";
 import { adoptGraph, disableGraph, refreshGraph } from "../src/graph/maintenance.js";
 import { resolveGraphPython } from "../src/graph/bridge.js";
 import { withGraphDerivedAccess } from "../src/graph/derived.js";
@@ -13,6 +13,7 @@ import { digest } from "../src/graph/util.js";
 import { sendPreparationGraphTurn } from "../src/graph/preparation.js";
 import { WorkflowReader } from "../src/workflowReader.js";
 import { WorkflowDb } from "../src/workflowDb.js";
+import { prepareFixtureAdapter, workFixtureTurn } from "./helpers/nativeOutput.js";
 import type { BuilderAdapter } from "../src/adapters/types.js";
 
 for (const phase of ["planner", "prepare", "assess", "challenge", "repair"] as const) {
@@ -33,10 +34,13 @@ for (const phase of ["planner", "prepare", "assess", "challenge", "repair"] as c
             assert.match(text, calls === 1 ? /complete mandatory inventory/ : /Continue the same frozen action/);
             assert.match(text, /rafi_graph_evidence/);
           }
-          return { text: calls === 1 && phase !== "repair" ? JSON.stringify({ kind: "rafi_graph_request", version: 1, requestId: "navigation", operations: [{ operation: "query", query: "main" }] }) : "normal phase result",
-            isError: false, numTurns: 1, costUsd: 0.1, costAuthoritative: true, usage: { scope: "turn-delta", inputTokens: 10, outputTokens: 5 } };
+          const turn = workFixtureTurn(policy, `${phase}-independent`, "claude", calls === 1 && phase !== "repair"
+            ? { kind: "graph-request", request: { kind: "rafi_graph_request", version: 1, requestId: "navigation", operations: [{ operation: "query", query: "main" }] } } : undefined);
+          return { ...turn, text: "normal phase result", costUsd: 0.1, costAuthoritative: true,
+            usage: { scope: "turn-delta", inputTokens: 10, outputTokens: 5 } };
         } };
-      const result = await sendPreparationGraphTurn(adapter, "complete mandatory inventory", { phase, projectDir: root, workspace: root, sourceRef: "frozen-source", runId: "run", workId: "work", operationId: "reserved-operation", remainingMs: 5000 });
+      prepareFixtureAdapter(adapter, root);
+      const result = await sendPreparationGraphTurn(adapter, "complete mandatory inventory", { phase, output: workReportOutput, projectDir: root, workspace: root, sourceRef: "frozen-source", runId: "run", workId: "work", operationId: "reserved-operation", remainingMs: 5000 });
       assert.equal(result.text, "normal phase result");
       assert.equal(calls, phase === "repair" ? 1 : 2);
       assert.equal(result.graphReceiptRefs.length, phase === "repair" ? 1 : 2);
@@ -61,11 +65,12 @@ test("expired preparation cannot send a graph continuation after a late provider
     let calls = 0, closes = 0;
     let release!: () => void;
     const pending = new Promise<void>(resolve => { release = resolve; });
-    const adapter: BuilderAdapter = { agent: "claude", sessionId: () => "deadline-session", events: async function* () {}, close: async () => { closes++; }, sendTurn: async () => {
+    const adapter: BuilderAdapter = { agent: "claude", sessionId: () => "deadline-session", events: async function* () {}, close: async () => { closes++; }, sendTurn: async (_text, policy) => {
       calls++; await pending;
-      return { text: JSON.stringify({ kind: "rafi_graph_request", version: 1, requestId: "late", operations: [{ operation: "query", query: "main" }] }), isError: false, numTurns: 1, costUsd: 0 };
+      return workFixtureTurn(policy, "deadline-session", "claude", { kind: "graph-request", request: { kind: "rafi_graph_request", version: 1, requestId: "late", operations: [{ operation: "query", query: "main" }] } });
     } };
-    await assert.rejects(sendPreparationGraphTurn(adapter, "inventory", { phase: "challenge", projectDir: root, workspace: root, sourceRef: "snapshot", runId: "run", workId: "work", operationId: "timeout", remainingMs: 1000 }), /deadline exceeded/);
+    prepareFixtureAdapter(adapter, root);
+    await assert.rejects(sendPreparationGraphTurn(adapter, "inventory", { phase: "challenge", output: workReportOutput, projectDir: root, workspace: root, sourceRef: "snapshot", runId: "run", workId: "work", operationId: "timeout", remainingMs: 1000 }), /deadline exceeded/);
     release();
     await new Promise(resolve => setTimeout(resolve, 150));
     assert.equal(calls, 1); assert.equal(closes, 1);
@@ -122,16 +127,17 @@ test("preparation uses a populated equivalent snapshot graph and falls back afte
     const built = await refreshGraph(root, root, "fixture-build", { python });
     assert.equal(built.state, "published", built.reason);
     const prompts: string[] = [];
-    const adapter: BuilderAdapter = { agent: "claude", sessionId: () => `snapshot-${prompts.length}`, events: async function* () {}, close: async () => {}, sendTurn: async text => {
-      prompts.push(text); return { text: "source-verified candidate", isError: false, numTurns: 1, costUsd: 0 };
+    const adapter: BuilderAdapter = { agent: "claude", sessionId: () => "snapshot-session", events: async function* () {}, close: async () => {}, sendTurn: async (text, policy) => {
+      prompts.push(text); return workFixtureTurn(policy, "snapshot-session", "claude");
     } };
-    await sendPreparationGraphTurn(adapter, "Inspect caller helper dependencies", { phase: "prepare", projectDir: root, workspace: snapshot, sourceRef: "frozen", runId: "run", workId: "work", operationId: "matching", remainingMs: 10000 });
+    prepareFixtureAdapter(adapter, snapshot);
+    await sendPreparationGraphTurn(adapter, "Inspect caller helper dependencies", { phase: "prepare", output: workReportOutput, projectDir: root, workspace: snapshot, sourceRef: "frozen", runId: "run", workId: "work", operationId: "matching", remainingMs: 10000 });
     const db = new WorkflowDb(root);
     try {
       assert.equal(db.graphStore().get<{ decision: string }>("receipt", "matching:0")?.value.decision, "used");
       assert.match(prompts[0], /helper/);
       writeFileSync(join(snapshot, "main.py"), "def changed(): return 2\n");
-      await sendPreparationGraphTurn(adapter, "Inspect changed dependencies", { phase: "assess", projectDir: root, workspace: snapshot, sourceRef: "changed", runId: "run", workId: "work", operationId: "drifted", remainingMs: 10000 });
+      await sendPreparationGraphTurn(adapter, "Inspect changed dependencies", { phase: "assess", output: workReportOutput, projectDir: root, workspace: snapshot, sourceRef: "changed", runId: "run", workId: "work", operationId: "drifted", remainingMs: 10000 });
       assert.equal(db.graphStore().get<{ decision: string }>("receipt", "drifted:0")?.value.decision, "unavailable");
       assert.match(prompts[1], /unavailable/);
       assert.equal(db.graphStore().list("generation").length, 1, "Preparation never starts extraction");

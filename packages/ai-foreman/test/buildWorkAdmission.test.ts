@@ -55,7 +55,7 @@ test("direct SQL cannot move admitted QA rows or attach evidence to another pare
     db.finishQaReviewAttempt("one",{status:"failed",reportDigest:"report"});
     const report=db.recordQaReport({runId:"one",ticketId:"T1",reviewNumber:1,sourceStateDigest:"source",reviewBasisDigest:"basis",reportDigest:"report",report:{version:1,summary:"failed",checks_run:[],findings:[],observations:[]}},[]);
     assert.throws(()=>raw.prepare("INSERT INTO qa_findings(finding_id,report_digest,report_occurrence_id,ordinal,created_at) VALUES('foreign','wrong',?,0,'now')").run(report.reportOccurrenceId),/digest ownership|FOREIGN KEY/);
-    assert.throws(()=>db.issueQaPassCertificate({runId:"two",ticketId:"T1",qaRevision:1,sourceStateDigest:"source",reviewBasisDigest:"basis",turnReceiptDigest:"foreign-turn"}),/completion receipt ownership/);
+    assert.throws(()=>db.issueQaPassCertificate({runId:"two",ticketId:"T1",qaRevision:1,sourceStateDigest:"source",reviewBasisDigest:"basis",turnReceiptDigest:"foreign-turn"}),/persisted sealed native QA owner receipt/);
     const tables=raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'qa_%'").all() as Array<{name:string}>;
     for(const {name} of tables) {
       const columns=raw.prepare(`PRAGMA table_info(${name})`).all() as Array<{name:string}>;

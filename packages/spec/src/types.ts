@@ -484,6 +484,9 @@ export interface StructuredPlanSlice {
   summary: string;
   acceptance: string[];
   required_tests: string[];
+  /** New approved artifacts carry V2 typed verification; missing means V1 history. */
+  verification_version?: 2;
+  verification_requirements?: import("./providerContracts.js").VerificationRequirementV2[];
   likely_files: string[];
   depends_on: string[];
   source_refs?: SourceVersionRef[];
@@ -1551,6 +1554,7 @@ export interface BuildRecoveryDecisionReceipt {
   /** Why the plan-update policy is trusted; omitted on legacy receipts. */
   planUpdateApprovalSource?: "explicit-yes" | "explicit-choice";
   /** Exact host-validated inputs covered by this approval. */
+  frozenWorkApproval?: { kind: "synthetic"; runId: string; workIds: string[]; admissionDigest: string; scopeRevision: string };
   planApproval?: {
     planDigest: string;
     ticketSetDigest: string;

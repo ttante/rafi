@@ -1,14 +1,16 @@
+import { streamTicketPopulation } from "../ticketPopulationPaging.js";
+import { operationPayload } from "../structuredOperation.js";
 import { Command } from "commander";
 import { accent, error, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { DeletedTicketResetPolicy, RequestedTicketResetTarget, SourceRegistryConfig, StructuredPlanV1, TicketGroupId } from "rafi-spec";
-import { riskNoteRepairProposalV1Schema, zodIssues } from "rafi-spec";
+import { riskNoteRepairOutput, type TicketPopulationProposalV1Contract, riskNoteRepairProposalV1Schema, zodIssues } from "rafi-spec";
 import { select, text, confirm, isCancel, multiselect } from "@clack/prompts";
 import { loadConfig } from "../config.js";
 import { Log } from "../log.js";
-import { Foreman, parseStepStatus, type StepStatus } from "../foreman.js";
+import { Foreman } from "../foreman.js";
 import type { EffortLevel } from "../adapters/types.js";
 import { printEvents } from "./events.js";
 import {
@@ -85,7 +87,8 @@ import {
   resumeInterviewRecord,
   type InterviewRecord,
 } from "../interviews.js";
-import { applyTicketPopulation, assertRiskPlanOnlyCorrection, authorizeTicketRetirements, extractTicketPopulationProposal, materializeTicketPopulation, recoverTicketPublications, TicketPopulationValidationError, TICKET_POPULATION_PROPOSAL_END, TICKET_POPULATION_PROPOSAL_START } from "../ticketPopulation.js";
+import { applyTicketPopulation, assertRiskPlanOnlyCorrection, authorizeTicketRetirements, materializeTicketPopulation, recoverTicketPublications, TicketPopulationValidationError } from "../ticketPopulation.js";
+import { WorkflowDb } from "../workflowDb.js";
 import { loadTickets, saveTickets, validateTicketDefs } from "../tickets/ticketLoader.js";
 import { resolveTicketPaths } from "../tickets/config.js";
 import { formatAllTicketDetails, formatTicketDetails, getAllTicketDetails, getTicketDetails } from "../tickets/details.js";
@@ -96,22 +99,12 @@ import { listTicketGroups, previewTicketGroupRepair, repairTicketGroups } from "
 import { StateDb } from "../tickets/stateDb.js";
 import { ticketDefinitionDigest } from "../tickets/riskWaivers.js";
 import { hasRollbackOrMitigationPlan } from "../tickets/ticketLoader.js";
+import { migrateTrackerRules } from "../tickets/renderMarkdown.js";
 
 let nestedTicketCommandDepth = 0;
 class TicketInterviewCancelled extends Error {}
 function cancelTicketInterview(): never { throw new TicketInterviewCancelled("ticket interview cancelled"); }
 
-/**
- * Ticket Maker may append an explanatory note after its machine envelope.
- * Preserve a schema-valid proposal before Foreman's strict generic marker
- * repair path replaces the response with a status-only correction.
- */
-export function acceptTicketPopulationCompletion(text: string): StepStatus | undefined {
-  try { extractTicketPopulationProposal(text); }
-  catch { return undefined; }
-  const status = parseStepStatus(text, { requireFinalLine: false });
-  return status.kind === "done" || status.kind === "plan_complete" ? status : undefined;
-}
 function fail(msg: string): never {
   if (nestedTicketCommandDepth > 0) throw new Error(msg);
   console.error(`foreman tickets: ${msg}`);
@@ -262,23 +255,13 @@ Return ticket content using Foreman's schema:
 - title, area, priority, size, risk, depends_on, summary, acceptance, required_tests, likely_files, rollback, notes.
 - Keep dependencies, acceptance criteria, testing expectations, file hints, risk notes, and implementation notes from the source material. For each ticket, use only the mapped approved slice's acceptance and required tests; do not copy plan-level acceptance criteria or add requirements about sibling slices or unfinished tickets. A ticket's acceptance must remain implementable and verifiable when its own slice is delivered.
 - Preserve additive-slice independence without inventing an absence test: each ticket's own behavior and tests should work against the shared approved baseline and must not depend on sibling implementation. Do not add wording such as "with the sibling absent/present," "without [sibling] present," or "with this slice alone" unless the approved plan explicitly requires sibling absence testing or an isolated branch. Otherwise use positive own-ticket checks, the shared project tests, and the combined-result check.
-- Preserve the approved slice's documentation policy exactly. Documentation is off by default; do not invent a documentation requirement because a docs directory exists. When documentation is required, retain its exact targets and criteria so the Builder and independent QA can enforce it.
+- Rafi copies documentation policy and QA preparation decisions directly from the approved slice. Do not include these host-owned fields in your proposal or invent additional requirements. Preserve the approved acceptance and tests.
 - File names and likely_files are implementation hints, not an exhaustive allowlist. Do not invent acceptance criteria or tests that require an exact changed-file list; allow other relevant files needed to complete the approved work. Preserve explicit user-established security, privacy, access, and other safety restrictions. Rafi manages ticket lifecycle state; do not require the Builder to mark tickets done in a document.
 - For every Medium or High risk ticket, \`rollback\` is required. It must state a concrete rollback or mitigation action: what is disabled, reverted, or contained, and how recovery or impact is verified. \`notes\` may add context but never satisfies this requirement. Low-risk tickets may use \`rollback: null\`.
 - Do not store mutable status/progress fields in .tickets/tickets.yaml.
 - Dependencies must reference slice_ref values. Include the exact IDs of existing populated tickets whose removed slices should become obsolete.
 
-If source content does not cleanly map to the new schema, ask for guidance instead of guessing. Use:
-STEP_STATUS: needs_input | question="..." choices="..."
-
-Output one JSON object between ${TICKET_POPULATION_PROPOSAL_START} and ${TICKET_POPULATION_PROPOSAL_END} with shape:
-{"version":1,"plan_id":"approved plan ID","revision":1,"tickets":[{"slice_ref":"slc_low","title":"...","area":"...","priority":"P1","size":"S","risk":"Low","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"documentation":{"required":false,"targets":[],"criteria":[]},"depends_on":[],"rollback":null,"notes":null},{"slice_ref":"slc_medium","title":"...","area":"...","priority":"P1","size":"S","risk":"Medium","summary":"...","acceptance":["..."],"required_tests":["..."],"likely_files":["..."],"documentation":{"required":false,"targets":[],"criteria":[]},"depends_on":["slc_low"],"rollback":"Disable the feature flag, restore the previous handler, and verify the affected error rate returns to baseline.","notes":null}],"retirements":["exact existing ticket ID"]}
-Triple-check that every approved slice appears exactly once.
-
-End with exactly one marker line as the final non-empty line; do not append notes or commentary after it:
-STEP_STATUS: done | summary="populated Foreman tickets from existing project ticket sources"
-or
-STEP_STATUS: blocked | reason="why ticket population cannot proceed"`;
+If source content does not cleanly map to the approved plan, return a needs-input or blocked result instead of guessing. Return the full proposal in result.payload of the native ticket-population response. The proposal contains version, plan_id, revision, tickets, and retirements. Do not allocate final ticket IDs.`;
 }
 
 /** A bounded correction loop ended without a publishable proposal. */
@@ -647,6 +630,18 @@ async function cmdSetupUpdateCli(opts: SetupCommandOptions): Promise<void> {
     if (patch.sourceRegistry) saveSourceRegistry(dir, patch.sourceRegistry);
     registrySaved = true;
     syncTicketLimits(dir, next.limits);
+    if (isTicketsInitialized(dir)) {
+      const ticketsConfig = loadTicketsConfig(dir);
+      const trackerRulesPath = join(dir, ticketsConfig.paths.trackerRules);
+      if (existsSync(trackerRulesPath)) {
+        const before = readFileSync(trackerRulesPath, "utf8");
+        const migrated = migrateTrackerRules(before, ticketsConfig.paths.progressDoc);
+        if (migrated.disposition !== "unchanged") {
+          writeFileSync(trackerRulesPath, migrated.content, "utf8");
+          console.log(`foreman tickets setup: ${migrated.disposition === "replaced-legacy" ? "upgraded" : "refreshed"} Rafi-managed tracker rules`);
+        }
+      }
+    }
     console.log(`foreman tickets setup: updated ticket setup in ${join(dir, "rafi-config.yaml")}`);
 
     if (isTicketsInitialized(dir)) {
@@ -1531,11 +1526,14 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     if (contextSources.length) {
       console.log(`foreman tickets: context sources ${contextSources.join(" ")}`);
     }
-    let turn = await foreman.runInstruction(
-      buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc),
-      { completion: acceptTicketPopulationCompletion },
-    );
-    planningRecord = checkpointInterview(dir, planningRecord, { runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() }, decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text } });
+    const population = (instruction: string, correction: number) => streamTicketPopulation({
+      projectDir: dir, interviewId: planningRecord.id, correction, instruction,
+      checkpoint: scope => { planningRecord = checkpointInterview(dir, planningRecord, { decisions: { ...planningRecord.decisions, populationArtifact: scope } }); },
+      dispatch: (instruction, policy) => foreman.runInstruction(instruction, policy),
+    });
+    const initialPopulation = await population(buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc), 0);
+    let turn = initialPopulation.turn;
+    planningRecord = checkpointInterview(dir, planningRecord, { runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() }, decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text, structuredResponse: turn.result.structured } });
 
     log.write("ticket-populate", {
       statusKind: turn.status.kind,
@@ -1556,7 +1554,8 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
     }
 
     const existing = loadTickets(resolveTicketPaths(ticketsConfig, dir).tickets);
-    let proposal = extractTicketPopulationProposal(turn.result.text);
+    if (!turn.result.selectedDispatch) throw new Error("Ticket population response has no sealed dispatch tuple");
+    let proposal = initialPopulation.proposal;
     let proposalArtifact = savePopulationProposalArtifact(dir, planningRecord.id, approvedPlan, proposal);
     let materialized: ReturnType<typeof materializeTicketPopulation>;
     let populationWaiver: { ticketIds: string[]; reason: string; actor: string } | undefined;
@@ -1579,18 +1578,21 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
           continue;
         }
         console.log(`foreman tickets: ${ids} need risk plans; asking Ticket Maker for a targeted correction (${correction + 1}/2)`);
-        const correctionTurn = await foreman.runInstruction(`Correct the existing ticket population proposal only. Do not change plan_id, revision, slice_ref mappings, ticket IDs, dependencies, scope, ownership, acceptance criteria, tests, retirements, or any field except \`rollback\` for these tickets: ${ids}. Each listed ticket is Medium or High risk and requires a concrete rollback or mitigation plan in \`rollback\`; \`notes\` cannot satisfy this requirement. Return the complete replacement JSON proposal between ${TICKET_POPULATION_PROPOSAL_START} and ${TICKET_POPULATION_PROPOSAL_END}, followed by STEP_STATUS: done.`);
+        const correctedPopulation = await population(`Correct the existing ticket population proposal only. Do not change plan_id, revision, slice_ref mappings, ticket IDs, dependencies, scope, ownership, acceptance criteria, tests, retirements, or any field except \`rollback\` for these tickets: ${ids}. Each listed ticket is Medium or High risk and requires a concrete rollback or mitigation plan in \`rollback\`; \`notes\` cannot satisfy this requirement. Return the complete replacement proposal through native ticket-population pages.`, correction + 1);
+        const correctionTurn = correctedPopulation.turn;
         if (correctionTurn.result.isError || (correctionTurn.status.kind !== "done" && correctionTurn.status.kind !== "plan_complete")) {
           throw new Error(`Ticket Maker could not correct missing risk plans for ${ids}: ${correctionTurn.status.reason ?? correctionTurn.status.error ?? correctionTurn.result.text.slice(0, 200)}`);
         }
         turn = correctionTurn;
         planningRecord = checkpointInterview(dir, planningRecord, {
           runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() },
-          decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text, riskPlanCorrections: correction + 1 },
+          decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text, structuredResponse: turn.result.structured, riskPlanCorrections: correction + 1 },
         });
-        const corrected = extractTicketPopulationProposal(turn.result.text);
+        const corrected = correctedPopulation.proposal;
         assertRiskPlanOnlyCorrection(proposal, corrected, err.repairableRiskSliceRefs);
         proposal = corrected;
+        if (!turn.result.selectedDispatch) throw new Error("Ticket population correction has no sealed dispatch tuple");
+        // A correction is immutable lineage, never a rewrite of the terminal proposal.
         proposalArtifact = savePopulationProposalArtifact(dir, planningRecord.id, approvedPlan, proposal);
       }
     }
@@ -1621,6 +1623,7 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
   }
 }
 
+
 interface RepairRiskNotesOptions { project?: string; agent?: string; model?: string; effort?: string; fast?: boolean; apply?: boolean; yes?: boolean }
 
 /** Ask Ticket Maker for a reviewable, rollback-only repair of published tickets. */
@@ -1640,12 +1643,12 @@ export async function cmdRepairRiskNotesCli(opts: RepairRiskNotesOptions): Promi
       "You are Ticket Maker in read-only repair mode. Do not edit files.",
       "For every listed ticket, supply a concrete rollback or mitigation plan. Do not change any other field or add/remove tickets.",
       `Tickets requiring repair:\n${JSON.stringify(targets.map(ticket => ({ id: ticket.id, title: ticket.title, risk: ticket.risk, summary: ticket.summary, acceptance: ticket.acceptance, required_tests: ticket.required_tests })), null, 2)}`,
-      `Return exactly one JSON object between ${RISK_NOTE_REPAIR_START} and ${RISK_NOTE_REPAIR_END}: {"version":1,"tickets":[{"id":"T001","rollback":"Concrete reversal or mitigation steps."}]}.`,
-      "End with STEP_STATUS: done | summary=\"risk-note repair proposed\"",
+      `Submit the native risk-note-repair payload: {"version":1,"tickets":[{"id":"T001","rollback":"Concrete reversal or mitigation steps."}]}.`,
+
     ].join("\n\n");
-    const turn = await foreman.runInstruction(instruction);
+    const turn = await foreman.runInstruction(instruction, { output: riskNoteRepairOutput });
     if (turn.result.isError || (turn.status.kind !== "done" && turn.status.kind !== "plan_complete")) throw new Error(`Ticket Maker could not propose risk-plan repairs: ${turn.status.reason ?? turn.status.error ?? turn.result.text.slice(0, 300)}`);
-    const proposal = extractRiskNoteRepairProposal(turn.result.text);
+    const proposal = operationPayload<RiskNoteRepairProposal>(turn.result, riskNoteRepairOutput);
     const repaired = applyRiskNoteRepairProposal(current, proposal);
     for (const target of targets) console.log(`  ${target.id}: ${proposal.tickets.find(item => item.id === target.id)!.rollback.trim()}`);
     if (!opts.apply) { console.log("foreman tickets: preview only; rerun with `rafi tickets repair --risk-notes --apply` to write this exact class of change."); return; }

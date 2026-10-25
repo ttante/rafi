@@ -1,3 +1,4 @@
+import { parseHostIpc } from "rafi-spec";
 import { WorkflowDb } from "ai-foreman/workflow-db.js";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -30,9 +31,11 @@ export async function launchResumeStart(entry: string, args: string[], context?:
   if (gated) {
     startupTimer = setTimeout(() => child.kill("SIGTERM"), 15_000);
     child.on("message", value => {
-      if (!value || typeof value !== "object" || !("kind" in value) || value.kind !== "rafi-launch-registered") return;
+      const registered = parseHostIpc(value);
+      if (registered?.kind !== "rafi-launch-registered" || registered.token !== token || registered.pid !== child.pid) return;
+      if (!startupTimer) return;
       const db = new WorkflowDb(args[1]!);
-      try { db.acknowledgeBuildLaunchChild(owner!, token!, child.pid!); child.send("rafi-launch-ack"); clearTimeout(startupTimer); }
+      try { db.acknowledgeBuildLaunchChild(owner!, token!, child.pid!); child.send({ version: 1, kind: "rafi-launch-ack", token, pid: child.pid }); clearTimeout(startupTimer); startupTimer = undefined; }
       catch { child.kill("SIGTERM"); }
       finally { db.close(); }
     });

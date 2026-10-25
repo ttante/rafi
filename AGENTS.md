@@ -1,3 +1,11 @@
+## Context budget - VERY IMPORTANT - DO NOT IGNORE
+
+For commands likely to produce large output, save the full output under `/private/tmp`.
+Report a short success summary, or on failure show the error and relevant nearby lines.
+Search the saved log if more detail is needed.
+Do not print whole logs, lockfiles, generated files, config files, or session files unless necessary.
+
+
 <!-- graphify-freshness:start -->
 ## Graphify selective use and freshness
 

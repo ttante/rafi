@@ -12,6 +12,6 @@ Use this skill only at a safe action boundary. Produce staged structured output;
 - Do not include credentials, hidden reasoning, raw transcripts, or unbounded logs.
 - An ordinary summary is not a handoff request.
 
-For a host-requested handoff or a Builder-requested transfer, read [references/protocol-v1.md](references/protocol-v1.md). Use [references/manifest-v1.schema.json](references/manifest-v1.schema.json) as the exact staged-output schema.
+For a host-requested handoff or a Builder-requested transfer, read [references/protocol-v2.md](references/protocol-v2.md). The host-selected native JSON schema is authoritative; the old marker envelope is only a historical format.
 
 When substantial cross-file investigation warrants adopted graph evidence, follow the packaged `rafi-graph` skill. Reuse hosted packets when supplied; routine tests, bookkeeping, and handoff do not trigger refresh. Verify graph claims in source.

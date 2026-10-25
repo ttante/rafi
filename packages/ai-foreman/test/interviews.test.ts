@@ -68,7 +68,11 @@ test("interview records persist atomically, are ignored, and retain only redacte
     assert.equal(loaded.records[0]?.answers.brief, "Add labels");
     assert.match(loaded.records[0]?.failure?.summary ?? "", /token=<redacted>/);
     assert.doesNotMatch(loaded.records[0]?.failure?.summary ?? "", /secret-value/);
-    assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), ".rafi/interviews/\n");
+    assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), [
+      ".rafi/recovery.sqlite3", ".rafi/recovery.sqlite3-wal", ".rafi/recovery.sqlite3-shm",
+      ".rafi/cache/handoffs/", ".rafi/backups/work-admission-v4/", ".rafi/interviews/", "",
+    ].join("\n"));
+    assert.ok(existsSync(join(dir, ".rafi", "recovery.sqlite3")), "repair admission precedes the first interview write");
     assert.ok(existsSync(join(dir, INTERVIEW_DIRECTORY, `${record.id}.json`)));
   } finally {
     rmSync(dir, { recursive: true });

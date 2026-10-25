@@ -1,10 +1,11 @@
+import { workFixtureTurn, prepareFixtureAdapter } from "./helpers/nativeOutput.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { assertGraphConfig, assertGraphReadRequest, DEFAULT_GRAPH_CONFIG } from "rafi-spec";
+import { workReportOutput, assertGraphConfig, assertGraphReadRequest, DEFAULT_GRAPH_CONFIG } from "rafi-spec";
 import { adoptGraph, disableGraph, refreshGraph } from "../src/graph/maintenance.js";
 import { loadGraphConfig } from "../src/graph/config.js";
 import { captureGraphCorpus } from "../src/graph/corpus.js";
@@ -91,24 +92,24 @@ test("host graph requests preserve one logical action and refuse uncertain repla
     const prompts: string[] = [];
     const actions: string[] = [];
     const adapter = {
-      agent: "codex", sessionId: () => "session", sendTurn: async (text: string, policy?: {
-        logicalActionId?: string;
-      }) => {
+      agent: "codex", sessionId: () => "session", sendTurn: async (text: string, policy?: import("../src/adapters/types.js").TurnRequest) => {
         prompts.push(text);
         actions.push(policy?.logicalActionId ?? "");
-        return { text: prompts.length === 1 ? JSON.stringify({ kind: "rafi_graph_request", version: 1, requestId: "r1", operations: [{ operation: "query", query: "helper" }] }) : 'STEP_STATUS: done | summary="verified source"', isError: false, numTurns: 1, costUsd: 0, turnId: `turn-${prompts.length}` };
+        return { ...workFixtureTurn(policy, "session", "codex", prompts.length === 1
+          ? { kind: "graph-request", request: { kind: "rafi_graph_request", version: 1, requestId: "r1", operations: [{ operation: "query", query: "helper" }] } } : undefined), text: "Source verified" };
       }
     } as unknown as BuilderAdapter;
+    prepareFixtureAdapter(adapter, root);
     const context = graphContext(root, root, "implementation", "Implement admitted work", { operationId: "exchange", logicalTaskId: "assignment" });
-    const result = await sendGraphTurn(adapter, "Implement admitted work", context);
-    assert.match(result.text, /STEP_STATUS: done/);
+    const result = await sendGraphTurn(adapter, "Implement admitted work", context, { output: workReportOutput });
+    assert.equal(result.structured?.state, "candidate");
     assert.deepEqual(actions, ["assignment", "assignment"]);
     assert.match(prompts[1], /missing-graph/);
-    await assert.rejects(sendGraphTurn(adapter, "Implement admitted work", context), /cannot be replayed/);
+    await assert.rejects(sendGraphTurn(adapter, "Implement admitted work", context, { output: workReportOutput }), /cannot be replayed/);
     assert.equal(prompts.length, 2);
     const readonlyContext = graphContext(root, root, "final-qa", "repair", { operationId: "repair" });
-    await sendGraphTurn(adapter, "Protocol repair only", readonlyContext, { responseOnly: true });
-    assert.equal(prompts[2], "Protocol repair only");
+    await sendGraphTurn(adapter, "Protocol repair only", readonlyContext, { responseOnly: true, output: workReportOutput });
+    assert.match(prompts[2], /^Protocol repair only/);
   }
   finally {
     rmSync(root, { recursive: true, force: true });

@@ -105,6 +105,24 @@ export interface PlanApprovalBinding {
   workflowConsequenceDigest: string;
 }
 
+export interface FrozenWorkApprovalBinding { kind: "synthetic"; runId: string; workIds: string[]; admissionDigest: string; scopeRevision: string }
+/** Unticketed recovery binds existing authorizations, never a fabricated plan. */
+export function frozenWorkApprovalBinding(projectDir: string, runId: string, workIds: readonly string[]): FrozenWorkApprovalBinding {
+  if (!workIds.length || new Set(workIds).size !== workIds.length) throw new Error("Frozen work approval requires a unique nonempty work scope");
+  const db = new WorkflowDb(projectDir);
+  try {
+    const admissions = [...workIds].sort().map(id => db.assertAdmittedWork(runId, id));
+    if (admissions.some(admission => admission.kind !== "synthetic")) throw new Error("Frozen work approval cannot replace ticket plan approval");
+    return { kind: "synthetic", runId, workIds: [...workIds].sort(), admissionDigest: createHash("sha256").update(canonical(admissions)).digest("hex"), scopeRevision: buildScopeRevision(projectDir) };
+  } finally { db.close(); }
+}
+export function validateFrozenWorkApprovalBinding(projectDir: string, runId: string, workIds: readonly string[], binding: FrozenWorkApprovalBinding): { valid: true } | { valid: false; reason: string } {
+  try {
+    if (canonical(frozenWorkApprovalBinding(projectDir, runId, workIds)) !== canonical(binding)) return { valid: false, reason: "Frozen work authorization, scope or configuration changed" };
+    return { valid: true };
+  } catch (error) { return { valid: false, reason: String(error) }; }
+}
+
 /** Compute the exact host-owned inputs covered by a recovery plan approval. */
 export function planApprovalBinding(projectDir: string, ticketIds: readonly string[], consequences?: Record<string, unknown>): PlanApprovalBinding {
   const paths = resolveTicketPaths(loadTicketsConfig(projectDir), projectDir);

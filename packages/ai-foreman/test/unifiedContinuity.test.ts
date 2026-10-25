@@ -1,3 +1,6 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy, operationPayload } from "../src/structuredOperation.js";
+import { workReportOutput, qaVerdictOutput } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -5,7 +8,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
-import { parseQaResponseContract, type ContinuityDelta, type ProviderSessionRefV1, type ResolvedAgentSettings } from "rafi-spec";
+import { type ContinuityDelta, type ProviderSessionRefV1, type ResolvedAgentSettings } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, TurnResult } from "../src/adapters/types.js";
 import { ContinuityAdapter } from "../src/continuity.js";
 import { HANDOFF_ACCEPTED, HandoffAcceptanceError, HandoffLoopError, HandoffService } from "../src/handoffs.js";
@@ -18,6 +21,7 @@ import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { SessionUnavailableError } from "../src/adapters/sessionFailure.js";
 import { providerSessionKey } from "../src/sessionIdentity.js";
+import { assertActiveProviderDispatch } from "../src/structuredDispatchAuthority.js";
 
 const EMPTY_DELTA: ContinuityDelta = {
   version: 1,
@@ -41,16 +45,35 @@ class FakeAdapter implements BuilderAdapter {
   policy?: NativeAutoCompactionPolicy;
   constructor(
     private readonly id: string | undefined,
-    private readonly turns: TurnResult[] = [],
+    private readonly turns: Array<TurnResult & { nativeAlternative?: unknown; nativeContinuity?: unknown }> = [],
     private readonly usages: ContextUsage[] = [{ used: 10, maximum: 100, percentage: 10 }],
     private readonly compactResult: CompactResult = { ok: true },
     agent: "claude" | "codex" = "codex",
   ) { this.agent = agent; }
   async sendTurn(_text?: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
     this.turnPolicies.push(policy);
-    return this.turns.shift() ?? { text: `${HANDOFF_ACCEPTED}\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 };
+    const provided = this.turns.shift();
+    const response = provided ?? { text: `${HANDOFF_ACCEPTED}\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 };
+    if (!policy?.output || response.isError || response.structured) return response;
+    if (policy.output.operation === "handoff-acceptance") {
+      if (provided?.nativeAlternative) return nativeFixtureTurn(policy, this.id!, null, this.agent, provided.nativeAlternative, EMPTY_DELTA);
+      if (provided && !response.text.startsWith(`${HANDOFF_ACCEPTED}\n`)) return response;
+      const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(_text ?? "");
+      if (!match) throw new Error("Missing host handoff binding");
+      return { ...nativeFixtureTurn(policy, this.id!, { manifestDigest: match[1], generation: Number(match[2]), missingResources: [] }, this.agent, undefined, EMPTY_DELTA), text: response.text };
+    }
+    const payload = policy.output.operation === "session-initialization" ? { ready: true }
+      : policy.output.operation === "qa-verdict" ? { kind: "passed", coverage: null, verifiedInstructionIds: [] }
+      : { disposition: "modified", evidence: ["Fixture source inspection"], coverage: null, graphMaintenance: null };
+    return { ...nativeFixtureTurn(policy, this.id!, payload, this.agent, provided?.nativeAlternative, provided ? provided.nativeContinuity ?? null : EMPTY_DELTA), text: response.text, rawResponse: response.text };
+
   }
   sessionId(): string | undefined { return this.id; }
+  async prepareSession(): Promise<ProviderSessionRefV1> {
+    const ref = this.sessionRef();
+    if (!ref) throw new Error("Fixture has no prepared session");
+    return ref;
+  }
   sessionRef(): ProviderSessionRefV1 | undefined {
     return this.adoptedRef ?? (this.id ? {
       version: 1, provider: this.agent, sessionId: this.id, role: "builder", stream: "builder", generation: 0,
@@ -427,7 +450,7 @@ test("recovery handoff fails closed without a scoped successor identity", async 
   finally { persisted.close(); }
 });
 
-test("handoff acceptance gives a malformed acknowledgement one bounded correction turn", async () => {
+test("malformed native handoff acknowledgement retains ownership without a correction turn", async () => {
   const projectDir = root("rafi-handoff-correction-");
   const db = new WorkflowDb(projectDir);
   db.ensureRun("run-1");
@@ -440,20 +463,15 @@ test("handoff acceptance gives a malformed acknowledgement one bounded correctio
     { text: `${HANDOFF_ACCEPTED}\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 },
   ]);
 
-  const transfer = await new HandoffService(projectDir).transfer({
-    runId: "run-1", role: "builder", reason: "fresh boundary", predecessorSessionId: "session-1", compactionCount: 0, compactMaximum: 10,
-  }, async () => successor);
-
-  assert.equal(transfer.successorSessionId, "session-2");
-  assert.equal(successor.closed, false);
-  assert.equal(successor.turnPolicies.length, 2);
-  for (const policy of successor.turnPolicies) {
-    assert.equal(policy?.responseOnly, true);
-    assert.equal(policy?.purpose, "contract-acceptance");
-  }
+  const service = new HandoffService(projectDir);
+  const staged = service.stage({ runId: "run-1", role: "builder", reason: "boundary", predecessorSessionId: "session-1", compactionCount: 0, compactMaximum: 10 });
+  await assert.rejects(service.acceptStaged(staged, successor), HandoffAcceptanceError);
+  assert.equal(successor.turnPolicies.length, 1, "format failure never causes a second turn");
+  const after = new WorkflowDb(projectDir);
+  try { assert.equal(after.roleMutationLease("run-1", "builder")?.providerSessionId, "session-1"); } finally { after.close(); }
 });
 
-test("handoff acceptance validates the raw provider reply when a wrapper cleaned the continuity record", async () => {
+test("handoff acceptance uses the native payload when presentation has no acknowledgement", async () => {
   const projectDir = root("rafi-handoff-raw-response-");
   const db = new WorkflowDb(projectDir);
   db.ensureRun("run-1");
@@ -461,10 +479,9 @@ test("handoff acceptance validates the raw provider reply when a wrapper cleaned
   db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 });
   db.claimInitialRoleLease("run-1", "builder", "session-1");
   db.close();
-  const raw = `${HANDOFF_ACCEPTED}\n${MARKER}`;
-  const successor = new FakeAdapter("session-2", [
-    { text: HANDOFF_ACCEPTED, rawResponse: raw, cleanedResponse: HANDOFF_ACCEPTED, isError: false, numTurns: 1, costUsd: 0 },
-  ]);
+  const successor = new FakeAdapter("session-2");
+  const send = successor.sendTurn.bind(successor);
+  successor.sendTurn = async (instruction, policy) => ({ ...await send(instruction, policy), text: "Presentation has no acknowledgement or continuity suffix", rawResponse: "Unrelated human prose" });
 
   const transfer = await new HandoffService(projectDir).transfer({
     runId: "run-1", role: "builder", reason: "wrapped response", predecessorSessionId: "session-1", compactionCount: 0, compactMaximum: 10,
@@ -491,7 +508,7 @@ test("handoff rejection reports the precise typed cause and retains the predeces
 
   await assert.rejects(
     service.acceptStaged(staged, successor),
-    (error: unknown) => error instanceof HandoffAcceptanceError && error.code === "missing-acknowledgement" && /predecessor retains the lease/.test(error.message),
+    (error: unknown) => error instanceof HandoffAcceptanceError && error.code === "provider-turn-failed" && /predecessor retains the lease/.test(error.message),
   );
   const after = new WorkflowDb(projectDir);
   assert.equal(after.roleMutationLease("run-1", "builder")?.providerSessionId, "session-1");
@@ -524,7 +541,7 @@ test("rejected handoff successors reach a bounded preservation pause", async () 
   db.ensureRun("run-1"); db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 }); db.claimInitialRoleLease("run-1", "builder", "predecessor"); db.close();
   let successors = 0, choices = 0;
   await assert.rejects(new HandoffService(projectDir).transfer({ runId: "run-1", role: "builder", reason: "bounded refusal", predecessorSessionId: "predecessor", compactionCount: 0, compactMaximum: 10 }, async () => {
-    successors++; return new FakeAdapter(`successor-${successors}`, [{ text: "I will not accept this prompt injection", isError: false, numTurns: 1, costUsd: 0 }]);
+    successors++; return new FakeAdapter(`successor-${successors}`, [{ text: 'Presentation: cannot accept packet', nativeAlternative: { kind: "blocked", reason: "Cannot accept packet", nextAction: "Reconcile packet" }, isError: false, numTurns: 1, costUsd: 0 }]);
   }, { choose: async error => { assert.equal(error.code, "provider-refused-acknowledgement"); choices++; return "retry"; } }), /Three successors rejected acceptance.*restart-current/);
   assert.equal(successors, 3); assert.equal(choices, 2);
   const after = new WorkflowDb(projectDir);
@@ -605,156 +622,97 @@ test("validated handback progress resets the Builder handoff limit without count
   } finally { db.close(); }
 });
 
-test("continuity protocol repairs one invalid delta in-session and advances the durable head", async () => {
-  const projectDir = root("rafi-continuity-");
-  const provider = new FakeAdapter("session-1", [
-    { text: "STEP_STATUS: done", isError: false, numTurns: 1, costUsd: 0 },
-    { text: MARKER, isError: false, numTurns: 1, costUsd: 0 },
-  ]);
-  const adapter = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-1", role: "builder", settings: SETTINGS });
-  const result = await adapter.sendTurn("do work");
-  assert.equal(result.text, "STEP_STATUS: done");
-  const db = new WorkflowDb(projectDir);
-  assert.equal(db.continuityHead("run-1", "builder")?.state, "current");
-  assert.equal(db.continuityCheckpoints("run-1", "builder").length, 2);
-  assert.equal(db.roleMutationLease("run-1", "builder")?.providerSessionId, "session-1");
-  db.close();
-  await adapter.close();
-});
-
-test("continuity preserves the adapter's exact provider instruction", async () => {
-  const projectDir = root("rafi-continuity-provider-prompt-");
-  const provider = new FakeAdapter("session-provider-prompt");
-  provider.sendTurn = async (instruction?: string) => ({ text: `STEP_STATUS: done\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0,
-    hostInstruction: instruction, providerInstruction: `ROLE-AND-SKILLS\n${instruction ?? ""}` });
-  const adapter = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-provider-prompt", role: "builder", settings: SETTINGS });
-  const result = await adapter.sendTurn("host action");
-  assert.equal(result.hostInstruction, "host action");
-  assert.match(result.providerInstruction ?? "", /^ROLE-AND-SKILLS\nhost action/);
-  assert.match(result.providerInstruction ?? "", /RAFI_CONTINUITY_DELTA/);
-  await adapter.close();
-});
-
-test("double-invalid continuity uses a bundled handoff and moves the lease only after successor acceptance", async () => {
-  const projectDir = root("rafi-continuity-handoff-");
-  const predecessor = new FakeAdapter("session-1", [
-    { text: "STEP_STATUS: done", isError: false, numTurns: 1, costUsd: 0 },
-    { text: "still not a continuity delta", isError: false, numTurns: 1, costUsd: 0 },
-  ]);
-  const successor = new FakeAdapter("session-2");
-  const adapter = new ContinuityAdapter({
-    adapter: predecessor, projectDir, runId: "run-1", role: "builder", settings: SETTINGS,
-    recoverWithHandoff: async ({ reason, reconstruction }) => {
-      const transfer = await new HandoffService(projectDir).transfer({
-        runId: "run-1", role: "builder", reason, predecessorSessionId: "session-1",
-        allowNonCurrentContinuity: true, roleState: { reconstruction },
-        compactionCount: 0, compactMaximum: 10,
-      }, async () => successor);
-      return transfer.successor;
-    },
-  });
-  const result = await adapter.sendTurn("do work");
-  assert.equal(result.text, "STEP_STATUS: done");
-  assert.equal(predecessor.closed, true);
-  const db = new WorkflowDb(projectDir);
-  assert.equal(db.continuityHead("run-1", "builder")?.state, "current");
-  assert.equal(db.handoffs("run-1").at(-1)?.state, "accepted");
-  assert.equal(db.roleMutationLease("run-1", "builder")?.providerSessionId, "session-2");
-  db.close();
-  await adapter.close();
-});
-
-test("legacy continuity successor fallback requires an exact first-line acceptance marker", async () => {
-  const projectDir = root("rafi-continuity-exact-acceptance-");
-  const predecessor = new FakeAdapter("session-1", [
-    { text: "STEP_STATUS: done", isError: false, numTurns: 1, costUsd: 0 },
-    { text: "still not a continuity delta", isError: false, numTurns: 1, costUsd: 0 },
-  ]);
-  const successor = new FakeAdapter("session-2", [
-    { text: `HANDOFF_ACCEPTED extra text\n${MARKER}`, isError: false, numTurns: 1, costUsd: 0 },
-  ]);
-  const adapter = new ContinuityAdapter({
-    adapter: predecessor, projectDir, runId: "run-1", role: "builder", settings: SETTINGS,
-    createSuccessor: async () => successor,
-  });
-
-  await assert.rejects(adapter.sendTurn("do work"), /fresh successor did not validate/);
-  assert.equal(successor.closed, true);
-  await adapter.close();
-});
-
-test("QA single-turn continuity errors remain typed and preserve the completed provider evidence", async () => {
-  const projectDir = root("rafi-qa-continuity-error-");
-  const original = { text: 'STEP_STATUS: qa_pass | summary="reviewed"', isError: false, numTurns: 1, costUsd: 0, turnId: "observed-review" };
-  const adapter = new FakeAdapter("qa-missing-marker", [original]);
-  adapter.adoptSessionRef({ ...adapter.sessionRef()!, role: "qa", stream: "qa", cwd: projectDir, configRoot: projectDir });
-  let dispatchedInstruction = "";
-  const send = adapter.sendTurn.bind(adapter);
-  adapter.sendTurn = async (...args: unknown[]) => { dispatchedInstruction = String(args[0]); return send(); };
-  const wrapper = new ContinuityAdapter({ projectDir, runId: "run", role: "qa", settings: { ...SETTINGS, role: "qa" }, adapter, durableSingleTurn: true });
+for (const role of ["builder", "qa"] as const) test(`${role} missing composed continuity is rejected before confirmation without repair or handoff`, async () => {
+  const projectDir = root("rafi-native-continuity-invalid-");
+  const text = role === "qa" ? 'STEP_STATUS: qa_pass | summary="reviewed"' : "STEP_STATUS: done";
+  const provider = new FakeAdapter("session-1", [{ text, isError: false, numTurns: 1, costUsd: 0 }]);
+  provider.adoptSessionRef({ ...provider.sessionRef()!, role });
+  const wrapper = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-1", role, settings: { ...SETTINGS, role }, durableSingleTurn: role === "qa" });
   try {
-    const result = await wrapper.sendTurn("review current source");
-    assert.equal(result.isError, true);
-    assert.deepEqual(result.continuityErrors, ["missing continuity marker"]);
-    assert.match(dispatchedInstruction, /required even when the review requests only a report or status/);
-    assert.match(dispatchedInstruction, /before RAFI_QA_FAILURE_REPORT_START/);
-    assert.equal(result.rawResponse, original.text);
-    assert.equal(result.turnId, original.turnId);
-    assert.equal(result.failure, undefined);
+    const result = await wrapper.sendTurn("perform assigned work", nativePolicy(role === "qa" ? qaVerdictOutput : workReportOutput));
+    // The session requires continuity, so a null delta fails native acceptance
+    // instead of being confirmed and then stranding postprocessing.
+    assert.equal(result.isError, true); assert.equal(result.rawResponse, text);
+    assert.equal(result.structured?.state, "rejected");
+    if (result.structured?.state === "rejected") { assert.equal(result.structured.reason, "invalid-contract"); assert.match(result.structured.detail, /continuity delta/); }
+    assert.equal(provider.turnPolicies.length, 1);
+    const db = new WorkflowDb(projectDir);
+    try { assert.equal(db.handoffs("run-1").length, 0); assert.equal(db.pendingStructuredPostprocessing("run-1").length, 0, "rejected transport never enters domain postprocessing");
+      assert.equal(db.operations("run-1").find(operation => operation.kind === "provider-dispatch")?.status, "uncertain"); assert.equal(db.roleMutationLease("run-1", role)?.providerSessionId, "session-1"); } finally { db.close(); }
+  } finally { await wrapper.close(); }
+});
+
+test("native continuity preserves the exact provider instruction and payload without suffix repair", async () => {
+  const projectDir = root("rafi-native-continuity-");
+  const provider = new FakeAdapter("session-1");
+  provider.sendTurn = async (instruction, policy) => ({ ...nativeFixtureTurn(policy, "session-1", { disposition: "already-satisfied", evidence: ["token: absent"], coverage: null, graphMaintenance: null }, "codex", undefined, EMPTY_DELTA), hostInstruction: instruction, providerInstruction: `ROLE-AND-SKILLS\n${instruction}` });
+  const wrapper = new ContinuityAdapter({ adapter: provider, projectDir, runId: "run-1", role: "builder", settings: SETTINGS });
+  try {
+    const result = await wrapper.sendTurn("host action", nativePolicy(workReportOutput));
+    assert.equal(result.isError, false); assert.equal(result.hostInstruction, "host action");
+    assert.match(result.providerInstruction!, /^ROLE-AND-SKILLS\nhost action/); assert.doesNotMatch(result.providerInstruction!, /RAFI_CONTINUITY_DELTA/);
+    assert.deepEqual(result.continuity, EMPTY_DELTA);
+    assert.equal(operationPayload<{ disposition: string }>(result, workReportOutput).disposition, "already-satisfied");
     const db = new WorkflowDb(projectDir);
     try {
-      assert.equal(db.unresolvedRoleDispatches("run", "qa").length, 0);
-      assert.equal(db.continuityHead("run", "qa")?.state, "current", "the valid baseline remains available for a fresh handoff");
+      assert.equal(db.continuityHead("run-1", "builder")?.state, "current");
+      const event = db.continuityEvents("run-1").find(item => item.kind === "provider_response_received")!;
+      const response = db.replayStructuredDispatch((event.payload as { dispatchId: string }).dispatchId, workReportOutput);
+      assert.equal(response.result.kind, "completed");
+      if (response.result.kind === "completed") assert.deepEqual(response.result.payload.evidence, ["token: absent"]);
     } finally { db.close(); }
   } finally { await wrapper.close(); }
 });
 
-
-test("QA continuity can precede the failure envelope without breaking report validation", async () => {
-  const projectDir = root("rafi-qa-continuity-format-");
-  const report = { version: 1, summary: "Missing guard", checks_run: [{ check: "inspection", outcome: "failed", evidence: "guard absent" }],
-    findings: [{ id: "F1", requirement: "guard", locations: ["source.ts"], problem: "guard absent", evidence: "inspection", expected: "guard present", fix_direction: "add guard", verification: ["inspect source"] }], observations: [] };
-  const text = `${MARKER}\nRAFI_QA_FAILURE_REPORT_START\n${JSON.stringify(report)}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="Missing guard"`;
-  const adapter = new FakeAdapter("qa-complete-marker", [{ text, isError: false, numTurns: 1, costUsd: 0 }]);
-  adapter.adoptSessionRef({ ...adapter.sessionRef()!, role: "qa", stream: "qa", cwd: projectDir, configRoot: projectDir });
-  const wrapper = new ContinuityAdapter({ projectDir, runId: "run", role: "qa", settings: { ...SETTINGS, role: "qa" }, adapter, durableSingleTurn: true });
-  try {
-    const result = await wrapper.sendTurn("return the exact QA report");
-    assert.equal(result.isError, false);
-    assert.equal(parseQaResponseContract(result.text).valid, true);
-    assert.equal(result.rawResponse, text);
-    assert.doesNotMatch(result.text, /RAFI_CONTINUITY_DELTA/);
-  } finally { await wrapper.close(); }
+test("continuity refuses an uncontracted dispatch before provider work", async () => {
+  const provider = new FakeAdapter("session-1");
+  const wrapper = new ContinuityAdapter({ adapter: provider, projectDir: root("rafi-no-contract-"), runId: "run", role: "builder", settings: SETTINGS });
+  try { await assert.rejects(wrapper.sendTurn("work"), /native.*contract/i); assert.equal(provider.turnPolicies.length, 0); } finally { await wrapper.close(); }
 });
 
-for (const role of ["builder", "qa"] as const) for (const outcome of ["valid", "invalid", "error", "unknown"] as const) test(`fresh recovery validates new ownership before context probes: ${role}/${outcome}`, async () => {
+for (const provider of ["codex", "claude"] as const) for (const role of ["builder", "qa"] as const) for (const outcome of ["valid", "invalid", "error", "unknown", "no-decision", "stale-decision", "owner-drift", "session-drift", "worktree-drift", "blocked"] as const) test(`fresh recovery validates new ownership before context probes: ${provider}/${role}/${outcome}`, async () => {
   const { rmSync } = await import("node:fs");
   const projectDir = root("rafi-fresh-owner-");
   const db = new WorkflowDb(projectDir);
   try {
-    db.claimInitialRoleLease("run", role, { ...new FakeAdapter("old").sessionRef()!, role });
+    const predecessor = { ...new FakeAdapter("old").sessionRef()!, provider, role, stream: role, cwd: projectDir };
+    db.claimInitialRoleLease("run", role, predecessor);
+    const decision = { version: 1 as const, mode: "fresh-recovery-only" as const, runId: "run", role,
+      tickets: [], authoritativeStateDigest: "fixture", settings: { ...SETTINGS, make: provider, role }, worktree: projectDir,
+      predecessorSessionId: "old", predecessorSessionRef: predecessor, planUpdateApproval: "review" as const, decidedAt: new Date().toISOString() };
+    if (outcome !== "no-decision") db.recordRecoveryDecision(decision);
     if (outcome === "unknown") {
       db.planOperation({ runId: "run", idempotencyKey: "old-dispatch", kind: "provider-dispatch", intent: { role } });
       db.updateOperation("old-dispatch", "in_progress");
       db.updateOperation("old-dispatch", "uncertain");
     }
     let turns = 0;
-    const adapter = new FakeAdapter("fresh");
-    adapter.adoptSessionRef({ ...adapter.sessionRef()!, role });
+    const adapter = new FakeAdapter("fresh", [], undefined, undefined, provider);
+    adapter.adoptSessionRef({ ...adapter.sessionRef()!, role, stream: role, cwd: outcome === "worktree-drift" ? join(projectDir, "foreign") : projectDir });
+    const prepare = adapter.prepareSession.bind(adapter);
+    adapter.prepareSession = async () => {
+      if (outcome === "stale-decision") db.recordRecoveryDecision({ ...decision, decidedAt: new Date(Date.now() + 1000).toISOString() });
+      return prepare();
+    };
     adapter.sendTurn = async (...args: unknown[]) => {
+      assertActiveProviderDispatch(args[1] as Parameters<BuilderAdapter["sendTurn"]>[1] & {}, args[0] as string, provider, adapter.sessionRef());
       turns++;
       assert.equal((args[1] as { responseOnly?: boolean }).responseOnly, true);
-      return { text: outcome === "invalid" ? "missing continuity" : MARKER, isError: outcome === "error", numTurns: 1, costUsd: 0 };
+      if (outcome === "owner-drift") db.moveRoleLeaseAfterValidatedRecovery("run", role, { ...predecessor, sessionId: "other" }, "concurrent recovery");
+      if (outcome === "session-drift") adapter.adoptSessionRef({ ...adapter.sessionRef()!, generation: 1 });
+      return { ...nativeFixtureTurn(args[1] as Parameters<BuilderAdapter["sendTurn"]>[1], "fresh", { ready: true }, provider,
+        outcome === "blocked" ? { kind: "blocked", reason: "cannot initialize", nextAction: "inspect", branchDependency: null } : undefined,
+        outcome === "invalid" ? null : EMPTY_DELTA), isError: outcome === "error" };
     };
-    const continuous = new ContinuityAdapter({ adapter, projectDir, runId: "run", role, settings: { ...SETTINGS, role }, durableSingleTurn: role === "qa", replaceRecoveryLeaseAfterCheckpoint: true });
+    const continuous = new ContinuityAdapter({ adapter, projectDir, runId: "run", role, settings: { ...SETTINGS, make: provider, role }, durableSingleTurn: role === "qa", replaceRecoveryLeaseAfterCheckpoint: true });
     if (outcome === "valid") {
       await continuous.validateFreshRecovery();
       assert.equal(db.roleMutationLease("run", role)?.providerSessionId, "fresh");
       await continuous.validateFreshRecovery(); assert.equal(turns, 1);
     } else {
-      await assert.rejects(continuous.validateFreshRecovery(), /checkpoint|completion/);
-      assert.equal(db.roleMutationLease("run", role)?.providerSessionId, "old");
-      assert.equal(turns, outcome === "unknown" ? 0 : 1);
+      await assert.rejects(continuous.validateFreshRecovery(), /checkpoint|completion|recovery decision|predecessor changed/);
+      assert.equal(db.roleMutationLease("run", role)?.providerSessionId, outcome === "owner-drift" ? "other" : "old");
+      assert.equal(turns, ["unknown", "no-decision", "stale-decision", "worktree-drift"].includes(outcome) ? 0 : 1);
       assert.equal(adapter.closed, true, "failed validation must close the unused replacement");
     }
     await continuous.close();
@@ -779,4 +737,30 @@ test("legacy missing threshold waits until 65 percent while explicit 50 stays co
   assert.equal(adapter.compactCalls, 1);
   const explicit = new ThresholdCompactionController({ projectDir: root("rafi-explicit-compact-"), runId: "explicit-run", role: "builder", initialSettings: SETTINGS });
   assert.equal(explicit.effectiveSettings().auto_compact_threshold_percent, 50);
+});
+
+test("embedded handoff resources survive restart and arrive with exact verified bytes", async () => {
+  const projectDir = root("rafi-embedded-handoff-");
+  const db = new WorkflowDb(projectDir);
+  db.ensureRun("run-1");
+  db.publishContinuityCheckpoint({ runId: "run-1", role: "builder", delta: EMPTY_DELTA, authoritativeStateRevision: 1 });
+  db.close();
+  const service = new HandoffService(projectDir);
+  const content = "Exact remaining work αβγ\nDo not invent prior completion.";
+  const input = { runId: "run-1", role: "builder" as const, reason: "boundary", compactionCount: 0, compactMaximum: 10,
+    resources: [{ label: "remaining-work", content, authoritative: true, requiredForRecovery: true, mediaType: "text/plain" }] };
+  assert.throws(() => service.stage({ ...input, resources: [{ ...input.resources[0]!, digest: "a".repeat(64) }] }), /digest mismatch/);
+  assert.throws(() => service.stage({ ...input, resources: [{ ...input.resources[0]!, bytes: 1 }] }), /byte count mismatch/);
+  const staged = service.stage(input);
+  const restored = new HandoffService(projectDir).inspect("run-1", staged.manifest.generation);
+  const successor = new FakeAdapter("successor");
+  const send = successor.sendTurn.bind(successor);
+  successor.sendTurn = async (prompt, policy) => {
+    const data = prompt!.split("\n\n").find(line => line.startsWith('{"continuityPacket"'))!;
+    const packet = JSON.parse(data);
+    assert.deepEqual(packet.embeddedResources, [{ label: "remaining-work", digest: createHash("sha256").update(content).digest("hex"), encoding: "utf8", content }]);
+    return send(prompt, policy);
+  };
+  const accepted = await service.acceptStaged({ ...restored, cacheDirectory: staged.cacheDirectory }, successor);
+  assert.equal(accepted.successorSessionId, "successor");
 });

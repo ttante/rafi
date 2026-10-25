@@ -2,7 +2,7 @@
 
 Rafi is an interview-led engineering CLI for Claude Code and Codex. It configures a project, turns ideas into tickets, and drives implementation with QA.
 
-Install Node.js 20+ and Rafi:
+Install Node.js 24 and Rafi:
 
 ```sh
 npm install -g @rafi-ai/cli

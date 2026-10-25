@@ -1,3 +1,6 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy } from "../src/structuredOperation.js";
+import { workReportOutput } from "rafi-spec";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, realpathSync } from "node:fs";
@@ -30,7 +33,7 @@ function fixture(proven=false,returnedTicket="T1",qaState?:"passed"|"completed"|
   const assignment=beginBuildAssignment(root,"run","T1",root,"Implement T1");writeFileSync(join(root,"source.txt"),"preserved guard\n");
   const session={version:1 as const,provider:"codex" as const,sessionId:"scoped-builder",role:"builder" as const,stream:"builder",generation:0,cwd:realpathSync(root),configRoot:realpathSync(root),ticketId:"T1",source:"observed" as const,createdAt:new Date().toISOString(),validatedAt:new Date().toISOString()};
   db=new WorkflowDb(root);db.recordSession("run","builder","builder",session,"started",{role:"builder",source:"project",make:"codex",model:"default",reasoning:"default",fast:false,session_strategy:"compact",settings_revision:1,display_session_cost:false,auto_compact_threshold_percent:65,compact_maximum:1});db.close();
-  finishBuildAssignment(root,assignment,{text:`STEP_STATUS: done | ticket="${returnedTicket}" summary="guard"`,providerMetadata:{provider:"codex",sessionId:session.sessionId,sessionRef:session},isError:false,numTurns:1,costUsd:0,turnId:"builder-turn"},{kind:"done",ticket:returnedTicket});
+  finishBuildAssignment(root,assignment,{...nativeFixtureTurn(nativePolicy(workReportOutput, { dispatchId: "builder-turn" }),session.sessionId,{ disposition: "modified", evidence: ["source.txt"], coverage: null, graphMaintenance: null },"codex"),text:`STEP_STATUS: done | ticket="${returnedTicket}" summary="guard"`,providerMetadata:{provider:"codex",sessionId:session.sessionId,sessionRef:session},isError:false,numTurns:1,costUsd:0,turnId:"builder-turn"},{kind:"done",ticket:returnedTicket});
   db=new WorkflowDb(root);db.beginQaReviewAttempt({attemptId:"review",runId:"run",ticketId:"T1",reviewNumber:1,cycle:1,remediationGeneration:0,sourceDigest:"legacy-source"});
   let certificateId: string | undefined;
   if(qaState) {

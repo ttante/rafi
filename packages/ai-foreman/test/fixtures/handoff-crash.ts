@@ -1,3 +1,6 @@
+import { nativeFixtureTurn } from "../helpers/nativeOutput.js";
+import { nativePolicy } from "../../src/structuredOperation.js";
+import { workReportOutput } from "rafi-spec";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -20,15 +23,20 @@ class Adapter implements BuilderAdapter {
   constructor(id: string, generation: number) { this.ref = { version: 1, provider: "codex", sessionId: id, role: "builder", stream: "builder", generation, cwd: root, configRoot: root, workspaceIdentity: "fixture", source: "observed", createdAt: new Date(0).toISOString(), validatedAt: new Date(0).toISOString() }; }
   sessionId() { return this.ref.sessionId; }
   sessionRef() { return this.ref; }
+  async prepareSession() { return this.ref; }
   adoptSessionRef(ref: ProviderSessionRefV1) { this.ref = ref; }
-  async sendTurn(instruction: string) {
+  async sendTurn(instruction: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]) {
     // The strict acceptance protocol deliberately precedes the handoff packet,
     // so acceptance is no longer the first text in the host instruction.
-    if (!instruction.includes("Accept this validated Rafi handoff")) {
+    if (policy?.output?.operation === "work-report") {
       writeFileSync(join(root, "mutation-observed.txt"), "one dispatch\n");
       if (phase === "dispatched") kill();
     }
-    return { text: `HANDOFF_ACCEPTED\nRAFI_CONTINUITY_DELTA: ${JSON.stringify(delta)}`, isError: false, numTurns: 1, costUsd: 0 };
+    const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(instruction);
+    const payload = policy?.output?.operation === "handoff-acceptance"
+      ? { manifestDigest: match![1], generation: Number(match![2]), missingResources: [] }
+      : { disposition: "modified", evidence: ["mutation-observed.txt"], coverage: null, graphMaintenance: null };
+    return nativeFixtureTurn(policy, this.ref.sessionId, payload, "codex", undefined, delta);
   }
   async *events(): AsyncIterable<BuilderEvent> {}
   async close() { if (phase === "adopting" && this.ref.sessionId === "old") kill(); }
@@ -44,17 +52,25 @@ db.recordBranchResumeSession("run", { ticket: "T001", branch: "feature/unit", ba
 db.close();
 const beforeAccept = WorkflowDb.prototype.acceptHandoff;
 if (phase === "before-acceptance") WorkflowDb.prototype.acceptHandoff = function(...args) { kill(); return beforeAccept.apply(this, args); };
-const beforeReceipt = WorkflowDb.prototype.updateOperation;
-if (phase === "receipt-before-commit") WorkflowDb.prototype.updateOperation = function(...args) { const result = beforeReceipt.apply(this, args); if (args[1] === "confirmed") kill(); return result; };
+const hasWorkReceipt = (db: WorkflowDb) => db.continuityEvents("run").some(event => event.kind === "provider_response_received" &&
+  (db.operation((event.payload as { dispatchId: string }).dispatchId)?.intent as { operation?: string })?.operation === "work-report");
+const beforeEvent = WorkflowDb.prototype.appendContinuityEvent;
+if (phase === "receipt-before-commit") WorkflowDb.prototype.appendContinuityEvent = function(...args) {
+  const result = beforeEvent.apply(this, args);
+  if (args[0].kind === "provider_response_received" && hasWorkReceipt(this)) kill();
+  return result;
+};
 const beforeAtomic = WorkflowDb.prototype.atomic;
 if (phase === "completed-before-checkpoint") WorkflowDb.prototype.atomic = function<T>(work: () => T): T {
   const result = beforeAtomic.call(this, work) as T;
-  if (this.operations("run").some(operation => operation.kind === "provider-dispatch" && operation.status === "confirmed")) kill();
+  const confirmed = this.operations("run").some(operation => operation.status === "confirmed" &&
+    (operation.intent as { operation?: string }).operation === "work-report");
+  if (hasWorkReceipt(this) && confirmed) kill();
   return result;
 };
 const beforeCheckpoint = WorkflowDb.prototype.publishContinuityCheckpoint;
 if (phase === "event-before-checkpoint") WorkflowDb.prototype.publishContinuityCheckpoint = function(...args) {
-  if (this.operations("run").some(operation => operation.kind === "provider-dispatch" && operation.status === "confirmed")) kill();
+  if (hasWorkReceipt(this)) kill();
   return beforeCheckpoint.apply(this, args);
 };
 const wrapped = new ContinuityAdapter({ adapter: old, projectDir: root, runId: "run", role: "builder", settings });
@@ -62,5 +78,5 @@ await new HandoffService(root).transfer({ runId: "run", role: "builder", reason:
 if (phase === "accepted") kill();
 await wrapped.adoptValidatedSuccessor(next);
 if (phase === "adopted") kill();
-await wrapped.sendTurn("Implement T001 once");
+await wrapped.sendTurn("Implement T001 once", nativePolicy(workReportOutput));
 throw new Error(`fixture failed to reach crash phase ${phase}`);

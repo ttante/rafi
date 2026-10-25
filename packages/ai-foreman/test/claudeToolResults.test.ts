@@ -3,6 +3,27 @@ import assert from "node:assert/strict";
 import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { AsyncQueue } from "../src/util/asyncQueue.js";
 import type { BuilderAdapterOptions, BuilderEvent } from "../src/adapters/types.js";
+import { existsSync, statSync } from "node:fs";
+
+for (const startupFailure of [false, true]) test(`Claude owns a real private read-only scratch directory and cleans it on ${startupFailure ? "startup failure" : "close"}`, async () => {
+  const stream = new AsyncQueue<unknown>();
+  const Constructor = ClaudeAdapter as unknown as new (opts: BuilderAdapterOptions, query: (input: any) => unknown) => ClaudeAdapter;
+  let scratch = "";
+  const create = () => new Constructor({ cwd: "/tmp/project-without-sibling-scratch", sessionRole: "ticket-maker", sandboxMode: "read-only", permission: async () => ({ behavior: "deny", message: "fixture" }) }, input => {
+    scratch = input.options.env.TMPDIR;
+    assert.ok(existsSync(scratch));
+    assert.notEqual(scratch, "/tmp/scratch");
+    if (process.platform !== "win32") assert.equal(statSync(scratch).mode & 0o777, 0o700);
+    assert.deepEqual(input.options.sandbox.filesystem.allowWrite, [scratch]);
+    assert.ok(input.options.sandbox.filesystem.denyWrite.includes("/tmp/project-without-sibling-scratch"));
+    if (startupFailure) throw new Error("SDK startup fixture failure");
+    return { [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](), interrupt: async () => stream.close() };
+  });
+  if (startupFailure) assert.throws(create, /SDK startup fixture failure/);
+  else await create().close();
+  assert.ok(scratch);
+  assert.equal(existsSync(scratch), false);
+});
 
 test("Claude results retain tool identity, classify uncertainty, and coalesce duplicate results", async () => {
   const stream = new AsyncQueue<unknown>();
@@ -13,7 +34,7 @@ test("Claude results retain tool identity, classify uncertainty, and coalesce du
   const consume = (async () => { for await (const event of adapter.events()) events.push(event); })();
   try {
     const turn = adapter.sendTurn("Scripted fixture");
-    for (const [id, text, failed] of [["elapsed", "TIME_ELAPSED", true], ["timeout", "command timed out", true], ["failure", "command exited 1", true], ["ok", "done", false], ["mixed", "TIME_ELAPSED: command exited 1", true], ["provisional", "gateway result pending", true], ["elapsed", "command exited 1", true], ["host-denial", "Foreman policy: this action needs human approval (command not allow-listed) and was NOT performed. Do not retry it.", true], ["approval-pending", "approval pending", true]] as const) {
+    for (const [id, text, failed] of [["elapsed", "TIME_ELAPSED", true], ["timeout", "command timed out", true], ["failure", "command exited 1", true], ["ok", "done", false], ["mixed", "TIME_ELAPSED: command exited 1", true], ["provisional", "gateway result pending", true], ["elapsed", "command exited 1", true], ["host-denial", "Foreman policy: this action needs human approval (command not allow-listed) and was NOT performed. Do not retry it.", true], ["approval-pending", "approval pending", true], ["read-output-limit", "File content (25091 tokens) exceeds maximum allowed tokens (25000). Use offset and limit parameters to read a smaller slice.", true]] as const) {
       if (id !== "elapsed" || text === "TIME_ELAPSED") stream.push({ type: "assistant", message: { content: [{ type: "tool_use", id, name: "Bash", input: { command: "test" } }] } });
       const result = { type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: text, is_error: failed }] } };
       stream.push(result); stream.push(result);
@@ -22,9 +43,9 @@ test("Claude results retain tool identity, classify uncertainty, and coalesce du
     await turn;
   } finally { await adapter.close(); await consume; }
   const results = events.filter((event): event is Extract<BuilderEvent, { kind: "tool" }> => event.kind === "tool" && event.lifecycle === "completed");
-  assert.equal(results.length, 9);
+  assert.equal(results.length, 10);
   assert.ok(results.every(event => event.name === "Bash"));
-  assert.deepEqual(results.map(event => event.status), ["unknown", "timed_out", "failed", "completed", "failed", "unknown", "failed", "denied", "unknown"]);
+  assert.deepEqual(results.map(event => event.status), ["unknown", "timed_out", "failed", "completed", "failed", "unknown", "failed", "denied", "unknown", "failed"]);
   assert.equal(results[0]?.completionKnown, false);
   const diagnostic = traces.find(trace => trace.phase === "provider-tool-result" && trace.toolCallId === "provisional");
   assert.equal(diagnostic?.classification, "unknown");

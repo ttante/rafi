@@ -12,6 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
+        node: [24]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -21,9 +22,11 @@ jobs:
           version: 10.2.1
       - uses: actions/setup-node@v4
         with:
-          node-version: 20.19.0
+          node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Runtime and native SQLite smoke
+        run: node scripts/check-native-runtime.mjs
       - name: Build workspace dependencies in order
         shell: bash
         run: |
@@ -34,6 +37,12 @@ jobs:
           pnpm --filter @rafi-ai/cli build
       - name: Typecheck
         run: pnpm typecheck
+      - name: Exact compiler authority and registry baseline
+        run: pnpm check:comms-inventory
+      - name: Communication contract and legacy regression preflight
+        run: pnpm test:comms-preflight
+      - name: Native transport, operation acceptance and host evidence contracts
+        run: node --import tsx --test --test-concurrency=1 packages/spec/test/structuredIdentity.test.ts packages/spec/test/hostIpc.test.ts packages/ai-foreman/test/structuredTransport.test.ts packages/ai-foreman/test/structuredOperation.test.ts packages/ai-foreman/test/probeIpc.test.ts packages/ai-foreman/test/hostQaComparison.test.ts packages/ai-foreman/test/hostSourcePreservation.test.ts packages/rafi/test/uninstallNative.test.ts
       - name: Shared storage, recovery selectors and launch contracts
         run: node --import tsx --test --test-concurrency=1 packages/ai-foreman/test/readinessRecovery.test.ts packages/ai-foreman/test/buildRuns081.test.ts packages/ai-foreman/test/processIdentity.test.ts packages/ai-foreman/test/startArguments.test.ts packages/rafi/test/buildResume.test.ts packages/rafi/test/buildStartOver.test.ts packages/ai-foreman/test/buildOwnershipReconciliation.test.ts packages/rafi/test/resume.test.ts packages/rafi/test/resumeLauncher.test.ts
       - name: Packaged readiness faults and actual short-command recovery
@@ -69,7 +78,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Windows'
         with:
-          name: windows-native-evidence
+          name: windows-native-evidence-node-${{ matrix.node }}
           path: |
             windows-native.log
             windows-platform.log

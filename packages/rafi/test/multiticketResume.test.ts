@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import { createBuildRun, persistBuildSession, releaseBuildLease, projectBuildRecovery, readBuildRuns } from "ai-foreman/build-runs.js";
 import { beginBuildAssignment, isInterruptedBuilderRecovery } from "ai-foreman/build-assignment.js";
 import { createProviderSessionRef } from "ai-foreman/session-identity.js";
@@ -15,6 +16,24 @@ import { StateDb } from "../../ai-foreman/dist/tickets/stateDb.js";
 import { buildBuildResumeCommand, type BuildResumeCommandOptions } from "../src/buildResume.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 import { processStartIdentity } from "../../ai-foreman/dist/processIdentity.js";
+
+function approveFixturePlan(projectDir: string, ticketIds: string[]) {
+  const config = parse(readFileSync(join(projectDir, "rafi-config.yaml"), "utf8"));
+  const file = join(projectDir, ".tickets/tickets.yaml");
+  const definitions = (parse(readFileSync(file, "utf8"))?.tickets ?? []) as Array<Record<string, unknown>>;
+  for (const id of ticketIds) if (!definitions.some(ticket => ticket.id === id)) definitions.push({ id, order: definitions.length + 1, title: `Fixture ${id}`, area: "tests", priority: "P2", size: "S", risk: "Low", depends_on: [], summary: `Approved work ${id}`, acceptance: ["Fixture work is complete"], required_tests: [], likely_files: [], rollback: null, notes: null });
+  writeFileSync(file, stringify({ tickets: definitions }));
+  const plan = { version: 1, plan_id: "resume-fixture-plan", revision: 1, content_digest: "", slices: definitions.map(ticket => ({ ...ticket, slice_ref: ticket.id })) };
+  const canonical = (value: unknown): string => JSON.stringify(value, (_, child) => child && typeof child === "object" && !Array.isArray(child) ? Object.fromEntries(Object.entries(child).sort(([a], [b]) => a.localeCompare(b))) : child);
+  plan.content_digest = createHash("sha256").update(canonical(plan)).digest("hex");
+  const directory = join(projectDir, config.docs?.root ?? "docs"); mkdirSync(directory, { recursive: true }); writeFileSync(join(directory, "rafi-plan.json"), JSON.stringify(plan));
+  const db = new WorkflowDb(projectDir);
+  try {
+    const runId = `fixture-plan-approval:${plan.content_digest}`;
+    if (!db.getRun(runId)) db.createRun({ runId, kind: "plan" });
+    db.transition(runId, { status: "completed", checkpoint: "approved", state: { planId: plan.plan_id, revision: plan.revision, digest: plan.content_digest, decisionReceipt: { planDigest: plan.content_digest } } });
+  } finally { db.close(); }
+}
 
 function fixture() {
   const root=mkdtempSync(join(tmpdir(),"rafi-multiticket-resume-"));
@@ -30,6 +49,7 @@ function fixture() {
   const tracker=new StateDb(join(root,".tickets/ticket-state.sqlite"));
   for(const ticket of tickets)tracker.upsertState(ticket.id,{status:ticket.order<4?"done":"planned",...(ticket.order<4?{completed_at:"2026-10-15T00:00:00Z",validation_result:"passed" as const}:{})},new Date().toISOString());
   tracker.close();
+  approveFixturePlan(root, tickets.map(ticket => ticket.id));
   let run=createBuildRun({repositoryRoot:root,tickets:tickets.map(t=>t.id),builder:{role:"builder",source:"project",make:"codex",model:"default",reasoning:"default",fast:false},builderCapabilities:{requestedNetwork:false,grantedNetwork:false}});
   const ref={...createProviderSessionRef({provider:"codex",sessionId:"unavailable-original",role:"builder",stream:"builder",cwd:root,configRoot:root,source:"observed"}),validatedAt:new Date().toISOString()};
   run=persistBuildSession(root,run,"builder",ref);

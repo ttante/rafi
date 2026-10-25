@@ -140,6 +140,8 @@ Commands:
   build:start-over [options] [project]                Safely preserve an implementation run,
                                                       reconcile its tracker state, and prepare a
                                                       fresh restart.
+  build:reset [options] [project]                     Archive all Rafi recovery state and reset
+                                                      tickets to their post-population state.
   handoffs                                            Inspect and explicitly manage validated
                                                       cumulative handoffs.
   agents [options] [project]                          Configure persistent runtime, model,
@@ -318,6 +320,10 @@ Commands:
                                                configured external import.
   show [options] [ticketId]                    Show one or all complete canonical tickets,
                                                including state, validation, delivery, and history.
+  waive-risk-notes [options]                   Record an explicit, definition-bound waiver for
+                                               missing Medium/High-risk rollback plans.
+  repair [options]                             Ask Ticket Maker for narrowly scoped repairs to
+                                               published ticket metadata.
   groups                                       List and repair durable ticket creation groups.
   reset [options] [ticketId]                   Reset tracker state while retaining history; use
                                                build:start-over to restart interrupted execution.
@@ -776,8 +782,8 @@ Options:
   --branch-prefix <prefix>             branch name prefix for ticket branches
   --show-session-cost                  show authoritative cost or trustworthy cumulative session
                                        tokens for Builder and QA
-  --audit-logging <mode>                host-owned audit logging (off | summary | trace) (default:
-                                        "summary")
+  --audit-logging <mode>               host-owned audit logging (off | summary | trace) (default:
+                                       "summary")
   --hide-session-cost                  hide session cost/token usage for Builder and QA
   --auto-compact-threshold <percent>   initial Builder context compaction threshold (1-99)
   --max-branch-depth <n>               maximum selected branch stack depth (default: "5")
@@ -875,6 +881,8 @@ Commands:
   init [options]                               Initialize .tickets/ structure in a project directory.
   populate [options]                           Populate tickets from an approved Rafi plan or configured external import.
   show [options] [ticketId]                    Show one or all complete canonical tickets, including state, validation, delivery, and history.
+  waive-risk-notes [options]                   Record an explicit, definition-bound waiver for missing Medium/High-risk rollback plans.
+  repair [options]                             Ask Ticket Maker for narrowly scoped repairs to published ticket metadata.
   groups                                       List and repair durable ticket creation groups.
   reset [options] [ticketId]                   Reset tracker state while retaining history; use build:start-over to restart interrupted execution.
   update [options] <ticketId>                  Update ticket status or progress fields.
@@ -969,6 +977,8 @@ Options:
   --show-session-cost                  show authoritative cost or trustworthy
                                        cumulative session tokens for Builder
                                        and QA
+  --audit-logging <mode>               host-owned audit logging (off | summary
+                                       | trace) (default: "summary")
   --hide-session-cost                  hide session cost/token usage for
                                        Builder and QA
   --auto-compact-threshold <percent>   initial Builder context compaction

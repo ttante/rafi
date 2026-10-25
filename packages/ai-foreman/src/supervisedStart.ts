@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { hostname } from "node:os";
 import { DurableSupervisor } from "./supervisor.js";
 import { WorkflowDb } from "./workflowDb.js";
-import { stopCause, type ResolvedAutonomyPolicy, type StopCause } from "rafi-spec";
+import { parseHostIpc, stopCause, type ResolvedAutonomyPolicy, type StopCause } from "rafi-spec";
 import { classifyProcess, processStartIdentity } from "./processIdentity.js";
 import { cancelOwnedRuntimeProbes } from "./runtimeReadiness.js";
 
@@ -33,7 +33,8 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
   } finally { preparation.close(); }
   maintainBuildAdmission(localBuildAuthority(projectDir)!);
   if (supervisedRunId()) {
-    const heartbeat = setInterval(() => { if (process.connected) process.send?.({ kind: "rafi-worker-heartbeat", runId }); }, 5_000);
+    let sequence = 0;
+    const heartbeat = setInterval(() => { if (process.connected) process.send?.({ version: 1, kind: "rafi-worker-heartbeat", runId, generation: Number(process.env.RAFI_BUILD_WORKER_GENERATION), pid: process.pid, sequence: ++sequence }); }, 5_000);
     heartbeat.unref();
     process.once("disconnect", () => {
       clearInterval(heartbeat);
@@ -88,8 +89,12 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
         env: { ...process.env, RAFI_DETACHED_SUPERVISOR_RUN: runId, RAFI_BUILD_LAUNCH_TOKEN: launch.token }, stdio: ["ignore", fd, fd, "ipc"] });
       try { await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => { parent.kill("SIGTERM"); reject(new Error("Detached supervisor startup timed out; use rafi resume to reconcile")); }, 15_000);
-        parent.once("message", () => {
-          try { launchDb.acknowledgeBuildLaunchChild(authority, launch.token, parent.pid!); parent.send("rafi-launch-ack", error => { clearTimeout(timer); if (error) reject(error); else resolve(); }); }
+        let acknowledged = false;
+        parent.on("message", value => {
+          const registered = parseHostIpc(value);
+          if (acknowledged || registered?.kind !== "rafi-launch-registered" || registered.token !== launch.token || registered.pid !== parent.pid) return;
+          acknowledged = true;
+          try { launchDb.acknowledgeBuildLaunchChild(authority, launch.token, parent.pid!); parent.send({ version: 1, kind: "rafi-launch-ack", token: launch.token, pid: parent.pid }, error => { clearTimeout(timer); if (error) reject(error); else resolve(); }); }
           catch (error) { clearTimeout(timer); parent.kill("SIGTERM"); reject(error); }
         });
         parent.once("error", error => { clearTimeout(timer); if (!parent.pid) launchDb.failBuildLaunch(authority, launch.token); reject(error); });
@@ -127,8 +132,11 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
         stdio: ["inherit", "inherit", "inherit", "ipc"], detached: process.platform !== "win32",
       });
       const startup = setTimeout(() => child.kill("SIGTERM"), 15_000);
-      child.on("message", message => {
-        if (!message || typeof message !== "object" || !("kind" in message) || message.kind !== "rafi-launch-registered") return;
+      let acknowledged = false;
+      child.on("message", value => {
+        const registered = parseHostIpc(value);
+        if (acknowledged || registered?.kind !== "rafi-launch-registered" || registered.token !== launch.token || registered.pid !== child.pid) return;
+        acknowledged = true;
         try {
           db.acknowledgeBuildLaunchChild(authority, launch.token, child.pid!);
           // Record the incarnation before acknowledging the blocked launch gate.
@@ -137,7 +145,7 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
             checkpoint: db.getRun(runId)?.checkpoint ?? "preparing", event: "worker_started",
             payload: { workerPid: child.pid, processStart: processStartIdentity(child.pid!), host: hostname(), generation },
           });
-          child.send("rafi-launch-ack", () => {}); clearTimeout(startup);
+          child.send({ version: 1, kind: "rafi-launch-ack", token: launch.token, pid: child.pid }, () => {}); clearTimeout(startup);
         }
         catch { child.kill("SIGTERM"); }
       });
@@ -158,14 +166,20 @@ export async function superviseStart(projectDir: string, runId: string, policy: 
       const heartbeatTimeout = policy.runtimeDeadlines?.heartbeat_ms ?? 120_000;
       const watchdog = setInterval(() => { if (Date.now() - lastHeartbeat > heartbeatTimeout) { stopRequestCause = stopCause({ cause: "heartbeat-timeout", source: "heartbeat", actor: "supervisor", runId, supervisorGeneration: generation, workerGeneration: generation, checkpoint: db.getRun(runId)?.checkpoint ?? "unknown", at: new Date().toISOString(), requested: true, detail: `worker heartbeat exceeded ${heartbeatTimeout}ms` }); stop(); } }, Math.min(5_000, Math.max(25, heartbeatTimeout / 4)));
       watchdog.unref();
-      child.on("message", message => { if (message && typeof message === "object" && "kind" in message && message.kind === "rafi-worker-heartbeat") lastHeartbeat = Date.now(); });
-      child.on("message", message => {
-        if (!message || typeof message !== "object" || !("kind" in message) || message.kind !== "rafi-readiness-child") return;
-        const value = message as { pid?: unknown; active?: unknown; processStart?: unknown; tag?: unknown };
-        if (!Number.isSafeInteger(value.pid) || Number(value.pid) <= 1) return;
-        if (typeof value.tag === "string") readinessTags.set(Number(value.pid), value.tag);
-        if (value.active === false) { readinessChildren.delete(Number(value.pid)); readinessTags.delete(Number(value.pid)); }
-        else if (typeof value.processStart === "string") readinessChildren.set(Number(value.pid), value.processStart);
+      let heartbeatSequence = 0;
+      child.on("message", value => {
+        const message = parseHostIpc(value);
+        if (acknowledged && message?.kind === "rafi-worker-heartbeat" && message.runId === runId && message.generation === generation && message.pid === child.pid && message.sequence > heartbeatSequence) {
+          heartbeatSequence = message.sequence; lastHeartbeat = Date.now();
+        }
+      });
+      child.on("message", raw => {
+        const value = parseHostIpc(raw);
+        if (!acknowledged || value?.kind !== "rafi-readiness-child" || value.runId !== runId || value.generation !== generation || value.workerPid !== child.pid) return;
+        if (value.active) {
+          readinessTags.set(value.pid, value.tag);
+          if (value.processStart) readinessChildren.set(value.pid, value.processStart);
+        } else if (readinessTags.get(value.pid) === value.tag) { readinessChildren.delete(value.pid); readinessTags.delete(value.pid); }
       });
       const result = new Promise<import("./supervisor.js").WorkerOutcome>(resolve => {
         child.once("error", error => {

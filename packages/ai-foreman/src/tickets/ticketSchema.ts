@@ -1,4 +1,5 @@
-import { documentationPolicyV1Schema, qaPreparationDepthDecisionV1Schema, type DocumentationPolicyV1, type QaPreparationDepthDecisionV1 } from "rafi-spec";
+import { documentationPolicyV1Schema, qaPreparationDepthDecisionV1Schema, verificationRequirementV2Schema, type DocumentationPolicyV1, type QaPreparationDepthDecisionV1 } from "rafi-spec";
+import { z } from "zod";
 export type TicketPriority = "P0" | "P1" | "P2" | "P3";
 export type TicketSize = "XS" | "S" | "M" | "L" | "XL";
 export type TicketRisk = "Low" | "Medium" | "High";
@@ -40,6 +41,8 @@ export interface TicketDef {
   summary: string;
   acceptance: string[];
   required_tests: string[];
+  verification_version?: 2;
+  verification_requirements?: import("rafi-spec").VerificationRequirementV2[];
   likely_files: string[];
   rollback?: string | null;
   notes?: string | null;
@@ -71,6 +74,8 @@ export const TICKET_JSON_SCHEMA = {
     summary: { type: "string", minLength: 1 },
     acceptance: { type: "array", items: { type: "string" }, minItems: 1 },
     required_tests: { type: "array", items: { type: "string" }, minItems: 1 },
+    verification_version: { const: 2 },
+    verification_requirements: { type: "array", minItems: 1, items: z.toJSONSchema(verificationRequirementV2Schema, { target: "draft-7", io: "input" }) },
     likely_files: { type: "array", items: { type: "string" } },
     rollback: { type: ["string", "null"] },
     notes: { type: ["string", "null"] },

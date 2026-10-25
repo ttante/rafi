@@ -10,7 +10,7 @@ template: false
 A change is not done until:
 
 - The requested behavior is implemented.
-- The agent has reviewed this rule file, confirmed the change complies with it, and prepared a concise rule-compliance result for the user, except for items that are not yet applicable during initial project buildout.
+- The agent has reviewed the applicable rules and reported their actual compliance status, including unmet or inapplicable items. When the host supplies a structured output contract, its evidence and coverage fields are the compliance report; do not require a duplicate prose declaration or heading. A claim of compliance does not replace verification.
 - Relevant tests are added or updated.
 - Relevant tests and quality checks pass, or any inability to run them is reported.
 - API docs are updated when contracts change.

@@ -1,3 +1,4 @@
+import { structuredPlanOutput } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -7,7 +8,6 @@ import {
   materializeStructuredPlan, readAndValidateStructuredPlanPair, regenerateStructuredPlanMarkdown,
   readNamedApprovedPlan, renderStructuredPlanMarkdown, validateMaterializedPlan, writeStructuredPlanArtifacts,
   validateStructuredPlanProposal,
-  extractStructuredPlanProposal,
   type StructuredPlanProposalV1,
 } from "../src/structuredPlan.js";
 
@@ -34,6 +34,17 @@ test("structured plans assign durable identities, retain them on revision, and r
   assert.equal(revised.plan_id, first.plan_id); assert.equal(revised.revision, 2);
   assert.deepEqual(revised.slices.map((slice) => slice.slice_ref), first.slices.map((slice) => slice.slice_ref));
   assert.equal(renderStructuredPlanMarkdown(revised), renderStructuredPlanMarkdown(revised));
+});
+
+test("documentation policy is preserved in the immutable plan and its rendered history", () => {
+  const p = proposal();
+  p.slices[0]!.documentation = { required: true, targets: ["README.md"], criteria: ["Explain the public API"] };
+  let sequence = 0;
+  const plan = materializeStructuredPlan(p, undefined, () => `stable-${++sequence}`);
+  assert.deepEqual(plan.slices[0]!.documentation, p.slices[0]!.documentation);
+  assert.match(renderStructuredPlanMarkdown(plan), /Documentation: required/);
+  assert.match(renderStructuredPlanMarkdown(plan), /Target: README\.md/);
+  assert.match(renderStructuredPlanMarkdown(plan), /Criterion: Explain the public API/);
 });
 
 test("paired artifacts reject edited Markdown and can regenerate it from structured data", () => {
@@ -80,13 +91,11 @@ test("structured plan proposal validation rejects malformed delivery units clear
   assert.ok(issues.includes("delivery unit ui.slice_refs must be a string array"));
 });
 
-test("structured plan extraction rejects provider-added fields at the contract boundary", () => {
+test("native structured plan rejects provider-added fields and literal marker envelopes", () => {
   const value = proposal() as unknown as Record<string, unknown>;
   value.provider_claimed_plan_id = "pln_provider";
-  assert.throws(
-    () => extractStructuredPlanProposal(`RAFI_PLAN_PROPOSAL_START\n${JSON.stringify(value)}\nRAFI_PLAN_PROPOSAL_END`),
-    /invalid structured plan proposal contract.*provider_claimed_plan_id/s,
-  );
+  assert.equal(structuredPlanOutput.schema.safeParse({ version: 1, operation: "structured-plan", continuity: null, result: { kind: "completed", summary: "Plan", payload: value } }).success, false);
+  assert.equal(structuredPlanOutput.schema.safeParse(`RAFI_PLAN_PROPOSAL_START\n${JSON.stringify(proposal())}\nRAFI_PLAN_PROPOSAL_END`).success, false);
 });
 
 test("structured plan proposal validation rejects invalid dependencies and source refs without throwing", () => {
@@ -105,6 +114,16 @@ test("structured plan proposal validation rejects invalid dependencies and sourc
   assert.ok(issues.includes("slice S1.source_refs must be an array"));
   assert.ok(issues.includes("delivery unit api cannot depend on itself"));
   assert.ok(issues.includes("delivery unit ui depends on unknown unit missing"));
+});
+
+test("structured plan validation rejects dependency cycles before it writes an approved plan", () => {
+  const p = proposal();
+  p.slices[0]!.depends_on = ["S2"];
+  p.delivery_units[0]!.depends_on = ["ui"];
+  const issues = validateStructuredPlanProposal(p);
+  assert.ok(issues.includes("slice dependency cycle at S1"));
+  assert.ok(issues.includes("delivery unit dependency cycle at api"));
+  assert.throws(() => materializeStructuredPlan(p), /dependency cycle/);
 });
 
 test("invalid materialized plan JSON returns validation errors before rendering can crash", () => {

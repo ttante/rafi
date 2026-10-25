@@ -64,8 +64,13 @@ export interface RuntimeFailure {
   availability?: SessionAvailabilityV1;
 }
 
-export interface TurnResult {
-  /** Final assistant message text — where the STEP_STATUS marker lives. */
+export interface RetainedTransportEvidence {
+  rawDigest: string; responseDigest: string; rawBytes: number; retainedRawBytes: number;
+  valueDigest?: string; rejectedValueDigest?: string;
+}
+export interface TurnResultBase {
+  transportEvidence?: RetainedTransportEvidence;
+  /** Human display / historical transport only. Never parse for a native operation. */
   text: string;
   isError: boolean;
   numTurns: number;
@@ -87,6 +92,8 @@ export interface TurnResult {
   turnId?: string;
   /** Deferred handback continuity validation; no hidden provider repair. */
   continuityErrors?: string[];
+  /** Validated composed continuity, never parsed from presentation text. */
+  continuity?: import("rafi-spec").ContinuityDelta;
   /** Exact instruction requested by the immediate host caller. */
   hostInstruction?: string;
   /** Exact instruction dispatched to the provider after all wrappers. */
@@ -102,12 +109,18 @@ export interface TurnResult {
   };
 }
 
+/** Structured transport observations always carry the tuple that selected them. */
+export type TurnResult = TurnResultBase & (
+  | { readonly structured: import("rafi-spec").StructuredResponse; readonly selectedDispatch: import("rafi-spec").SelectedDispatchTupleV2 }
+  | { readonly structured?: undefined; readonly selectedDispatch?: import("rafi-spec").SelectedDispatchTupleV2 }
+);
+
 /** Observability events emitted while a builder works. */
 export type BuilderEvent =
   (
   | { kind: "text"; text: string; byteCount?: number; digest?: string }
   | { kind: "tool"; name: string; input: unknown; inputCompleteness?: "complete" | "truncated" | "unavailable"; lifecycle?: "started" | "progress" | "completed"; callId?: string; status?: string; durationMs?: number; exitCode?: number; outputSummary?: string; outputDigest?: string; outputCompleteness?: "complete" | "truncated" | "unavailable"; rawOutputBytes?: number; completionKnown?: boolean; providerTurnId?: string }
-  | { kind: "provider-item"; provider: "claude" | "codex"; lifecycle: "started" | "completed"; itemType: string; payload: Record<string, unknown>; payloadCompleteness: "complete"; providerTurnId?: string }
+  | { kind: "provider-item"; provider: "claude" | "codex"; lifecycle: "started" | "completed"; itemType: string; payload: Record<string, unknown>; payloadCompleteness: "complete" | "truncated"; providerTurnId?: string }
   | { kind: "activity"; state: string; detail?: string; provider?: "claude" | "codex"; model?: string; transient?: boolean }
   | { kind: "retry"; provider: "claude" | "codex"; reason: string; attempt?: number; maximum?: number; delayMs?: number; managedBy: "provider" | "rafi"; retryId?: string; providerTurnId?: string }
   | { kind: "turn-complete"; result: TurnResult; turnId?: string }
@@ -165,7 +178,13 @@ export interface ProviderSettingSwitch { model?: string; effort?: EffortLevel; f
 
 export type EffortLevel = "low" | "medium" | "high" | "xhigh";
 
+export interface ProviderQueryBudget {
+  reserveQuery(provider: "claude" | "codex"): { maximumSpendUsd: number; signal: AbortSignal; record(costUsd: number): void; close(): void };
+}
+
 export interface BuilderAdapterOptions {
+  /** Live validation supplies the shared supervisor; production has no synthetic dollar meter. */
+  queryBudget?: ProviderQueryBudget;
   /** Working directory the builder operates in. */
   cwd: string;
   /** Absolute runtime executable path verified by the readiness probe. */
@@ -232,7 +251,23 @@ export interface BuilderAdapterOptions {
   onLifecycleTrace?: (event: { phase: string; at: string; elapsedMs?: number; sessionId?: string; method?: string; timeoutMs?: number; providerTurnId?: string; toolCallId?: string; toolName?: string; classification?: string; resultReason?: string; isError?: boolean; outputDigest?: string; rawOutputBytes?: number; completionKnown?: boolean }) => void;
 }
 
+export interface ConfirmedDispatchReference { dispatchId: string; runId: string; tupleDigest: string }
+
+/**
+ * Host-owned response requirement contributed by an adapter decorator. The
+ * instruction is applied before the dispatch is sealed; validation runs on the
+ * native-validated response before the dispatch can be confirmed.
+ */
+export interface StructuredDispatchRequirement {
+  readonly instruction: string;
+  validate(response: import("rafi-spec").OperationResponse): void;
+}
+
 export interface BuilderAdapter {
+  /** Receives only durable verified transport identity, after confirmation. */
+  postConfirmedDispatch?(reference: ConfirmedDispatchReference): Promise<TurnResult | void>;
+  /** Requirements every structured dispatch through this adapter must satisfy. */
+  structuredDispatchRequirement?(): StructuredDispatchRequirement | undefined;
   graphRuntimeSettings?(): Pick<BuilderAdapterOptions, "model" | "effort" | "fast" | "runtimeExecutable"> | undefined;
   readonly agent: "claude" | "codex";
   contractCapabilities?(): { sameSessionAcceptance: boolean; nativeCompactionBarrier: boolean };
@@ -243,7 +278,7 @@ export interface BuilderAdapter {
   configureQaContractReminder?(reminder: string, onEvent?: (event: { kind: "installed" | "compaction-observed" | "reminder-delivered" | "reminder-retained"; at: string; sessionId?: string }) => void): void;
 
   /** Send one instruction; resolves when that turn completes. */
-  sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: ProviderTurnPurpose }): Promise<TurnResult>;
+  sendTurn(text: string, policy?: TurnRequest): Promise<TurnResult>;
   /** Synchronous observation through the event owner. Terminal precedes sendTurn resolution. */
   observeEvents?(listener: (event: BuilderEvent) => void): () => void;
   /** Commit a deferred handback checkpoint only after the host validates the turn. */
@@ -306,3 +341,35 @@ export interface BuilderAdapter {
   /** Shut the builder down and release resources. */
   close(): Promise<void>;
 }
+
+/** Host request only; the durable gateway must seal this before provider contact. */
+export interface TurnRequest {
+  journalRunId?: string;
+  /** Minted only inside the committed structured gateway; never serialized. */
+  dispatchCapability?: import("../structuredDispatchAuthority.js").StructuredDispatchCapability;
+  handback?: boolean;
+  responseOnly?: boolean;
+  logicalActionId?: string;
+  dispatchId?: string;
+  parentDispatchId?: string;
+  purpose?: ProviderTurnPurpose;
+  output?: import("rafi-spec").OutputContract;
+  /** Immutable selected provider boundary; no adapter may substitute a schema. */
+  wireContract?: import("rafi-spec").ProviderWireContract<any>;
+  /** Digest of the descriptor that rendered the exact provider instruction. */
+  renderedWireContractDigest?: string;
+  /** Immutable authority sealed before the provider receives the instruction. */
+  selectedDispatch?: import("rafi-spec").SelectedDispatchTupleV2;
+}
+
+/** Terminal provider boundary. Requests acquire this shape only after sealing. */
+export interface SealedTurnPolicy extends TurnRequest {
+  output: import("rafi-spec").OutputContract;
+  wireContract: import("rafi-spec").ProviderWireContract<any>;
+  renderedWireContractDigest: string;
+  selectedDispatch: import("rafi-spec").SelectedDispatchTupleV2;
+  dispatchCapability: import("../structuredDispatchAuthority.js").StructuredDispatchCapability;
+  dispatchId: string;
+}
+export type TurnPolicy = SealedTurnPolicy | (TurnRequest & { output?: never; selectedDispatch?: never; dispatchCapability?: never });
+export type ProviderTurnPolicy = TurnPolicy;

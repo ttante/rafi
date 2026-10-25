@@ -2,17 +2,21 @@
   "name": "rafi-monorepo",
   "version": "0.0.0",
   "private": true,
-  "description": "Rafi — Refined AI Framework & Implementor. Monorepo for special-agents (library), @rafi-ai/cli, and ai-foreman (runtime).",
+  "description": "Rafi \u2014 Refined AI Framework & Implementor. Monorepo for special-agents (library), @rafi-ai/cli, and ai-foreman (runtime).",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   },
   "packageManager": "pnpm@10.2.1",
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
+    "check:native": "node scripts/check-native-runtime.mjs",
+    "test:comms-preflight": "node --import tsx --test scripts/comms/contracts.test.mjs scripts/comms/harness.test.mjs scripts/comms/legacy-regressions.test.ts scripts/comms/structured-communication-inventory.test.mts scripts/comms/registry-baseline.test.mts scripts/comms/structured-live-supervisor.test.mjs scripts/comms/node24-policy.test.mjs",
+    "baseline:comms": "node scripts/comms/baseline.mjs",
+    "canary:structured-output": "node scripts/live/structured-output.mjs",
     "test:live-create": "node scripts/live-create.mjs",
     "test:live-ticket-plan": "node scripts/live-ticket-plan.mjs",
     "test:live-interview": "node scripts/live-interview.mjs",
@@ -25,9 +29,13 @@
     "canary:incident-journeys": "node scripts/live/incident-journeys.mjs",
     "canary:multiticket-recovery": "node scripts/live/multiticket-recovery.mjs",
     "docs:generate": "tsx packages/rafi/scripts/generate-cli-docs.ts",
-    "docs:check": "tsx packages/rafi/scripts/generate-cli-docs.ts --check"
+    "docs:check": "tsx packages/rafi/scripts/generate-cli-docs.ts --check",
+    "canary:structured-handoffs": "node --import tsx scripts/live/structured-handoffs.ts",
+    "check:comms-inventory": "node scripts/comms/node24-policy.mjs && tsc -p tsconfig.comms.json && node --import tsx scripts/comms/registry-baseline.mts && node --import tsx scripts/comms/manifest-parity.mts"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["better-sqlite3"]
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
   }
 }

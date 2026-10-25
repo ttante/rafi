@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { lstatSync } from "node:fs";
+import { join } from "node:path";
+import { filePreservationSchema, inspectFilePreservation, type RetainedSourceIdentity } from "./hostSourcePreservation.js";
 import type { QaContractCoverageV1, QaVerificationContractV1 } from "rafi-spec";
 import type { TicketDef } from "./tickets/ticketSchema.js";
 import { captureBuildSource } from "./buildAssignment.js";
@@ -27,6 +30,8 @@ export const hostQaComparisonV1Schema = z.object({
   protectedPaths: z.array(path).max(256),
   reason: z.string().max(2048),
   comparedAt: z.string().datetime(),
+  filePreservation: z.array(filePreservationSchema).max(20).optional(),
+  preservationOmitted: z.number().int().nonnegative().optional(),
 });
 
 export type HostQaComparisonV1 = z.infer<typeof hostQaComparisonV1Schema>;
@@ -41,7 +46,7 @@ type InventoryPath = {
 
 type RetainedAssignment = {
   idempotencyKey: string;
-  intent: { ticketId?: string; before?: { digest?: string; pathInventory?: InventoryPath[] } };
+  intent: { ticketId?: string; before?: RetainedSourceIdentity & { pathInventory?: InventoryPath[] } };
   result?: { after?: { digest?: string; pathInventory?: InventoryPath[] } };
 };
 
@@ -68,12 +73,7 @@ function matchesScope(candidate: string, patterns: string[]): boolean {
 }
 
 function isHostQaCheck(check: QaVerificationContractV1["checks"][number]): boolean {
-    const text = `${check.expectedBehavior} ${check.expectedEvidence.join(" ")} ${check.applicability.requiredEvidence.join(" ")}`;
-    const hostScopeEvidence = check.applicability.requiredEvidence.some(evidence => /host[- ]owned.*scope comparison/i.test(evidence));
-    const scopeSemantics = /scope/i.test(text) && /comparison/i.test(text) && /baseline|protected|approved scope|product changes/i.test(text);
-    const changedProductPaths = /changed product paths/i.test(text) && /host[- ]retained|baseline|bookkeeping|evidence exclusions/i.test(text);
-    return !/documentation/i.test(text)
-      && (hostScopeEvidence || changedProductPaths || (check.applicability.decisionOwner === "host" && (/Rafi compares the final product paths/i.test(check.expectedBehavior) || scopeSemantics)));
+  return check.hostKind === "source-scope";
 }
 
 export function findHostQaCheck(contract: QaVerificationContractV1): QaVerificationContractV1["checks"][number] | undefined {
@@ -85,9 +85,7 @@ function findHostQaChecks(contract: QaVerificationContractV1): QaVerificationCon
 }
 
 function findHostDocumentationCheck(contract: QaVerificationContractV1): QaVerificationContractV1["checks"][number] | undefined {
-  return contract.checks.find(check => check.applicability.decisionOwner === "host"
-    && /documentation/i.test(check.expectedBehavior)
-    && /documentation/i.test(check.expectedEvidence.join(" ")));
+  return contract.checks.find(check => check.hostKind === "documentation-policy");
 }
 
 function findAssignment(db: Pick<WorkflowDb, "operations">, runId: string, ticketId: string, baselineDigest: string): RetainedAssignment | undefined {
@@ -117,7 +115,7 @@ function resultEvidence(resultDigest: string, projectDir: string, sourceDigest: 
  * Performs the private host comparison and returns the immutable artifact plus
  * the coverage row replacement. Provider output is never used to decide scope.
  */
-export function createHostQaComparison(input: {
+type HostQaComparisonInput = {
   db: Pick<WorkflowDb, "operations" | "qaPreparationStore">;
   projectDir: string;
   worktree: string;
@@ -126,31 +124,38 @@ export function createHostQaComparison(input: {
   contract: QaVerificationContractV1;
   reviewAttemptId: string;
   reviewBasisDigest: string;
-}): { result: HostQaComparisonV1; resultDigest: string; checkId?: string } {
+};
+
+/** Source facts supplied before review; this is not a QA acceptance certificate. */
+export function inspectHostQaComparison(input: Omit<HostQaComparisonInput, "reviewAttemptId" | "reviewBasisDigest">): Omit<HostQaComparisonV1, "reviewAttemptId" | "reviewBasisDigest"> {
   const check = findHostQaCheck(input.contract);
   if (!check) throw new Error("Host QA comparison contract check is missing");
   const expectedBaseline = baselineDigest(input.contract);
   if (!expectedBaseline) throw new Error("Host QA comparison lacks the admitted preimplementation baseline");
   const assignment = findAssignment(input.db, input.runId, input.ticket.id, expectedBaseline);
   const finalFirst = captureBuildSource(input.worktree);
-  const finalSecond = captureBuildSource(input.worktree);
-  if (finalFirst.digest !== finalSecond.digest) throw new Error("Host QA comparison source changed during final capture");
-  const final = finalSecond;
+  const final = finalFirst;
   const before = assignment?.intent.before;
   const assignmentId = assignment?.idempotencyKey ?? "missing-assignment";
   const beforePaths = new Map((before?.pathInventory ?? []).map(item => [item.path, item]));
   const afterPaths = new Map(final.pathInventory.map(item => [item.path, item as InventoryPath]));
   const allPaths = [...new Set([...beforePaths.keys(), ...afterPaths.keys()])].sort();
   const changedPaths = allPaths.filter(item => identity(beforePaths.get(item)) !== identity(afterPaths.get(item)));
-  const deletedPaths = [...beforePaths.keys()].filter(item => !afterPaths.has(item)).sort();
+  const deletedPaths = [...beforePaths.keys()].filter(item => {
+    if (afterPaths.has(item)) return false;
+    try { lstatSync(join(input.worktree, item)); return false; } catch { return true; }
+  }).sort();
   const protectedPaths = changedPaths.filter(item => item === ".git" || item.startsWith(".git/") || item === ".rafi" || item.startsWith(".rafi/") || item === ".foreman" || item.startsWith(".foreman/")).sort();
   const scopePatterns = input.ticket.likely_files.map(item => item.replaceAll("\\", "/"));
   const unauthorizedPaths = scopePatterns.length ? changedPaths.filter(item => !matchesScope(item, scopePatterns)) : changedPaths;
   const scopeBasisDigest = contractDigest("host-qa-scope-basis", { ticketId: input.ticket.id, ticket: input.ticket, contractDigest: input.contract.contentDigest, assignmentId });
+  const headChanged = Boolean(before?.head && before.head !== final.head);
   const missingBaseline = !assignment || !before || before.digest !== expectedBaseline;
-  const status: HostQaComparisonV1["status"] = missingBaseline || protectedPaths.length || deletedPaths.length || unauthorizedPaths.length ? (missingBaseline ? "blocked" : "failed") : "passed";
+  const status: HostQaComparisonV1["status"] = missingBaseline || headChanged || protectedPaths.length || deletedPaths.length || unauthorizedPaths.length ? (missingBaseline || headChanged ? "blocked" : "failed") : "passed";
   const reason = missingBaseline
     ? "The admitted Builder assignment baseline was not retained or does not match the contract baseline."
+    : headChanged
+      ? "Repository HEAD changed since the admitted baseline; path-inventory comparison cannot authorize this source."
     : protectedPaths.length
       ? `Protected paths changed: ${protectedPaths.slice(0, 8).join(", ")}`
       : deletedPaths.length
@@ -158,7 +163,14 @@ export function createHostQaComparison(input: {
         : unauthorizedPaths.length
           ? `Changed paths are outside the host-resolved ticket scope: ${unauthorizedPaths.slice(0, 8).join(", ")}`
           : "Host-observed product paths match the retained baseline and host-resolved ticket scope.";
-  const result = hostQaComparisonV1Schema.parse({ version: 1, runId: input.runId, ticketId: input.ticket.id, assignmentId, contractDigest: input.contract.contentDigest, contractRevision: input.contract.revision, reviewAttemptId: input.reviewAttemptId, reviewBasisDigest: input.reviewBasisDigest, baselineSourceDigest: expectedBaseline, finalSourceDigest: final.digest, scopeBasisDigest, status, changedPaths, unauthorizedPaths, deletedPaths, protectedPaths, reason, comparedAt: new Date().toISOString() });
+  const eligiblePaths = changedPaths.filter(path => !protectedPaths.includes(path) && !unauthorizedPaths.includes(path));
+  const filePreservation = before && !headChanged ? inspectFilePreservation(input.worktree, before, eligiblePaths) : [];
+  if (final.digest !== captureBuildSource(input.worktree).digest) throw new Error("Host QA comparison source changed during final capture");
+  return hostQaComparisonV1Schema.omit({ reviewAttemptId: true, reviewBasisDigest: true }).parse({ version: 1, runId: input.runId, ticketId: input.ticket.id, assignmentId, contractDigest: input.contract.contentDigest, contractRevision: input.contract.revision, baselineSourceDigest: expectedBaseline, finalSourceDigest: final.digest, scopeBasisDigest, status, changedPaths, unauthorizedPaths, deletedPaths, protectedPaths, filePreservation, preservationOmitted: Math.max(0, eligiblePaths.length - filePreservation.length), reason, comparedAt: new Date().toISOString() });
+}
+
+export function createHostQaComparison(input: HostQaComparisonInput): { result: HostQaComparisonV1; resultDigest: string; checkId?: string } {
+  const result = hostQaComparisonV1Schema.parse({ ...inspectHostQaComparison(input), reviewAttemptId: input.reviewAttemptId, reviewBasisDigest: input.reviewBasisDigest });
   const store = input.db.qaPreparationStore();
   const existing = store.artifacts("host-qa-comparison").find(item => {
     const candidate = hostQaComparisonV1Schema.safeParse(item.value);
@@ -173,10 +185,12 @@ export function createHostQaComparison(input: {
       && JSON.stringify(prior.unauthorizedPaths) === JSON.stringify(result.unauthorizedPaths)
       && JSON.stringify(prior.deletedPaths) === JSON.stringify(result.deletedPaths)
       && JSON.stringify(prior.protectedPaths) === JSON.stringify(result.protectedPaths)
+      && JSON.stringify(prior.filePreservation) === JSON.stringify(result.filePreservation)
+      && prior.preservationOmitted === result.preservationOmitted
       && prior.reason === result.reason;
   });
   const resultDigest = existing?.digest ?? store.putArtifact("host-qa-comparison", result);
-  return { result: existing ? hostQaComparisonV1Schema.parse(existing.value) : result, resultDigest, checkId: check.id };
+  return { result: existing ? hostQaComparisonV1Schema.parse(existing.value) : result, resultDigest, checkId: findHostQaCheck(input.contract)!.id };
 }
 
 export function applyHostQaComparison(coverage: QaContractCoverageV1, contract: QaVerificationContractV1, result: HostQaComparisonV1, resultDigest: string, projectDir: string): QaContractCoverageV1 {

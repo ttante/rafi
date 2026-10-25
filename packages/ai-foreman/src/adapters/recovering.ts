@@ -24,6 +24,8 @@ export interface RecoveringAdapterOptions {
 
 /** Adds interactive recovery around structured runtime turn failures. */
 export class RecoveringAdapter implements BuilderAdapter {
+  postConfirmedDispatch(reference: import("../adapters/types.js").ConfirmedDispatchReference): Promise<TurnResult | void> { return this.adapter.postConfirmedDispatch?.(reference) ?? Promise.resolve(); }
+  structuredDispatchRequirement(): import("../adapters/types.js").StructuredDispatchRequirement | undefined { return this.adapter.structuredDispatchRequirement?.(); }
   private adapter: BuilderAdapter;
   private runtime: AgentRuntime;
   private readonly eventQueue = new AsyncQueue<BuilderEvent>();
@@ -64,7 +66,9 @@ export class RecoveringAdapter implements BuilderAdapter {
           this.eventQueue.push({ kind: "error", message: `failed to persist scoped provider session binding: ${error instanceof Error ? error.message : String(error)}` });
         }
       }
-      if (policy?.handback || !this.opts.enabled || !result.isError || !result.failure) return result;
+      // Structured operations have one recovery owner above the adapter. Never
+      // hide a second actual dispatch behind the same request/receipt identity.
+      if (policy?.output || policy?.handback || !this.opts.enabled || !result.isError || !result.failure) return result;
       // The host cannot know whether a missing exact session received this
       // instruction. Never replay it or silently switch providers.
       if (result.failure.category === "session-unavailable" || result.failure.dispatchState === "unknown") return result;

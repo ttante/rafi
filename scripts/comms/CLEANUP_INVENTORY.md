@@ -1,0 +1,79 @@
+# Communication migration cleanup inventory
+
+Implementation dispositions, updated 2026-10-24 UTC. This records the working tree, not a release approval. The integrated offline and live gates remain open until the [migration plan](../../STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md) records final results. All changes ship together.
+
+## Removed from active result acceptance
+
+| Boundary | Implemented replacement | Preserved behavior and regression evidence |
+| --- | --- | --- |
+| Foreman work/status | One native `work-report` contains outcome, evidence, optional coverage and continuity. `result.kind: completed` is the sole completion claim; the redundant `payload.status: done` field is removed. Removed generic status-suffix correction, question-like prose routing and prose-based completion. | Admission, scope, already-satisfied work and independent QA. `foreman`, `buildAssignment`, `buildStallRepairs`, `scripts/comms/legacy-regressions` tests. |
+| Continuity | Native result contains the continuity object; original provider response is persisted before validation. No suffix repair or fresh session solely to fix formatting. | Intent/receipt journal, checkpoints, leases, generation checks, uncertain dispatch reconciliation. `unifiedContinuity`, `handoffCrash`, `sessionLocation`, `structuredOperation` tests. |
+| Planning / ticket planning | Typed final proposal, blocked/question/source-request alternatives. Domain corrections retain a durable bounded allowance across resume; malformed transport stops. | Approval, fingerprints, source revision, existing decisions and publication safety. `plan`, `ticketPlanRecovery`, `discovery` tests. |
+| Population / rollback notes | Native population draft and narrowly scoped risk-note correction. Approved plan owns QA preparation and documentation settings; population cannot reinterpret them. | Plan/slice mapping, retirement authorization, staged publication and crash reconciliation. `ticketPopulation`, `tickets`, CLI E2E tests. |
+| QA preparation | Separate native draft, depth, assessment and challenge contracts. Removed nested format repair, full legacy-candidate acceptance and prose-based materiality downgrades. | Independent assessment, source binding, exact requirements, host evidence provenance, bounded substantive correction and uncertainty. `qaPreparation`, `qaPreparationRecovery`, `qaPrebuildCallers` tests. |
+| Final QA | Native exclusive passed/failed verdict with coverage and Manager instruction IDs. Invalid response is retained and pauses; it does not trigger formatting-only fresh QA. Removed dead manual-report injection and repair branches. | Independent review, frozen instruction/source, complete findings, atomic certificate transaction, current contract and source checks. `qaRecovery`, `qaPreparationIntegration`, `qaGuidanceDelivery`, QA handback suites. |
+| Remediation | Native result binds the complete report, blocked disposition, claims and optional typed graph-maintenance hint. Removed active formatting-repair dispatch branches. | Finding identity, partial blocked findings, exact source, terminal correlation, durable receipt/replay protection. `qaFailureDelivery`, `qaHandbackSafety`, `qaHandbackCallers` tests. |
+| Remediation evidence | QA-failure delivery and manager-guidance follow-up now observe bounded Builder test lifecycles and capture the pre-turn source digest before dispatch. The resulting observations flow into the same contract coverage evidence as ordinary Builder work. | A model's claimed test history cannot pass a historical check. Enforced coverage persists the host observation digest and accepts RED→changed-source GREEN only when both facts bind to the ticket and final source. |
+| Graph / Manager / branch audit | Native intermediate evidence requests and operation-specific final payloads. A valid evidence request may continue within the existing budget; invalid transport cannot become a graph formatting loop. | Graph access revocation, bounded lookup, advisory Manager content and independent authority. `graphAccessBoundaries`, `graphGaps`, `managerEvidence`, branch tests. |
+| Uninstall interpreter | Native `uninstall-proposal`; removed regex extraction of an object from prose. | Read-only interpretation, ambiguity, host-owned paths, preview, explicit approval and recoverable removal. `uninstallNative`, `uninstallRecovery` tests. |
+
+## Adapted or retained deliberately
+
+| Boundary | Decision and reason | Evidence |
+| --- | --- | --- |
+| Provider adapters | Claude uses SDK `outputFormat` and terminal `structured_output`; Codex uses `outputSchema` and exact thread/turn/final-item correlation. Provider-specific schema projections preserve mandatory host validation. No silent legacy fallback. | `structuredTransport`, `codex`, immutable schema tests; real adapter probes on both providers. Codex rejects `uniqueItems` in its native schema subset, so uniqueness remains host-enforced. |
+| Validation diagnostics | Keep identical acceptance constraints, but return bounded field paths and useful JSON Schema errors. Suppress irrelevant alternatives after a union discriminator selects an outcome. An explicit envelope example keeps continuity at the top level. | Live Claude nesting failure reproduced by `structuredIdentity`; corrected shape passes and original malformed input remains rejected without mutation. |
+| Provider control commands | Claude `/context`, `/compact` and `/model`, Codex control RPCs, native questions and permission callbacks remain their provider-defined protocols. | These are transport/control APIs, not free-text business results authorizing workflow transitions. Native initialization now also uses a typed result. |
+| Handoffs | Keep stage → accept → atomic lease transfer → separate work dispatch. Native acknowledgement binds manifest and generation. Embedded resources are persisted and delivered with exact byte/digest checks, including after restart. | Handoff crash/continuity tests and live actual ownership transfers on both providers. An acknowledgement proves delivery, not comprehension. |
+| Contract delivery | Keep Claude segmented, same-session typed acknowledgements and Codex host delivery receipts/reminders. Native compaction invalidates old delivery receipts; manual Codex compaction now advances the sequence too. | `qaContractDelivery`, `codex`; real 360 KB Unicode delivery, native compaction, stale-receipt rejection and renewal on both providers. |
+| Builder coverage | Reuse coverage composed into the work/remediation result. If missing, one tools-disabled collection turn obtains claims; it never redoes implementation. Host binds the final source after receipt. | `qaBuilderEvidence`, `qaContractCoverage`, enforcing preparation integration tests. The retained `response-repair` phase label is a tool-barrier classification here, not a generic formatting loop. |
+| QA source/session replacement | Keep fresh reviews for actual source changes, unavailable evidence, or explicit resumed recovery. Disposable snapshots require correctly scoped provider sessions. | Source-drift, resumed packet, session-location and guidance tests. Removing these would weaken independent QA. |
+| Host authority and normalization | Provider cannot supply host check kinds, run/source/session identities, policy, timestamps or approvals. Deterministic binding/normalization records provenance; invalid outcome labels are rejected rather than repaired into success. | Host comparison/applicability tests, coverage tests, `structuredOperation`. Manager IDs are distinct from contract check IDs, and foreign IDs roll back certification. |
+| Readiness / supervisor IPC | Strict versioned schemas plus launch token, run, PID, generation, monotonic heartbeat and probe correlation. Identical terminal redelivery is idempotent; conflicting results reject. Stale child deregistration cannot remove a newer tag. | `hostIpc`, `probeIpc`, `runtimeReadiness081`, `supervisedStart`, packaged readiness fault tests. Durable DB ownership remains authoritative. |
+| Durable recovery | Keep workflow DB, admission, publication reconciliation, leases, supervisor cleanup and native session recovery. Older writers are fenced from migrated records. | Workflow/admission/recovery, writer-guard, SIGKILL and packaged resume suites. JSON cannot prevent process crashes or make uncertain side effects safe to replay. |
+| Read-only Claude scratch | Each adapter owns a private existing temporary directory for the full query lifecycle, including schema rotation; clean up on startup failure and close. | Live planning/population exposed a nonexistent sibling scratch path. `claudeToolResults` verifies creation, confinement and cleanup; QA confinement metadata reflects the actual policy. |
+| Host comparison timing | Provide bounded retained source facts before independent review. Recompute the comparison at final acceptance; an observation has no certificate authority. | Live QA could otherwise wait for evidence that Rafi only created after the response. `hostQaComparison` rejects reuse after drift; `qaPreparationIntegration` verifies delivery before a certificate exists. |
+| Exact preservation evidence | Bounded host byte-prefix comparison uses retained hashes/lengths or Git blob identities; no provider reconstructs the private baseline. Source changes are fenced, omissions stay explicit. | `hostSourcePreservation` covers clean, staged, unstaged, untracked, Unicode, changed prefix, missing lengths, symlinks and limits. `hostQaComparison` blocks HEAD drift and distinguishes restored paths from deletion. |
+| Applicability instructions | Contract preparation and Builder reporting distinguish an unconditional absence check from a conditional check. | A live Claude contradiction remains rejected; no host rewrite turns a waiver into a pass. |
+| Bundled report rules | Native summary/evidence/coverage satisfy the applicable reporting items; no duplicate prose rule-compliance heading is required. Standalone prose reporting remains available without a host schema. | Live Claude exposed a report-only remediation despite existing structured coverage. Generated rule packs and their source snapshot are updated together; parity/compile tests pass. |
+| Exact durable protocol evidence | Persist structured dispatch, continuity, Builder coverage, QA and remediation JSON as exact bytes. Diagnostic string redaction remains separate. | `structuredOperation` and `unifiedContinuity` regressions preserve ordinary `token: absent` text and valid JSON; diagnostic redaction still applies. |
+| Root instruction append | Overflow now evaluates the short final sidecar reference in its existing/end position before escalating to top-after-frontmatter placement. | User-owned root text remains ordered when the final root fits; sidecar validation, sticky placement, and provider byte/character budgets remain enforced. |
+| Existing tracker rules | `setup:update` upgrades only exact legacy Rafi native-result text or marker-delimited Rafi blocks. | Modified/unrecognized user text is untouched; a current managed block is idempotent. |
+| QA context | Retain exact evidence, but exclude runtime validator/schema objects from provider evidence and avoid repeating the same provider evidence for every baseline observation. | Final-review context tests, original evidence digests and live CLI diagnostics. Full evidence remains host-retained; summaries cannot create authority. |
+
+## Compatibility boundaries
+
+Provider marker converters are removed from production exports and calls. The
+only retained historical parser is private to `packages/spec/src/legacyQaDisplay.ts`.
+Its public `describeHistoricalQaTranscript` returns only display status, validity,
+and issues; it cannot return a report, receipt, tuple, or dispatch. Foreman exposes
+that narrow function through `legacyCommunicationDisplay.ts`. Its callers are the
+human QA timeline and recovery-menu synopsis. A native receipt never falls back to
+legacy text for workflow acceptance.
+
+### Parser/caller ledger
+
+| Marker/extractor family | Disposition | Current callers / enforcement |
+| --- | --- | --- |
+| `parseProtocol`, `parseDelimitedJson`, `extractJson`, planner status/field extractors | Removed | No production definition/caller; compiler rejects any reintroduced authority call. |
+| `parseContinuityDelta` / `RAFI_CONTINUITY_DELTA` | Selected-native replacement; text converter removed | Continuity consumes verified native delta after durable confirmation; crash/replay regressions. |
+| `parsePreparationArtifact` / QA candidate, assessment and challenge envelopes | Selected-native replacement; text converter removed | Draft/assessment/challenge/depth contracts; literal marker rejection and preparation tests. |
+| `parseGraphRequest` / `rafi_graph_request` prose | Selected-native replacement; text converter removed | Graph loop consumes the closed native intermediate union. |
+| `extractDiscoveryEnvelope`, `extractStructuredPlanProposal`, `parseGrillAuditVerdict` | Selected-native replacement; text converters removed | CLI discovery/planning/audit native contracts; domain validation remains on object values. |
+| `parseBuilderQaRemediationContract` and report V2/V3 converters | Selected-native replacement; text converters removed | Remediation consumes persisted native receipt/tuple through the common verifier. |
+| `parseQaResponseContract`, `parseQaFailureReport` | Private historical display only | Only `legacyQaDisplay.ts`; narrow display projection, bounded input; inventory rejects other parser callers. |
+| `parseContractCoverage` | Explicit rejection boundary | Always throws; native coverage fields supply authoritative claims. |
+| Strict JSON operator-file parsing | Non-provider protocol | `parseStrictJson` rejects duplicate keys; bounded operator report schema validation does not accept Markdown or markers. |
+| `RAFI_APPEND`, managed root/skill/file regions | Non-protocol file delimiters | Managed file editing; no provider result conversion or workflow completion. |
+| Native question/permission callbacks, `/context`, `/compact`, model/settings RPCs | Registered non-authoritative control | Provider control manifest and observable completion; never a business-result parser. |
+
+Retained legacy text tests reject literal marker forms at native authority consumers.
+Object validation, QA depth normalization, blocker semantics and exact finding
+coverage have dedicated native/domain assertions; their coverage is not removed
+along with obsolete conversion fixtures.
+
+Packaged handoff protocol v2 describes the new native transport; protocol v1 remains a historical reference. `RAFI_APPEND` and similar generated-file regions are file-edit delimiters and are unrelated to provider result acceptance.
+
+## Release evidence
+
+Use the final gate record in the main plan and retained logs; individual passing fixtures are not whole-application certification. Live CLI runs retain failed attempts as well as successes. New live journeys freeze the compiled workspace packages and record their artifact digest, so concurrent offline packaging tests cannot change code underneath an online run. No package was published, deployed or pushed by this migration.

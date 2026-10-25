@@ -23,8 +23,6 @@ export interface TicketSliceProposal {
   source_refs?: Array<{ source_id: string; fingerprint: string; item?: string; url?: string | null; note?: string | null }>;
 }
 export interface TicketPopulationProposalV1 { version: 1; plan_id: string; revision: number; tickets: TicketSliceProposal[]; retirements: string[] }
-export const TICKET_POPULATION_PROPOSAL_START = "RAFI_TICKET_POPULATION_PROPOSAL_START";
-export const TICKET_POPULATION_PROPOSAL_END = "RAFI_TICKET_POPULATION_PROPOSAL_END";
 export interface PopulationRiskWaiver { ticketId: string; reason: string; actor: string }
 export interface MaterializedTicketPopulation { tickets: TicketDef[]; delivery: DeliveryConfig; retirements: string[]; sliceToTicket: Map<string, string>; riskWaivers?: PopulationRiskWaiver[] }
 export type PopulationBranchStrategy = "current" | "batch" | "branch-per-ticket";
@@ -108,17 +106,6 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function extractTicketPopulationProposal(output: string): TicketPopulationProposalV1 {
-  const start = output.lastIndexOf(TICKET_POPULATION_PROPOSAL_START); const end = output.lastIndexOf(TICKET_POPULATION_PROPOSAL_END);
-  if (start < 0 || end <= start) throw new Error(`ticket-maker output is missing ${TICKET_POPULATION_PROPOSAL_START}/${TICKET_POPULATION_PROPOSAL_END}`);
-  const raw = output.slice(start + TICKET_POPULATION_PROPOSAL_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch (error) { throw new Error(`ticket-maker proposal is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
-  const validated = ticketPopulationProposalV1Schema.safeParse(parsed);
-  if (!validated.success) throw new Error(`ticket-maker proposal contract validation failed:\n${zodIssues(validated.error).map((issue) => `- ${issue}`).join("\n")}`);
-  return validated.data;
-}
-
 export function validateTicketPopulationProposal(proposal: TicketPopulationProposalV1, plan: StructuredPlanV1, existing: TicketDef[], options: { branchStrategy?: PopulationBranchStrategy } = {}): string[] {
   const issues: string[] = [];
   const contract = ticketPopulationProposalV1Schema.safeParse(proposal);
@@ -168,7 +155,10 @@ export function materializeTicketPopulation(
       title: slice.title, area: slice.area, priority: slice.priority, size: slice.size, risk: slice.risk,
       depends_on: slice.depends_on.map((ref) => sliceToTicket.get(ref)!), summary: slice.summary,
       acceptance: [...slice.acceptance], required_tests: [...slice.required_tests], likely_files: [...slice.likely_files],
-      documentation: structuredClone(slice.documentation ?? plan.slices.find(item => item.slice_ref === slice.slice_ref)?.documentation ?? { required: false, targets: [], criteria: [] }),
+      ...(plan.slices.find(item => item.slice_ref === slice.slice_ref)?.verification_version === 2
+        ? { verification_version: 2 as const, verification_requirements: structuredClone(plan.slices.find(item => item.slice_ref === slice.slice_ref)!.verification_requirements!) }
+        : {}),
+      documentation: structuredClone(plan.slices.find(item => item.slice_ref === slice.slice_ref)?.documentation ?? { required: false, targets: [], criteria: [] }),
       rollback: slice.rollback, notes: slice.notes, plan_ref: { plan_id: plan.plan_id, revision: plan.revision, slice_ref: slice.slice_ref },
       source_refs: (plan.slices.find((item) => item.slice_ref === slice.slice_ref)?.source_refs ?? slice.source_refs)?.map((ref) => ({
         source: ref.source_id, item: ref.item ?? "document", source_id: ref.source_id, fingerprint: ref.fingerprint,

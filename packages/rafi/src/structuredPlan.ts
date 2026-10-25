@@ -12,12 +12,15 @@ export const MAX_PLAN_STACK_DEPTH = 5;
 
 export interface PlanSliceProposal {
   qa_preparation?: StructuredPlanSlice["qa_preparation"];
+  documentation?: StructuredPlanSlice["documentation"];
   local_ref: string;
   retains?: string;
   title: string;
   summary: string;
   acceptance: string[];
   required_tests: string[];
+  verification_version?: 2;
+  verification_requirements?: import("rafi-spec").VerificationRequirementV2[];
   likely_files: string[];
   depends_on: string[];
   source_refs?: Array<{ source_id: string; fingerprint: string; item?: string; url?: string | null; note?: string | null }>;
@@ -53,25 +56,28 @@ export interface StructuredPlanArtifactPaths {
   latestData: string;
 }
 
-export function extractStructuredPlanProposal(output: string): StructuredPlanProposalV1 {
-  const start = output.lastIndexOf(PLAN_PROPOSAL_START);
-  const end = output.lastIndexOf(PLAN_PROPOSAL_END);
-  if (start < 0 || end <= start) throw new Error(`planner output is missing ${PLAN_PROPOSAL_START}/${PLAN_PROPOSAL_END}`);
-  const json = output.slice(start + PLAN_PROPOSAL_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  let parsed: unknown;
-  try { parsed = JSON.parse(json); } catch (error) { throw new Error(`structured plan proposal is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
-  const validated = structuredPlanProposalV1Schema.safeParse(parsed);
-  const contractIssues = validated.success ? [] : zodIssues(validated.error);
-  // Preserve the established repair diagnostics for missing/mistyped fields,
-  // but surface unknown provider-owned fields as contract violations at the
-  // extraction boundary.
-  if (contractIssues.some((issue) => issue.includes("Unrecognized key"))) {
-    throw new Error(`invalid structured plan proposal contract:\n${contractIssues.map((issue) => `- ${issue}`).join("\n")}`);
-  }
-  const issues = validateStructuredPlanProposal(parsed);
-  if (issues.length) throw new Error(`invalid structured plan proposal:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
-  if (!validated.success) throw new Error(`invalid structured plan proposal contract:\n${contractIssues.map((issue) => `- ${issue}`).join("\n")}`);
-  return validated.data;
+/**
+ * Providers sometimes omit the exact risk categories from minimumReasons even
+ * though they returned those categories in riskFactors.  The categories are
+ * host-owned facts already present in the same depth decision, so repair only
+ * this redundant representation at the proposal boundary.
+ */
+export function normalizeStructuredPlanProposal(input: StructuredPlanProposalV1): StructuredPlanProposalV1 {
+  return {
+    ...input,
+    slices: input.slices.map((slice) => slice.qa_preparation
+      ? {
+        ...slice,
+        qa_preparation: {
+          ...slice.qa_preparation,
+          minimumReasons: [...new Set([
+            ...slice.qa_preparation.minimumReasons,
+            ...slice.qa_preparation.riskFactors.map((risk) => risk.category),
+          ])],
+        },
+      }
+      : slice),
+  };
 }
 
 export function validateStructuredPlanProposal(value: unknown): string[] {
@@ -157,6 +163,19 @@ export function validateStructuredPlanProposal(value: unknown): string[] {
     }
   }
   for (const ref of localRefs) if (!assigned.has(ref)) issues.push(`slice ${ref} is not assigned to a delivery unit`);
+  const assertAcyclic = (label: string, edges: Map<string, string[]>): void => {
+    const active = new Set<string>(), visited = new Set<string>();
+    const visit = (id: string): void => {
+      if (active.has(id)) { issues.push(`${label} dependency cycle at ${id}`); return; }
+      if (visited.has(id)) return;
+      active.add(id);
+      for (const dependency of edges.get(id) ?? []) visit(dependency);
+      active.delete(id); visited.add(id);
+    };
+    for (const id of edges.keys()) visit(id);
+  };
+  assertAcyclic("slice", new Map(proposal.slices.filter((slice): slice is PlanSliceProposal => Boolean(slice && typeof slice === "object" && typeof slice.local_ref === "string" && Array.isArray(slice.depends_on))).map(slice => [slice.local_ref, slice.depends_on])));
+  assertAcyclic("delivery unit", new Map(proposal.delivery_units.filter((unit): unit is PlanDeliveryUnitProposal => Boolean(unit && typeof unit === "object" && typeof unit.id === "string" && Array.isArray(unit.depends_on))).map(unit => [unit.id, unit.depends_on])));
   const stackLocals = new Set<string>();
   const stackedUnits = new Set<string>();
   for (const [index, rawStack] of proposal.stacks.entries()) {
@@ -182,6 +201,7 @@ export function materializeStructuredPlan(
   allocate: () => string = randomUUID,
   preparationPolicy?: import("rafi-spec").QaPreparationConfigV1,
 ): StructuredPlanV1 {
+  proposal = normalizeStructuredPlanProposal(proposal);
   const issues = validateStructuredPlanProposal(proposal);
   if (issues.length) throw new Error(issues.join("; "));
   if (preparationPolicy?.mode === "enforce") for (const slice of proposal.slices) {
@@ -198,6 +218,8 @@ export function materializeStructuredPlan(
   const slices: StructuredPlanSlice[] = proposal.slices.map((slice) => ({
     slice_ref: refMap.get(slice.local_ref)!, title: slice.title, summary: slice.summary,
     acceptance: [...slice.acceptance], required_tests: [...slice.required_tests], likely_files: [...slice.likely_files],
+    ...(slice.verification_version === 2 && slice.verification_requirements ? { verification_version: 2, verification_requirements: structuredClone(slice.verification_requirements) } : {}),
+    ...(slice.documentation ? { documentation: structuredClone(slice.documentation) } : {}),
     depends_on: slice.depends_on.map((ref) => refMap.get(ref)!),
     source_refs: slice.source_refs?.map((ref) => ({ ...ref })),
     ...(slice.qa_preparation ? { qa_preparation: structuredClone(slice.qa_preparation) } : {}),
@@ -246,6 +268,8 @@ export function validateMaterializedPlan(plan: StructuredPlanV1): string[] {
     else refs.add(slice.slice_ref);
     for (const field of ["title", "summary"] as const) if (typeof slice[field] !== "string" || !slice[field].trim()) issues.push(`slice ${slice.slice_ref || index}.${field} is required`);
     for (const field of ["acceptance", "required_tests", "likely_files", "depends_on"] as const) if (!stringArray(slice[field])) issues.push(`slice ${slice.slice_ref || index}.${field} must be a string array`);
+    const hasV2 = slice.verification_version !== undefined || slice.verification_requirements !== undefined;
+    if (hasV2 && (slice.verification_version !== 2 || !Array.isArray(slice.verification_requirements) || !slice.verification_requirements.length)) issues.push(`slice ${slice.slice_ref || index}.verification_requirements must be a non-empty V2 requirement array`);
     if (slice.source_refs !== undefined && !Array.isArray(slice.source_refs)) issues.push(`slice ${slice.slice_ref || index}.source_refs must be an array`);
     if (Array.isArray(slice.source_refs)) for (const [refIndex, rawRef] of slice.source_refs.entries()) {
       const ref = rawRef as unknown as Record<string, unknown> | undefined;
@@ -263,6 +287,16 @@ export function validateMaterializedPlan(plan: StructuredPlanV1): string[] {
       else if (!refs.has(dep)) issues.push(`slice ${slice.slice_ref} depends on unknown slice ${dep}`);
     }
   }
+  const assertMaterializedAcyclic = (label: string, edges: Map<string, string[]>): void => {
+    const active = new Set<string>(), visited = new Set<string>();
+    const visit = (id: string): void => {
+      if (active.has(id)) { issues.push(`${label} dependency cycle at ${id}`); return; }
+      if (visited.has(id)) return;
+      active.add(id); for (const dep of edges.get(id) ?? []) visit(dep); active.delete(id); visited.add(id);
+    };
+    for (const id of edges.keys()) visit(id);
+  };
+  assertMaterializedAcyclic("slice", new Map(plan.slices.filter((slice): slice is StructuredPlanSlice => Boolean(slice && typeof slice.slice_ref === "string" && Array.isArray(slice.depends_on))).map(slice => [slice.slice_ref, slice.depends_on])));
   const unitById = new Map<string, StructuredPlanDeliveryUnit>();
   for (const [index, rawUnit] of plan.delivery_units.entries()) {
     if (!rawUnit || typeof rawUnit !== "object" || Array.isArray(rawUnit)) { issues.push(`delivery_units[${index}] must be an object`); continue; }
@@ -290,6 +324,7 @@ export function validateMaterializedPlan(plan: StructuredPlanV1): string[] {
     if (dep === unit.id) issues.push(`unit ${unit.id} cannot depend on itself`);
     else if (!unitById.has(dep)) issues.push(`unit ${unit.id} depends on unknown unit ${dep}`);
   }
+  assertMaterializedAcyclic("delivery unit", new Map([...unitById.values()].map(unit => [unit.id, unit.depends_on])));
   for (const ref of refs) if (!assigned.has(ref)) issues.push(`slice ${ref} is not assigned to a delivery unit`);
   const stackedUnits = new Set<string>();
   for (const [index, rawStack] of plan.stacks.entries()) {
@@ -332,7 +367,7 @@ export function renderStructuredPlanMarkdown(plan: StructuredPlanV1): string {
     "", "## Implementation Changes", "", bullets(plan.implementation_changes), "", "## Acceptance Criteria", "", bullets(plan.acceptance_criteria),
     "", "## Test Plan", "", bullets(plan.test_plan), "", "## Ticket Slices", "",
   ];
-  for (const slice of plan.slices) lines.push(`### ${slice.title} (${slice.slice_ref})`, "", slice.summary, "", `Dependencies: ${slice.depends_on.join(", ") || "None"}`, "", "Acceptance:", bullets(slice.acceptance), "", "Required tests:", bullets(slice.required_tests), "", `Likely files: ${slice.likely_files.join(", ") || "unknown"}`, "");
+  for (const slice of plan.slices) lines.push(`### ${slice.title} (${slice.slice_ref})`, "", slice.summary, "", `Dependencies: ${slice.depends_on.join(", ") || "None"}`, "", "Acceptance:", bullets(slice.acceptance), "", "Required tests:", bullets(slice.required_tests), ...(slice.documentation ? ["", `Documentation: ${slice.documentation.required ? "required" : "not required"}`, ...slice.documentation.targets.map(target => `- Target: ${target}`), ...slice.documentation.criteria.map(criterion => `- Criterion: ${criterion}`)] : []), ...(slice.verification_version === 2 ? ["", "Structured verification:", ...((slice.verification_requirements ?? []).map(requirement => `- ${requirement.id}: ${requirement.summary} (${requirement.timing}; ${requirement.applicability.kind})`))] : []), "", `Likely files: ${slice.likely_files.join(", ") || "unknown"}`, "");
   lines.push("## Delivery Units", "");
   for (const unit of plan.delivery_units) lines.push(`- ${unit.id}: slices ${unit.slice_refs.join(", ")}; branch_mode=${unit.branch_mode}; completion=${unit.completion}; provider=${unit.provider}; depends_on=${unit.depends_on.join(",") || "none"}; dependency_mode=${unit.dependency_mode}`);
   lines.push("", "## Delivery Stacks", "");

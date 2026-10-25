@@ -16,14 +16,18 @@ import {
 } from "./live-interview-harness.mjs";
 import { createLiveWorkspace } from "./live/workspace.mjs";
 
+import { runSupervisedStructuredLive } from "./live/structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("live-create", async (supervisor) => {
 const root = resolve(new URL("..", import.meta.url).pathname);
 const fixture = join(root, "test", "fixtures", "live-todo-app");
-const workdir = createLiveWorkspace("rafi-live-create-").workspaceRoot;
 const requestedRuntimes = process.env.RAFI_LIVE_RUNTIMES?.split(",").map((value) => value.trim()).filter(Boolean);
-const runtimes = requestedRuntimes?.length ? requestedRuntimes : ["claude", "codex"];
+const runtimes = requestedRuntimes?.length ? requestedRuntimes : supervisor.config.providers;
+if (runtimes.some(runtime => !supervisor.config.providers.includes(runtime))) throw new Error("Runtime outside supervised provider selection");
 if (runtimes.some((runtime) => runtime !== "claude" && runtime !== "codex")) {
   throw new Error("RAFI_LIVE_RUNTIMES accepts only claude and codex");
 }
+const workdir = createLiveWorkspace("rafi-live-create-").workspaceRoot;
 const runStates = [];
 let succeeded = false;
 let dockerComposeReady = false;
@@ -154,3 +158,6 @@ try {
 } catch (error) {
   die(error instanceof Error ? error.message : String(error));
 }
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

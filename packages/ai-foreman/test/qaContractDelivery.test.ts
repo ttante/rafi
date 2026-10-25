@@ -1,5 +1,7 @@
+import { nativeFixtureTurn, prepareFixtureAdapter } from "./helpers/nativeOutput.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, realpathSync, rmSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,16 +22,18 @@ test("delivery acknowledges exact version on actual scoped session and renews af
   let sequence = 0, accepted = -1, sessionId = "builder", ackDigest = contract.contentDigest;
   const adapter: BuilderAdapter = { agent: "claude", sessionId: () => sessionId, sessionRef: () => createProviderSessionRef({ provider: "claude", sessionId, role: "builder", stream: "builder", generation: 1, cwd: root, configRoot: root, source: "observed" }),
     contractCapabilities: () => ({ sameSessionAcceptance: true, nativeCompactionBarrier: true }), enableContractEnforcement: () => {}, contractCompactionSequence: () => sequence, acceptContractDelivery: value => { accepted = value; },
-    sendTurn: async (instruction, policy) => { assert.equal(policy?.purpose, "contract-acceptance"); assert.equal(policy?.responseOnly, true); assert.ok(instruction.includes("Expired tokens return unauthorized")); return { text: `RAFI_QA_ACCEPTANCE_START\n${JSON.stringify({ workId: "T1", revision: 1, digest: ackDigest, missingSections: [] })}\nRAFI_QA_ACCEPTANCE_END`, isError: false, numTurns: 1, costUsd: 0 }; }, events: async function* () {}, close: async () => {} };
+    sendTurn: async (instruction, policy) => { assert.equal(policy?.purpose, "contract-acceptance"); assert.equal(policy?.responseOnly, true); assert.ok(instruction.includes("Expired tokens return unauthorized")); return nativeFixtureTurn(policy, sessionId, { workId: "T1", revision: 1, digest: ackDigest, missingSections: [] }); }, events: async function* () {}, close: async () => {} };
   try {
     assert.throws(() => actualContractSession({ ...adapter, sessionId: () => "foreign-native-session" }, root, root), /actual scoped Builder/);
     assert.throws(() => actualContractSession({ ...adapter, sessionRef: () => ({ ...adapter.sessionRef!()!, role: "qa" }) }, root, root), /actual scoped Builder/);
+    prepareFixtureAdapter(adapter, root);
     const receipt = await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket"); assert.equal(receipt.sessionId, "builder"); assert.equal(accepted, 0);
     assert.equal(assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root), adapter).contentDigest, contract.contentDigest);
     const freshAdapter = { ...adapter };
     assert.throws(() => assertContractReceipt(store, "run", "T1", digest, actualContractSession(freshAdapter, root, root), freshAdapter), /current adapter/);
     assert.equal(assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root)).contentDigest, contract.contentDigest);
     sequence++; assert.throws(() => assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root)), /actual-session/);
+    prepareFixtureAdapter(adapter, root);
     await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket"); assert.equal(accepted, 1);
     sessionId = "replacement"; assert.throws(() => assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root)), /actual-session/);
     ackDigest = "b".repeat(64); await assert.rejects(() => deliverVerificationContract(contract, store, adapter, root, root, "Full ticket"), /stale/);
@@ -51,6 +55,7 @@ test("Codex delivery records the actual Builder contract and configures a non-bl
     sendTurn: async () => { sends++; return { text: "unexpected", isError: false, numTurns: 1, costUsd: 0 }; }, events: async function* () {}, close: async () => {},
   };
   try {
+    prepareFixtureAdapter(adapter, root);
     const receipt = await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket");
     assert.equal(receipt.sessionId, "codex-builder"); assert.equal(sends, 0, "Codex does not require a separate acknowledgement turn");
     assert.match(reminder, /context compacted/); assert.match(reminder, new RegExp(contract.contentDigest));
@@ -75,6 +80,7 @@ test("Codex contract delivery survives the production Builder wrapper chain", as
   const continuous = new ContinuityAdapter({ adapter: recovering, projectDir: root, runId: "run", role: "builder", settings: { role: "builder", source: "project", make: "codex", model: "default", reasoning: "default", fast: false, session_strategy: "compact", display_session_cost: false, auto_compact_threshold_percent: 65, compact_maximum: 1, settings_revision: 1 } });
   const adapter = new RoleStatusAdapter(continuous, () => {}, () => {});
   try {
+    prepareFixtureAdapter(adapter, root);
     await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket");
     assert.match(reminder, /context compacted/);
     assert.equal(assertContractReceipt(store, "run", "T1", digest, actualContractSession(adapter, root, root), adapter).contentDigest, contract.contentDigest);
@@ -99,10 +105,11 @@ test("large transport is lossless, byte bounded and cannot acknowledge a missing
   let segments = 0, omit = false;
   const adapter: BuilderAdapter = { agent: "claude", sessionId: () => "builder", sessionRef: () => createProviderSessionRef({ provider: "claude", sessionId: "builder", role: "builder", stream: "builder", generation: 1, cwd: root, configRoot: root, source: "observed" }), contractCapabilities: () => ({ sameSessionAcceptance: true, nativeCompactionBarrier: true }), enableContractEnforcement: () => {}, acceptContractDelivery: () => {}, events: async function* () {}, close: async () => {}, sendTurn: async (instruction, policy) => {
     assert.equal(policy?.responseOnly, true); assert.ok(Buffer.byteLength(instruction) < 256 * 1024);
-    const segment = instruction.match(/Return RAFI_QA_SEGMENT_START\/END containing (\{.*\})\./);
-    if (segment) { segments++; const value = JSON.parse(segment[1]!); if (omit) value.missingSections = [String(value.index)]; return { text: `RAFI_QA_SEGMENT_START\n${JSON.stringify(value)}\nRAFI_QA_SEGMENT_END`, isError: false, numTurns: 1, costUsd: 0 }; }
-    return { text: `RAFI_QA_ACCEPTANCE_START\n${JSON.stringify({ workId: "T1", revision: 1, digest: contract.contentDigest, missingSections: [] })}\nRAFI_QA_ACCEPTANCE_END`, isError: false, numTurns: 1, costUsd: 0 };
+    const segment = instruction.match(/Submit the native segment payload (\{.*\})/);
+    if (segment) { segments++; const value = JSON.parse(segment[1]!); if (omit) value.missingSections = [String(value.index)]; return nativeFixtureTurn(policy, "builder", value); }
+    return nativeFixtureTurn(policy, "builder", { workId: "T1", revision: 1, digest: contract.contentDigest, missingSections: [] });
   } };
+  prepareFixtureAdapter(adapter, root);
   try { await deliverVerificationContract(contract, store, adapter, root, root, text); assert.ok(segments > 1); omit = true; await assert.rejects(() => deliverVerificationContract(contract, store, adapter, root, root, text), /incomplete/); assert.equal(store.receipts(contract.contentDigest).length, 1); }
   finally { db.close(); rmSync(root, { recursive: true, force: true }); }
 });
@@ -114,19 +121,32 @@ test("large final-review context bounds inline baseline/provider evidence in a c
     const providerReceipt = store.putArtifact("investigation-evidence", { text: "baseline-output:" + "😀".repeat(40000), sessionId: "preparer" });
     const evidenceDigest = store.putArtifact("baseline-observation", { procedure: "Inspect baseline", providerReceipt });
     draft.baseline = [{ id: "baseline", checkId: "check", applicability: "applicable", sourceDigest: digest, phase: "preimplementation-investigation", runtime: "node20", procedure: "Inspect baseline", observedAt: draft.createdAt, status: "passed", evidenceDigest, relevance: "preservation", expectedTransition: "Preserved" }];
+    draft.baseline.push({ ...draft.baseline[0]!, id: "same-provider-second-observation" });
     const contract = assembleContract(draft, draft.requirements, assessment(draft), "author");
-    const claims = [{ outcome: "not-run", evidence: [] }];
+    const claims = [{ outcome: "not-run", evidence: [] }, { sourceDigest: digest, currentSource: false, implementationResponse: { response: "earlier evidence ".repeat(1000) + "rule compliance: verified; token: absent" } }];
     const commandObservations = [{ spanId: "span", kind: "test", outcome: "failed" }];
     const instruction = finalReviewContractContext(contract, store, root, claims, commandObservations);
-    assert.ok(Buffer.byteLength(instruction) < 16 * 1024); assert.match(instruction, /Large baseline\/provider evidence is retained by digest/);
+    assert.ok(Buffer.byteLength(instruction) < 20 * 1024); assert.match(instruction, /read the linked resource before concluding/);
     const path = instruction.match(/Complete retained QA context: (.*)\n/)![1]!;
     const context = JSON.parse(readFileSync(path, "utf8"));
-    assert.deepEqual(context.contract, contract); assert.deepEqual(context.builderClaims, claims);
+    assert.deepEqual(context.contract, contract); assert.deepEqual(context.builderClaims[0], claims[0]);
+    assert.equal(context.builderClaims[1].summary.includes("rule compliance: verified"), false);
+    for (const [descriptor, original] of [[context.builderClaims[1], claims[1]], [context.baselineEvidence[0].providerEvidence.summary, store.artifact(providerReceipt, "investigation-evidence")]]) {
+      assert.ok(descriptor.resource.path.startsWith(join(root, ".foreman", "qa-contracts") + "/"));
+      const bytes = readFileSync(descriptor.resource.path);
+      assert.deepEqual(JSON.parse(bytes.toString()), original, "Evidence after the summary cutoff must remain fully accessible");
+      assert.equal(createHash("sha256").update(bytes).digest("hex"), descriptor.resource.sha256);
+      assert.equal(bytes.length, descriptor.resource.bytes);
+      assert.equal(statSync(descriptor.resource.path).mode & 0o222, 0);
+    }
     assert.deepEqual(context.commandObservations, commandObservations);
     assert.match(instruction, /Classification and exit status alone do not prove/);
     assert.equal(context.baselineEvidence[0].digest, evidenceDigest);
     assert.equal(context.baselineEvidence[0].providerEvidence.digest, providerReceipt);
     assert.equal(context.baselineEvidence[0].providerEvidence.retainedForHostInspection, true);
+    assert.equal(context.baselineEvidence[1].providerEvidence.digest, providerReceipt);
+    assert.equal(context.baselineEvidence[1].providerEvidence.sameEvidenceAsEarlierBaseline, true);
+    assert.equal(context.baselineEvidence[1].providerEvidence.summary, undefined);
     assert.equal(context.baselineEvidence[0].providerEvidence.summary.summaryMayBeTruncated, true);
     assert.ok(Buffer.byteLength(context.baselineEvidence[0].providerEvidence.summary.summary) <= 4096);
     assert.ok(instruction.includes(contractDigest("final-review-context", context)));

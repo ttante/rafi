@@ -36,6 +36,25 @@ export function admittedPlanInput(projectDir: string, ticket: TicketDef): { inpu
         requirements.push({ id: `req-plan-${fingerprint.slice(0, 24)}-${occurrence}`, inputRef: input.id, locator: `${location}${field}[${index}]`, statement, digest: contractDigest("statement", statement), obligation: "mandatory", origin: "explicit", authority: "approved" });
       });
     }
+    if (slice.verification_version === 2) {
+      for (const requirement of slice.verification_requirements ?? []) {
+        const statement = requirement.summary;
+        requirements.push({
+          id: `req-plan-v2-${slice.slice_ref}-${requirement.id}`,
+          inputRef: input.id,
+          locator: `slices.${slice.slice_ref}.verification_requirements.${requirement.id}`,
+          statement,
+          // A RequirementRef's historical digest domain is its statement.
+          // Keep that invariant and bind the executable V2 intent separately.
+          digest: contractDigest("statement", statement),
+          verificationIntentDigest: contractDigest("verification-intent-v2", requirement),
+          obligation: "mandatory",
+          origin: "explicit",
+          authority: "approved",
+          verificationIntent: structuredClone(requirement),
+        });
+      }
+    }
     return { input, plan, requirements };
   }
   throw new Error("Exact admitted approved-plan revision unavailable; restore its immutable artifact before preparation");

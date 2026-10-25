@@ -1,10 +1,13 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy, journalStructuredDispatch } from "../src/structuredOperation.js";
+import { qaVerdictOutput } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ContinuityDelta, ProviderSessionRefV1 } from "rafi-spec";
-import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/types.js";
+import type { BuilderAdapter, BuilderEvent, TurnRequest, TurnResult } from "../src/adapters/types.js";
 import { HANDOFF_ACCEPTED, HandoffAcceptanceError, HandoffService } from "../src/handoffs.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { AsyncQueue } from "../src/util/asyncQueue.js";
@@ -18,15 +21,17 @@ class Successor implements BuilderAdapter {
   calls = 0;
   closed = false;
   ref: ProviderSessionRefV1;
-  constructor(projectDir: string, readonly mode: "ok" | "error" | "mismatch" | "missing-terminal") {
+  constructor(projectDir: string, readonly mode: "ok" | "error" | "mismatch" | "missing-terminal" | "prior-terminal") {
     this.ref = { version: 1, provider: "codex", sessionId: "successor", role: "qa", stream: "qa", generation: 0,
       cwd: projectDir, configRoot: projectDir, source: "observed", createdAt: new Date(0).toISOString(), validatedAt: new Date(0).toISOString() };
   }
-  async sendTurn(instruction: string): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: TurnRequest): Promise<TurnResult> {
     this.calls++;
     const reported = this.mode === "mismatch" ? { ...this.ref, sessionId: "different-session" } : this.ref;
-    const result: TurnResult = { text: acceptedText, isError: this.mode === "error", numTurns: 1, costUsd: 0,
-      turnId: `turn-${this.calls}`, hostInstruction: instruction, providerInstruction: instruction, rawResponse: acceptedText,
+    const match = /Acknowledge manifestDigest ([a-f0-9]+), generation (\d+)/.exec(instruction);
+    const native = nativeFixtureTurn(policy, this.ref.sessionId, match ? { manifestDigest: match[1], generation: Number(match[2]), missingResources: [] } : { kind: "passed", coverage: null, verifiedInstructionIds: [] }, this.agent, undefined, delta);
+    const result: TurnResult = { ...native, text: acceptedText, isError: this.mode === "error", numTurns: 1, costUsd: 0,
+      turnId: native.turnId, hostInstruction: instruction, providerInstruction: instruction, rawResponse: acceptedText,
       providerMetadata: { provider: this.agent, sessionId: reported.sessionId, sessionRef: reported } };
     if (this.mode !== "missing-terminal") this.queue.push({ kind: "turn-complete", result, turnId: result.turnId });
     else this.queue.close();
@@ -34,6 +39,15 @@ class Successor implements BuilderAdapter {
   }
   sessionId(): string { return this.ref.sessionId; }
   sessionRef(): ProviderSessionRefV1 { return this.ref; }
+  async prepareSession(): Promise<ProviderSessionRefV1> {
+    // Claude-style initialization completes a host-owned local turn before acceptance.
+    if (this.mode === "prior-terminal" && !this.initialized) {
+      this.initialized = true;
+      this.queue.push({ kind: "turn-complete", result: { text: "Local context", isError: false, numTurns: 0, costUsd: 0, turnId: "initialization-turn" }, turnId: "initialization-turn" });
+    }
+    return this.ref;
+  }
+  private initialized = false;
   adoptSessionRef(ref: ProviderSessionRefV1): void { this.ref = ref; }
   events(): AsyncIterable<BuilderEvent> { return this.queue; }
   async close(): Promise<void> { this.closed = true; this.queue.close(); }
@@ -77,10 +91,29 @@ test("validated QA handoff returns the active successor with its event stream us
     const transfer = await new HandoffService(projectDir).transfer({ runId: "run", role: "qa", reason: "recover QA", compactionCount: 0, compactMaximum: 10 }, async () => successor);
     assert.equal(transfer.acceptanceReceipt?.successorSessionRef.sessionId, "successor");
     assert.equal(successor.closed, false);
-    const next = await successor.sendTurn("next review");
+    const next = await journalStructuredDispatch(projectDir, successor, "next review", nativePolicy(qaVerdictOutput), (instruction, policy) => successor.sendTurn(instruction, policy));
     const event = await successor.events()[Symbol.asyncIterator]().next();
     assert.equal(event.value?.kind, "turn-complete");
     if (event.value?.kind === "turn-complete") assert.equal(event.value.turnId, next.turnId);
     await successor.close();
+  } finally { rmSync(projectDir, { recursive: true, force: true }); }
+});
+
+test("QA handoff accepts when an earlier initialization terminal is still queued", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "qa-handoff-prior-terminal-"));
+  try {
+    const db = new WorkflowDb(projectDir);
+    db.ensureRun("run");
+    db.appendContinuityEvent({ runId: "run", role: "host", kind: "baseline", payload: {}, authoritativeStateRevision: 1 });
+    db.publishContinuityCheckpoint({ runId: "run", role: "qa", delta, authoritativeStateRevision: 1 });
+    db.claimInitialRoleLease("run", "qa", "predecessor");
+    db.close();
+    const service = new HandoffService(projectDir);
+    const staged = service.stage({ runId: "run", role: "qa", reason: "recover QA", predecessorSessionId: "predecessor", compactionCount: 0, compactMaximum: 10 });
+    const successor = new Successor(projectDir, "prior-terminal");
+    await successor.prepareSession();
+    const accepted = await service.acceptStaged(staged, successor);
+    assert.equal(successor.calls, 1);
+    assert.equal(accepted.successor, successor);
   } finally { rmSync(projectDir, { recursive: true, force: true }); }
 });

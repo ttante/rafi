@@ -26,6 +26,9 @@ import {
 } from "./live-interview-harness.mjs";
 import { createLiveWorkspace } from "./live/workspace.mjs";
 
+import { runSupervisedStructuredLive } from "./live/structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("live-ticket-plan", async (supervisor) => {
 const root = resolve(new URL("..", import.meta.url).pathname);
 const appFixture = join(root, "test", "fixtures", "live-todo-app");
 const planFixture = join(root, "test", "fixtures", "live-ticket-plan");
@@ -34,7 +37,8 @@ const workdir = createLiveWorkspace("rafi-live-ticket-plan-").workspaceRoot;
 const repo = join(workdir, "todo-app");
 const transcript = join(workdir, "ticket-plan-interview.typescript");
 const composeProject = `rafi_live_ticket_plan_${Date.now()}_${process.pid}`.replace(/[^a-z0-9_]/gi, "_");
-const selectedRuntime = process.env.RAFI_LIVE_TICKET_PLAN_RUNTIME ?? "codex";
+const selectedRuntime = process.env.RAFI_LIVE_TICKET_PLAN_RUNTIME ?? supervisor.config.providers[0];
+if (!supervisor.config.providers.includes(selectedRuntime)) throw new Error("Runtime outside supervised provider selection");
 let succeeded = false;
 let dockerComposeReady = false;
 
@@ -255,3 +259,6 @@ try {
 } catch (error) {
   die(error instanceof Error ? error.message : String(error));
 }
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

@@ -18,6 +18,9 @@ import { cmdUpdate } from "../../packages/ai-foreman/src/tickets/commands.js";
 import { readBuildRuns } from "../../packages/ai-foreman/src/buildRuns.js";
 import { WorkflowReader } from "../../packages/ai-foreman/src/workflowReader.js";
 
+import { runSupervisedStructuredLive, trackStructuredLiveChild } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("branch-scope-recovery", async (supervisor) => {
 if (process.env.RAFI_LIVE_BRANCH_SCOPE !== "1") throw new Error("Set RAFI_LIVE_BRANCH_SCOPE=1 only with explicit provider authorization");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
 assert.ok(Number.isFinite(deadline) && deadline > Date.now(), "Set a future RAFI_LIVE_DEADLINE absolute timestamp");
@@ -66,6 +69,7 @@ async function invoke(project: string, provider: "claude" | "codex", phase: stri
   ledger.push(entry); save();
   const fd = openSync(log, "w", 0o600);
   const child = spawn(process.execPath, [cli, ...args], { cwd: project, env: { ...process.env, NO_COLOR: "1" }, stdio: ["ignore", fd, fd] });
+    trackStructuredLiveChild(child);
   let interrupted = false;
   const watch = interruptQa ? setInterval(() => {
     try {
@@ -153,3 +157,6 @@ try {
   }
 } catch (error) { ledger.push({ status: "fail", error: String(error), at: new Date().toISOString() }); save(); throw error; }
 console.log(`Branch scope recovery passed; evidence ${root}`);
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

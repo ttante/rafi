@@ -1,5 +1,6 @@
 import type { ProviderSessionRefV1 } from "rafi-spec";
 import type { RuntimeFailure } from "./adapters/types.js";
+import { STRUCTURED_AUTHORITY_TABLES } from "./structuredCutover.js";
 
 export type QaDeliveryOutcome = "remediation-reported" | "blocked" | "needs-input" | "response-invalid" | "delivery-uncertain" | "source-drift";
 
@@ -21,6 +22,8 @@ export interface QaDeliveryInvocationV3 {
 }
 
 export interface QaDeliveryTurnV3 {
+  sealedDispatch?: import("./structuredDispatchRecord.js").SealedDispatchRecordV2;
+  structuredResponseDigest?: string;
   version: 3;
   turnRecordId: string;
   operationId: string;
@@ -73,10 +76,27 @@ export type QaDeliveryTurn = QaDeliveryTurnV3 | QaDeliveryTurnV4;
  * evidence-continuation journal they would interpret as a response-only repair. */
 export function registerQaGraphJournalWriter(db: import("better-sqlite3").Database): void {
   db.function("rafi_graph_delivery_protocol", () => 4);
+  // A v1 connection must never be able to mutate a journal after the v2
+  // cutover.  Keep this connection-local function deliberately separate from
+  // the graph-delivery writer version.
+  db.function("rafi_structured_communication_protocol", () => 2);
+  db.function("rafi_structured_authority_revision", () => 3);
 }
 export function ensureQaGraphJournalGuards(db: import("better-sqlite3").Database): void {
-  const tables = ["qa_delivery_turns", "qa_review_attempts", "qa_remediation_attempts", "qa_turns", "qa_ticket_heads", "qa_operation_journal", "qa_pass_certificates", "build_assignments"];
+    const tables = ["qa_delivery_turns", "qa_review_attempts", "qa_remediation_attempts", "qa_turns", "qa_ticket_heads", "qa_operation_journal", "qa_pass_certificates", "build_assignments"];
   db.transaction(() => {
+    for (const table of new Set([...STRUCTURED_AUTHORITY_TABLES, ...tables, "workflow_runs", "build_work_scope", "build_work_admissions"])) {
+      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue;
+      for (const action of ["INSERT", "UPDATE", "DELETE"]) {
+        // The old guard was an authority bypass: an old writer could continue
+        // to mutate records that the v2 reader treats as sealed.  Dropping it
+        // is safe and idempotent because this migration installs its v2
+        // replacement in the same SQLite transaction.
+        db.exec(`DROP TRIGGER IF EXISTS structured_comms_v1_${table}_${action}`);
+        db.exec(`CREATE TRIGGER IF NOT EXISTS structured_authority_v3_${table}_${action} BEFORE ${action} ON ${table} BEGIN SELECT CASE WHEN rafi_structured_authority_revision() <> 3 THEN RAISE(ABORT,'Structured authority revision 3 writer required') END; END;`);
+        db.exec(`CREATE TRIGGER IF NOT EXISTS structured_comms_v2_${table}_${action} BEFORE ${action} ON ${table} BEGIN SELECT CASE WHEN rafi_structured_communication_protocol() <> 2 THEN RAISE(ABORT,'Structured communication v2 writer required') END; END;`);
+      }
+    }
     for (const table of tables) {
       if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue;
       for (const action of ["INSERT", "UPDATE", "DELETE"])

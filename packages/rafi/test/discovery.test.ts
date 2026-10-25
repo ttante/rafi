@@ -1,3 +1,6 @@
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { nativePolicy } from "ai-foreman/agent-run.js";
+import { discoveryOutput } from "rafi-spec";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,11 +27,11 @@ function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "rafi-discovery-test-"));
 }
 
-function agentResult(text: string): RoleInstructionRunResult {
+function agentResult(result: unknown, text = "Discovery presentation"): RoleInstructionRunResult {
   return {
     turn: {
-      result: { text, isError: false },
-      status: { kind: "plan_complete", summary: "discovery_complete" },
+      result: { ...nativeFixtureTurn(nativePolicy(discoveryOutput), "discovery-session", undefined, "codex", result), text },
+      status: { kind: "done", summary: "discovery_complete" },
     },
     runtime: "codex",
     logPath: "test.log",
@@ -37,12 +40,18 @@ function agentResult(text: string): RoleInstructionRunResult {
   } as unknown as RoleInstructionRunResult;
 }
 
-function finalOutput(): string {
-  return `Discovery report
-${DISCOVERY_ENVELOPE_START}
-{"version":1,"likely_current_state":{"state":"ready","evidence":["docs/plan.md"]},"relevant_prior_plans_docs_tickets":[{"path":"docs/plan.md","status":"current"}],"recommended_next_command":"none","handoff_brief":"Continue from here"}
-${DISCOVERY_ENVELOPE_END}
-STEP_STATUS: plan_complete | summary="discovery_complete"`;
+function finalResult(): RoleInstructionRunResult {
+  return agentResult({ kind: "completed", summary: "Discovery complete", payload: {
+    version: 1, likely_current_state: { state: "ready", evidence: ["docs/plan.md"] },
+    relevant_prior_plans_docs_tickets: [{ path: "docs/plan.md", status: "current" }],
+    recommended_next_command: "none", handoff_brief: "Continue from here",
+    rafi_history_confidence: { answer: "Observed source", confidence: "high", basis: "Fixture inventory" },
+    source_candidates: [], excluded_or_avoided_resources: [],
+  } });
+}
+
+function sourceResult(requests: unknown[], text = "Need more"): RoleInstructionRunResult {
+  return agentResult({ kind: "source-request", requests }, `${text}\n${SOURCE_REQUEST_START}\n${JSON.stringify(requests.length === 1 ? requests[0] : requests)}\n${SOURCE_REQUEST_END}`);
 }
 
 test("discovery run options use the discovery role with read-only permissions", () => {
@@ -72,7 +81,7 @@ test("discovery preserves linguistic answers in the agent instruction", async ()
     setSourceStorage: (registry) => registry,
     runRole: async (opts: RoleInstructionRunOptions) => {
       seen.push(opts.instruction);
-      return agentResult(finalOutput());
+      return finalResult();
     },
   });
 
@@ -132,7 +141,7 @@ test("uninitialized discovery does not write rafi-config.yaml or save sources", 
     sourceRequestFromAnswer: () => ({}),
     extractSourceRequests: () => [],
     setSourceStorage: (registry) => registry,
-    runRole: async () => agentResult(finalOutput()),
+    runRole: async () => finalResult(),
     registerSources: async (projectDir, registry) => {
       registered += 1;
       return { registry, entries: [], snapshots: [], pending: [] };
@@ -166,13 +175,9 @@ test("discovery processes source requests and stops after three rounds", async (
     runRole: async () => {
       runs += 1;
       if (runs <= 4) {
-        return agentResult(`Need more
-${SOURCE_REQUEST_START}
-{"type":"url","label":"Example ${runs}","locator":{"url":"https://example.com/${runs}"}}
-${SOURCE_REQUEST_END}
-STEP_STATUS: needs_input | question="more?" choices="yes|no"`);
+        return sourceResult([{ type: "url", label: `Example ${runs}`, locator: { url: `https://example.com/${runs}` } }]);
       }
-      return agentResult(finalOutput());
+      return finalResult();
     },
     registerSources: async (projectDir, registry, requests) => {
       registered += 1;
@@ -225,14 +230,10 @@ test("source continuation keeps original context, accumulated captures, prior ou
     runRole: async (opts: RoleInstructionRunOptions) => {
       seen.push(opts);
       if (seen.length === 1) {
-        return { ...agentResult(`Need plan
-${SOURCE_REQUEST_START}
-{"type":"local","label":"Current plan","locator":{"path":"docs/current-plan.md"}}
-${SOURCE_REQUEST_END}
-STEP_STATUS: needs_input | question="source?"`), sessionRef };
+        return { ...sourceResult([{ type: "local", label: "Current plan", locator: { path: "docs/current-plan.md" } }], "Need plan"), sessionRef };
       }
       assert.deepEqual(opts.resumeSessionRef, sessionRef);
-      return agentResult(finalOutput());
+      return finalResult();
     },
   });
 
@@ -295,23 +296,22 @@ test("discovery filters source requests that violate online and avoid instructio
     yes: true,
     loadSources: () => emptyLoadedSources(),
     sourceRequestFromAnswer: () => ({}),
-    extractSourceRequests: () => {
-      if (extracted) return [];
-      extracted = true;
-      return [
-        { type: "url", label: "Remote", locator: { url: "https://example.com" } },
-        { type: "jira", label: "Jira", locator: { site: "https://example.atlassian.net", jql: "project = ENG" } },
-        { type: "local", label: "Avoided", locator: { path: "docs/foo/plan.md" } },
-        { type: "local", label: "Kept", locator: { path: "docs/bar.md" } },
-      ];
-    },
     setSourceStorage: (registry) => registry,
     saveSources: () => {},
     registerSources: async (projectDir, registry, requests) => {
       requestedTypes.push(...requests.map((request) => `${request.type}:${request.locator?.path ?? request.label}`));
       return { registry, entries: [], snapshots: [], pending: [] };
     },
-    runRole: async () => agentResult(finalOutput()),
+    runRole: async () => {
+      if (extracted) return finalResult();
+      extracted = true;
+      return sourceResult([
+        { type: "url", label: "Remote", locator: { url: "https://example.com" } },
+        { type: "jira", label: "Jira", locator: { site: "https://example.atlassian.net", jql: "project = ENG" } },
+        { type: "local", label: "Avoided", locator: { path: "docs/foo/plan.md" } },
+        { type: "local", label: "Kept", locator: { path: "docs/bar.md" } },
+      ]);
+    },
   });
 
   assert.deepEqual(requestedTypes, ["local:docs/bar.md"]);

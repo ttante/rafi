@@ -13,7 +13,8 @@ export interface QaPrerequisiteEvidence {
   checkedAt: string;
   /** Host absence is actionable; host availability never proves provider access. */
   authority: "host-preflight";
-  checks: Array<{ requirement: string; capability: string; outcome: "available" | "not_run"; evidence: string }>;
+  /** not_applicable: a typed applicability condition is false, so the requirement does not apply (never a missing prerequisite). */
+  checks: Array<{ requirement: string; capability: string; outcome: "available" | "not_run" | "not_applicable"; evidence: string }>;
   sourceDefects: string[];
 }
 
@@ -30,12 +31,31 @@ export async function checkQaPrerequisites(input: {
   try { const raw = manifests.find(f => f.path === "package.json")?.content; if (raw) pkg = JSON.parse(raw); } catch { /* malformed manifests remain source findings */ }
   const evidence: QaPrerequisiteEvidence = {
     version: 3, snapshotPath: realpathSync(input.snapshotPath), checkedAt: new Date().toISOString(), authority: "host-preflight",
-    scopeDigest: qaDigest("qa-prerequisites-v3", { sourceDigest: input.sourceDigest, snapshotPath: realpathSync(input.snapshotPath), manifests, node: process.version, path: env.PATH ?? "", runtimeContext: input.runtimeContext ?? null, requirements: input.ticket.required_tests }),
+    scopeDigest: qaDigest("qa-prerequisites-v4", { sourceDigest: input.sourceDigest, snapshotPath: realpathSync(input.snapshotPath), manifests, node: process.version, path: env.PATH ?? "", runtimeContext: input.runtimeContext ?? null, requirements: input.ticket.verification_version === 2 ? input.ticket.verification_requirements : input.ticket.required_tests }),
     checks: [], sourceDefects: [],
   };
   const probe = input.probe ?? ((executable, args) => new Promise<boolean>(resolve => {
     execFile(executable, args, { cwd: input.snapshotPath, env, timeout: timeoutMs, maxBuffer: 4096, windowsHide: true }, error => resolve(!error));
   }));
+  // V2 never extracts or executes a command from provider prose. Its closed
+  // probe vocabulary is resolved by the host and records availability only.
+  if (input.ticket.verification_version === 2) {
+    for (const requirement of input.ticket.verification_requirements ?? []) {
+      if (requirement.applicability.kind !== "host-executable-available") continue;
+      const executable = resolveExecutablePath(requirement.applicability.executable, env);
+      const available = Boolean(executable);
+      const expected = requirement.applicability.expected;
+      evidence.checks.push({
+        requirement: requirement.id,
+        capability: `host-probe:executable-available:${requirement.applicability.executable}`,
+        outcome: available === expected ? "available" : "not_applicable",
+        evidence: `Host registry resolved executable availability=${available}; expected=${expected}; ${available === expected ? "requirement applies" : "requirement does not apply"}; snapshot=${evidence.snapshotPath}`,
+      });
+    }
+    return evidence;
+  }
+  // V1 compatibility only: historical prose is read conservatively and never
+  // promoted to a typed applicability condition.
   for (const requirement of input.ticket.required_tests) {
     const command = /^\s*`?(pnpm|npm|yarn|bun|node|docker|python3|pytest|cargo|go)\b/.exec(requirement)?.[1];
     if (command) {

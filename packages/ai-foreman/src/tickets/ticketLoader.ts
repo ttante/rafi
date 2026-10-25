@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { parse, stringify } from "yaml";
 import { Ajv } from "ajv";
 import { TICKET_JSON_SCHEMA, type TicketDef } from "./ticketSchema.js";
+import { verificationRequirementV2Schema } from "rafi-spec";
 
 const ajv = new Ajv({ allErrors: true });
 const validateTicketSchema = ajv.compile(TICKET_JSON_SCHEMA);
@@ -49,6 +50,14 @@ export function validateTicketDefs(tickets: TicketDef[]): ValidationError[] {
           message: err.message ?? "unknown error",
         });
       }
+    }
+    const hasV2 = ticket.verification_version !== undefined || ticket.verification_requirements !== undefined;
+    if (hasV2 && (ticket.verification_version !== 2 || !Array.isArray(ticket.verification_requirements) || ticket.verification_requirements.length === 0)) {
+      errors.push({ path: `tickets[${ticket.id ?? "?"}].verification_requirements`, message: "V2 verification requires version 2 and at least one typed requirement" });
+    }
+    for (const [index, requirement] of (ticket.verification_requirements ?? []).entries()) {
+      const parsed = verificationRequirementV2Schema.safeParse(requirement);
+      if (!parsed.success) errors.push({ path: `tickets[${ticket.id ?? "?"}].verification_requirements[${index}]`, message: parsed.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ") });
     }
   }
 

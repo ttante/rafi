@@ -1,0 +1,495 @@
+{
+  "version": 2,
+  "manifestDigest": "be5af9bdc0a39ade83db971a55e342f50e9c846e18f5650c7d97bfb3ddbf97cd",
+  "descriptorDigest": "fbd632dc888c342539c41a1e32dc36b13eb3e108e3223c9416759a01b08de228",
+  "authoritySiteDigest": "d370aa5b9f4d006e38148b44780d3df9e90482fd212fef9e7e1ca01d3a56f2ab",
+  "descriptors": [
+    {
+      "operation": "branch-dependency-audit",
+      "schemaVersion": 1,
+      "schemaDigest": "38a070c6d6c41def88dc7f6320348c07759d308b09c818d4c434ee2f0b8bc985",
+      "provider": "claude",
+      "profile": "claude-branch-dependency-audit-v2",
+      "variant": "default",
+      "descriptorDigest": "350892e964693d7cc4b3fc6433ab8febef893c79f85d60f1e6267f728a911074"
+    },
+    {
+      "operation": "branch-dependency-audit",
+      "schemaVersion": 1,
+      "schemaDigest": "38a070c6d6c41def88dc7f6320348c07759d308b09c818d4c434ee2f0b8bc985",
+      "provider": "codex",
+      "profile": "codex-branch-dependency-audit-v2",
+      "variant": "default",
+      "descriptorDigest": "ce823517644b02f10ce2957dd4fa216383248fe5ef7d7950d5fea20a6f26d45f"
+    },
+    {
+      "operation": "build-preflight",
+      "schemaVersion": 1,
+      "schemaDigest": "8ce21a2f1120070d080094ab8861bc49773d8bce6055a1c16f946d09e089d537",
+      "provider": "claude",
+      "profile": "claude-build-preflight-v2",
+      "variant": "default",
+      "descriptorDigest": "219820e3422558335bb3fa0914da794d51a0313217220965b96b757abd74e530"
+    },
+    {
+      "operation": "build-preflight",
+      "schemaVersion": 1,
+      "schemaDigest": "8ce21a2f1120070d080094ab8861bc49773d8bce6055a1c16f946d09e089d537",
+      "provider": "codex",
+      "profile": "codex-build-preflight-v2",
+      "variant": "default",
+      "descriptorDigest": "b2cad518bd3898ea028132165b0237f533ded69553821e781bcf595298dd4d69"
+    },
+    {
+      "operation": "builder-coverage",
+      "schemaVersion": 1,
+      "schemaDigest": "8685007db2375172fcdae665beaa8b0aa37b85165b75198908c06c2d1a30c4a9",
+      "provider": "claude",
+      "profile": "claude-builder-coverage-v2",
+      "variant": "default",
+      "descriptorDigest": "26afae8253c6ba73f6acc43e6b3eb3cdfa0acc82260cd11b946b3a5e2e150a6f"
+    },
+    {
+      "operation": "builder-coverage",
+      "schemaVersion": 1,
+      "schemaDigest": "8685007db2375172fcdae665beaa8b0aa37b85165b75198908c06c2d1a30c4a9",
+      "provider": "codex",
+      "profile": "codex-builder-coverage-v2",
+      "variant": "default",
+      "descriptorDigest": "4d805956fcaaff48ea61919f39ae2f60375ab251a65355abc44c29dbbf13f3c3"
+    },
+    {
+      "operation": "builder-remediation",
+      "schemaVersion": 1,
+      "schemaDigest": "d36738a3e18212213d10e19bf912a1dcdb9200b1458977c4fffcc8973cb12129",
+      "provider": "claude",
+      "profile": "claude-builder-remediation-v2",
+      "variant": "default",
+      "descriptorDigest": "4d4efda34f93e8c15d846df033e5b6eb3de9865293ae4aac2f637e70bb51d86b"
+    },
+    {
+      "operation": "builder-remediation",
+      "schemaVersion": 1,
+      "schemaDigest": "d36738a3e18212213d10e19bf912a1dcdb9200b1458977c4fffcc8973cb12129",
+      "provider": "codex",
+      "profile": "codex-builder-remediation-v2",
+      "variant": "default",
+      "descriptorDigest": "dcb84c62cd6b57328e338b5fa2e1e61519b0e494adfa95bd66049bfab681c1fa"
+    },
+    {
+      "operation": "discovery",
+      "schemaVersion": 1,
+      "schemaDigest": "39b340ff7bccb499775f49aceec7069a78e488402eed5cc5a0df7a56bda981ff",
+      "provider": "claude",
+      "profile": "claude-discovery-v2",
+      "variant": "default",
+      "descriptorDigest": "20e4e8d92aa194a5a8b0626b4e95ecdde40db4d7d980cc4a47840da1f520b120"
+    },
+    {
+      "operation": "discovery",
+      "schemaVersion": 1,
+      "schemaDigest": "39b340ff7bccb499775f49aceec7069a78e488402eed5cc5a0df7a56bda981ff",
+      "provider": "codex",
+      "profile": "codex-discovery-v2",
+      "variant": "default",
+      "descriptorDigest": "cc0eb8f19f9d9f5b0b655c37933a532db85c51e9b1ff03199d9a23d0b4ff723e"
+    },
+    {
+      "operation": "graph-semantic-extraction",
+      "schemaVersion": 1,
+      "schemaDigest": "e14779e7a31b8c07bbe67f4a3282ef3764f669255599afc354800d6eca1c5999",
+      "provider": "codex",
+      "profile": "codex-graph-semantic-extraction-v2",
+      "variant": "default",
+      "descriptorDigest": "3b170c441b2a3184f6d8de8b4316f455b9d6e4f3677677e1d027b4227e727131"
+    },
+    {
+      "operation": "graph-semantic-extraction",
+      "schemaVersion": 1,
+      "schemaDigest": "e14779e7a31b8c07bbe67f4a3282ef3764f669255599afc354800d6eca1c5999",
+      "provider": "claude",
+      "profile": "claude-graph-semantic-extraction-v2",
+      "variant": "default",
+      "descriptorDigest": "cc3d4678affb6f2c1e1ca53e390c584e5f4affa0c5b76a59c0320b34b179bcd2"
+    },
+    {
+      "operation": "grill-audit",
+      "schemaVersion": 1,
+      "schemaDigest": "28336316d35b99efc9f7358168c8f8958e31851268763120a7ee05d7d664fe01",
+      "provider": "claude",
+      "profile": "claude-grill-audit-v2",
+      "variant": "default",
+      "descriptorDigest": "101c66807e06b32d5bdb81ad5ed38448c1a466ce288749f6159da4f7cc34b337"
+    },
+    {
+      "operation": "grill-audit",
+      "schemaVersion": 1,
+      "schemaDigest": "28336316d35b99efc9f7358168c8f8958e31851268763120a7ee05d7d664fe01",
+      "provider": "codex",
+      "profile": "codex-grill-audit-v2",
+      "variant": "default",
+      "descriptorDigest": "6ec9130dd5421ce9e8110a79cf3b09d4dcbc9504188d7248ca65b1ae0f7ec2f9"
+    },
+    {
+      "operation": "guided-recovery",
+      "schemaVersion": 1,
+      "schemaDigest": "0b5ae2386abed23cae558acba2e00437cb25a7a01fd2facdc800cc63997c4fe5",
+      "provider": "codex",
+      "profile": "codex-guided-recovery-v2",
+      "variant": "default",
+      "descriptorDigest": "d0eea9398748b9a39872b16be47e2fc9a7a8b8a3a31494a31922cb6c9ac90866"
+    },
+    {
+      "operation": "guided-recovery",
+      "schemaVersion": 1,
+      "schemaDigest": "0b5ae2386abed23cae558acba2e00437cb25a7a01fd2facdc800cc63997c4fe5",
+      "provider": "claude",
+      "profile": "claude-guided-recovery-v2",
+      "variant": "default",
+      "descriptorDigest": "f755746c5a7b42d8bc1f40f08ac39c3e05604784dcad336ad8d4d86a881021ac"
+    },
+    {
+      "operation": "handoff-acceptance",
+      "schemaVersion": 1,
+      "schemaDigest": "333f11cc8a417777458d99ea061dd5522c8a5c00623a69b467f52336400463f5",
+      "provider": "codex",
+      "profile": "codex-handoff-acceptance-v2",
+      "variant": "default",
+      "descriptorDigest": "8478278c44ba64f55e7bf4c1ba9489e270d4c5145b8da2207efa3980ef8c8ec5"
+    },
+    {
+      "operation": "handoff-acceptance",
+      "schemaVersion": 1,
+      "schemaDigest": "333f11cc8a417777458d99ea061dd5522c8a5c00623a69b467f52336400463f5",
+      "provider": "claude",
+      "profile": "claude-handoff-acceptance-v2",
+      "variant": "default",
+      "descriptorDigest": "c98c52a5a16950019fbf3d3b51f7ea42c79019d64dc78af2277494805ff384d5"
+    },
+    {
+      "operation": "manager",
+      "schemaVersion": 1,
+      "schemaDigest": "f942b1c3472d5b4aad353ae6bf14bac2562bd21498ba16f0d38abd95f1bf3d21",
+      "provider": "claude",
+      "profile": "claude-manager-v2",
+      "variant": "default",
+      "descriptorDigest": "20c093ee4720fed2a13f0156550c5bc1e3927d6379cb4307fab1270d25908015"
+    },
+    {
+      "operation": "manager",
+      "schemaVersion": 1,
+      "schemaDigest": "f942b1c3472d5b4aad353ae6bf14bac2562bd21498ba16f0d38abd95f1bf3d21",
+      "provider": "codex",
+      "profile": "codex-manager-v2",
+      "variant": "default",
+      "descriptorDigest": "8cbd6dc5c3cf4a9ad97c8a91b55f325a4b2b0ae4d90b553bdc38756f27bb94c5"
+    },
+    {
+      "operation": "planner-remediation",
+      "schemaVersion": 1,
+      "schemaDigest": "d4ca24179aa1b382cc7b87d90e3371ea188a303c575408fa5dcc8bf0a206aa9c",
+      "provider": "codex",
+      "profile": "codex-planner-remediation-v2",
+      "variant": "default",
+      "descriptorDigest": "ceb6950053fdf7f9765499489eda9a0733e51ae899a71ee24ef1c2ec466a401a"
+    },
+    {
+      "operation": "planner-remediation",
+      "schemaVersion": 1,
+      "schemaDigest": "d4ca24179aa1b382cc7b87d90e3371ea188a303c575408fa5dcc8bf0a206aa9c",
+      "provider": "claude",
+      "profile": "claude-planner-remediation-v2",
+      "variant": "default",
+      "descriptorDigest": "f495416d3554f2b178fa2dbe9fbc3614075d81b3d63a62a0e1fd20f5bede12b9"
+    },
+    {
+      "operation": "qa-contract-acceptance",
+      "schemaVersion": 1,
+      "schemaDigest": "48147d1c2574eda2ae4dd58e77618b0b32d2268540853537cd087b0208dbfae4",
+      "provider": "claude",
+      "profile": "claude-qa-contract-acceptance-v2",
+      "variant": "default",
+      "descriptorDigest": "5ed23acc353219642e399277c48c87cb21202d01ab6a74e41f215f9760c0b245"
+    },
+    {
+      "operation": "qa-contract-acceptance",
+      "schemaVersion": 1,
+      "schemaDigest": "48147d1c2574eda2ae4dd58e77618b0b32d2268540853537cd087b0208dbfae4",
+      "provider": "codex",
+      "profile": "codex-qa-contract-acceptance-v2",
+      "variant": "default",
+      "descriptorDigest": "88ea1f668df4ac336d2538bd42dbfc140f9f841aa3dc1be140e0e1b5c43e6e2b"
+    },
+    {
+      "operation": "qa-contract-segment",
+      "schemaVersion": 1,
+      "schemaDigest": "4598e1de76fabd019874dbeef277f4126bc0d1fc1e7ddc816b9f9d59f15b2501",
+      "provider": "codex",
+      "profile": "codex-qa-contract-segment-v2",
+      "variant": "default",
+      "descriptorDigest": "6abe5173aad699a505c02717f4b056bd36075ad58c9bee48180e9d32be265338"
+    },
+    {
+      "operation": "qa-contract-segment",
+      "schemaVersion": 1,
+      "schemaDigest": "4598e1de76fabd019874dbeef277f4126bc0d1fc1e7ddc816b9f9d59f15b2501",
+      "provider": "claude",
+      "profile": "claude-qa-contract-segment-v2",
+      "variant": "default",
+      "descriptorDigest": "e7ea70ea3e61ba76904b6d792b476a5314090e7473f7e345ce8467090311ff8d"
+    },
+    {
+      "operation": "qa-preparation-assessment",
+      "schemaVersion": 1,
+      "schemaDigest": "449dfcbd122d9a603135b2eb87acfecef4fb6fa3fb4cc5c4b651a86ae31af5a7",
+      "provider": "claude",
+      "profile": "claude-qa-preparation-assessment-v2",
+      "variant": "default",
+      "descriptorDigest": "3b8a304720f1d69710fcb6433aa205a1844dc3c24bda06b04fe959e2c28dbbdc"
+    },
+    {
+      "operation": "qa-preparation-assessment",
+      "schemaVersion": 1,
+      "schemaDigest": "449dfcbd122d9a603135b2eb87acfecef4fb6fa3fb4cc5c4b651a86ae31af5a7",
+      "provider": "codex",
+      "profile": "codex-qa-preparation-assessment-v2",
+      "variant": "default",
+      "descriptorDigest": "fd8c246e651f4db0b9df3be312142313d0af97fe89f842fa4103164387d18dd7"
+    },
+    {
+      "operation": "qa-preparation-challenge",
+      "schemaVersion": 1,
+      "schemaDigest": "ff5d1593ac9d7e3f6e0f00b6783ec59648e28c278dcbf3e8894c9342993dea23",
+      "provider": "claude",
+      "profile": "claude-qa-preparation-challenge-v2",
+      "variant": "default",
+      "descriptorDigest": "340d3c1149cd1c4f55a8ccf052fd5d332545311cdedb70f531bdaa1b5b9906df"
+    },
+    {
+      "operation": "qa-preparation-challenge",
+      "schemaVersion": 1,
+      "schemaDigest": "ff5d1593ac9d7e3f6e0f00b6783ec59648e28c278dcbf3e8894c9342993dea23",
+      "provider": "codex",
+      "profile": "codex-qa-preparation-challenge-v2",
+      "variant": "default",
+      "descriptorDigest": "eb6a5b7984651c3f95a5623687ca60b281f06df2a0a130980141b932ecbfb951"
+    },
+    {
+      "operation": "qa-preparation-depth",
+      "schemaVersion": 1,
+      "schemaDigest": "c9570c489175b800b4cf0308b4bdd90be187c7b39f967ebf441c86a724f7d030",
+      "provider": "claude",
+      "profile": "claude-qa-preparation-depth-v2",
+      "variant": "default",
+      "descriptorDigest": "8c209cbe7f7bbf86256ba218d9cc8c07c9db8f7bcff4ec19fa81e7458b521e2a"
+    },
+    {
+      "operation": "qa-preparation-depth",
+      "schemaVersion": 1,
+      "schemaDigest": "c9570c489175b800b4cf0308b4bdd90be187c7b39f967ebf441c86a724f7d030",
+      "provider": "codex",
+      "profile": "codex-qa-preparation-depth-v2",
+      "variant": "default",
+      "descriptorDigest": "b1c160f889cf5357dfaad5efe6c6404eea6a51afa836080c9d18d85e0ce11468"
+    },
+    {
+      "operation": "qa-preparation-draft",
+      "schemaVersion": 1,
+      "schemaDigest": "b7f815c5da0c2260303b200e6bae5df7c544a5dff656ac2662a7fccfd13b0baa",
+      "provider": "claude",
+      "profile": "claude-qa-preparation-draft-v2",
+      "variant": "default",
+      "descriptorDigest": "327e9ee990de7379bb282e9fdf34866cf6ea134bfaaf380ec2fc2728f5fb9f66"
+    },
+    {
+      "operation": "qa-preparation-draft",
+      "schemaVersion": 1,
+      "schemaDigest": "b7f815c5da0c2260303b200e6bae5df7c544a5dff656ac2662a7fccfd13b0baa",
+      "provider": "codex",
+      "profile": "codex-qa-preparation-draft-v2",
+      "variant": "default",
+      "descriptorDigest": "496f3dff0d698a408a20a55678f8e0469f064b563acefa84a66ff773ea878656"
+    },
+    {
+      "operation": "qa-recovery-acceptance",
+      "schemaVersion": 1,
+      "schemaDigest": "e64297d8c73ddcc7fcca21f26f524085f98d1537423a9db84053cf451b4b6d06",
+      "provider": "codex",
+      "profile": "codex-qa-recovery-acceptance-v2",
+      "variant": "default",
+      "descriptorDigest": "889bde59354c7dbab1f6a4e568c75bcbe53829a74d27507c9c2cfcbc29d1d87f"
+    },
+    {
+      "operation": "qa-recovery-acceptance",
+      "schemaVersion": 1,
+      "schemaDigest": "e64297d8c73ddcc7fcca21f26f524085f98d1537423a9db84053cf451b4b6d06",
+      "provider": "claude",
+      "profile": "claude-qa-recovery-acceptance-v2",
+      "variant": "default",
+      "descriptorDigest": "c77a6218cfd66659189f495575b3113f4c0f150e026aa1e549584edd8df93d45"
+    },
+    {
+      "operation": "qa-verdict",
+      "schemaVersion": 1,
+      "schemaDigest": "d012a22c9abf6180758bf6cc130f99b05b4c99d523a57360dadddfed07a083ce",
+      "provider": "codex",
+      "profile": "codex-qa-verdict-v2",
+      "variant": "default",
+      "descriptorDigest": "99d50260f1151ad9a12d41edf88eecd61aaf8a074ca9719e8ba16ccd28fe44de"
+    },
+    {
+      "operation": "qa-verdict",
+      "schemaVersion": 1,
+      "schemaDigest": "d012a22c9abf6180758bf6cc130f99b05b4c99d523a57360dadddfed07a083ce",
+      "provider": "claude",
+      "profile": "claude-qa-verdict-v2",
+      "variant": "default",
+      "descriptorDigest": "df7f37340efbc405e4d55ffe4d9aeb92ed87d72c7808c1014b10374b72feda34"
+    },
+    {
+      "operation": "risk-note-repair",
+      "schemaVersion": 1,
+      "schemaDigest": "dd4e69a8fe129aae7c89237070afcc8fa1ebd375cdd9808179a1ca72135a6e66",
+      "provider": "claude",
+      "profile": "claude-risk-note-repair-v2",
+      "variant": "default",
+      "descriptorDigest": "b4617adbdd9b8680ea426ca873c624bee31d2d429b96fac547a63b6367f729ac"
+    },
+    {
+      "operation": "risk-note-repair",
+      "schemaVersion": 1,
+      "schemaDigest": "dd4e69a8fe129aae7c89237070afcc8fa1ebd375cdd9808179a1ca72135a6e66",
+      "provider": "codex",
+      "profile": "codex-risk-note-repair-v2",
+      "variant": "default",
+      "descriptorDigest": "ead3cc0c0b87f235043f3b993bf312f2d3d3ecb2d57c9d64f5a6fc76f46ea833"
+    },
+    {
+      "operation": "session-initialization",
+      "schemaVersion": 1,
+      "schemaDigest": "6368c57dcec133d95148ac5017545b0bb06979a4aa44b32bc826436cf8049451",
+      "provider": "claude",
+      "profile": "claude-session-initialization-v2",
+      "variant": "default",
+      "descriptorDigest": "348705dda9b0153945cfd732a116314172dc31f219270f49bd4b44a6363b3f24"
+    },
+    {
+      "operation": "session-initialization",
+      "schemaVersion": 1,
+      "schemaDigest": "6368c57dcec133d95148ac5017545b0bb06979a4aa44b32bc826436cf8049451",
+      "provider": "codex",
+      "profile": "codex-session-initialization-v2",
+      "variant": "default",
+      "descriptorDigest": "6adc0e6f2ec68f15cd78df5b39dfa619bd8f1ef9b3becb3885093ddf29fc02a1"
+    },
+    {
+      "operation": "structured-plan",
+      "schemaVersion": 1,
+      "schemaDigest": "7787e3ee3d1a1bfc7bdb5fbf72c21b9e50bbdc746d6365195b8933119544baa9",
+      "provider": "claude",
+      "profile": "claude-structured-plan-v2",
+      "variant": "default",
+      "descriptorDigest": "1d4e8bed4100744e09ee975c1aba97c52622b8a0899aed30d05b209d313edae8"
+    },
+    {
+      "operation": "structured-plan",
+      "schemaVersion": 1,
+      "schemaDigest": "7787e3ee3d1a1bfc7bdb5fbf72c21b9e50bbdc746d6365195b8933119544baa9",
+      "provider": "codex",
+      "profile": "codex-structured-plan-v2",
+      "variant": "default",
+      "descriptorDigest": "d7ed66543dcdea9e0653f09a866a87b04b29f584570310bc6bcde7f96357496f"
+    },
+    {
+      "operation": "ticket-plan",
+      "schemaVersion": 1,
+      "schemaDigest": "6f70b90b30cf1177f6b8c896736eb94e6be1030da72c733968ce20d3e4ba5f75",
+      "provider": "codex",
+      "profile": "codex-ticket-plan-v2",
+      "variant": "default",
+      "descriptorDigest": "2fc0090712943135ad1251a543b199fe583fa16635c19e1162579862744f5769"
+    },
+    {
+      "operation": "ticket-plan",
+      "schemaVersion": 1,
+      "schemaDigest": "6f70b90b30cf1177f6b8c896736eb94e6be1030da72c733968ce20d3e4ba5f75",
+      "provider": "claude",
+      "profile": "claude-ticket-plan-v2",
+      "variant": "default",
+      "descriptorDigest": "60487376b54eaeef94d2a68890f16974bd7e4537f066f531e314a3444dfe2075"
+    },
+    {
+      "operation": "ticket-population",
+      "schemaVersion": 1,
+      "schemaDigest": "8fc3a7b1a0f2c0b78332db01057b47eedafbfe934e1ca656a52648b49c16b7f9",
+      "provider": "claude",
+      "profile": "claude-ticket-population-v2",
+      "variant": "default",
+      "descriptorDigest": "060e4044ca9f88993de53aeb3a71865ca072b0465d1f917bfb1b4027c0bfbc01"
+    },
+    {
+      "operation": "ticket-population",
+      "schemaVersion": 1,
+      "schemaDigest": "8fc3a7b1a0f2c0b78332db01057b47eedafbfe934e1ca656a52648b49c16b7f9",
+      "provider": "codex",
+      "profile": "codex-ticket-population-v2",
+      "variant": "default",
+      "descriptorDigest": "282356a6f0853e3f73348028967e53e2c2bcc9bc8061b09c37a22ffec4e2bfe4"
+    },
+    {
+      "operation": "ticket-population-page",
+      "schemaVersion": 1,
+      "schemaDigest": "c4d3a38c96da28e248b6de0c3803d43e4e0b33fadb1df100cef5400844ab3a04",
+      "provider": "codex",
+      "profile": "codex-ticket-population-page-v2",
+      "variant": "default",
+      "descriptorDigest": "051a522b021d4bc812829865a18fef47c8b5034617b33071750436f08b68b7e9"
+    },
+    {
+      "operation": "ticket-population-page",
+      "schemaVersion": 1,
+      "schemaDigest": "c4d3a38c96da28e248b6de0c3803d43e4e0b33fadb1df100cef5400844ab3a04",
+      "provider": "claude",
+      "profile": "claude-ticket-population-page-v2",
+      "variant": "default",
+      "descriptorDigest": "15a2ad5a746a89c073567b1dfaa8d018fac9061a7286d2eb4a2630a928075585"
+    },
+    {
+      "operation": "uninstall-proposal",
+      "schemaVersion": 1,
+      "schemaDigest": "edda000b3e65f40104e8fe7d810b04dfdbcb68b0e2767bd45b4d9b542bd3fdca",
+      "provider": "claude",
+      "profile": "claude-uninstall-proposal-v2",
+      "variant": "default",
+      "descriptorDigest": "071b67ad147ae4ebd4f97aa8143ade4a7b11a93e4725708577b5dd75a911e53e"
+    },
+    {
+      "operation": "uninstall-proposal",
+      "schemaVersion": 1,
+      "schemaDigest": "edda000b3e65f40104e8fe7d810b04dfdbcb68b0e2767bd45b4d9b542bd3fdca",
+      "provider": "codex",
+      "profile": "codex-uninstall-proposal-v2",
+      "variant": "default",
+      "descriptorDigest": "1ccf6fc723868983dac32d2b008d819ab8a4c97ed43bf775acdbc981fe913557"
+    },
+    {
+      "operation": "work-report",
+      "schemaVersion": 1,
+      "schemaDigest": "a1c13c4b2ab324a9bd1563ac9a7a62effbcbbdef211ed7ec8665999b97033a81",
+      "provider": "codex",
+      "profile": "codex-work-report-v2",
+      "variant": "default",
+      "descriptorDigest": "0e957c906fa42eae5b71e3e412d5ccd5cadee52dc8e1b1974402475f37f2d371"
+    },
+    {
+      "operation": "work-report",
+      "schemaVersion": 1,
+      "schemaDigest": "a1c13c4b2ab324a9bd1563ac9a7a62effbcbbdef211ed7ec8665999b97033a81",
+      "provider": "claude",
+      "profile": "claude-work-report-v2",
+      "variant": "default",
+      "descriptorDigest": "fe79bb8aafd6b418186e0f12ad47d18a43cc2b7284adc371f9efe8f109c84354"
+    }
+  ],
+  "scope": "Registry and resolved source-site state captured before remaining-work runtime changes; historical verification remains separate"
+}

@@ -6,12 +6,26 @@ const enumeration = (...values: string[]) => ({ enum: values });
 const array = (items: unknown, minItems = 0) => ({ type: "array", items, minItems, maxItems: 10000 });
 const object = (properties: Record<string, unknown>, optional: string[] = []) => ({ type: "object", additionalProperties: false, properties, required: Object.keys(properties).filter(key => !optional.includes(key)) });
 const documentationTarget = { type: "string", minLength: 1, maxLength: 1_000, pattern: "^(?!/)(?!.*(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$))(?![A-Za-z]:[/\\\\])" };
+const verificationIntentV2Schema = object({
+  id: text,
+  summary: text,
+  timing: enumeration("preimplementation", "postimplementation", "both"),
+  applicability: {
+    oneOf: [
+      object({ kind: { const: "always" } }),
+      object({ kind: { const: "host-executable-available" }, executable: enumeration("pnpm", "npm", "yarn", "bun", "node", "python3", "pytest", "cargo", "go"), expected: { type: "boolean" }, phase: enumeration("preimplementation", "postimplementation", "both") }),
+    ],
+  },
+  methods: array(object({ kind: enumeration("command", "procedure"), argv: array(text, 1), steps: array(text, 1), cwd: text, runtime: text, timeout_ms: { type: "integer", minimum: 1, maximum: 3600000 }, expected_outcome: text }, ["argv", "steps"]), 1),
+  expected_evidence: array(text, 1),
+  depends_on: strings,
+});
 export const documentationPolicyV1Schema = object({ required: { type: "boolean" }, targets: array(documentationTarget, 0), criteria: array(text, 0) });
 export const qaContractInputRefSchema = object({ id: text, kind: enumeration("ticket", "plan", "decision", "checklist", "rules", "skill", "policy", "baseline"), reference: text, digest, authority: enumeration("approved-scope", "project-rule", "planner-policy", "inspected-context"), revision: text, availability: enumeration("available", "missing", "unsupported") });
-export const qaRequirementRefSchema = object({ id: text, inputRef: text, locator: text, statement: text, digest, obligation: enumeration("mandatory", "advisory"), origin: enumeration("explicit", "derived", "invariant", "proposed", "advisory"), authority: enumeration("approved", "invariant", "proposed"), conflict: text }, ["conflict"]);
+export const qaRequirementRefSchema = object({ id: text, inputRef: text, locator: text, statement: text, digest, obligation: enumeration("mandatory", "advisory"), origin: enumeration("explicit", "derived", "invariant", "proposed", "advisory"), authority: enumeration("approved", "invariant", "proposed"), conflict: text, verificationIntent: verificationIntentV2Schema, verificationIntentDigest: digest }, ["conflict", "verificationIntent", "verificationIntentDigest"]);
 export const qaVerificationMethodSchema = object({ kind: enumeration("command", "procedure"), argv: array({ type: "string" }, 1), steps: array(text, 1), cwd: text, fixtures: strings, expectedOutcome: text, runtime: text, timeoutMs: { type: "integer", minimum: 1, maximum: 3600000 }, equivalentAuthorityId: text }, ["argv", "steps", "equivalentAuthorityId"]);
-export const qaVerificationCheckSchema = object({ id: text, requirementRefs: array(text, 1), origin: enumeration("explicit", "derived", "invariant", "proposed", "advisory"), expectedBehavior: text, obligation: enumeration("mandatory", "advisory"), timing: enumeration("preimplementation", "postimplementation", "both"), applicability: object({ kind: enumeration("unconditional", "conditional"), predicate: text, decisionOwner: enumeration("host", "qa"), requiredEvidence: strings }, ["predicate"]), verification: array(qaVerificationMethodSchema, 1), expectedEvidence: array(text, 1), prerequisiteRefs: strings, dependsOnChecks: strings, expectedBaseline: text, dispositionRef: text, successorOf: text }, ["expectedBaseline", "dispositionRef", "successorOf"]);
-export const qaUnresolvedConcernSchema = object({ reason: text, requirementIds: strings, checkIds: strings, material: { type: "boolean" }, owner: text, nextAction: text });
+export const qaVerificationCheckSchema = object({ hostKind: enumeration("source-scope", "graph-maintenance", "documentation-policy"), id: text, requirementRefs: array(text, 1), origin: enumeration("explicit", "derived", "invariant", "proposed", "advisory"), expectedBehavior: text, obligation: enumeration("mandatory", "advisory"), timing: enumeration("preimplementation", "postimplementation", "both"), applicability: object({ kind: enumeration("unconditional", "conditional"), predicate: text, decisionOwner: enumeration("host", "qa"), requiredEvidence: strings }, ["predicate"]), verification: array(qaVerificationMethodSchema, 1), expectedEvidence: array(text, 1), prerequisiteRefs: strings, dependsOnChecks: strings, expectedBaseline: text, dispositionRef: text, successorOf: text }, ["hostKind", "expectedBaseline", "dispositionRef", "successorOf"]);
+export const qaUnresolvedConcernSchema = object({ category: enumeration("evidence-gap", "contract-gap", "scope-conflict", "verification-gap"), timing: enumeration("preimplementation", "postimplementation", "both"), reason: text, requirementIds: strings, checkIds: strings, material: { type: "boolean" }, owner: text, nextAction: text }, ["category", "timing"]);
 const candidateFields = {
   version: { const: 1 }, contractId: text, revision: { type: "integer", minimum: 1 }, predecessorDigest: digest,
   runId: text, workId: text, admissionDigest: digest, depthDecision: qaPreparationDepthDecisionV1Schema,

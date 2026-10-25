@@ -1,7 +1,8 @@
+import { runSupervisedStructuredLive } from "../../../scripts/live/structured-live-supervisor.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaudeAdapter } from "../src/adapters/claude.js";
@@ -12,19 +13,27 @@ import { SessionUnavailableError } from "../src/adapters/sessionFailure.js";
 
 const live = process.env.RAFI_LIVE_PROVIDER_SESSIONS === "1";
 for (const provider of ["claude", "codex"] as const) {
-  test(`authenticated ${provider} session starts, compacts natively, and resumes exactly`, { skip: !live }, async () => {
+  const requested = (process.env.RAFI_LIVE_PROVIDERS ?? "claude,codex").split(",");
+  test(`authenticated ${provider} session starts, compacts natively, and resumes exactly`, { skip: !live ? "Live provider opt-in absent" : !requested.includes(provider) ? `${provider} omitted from the selected providers` : false }, async () => {
+    await runSupervisedStructuredLive(`provider-session-${provider}`, async supervisor => {
+    const evidence: Record<string, unknown> = { provider };
     const cwd = mkdtempSync(join(tmpdir(), `rafi-${provider}-smoke-`));
     const otherCwd = mkdtempSync(join(tmpdir(), `rafi-${provider}-cross-cwd-`));
     execFileSync("git", ["init", "-q"], { cwd });
     execFileSync("git", ["init", "-q"], { cwd: otherCwd });
     const make = async (workDir: string, resumeSessionRef?: ProviderSessionRefV1): Promise<BuilderAdapter> => provider === "claude"
-      ? await ClaudeAdapter.create({ cwd: workDir, configRoot: cwd, resumeSessionRef, permission: async () => ({ behavior: "deny", message: "smoke is read-only" }), sandboxMode: "read-only" })
+      ? await ClaudeAdapter.create({ queryBudget: supervisor, cwd: workDir, configRoot: cwd, resumeSessionRef, permission: async () => ({ behavior: "deny", message: "smoke is read-only" }), sandboxMode: "read-only" })
       : new CodexAdapter({ cwd: workDir, configRoot: cwd, resumeSessionRef, permission: async () => ({ behavior: "deny", message: "smoke is read-only" }), sandboxMode: "read-only" });
-    const first = await make(cwd);
+    const untrackedMake = make;
+    const trackedMake: typeof make = async (...args) => { const adapter = await untrackedMake(...args); supervisor.track(() => adapter.close()); return adapter; };
+    const first = await trackedMake(cwd);
+    evidence.cwd = cwd; evidence.otherCwd = otherCwd;
+    try {
     let sessionRef: ProviderSessionRefV1 | undefined;
     let context;
     try {
       const turn = await first.sendTurn('Remember the nonce "rafi-native-compact" and return exactly OK.');
+      evidence.firstTurn = turn;
       assert.equal(turn.isError, false, turn.text);
       sessionRef = first.sessionRef?.();
       assert.ok(sessionRef);
@@ -37,14 +46,16 @@ for (const provider of ["claude", "codex"] as const) {
       }
       assert.equal(compact?.ok, true, compact?.error);
       context = await first.contextUsage?.();
+      evidence.compact = compact; evidence.context = context; evidence.sessionRef = sessionRef;
     } finally {
       await first.close();
     }
     assert.ok(sessionRef);
-    const resumed = await make(cwd, sessionRef);
+    const resumed = await trackedMake(cwd, sessionRef);
     try {
       assert.equal((await resumed.validateSession?.())?.status, "available");
       const continuity = await resumed.sendTurn("Return only the nonce I asked you to remember.");
+      evidence.resumedTurn = continuity;
       assert.equal(continuity.isError, false, continuity.text);
       assert.match(continuity.text, /rafi-native-compact/);
       assert.ok(context === undefined || context.used >= 0);
@@ -52,14 +63,16 @@ for (const provider of ["claude", "codex"] as const) {
       await resumed.close();
     }
     if (provider === "claude") {
-      await assert.rejects(make(otherCwd, sessionRef), SessionUnavailableError);
+      await assert.rejects(trackedMake(otherCwd, sessionRef), SessionUnavailableError);
     } else {
-      const crossCwd = await make(otherCwd, sessionRef);
+      const crossCwd = await trackedMake(otherCwd, sessionRef);
       try {
         const availability = await crossCwd.validateSession?.();
         assert.equal(availability?.status, "unavailable");
         assert.equal(availability?.reason, "cwd-mismatch");
       } finally { await crossCwd.close(); }
     }
+    } finally { writeFileSync(join(supervisor.evidenceRoot, "provider-session.json"), JSON.stringify(evidence, null, 2)); }
+    });
   });
 }

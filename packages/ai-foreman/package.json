@@ -1,6 +1,6 @@
 {
   "name": "ai-foreman",
-  "version": "1.7.29",
+  "version": "2.0.0",
   "description": "An orchestrator that keeps Codex CLI / Claude Code builders moving through their step list unattended. Part of Rafi.",
   "license": "Apache-2.0",
   "type": "module",
@@ -92,6 +92,14 @@
     "./workflow-reader.js": {
       "types": "./dist/workflowReader.d.ts",
       "default": "./dist/workflowReader.js"
+    },
+    "./process-identity.js": {
+      "types": "./dist/processIdentity.d.ts",
+      "default": "./dist/processIdentity.js"
+    },
+    "./tickets/reset.js": {
+      "types": "./dist/tickets/reset.d.ts",
+      "default": "./dist/tickets/reset.js"
     },
     "./ticket-history-reader.js": {
       "types": "./dist/ticketHistoryReader.d.ts",
@@ -281,7 +289,7 @@
     "dev": "tsx src/index.ts",
     "test": "node scripts/test-offline.mjs",
     "typecheck": "tsc --noEmit",
-    "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 tsx --test test/providerSmoke.test.ts",
+    "test:live-providers": "RAFI_LIVE_PROVIDER_SESSIONS=1 node --import tsx --test test/providerSmoke.test.ts",
     "prepublishOnly": "tsc -p ../spec/tsconfig.build.json && pnpm build && pnpm --filter ai-foreman test && tsc --noEmit"
   },
   "keywords": [
@@ -295,7 +303,7 @@
     "cli"
   ],
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   },
   "packageManager": "pnpm@10.2.1",
   "optionalDependencies": {
@@ -305,21 +313,21 @@
     "@clack/prompts": "^1.4.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
-    "better-sqlite3": "^12.10.0",
+    "better-sqlite3": "^13.0.3",
     "commander": "^12.1.0",
     "ignore": "7.0.5",
     "luxon": "^3.7.2",
     "parse5": "7.2.1",
     "pdfjs-dist": "4.10.38",
-    "rafi-spec": "0.8.18",
-    "special-agents": "0.8.18",
+    "rafi-spec": "0.9.0",
+    "special-agents": "0.9.0",
     "yaml": "^2.5.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/luxon": "^3.7.1",
-    "@types/node": "^20.14.0",
+    "@types/node": "^24.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

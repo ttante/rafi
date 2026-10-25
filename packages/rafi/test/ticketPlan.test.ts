@@ -18,11 +18,11 @@ test("guided ticket plan instruction is read-only, conversational, and exact-app
   assert.match(instruction, /grill-me skill exhaustively/);
   assert.match(instruction, /recommended answer first/);
   assert.match(instruction, /native AskUserQuestion-style question tool/);
-  assert.match(instruction, /SOURCE_REQUEST/);
+  assert.match(instruction, /source-request/);
   assert.match(instruction, /source_reconciliation/);
   assert.match(instruction, /replace_existing/);
-  assert.match(instruction, /RAFI_PROPOSAL_START/);
-  assert.match(instruction, /proposal_ready/);
+  assert.match(instruction, /native ticket-plan result/);
+  assert.doesNotMatch(instruction, /STEP_STATUS|RAFI_PROPOSAL_START/);
 });
 
 test("ticket plan work mode is host-owned and overrides contradictory planner output", () => {

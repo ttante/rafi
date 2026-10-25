@@ -44,6 +44,23 @@ test("required service/connectivity checks are bounded; offline/static projects 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("V2 applicability uses only the closed host registry and never parses or executes prose", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-prerequisite-v2-"));
+  try {
+    writeFileSync(join(root, "pnpm"), "#!/bin/sh\nexit 0\n"); chmodSync(join(root, "pnpm"), 0o755);
+    let executed = 0;
+    const typed = {
+      ...ticket(["docker info; do not parse this as an executable probe"]),
+      verification_version: 2 as const,
+      verification_requirements: [{ id: "fallback", summary: "Use node fallback only when pnpm is unavailable", timing: "postimplementation" as const, applicability: { kind: "host-executable-available" as const, executable: "pnpm" as const, expected: false, phase: "preimplementation" as const }, methods: [{ kind: "procedure" as const, steps: ["run fallback"], cwd: ".", runtime: "node", timeout_ms: 1000, expected_outcome: "passes" }], expected_evidence: ["host receipt"], depends_on: [] }],
+    };
+    const result = await checkQaPrerequisites({ snapshotPath: root, sourceDigest: "source", ticket: typed, env: { PATH: root }, probe: async () => { executed++; return true; } });
+    assert.equal(executed, 0);
+    assert.deepEqual(result.checks.map(check => check.capability), ["host-probe:executable-available:pnpm"]);
+    assert.equal(result.checks[0]!.outcome, "not_applicable", "the host records that pnpm is available, so the unavailable fallback does not apply");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("optional history is bounded through 20 cycles without recursively copying reports or requests", () => {
   const history: unknown[] = [];
   const sizes: number[] = [];
@@ -60,4 +77,18 @@ test("optional history is bounded through 20 cycles without recursively copying 
   assert.ok(sizes[19]! <= sizes[3]! + 30);
   assert.equal(utf8Prefix("🐢🐢", 5), "🐢");
   assert.equal(utf8Prefix("a🐢", 4), "a");
+});
+
+test("typed applicability pairs mark exactly one branch applicable and never report a missing prerequisite", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rafi-prerequisite-pair-"));
+  try {
+    writeFileSync(join(root, "npm"), "#!/bin/sh\nexit 0\n"); chmodSync(join(root, "npm"), 0o755);
+    const requirement = (id: string, expected: boolean) => ({ id, summary: id, timing: "postimplementation" as const, applicability: { kind: "host-executable-available" as const, executable: "npm" as const, expected, phase: "postimplementation" as const }, methods: [{ kind: "procedure" as const, steps: ["run"], cwd: ".", runtime: "node", timeout_ms: 1000, expected_outcome: "passes" }], expected_evidence: ["output"], depends_on: [] });
+    const typed = { ...ticket([]), verification_version: 2 as const, verification_requirements: [requirement("npm-tests", true), requirement("node-fallback", false)] };
+    for (const [path, outcomes] of [[root, ["available", "not_applicable"]], [join(root, "missing"), ["not_applicable", "available"]]] as const) {
+      const result = await checkQaPrerequisites({ snapshotPath: root, sourceDigest: "source", ticket: typed, env: { PATH: path } });
+      assert.deepEqual(result.checks.map(check => check.outcome), outcomes);
+      assert.equal(result.checks.filter(check => check.outcome === "not_run").length, 0);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

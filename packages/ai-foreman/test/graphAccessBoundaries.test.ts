@@ -1,3 +1,4 @@
+import { nativeFixtureTurn, prepareFixtureAdapter } from "./helpers/nativeOutput.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -158,11 +159,11 @@ for (const provider of ["claude", "codex"] as const) test(`${provider} actual Bu
         contractCapabilities: () => ({ sameSessionAcceptance: true, nativeCompactionBarrier: true }), enableContractEnforcement: () => {}, contractCompactionSequence: () => 0, acceptContractDelivery: () => {}, events: async function* () {}, close: async () => {},
         sendTurn: async (instruction, policy) => {
           calls++; assert.equal(policy?.responseOnly, true);
-          if (policy?.purpose === "contract-acceptance") return { text: `RAFI_QA_ACCEPTANCE_START\n${JSON.stringify({ workId: "T1", revision: 1, digest: contract.contentDigest, missingSections: [] })}\nRAFI_QA_ACCEPTANCE_END`, isError: false, numTurns: 1, costUsd: 0 };
-          const binding = JSON.parse(instruction.split("Exact coverage binding: ")[1]!.split("\n")[0]!);
-          return { text: `RAFI_QA_COVERAGE_START\n${JSON.stringify({ ...binding, checks: [{ checkId: "check", applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] }] })}\nRAFI_QA_COVERAGE_END`, isError: false, numTurns: 1, costUsd: 0 };
+          if (policy?.purpose === "contract-acceptance") return nativeFixtureTurn(policy, "actual-builder", { workId: "T1", revision: 1, digest: contract.contentDigest, missingSections: [] }, provider);
+          return nativeFixtureTurn(policy, "actual-builder", { checks: [{ checkId: "check", applicability: "applicable", predicateEvidence: [], outcome: "not-run", evidence: [] }] }, provider);
         },
       };
+      prepareFixtureAdapter(adapter, root);
       await deliverVerificationContract(contract, store, adapter, root, root, "Full ticket");
       seedSession(root, adapter);
       const implementation = { text: "Implementation completed", isError: false, numTurns: 1, costUsd: 0 };

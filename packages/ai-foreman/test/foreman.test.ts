@@ -1,3 +1,6 @@
+import { fixtureReplyTurn, nativeFixtureTurn, type NativeFixtureReply } from "./helpers/nativeOutput.js";
+import { structuredReceipt } from "../src/adapters/structured.js";
+import { providerOutputSchema } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -45,8 +48,8 @@ function writeBuilderProduct(dir: string, index: number): void {
   writeFileSync(join(dir, ".builder-product.ts"), `fixture implementation ${index}\n`, "utf8");
 }
 
-const qaPass = 'checked\nSTEP_STATUS: qa_pass | summary="tests passed"';
-const qaFail = `RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify({ version: 1, summary: "missing test", checks_run: [{ check: "unit test", outcome: "failed", evidence: "not found" }], findings: [{ id: "QA-1", requirement: "Unit test", locations: ["repository-wide"], problem: "missing test", evidence: "no matching test", expected: "test exists", fix_direction: "add the test", verification: ["run the test"] }], observations: [] })}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="missing test"`;
+const qaPass = ({text:'checked\nSTEP_STATUS: qa_pass | summary="tests passed"',result:{"kind":"completed","summary":"tests passed","payload":{"kind":"passed","coverage":null,"verifiedInstructionIds":[]}}});
+const qaFail = ({text:`RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify({ version: 1, summary: "missing test", checks_run: [{ check: "unit test", outcome: "failed", evidence: "not found" }], findings: [{ id: "QA-1", requirement: "Unit test", locations: ["repository-wide"], problem: "missing test", evidence: "no matching test", expected: "test exists", fix_direction: "add the test", verification: ["run the test"] }], observations: [] })}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="missing test"`,result:{kind:"completed",summary:"missing test",payload:{kind:"failed",report:{ version: 1, summary: "missing test", checks_run: [{ check: "unit test", outcome: "failed", evidence: "not found" }], findings: [{ id: "QA-1", requirement: "Unit test", locations: ["repository-wide"], problem: "missing test", evidence: "no matching test", expected: "test exists", fix_direction: "add the test", verification: ["run the test"] }], observations: [] },coverage:null,verifiedInstructionIds:[]}}});
 
 function makeDef(id: string): TicketDef {
   return {
@@ -70,7 +73,7 @@ function makeDef(id: string): TicketDef {
 for (const qaEnabled of [false, true]) {
   for (const kind of ["done", "plan_complete", "blocked", "needs_input"] as const) {
     for (const returned of ["T001", "UNKNOWN", undefined]) {
-      test(`assignment rejects ${kind}/${returned ?? "missing"} with QA ${qaEnabled}`, async () => {
+      test(`assignment rejects invalid native receipt for ${kind}/${returned ?? "missing"} with QA ${qaEnabled}`, async () => {
         const dir = makeTmpDir();
         try {
           cmdInit(dir, { appName: "Test", timezone: "UTC" });
@@ -78,7 +81,7 @@ for (const qaEnabled of [false, true]) {
           let qaCalls = 0;
           const run = createBuildRun({ tickets: ["T002"], repositoryRoot: dir, qaEnabled });
           const response = `STEP_STATUS: ${kind} | ${returned ? `ticket="${returned}" ` : ""}summary="returned" reason="blocked" question="choose" choices="A|B"`;
-          const builder = new FakeBuilder([response], () => writeFileSync(join(dir, "unexpected.txt"), "preserve these edits"));
+          const builder = new FakeBuilder([response], () => writeFileSync(join(dir, "unexpected.txt"), "preserve these edits"), true);
           const parameters: ConstructorParameters<typeof Foreman> = [builder, new Log(join(dir, ".foreman/test.jsonl")), false, qaEnabled, 3, dir, undefined, async (cwd) => { qaCalls++; return qaHandle(new FakeBuilder([qaPass]), cwd); }];
           parameters[22] = run.runId;
           const foreman = new Foreman(...parameters);
@@ -114,7 +117,7 @@ test("an empty automatic ticket queue does not dispatch generic work", async () 
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [] }));
-    const builder = new FakeBuilder(['STEP_STATUS: done | summary="generic work"']);
+    const builder = new FakeBuilder([({text:'STEP_STATUS: done | summary="generic work"',result:{"kind":"completed","summary":"generic work","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})]);
     const result = await new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir).runBatch(1);
     assert.equal(builder.instructions.length, 0);
     assert.equal(result.completed, 0);
@@ -126,7 +129,7 @@ test("an unavailable explicit ticket never substitutes an independent ticket", a
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
-    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"']);
+    const builder = new FakeBuilder([({text:'STEP_STATUS: done | ticket="T001"',result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})]);
     const result = await new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir).runBatch(1, undefined, undefined, "REMOVED");
     assert.equal(result.outcome, "needs-human");
     assert.equal(builder.instructions.length, 0);
@@ -138,7 +141,7 @@ test("removed definitions during approval dispatch no substitute or synthetic wo
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
-    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"']);
+    const builder = new FakeBuilder([({text:'STEP_STATUS: done | ticket="T001"',result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})]);
     const result = await new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 1, dir).runBatch(1, undefined, () => {
       writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [] }));
     }, "T001");
@@ -188,22 +191,22 @@ class FakeBuilder implements BuilderAdapter {
   private ref?: ProviderSessionRefV1;
 
   constructor(
-    private readonly turns: Array<string | ((instruction:string)=>string)>,
+    private readonly turns: Array<string | NativeFixtureReply | ((instruction:string)=>string | NativeFixtureReply)>,
     private readonly beforeTurn?: (index: number) => void,
+    private readonly foreignReceipt = false,
   ) {}
 
-  async sendTurn(instruction: string): Promise<TurnResult> {
-    this.instructions.push(instruction);
-    this.beforeTurn?.(this.index);
-    const response = this.turns[this.index++] ?? "";
-    let text = typeof response === "function" ? response(instruction) : response;
-    if (instruction.includes(BUILDER_QA_REMEDIATION_START) && !text.includes(BUILDER_QA_REMEDIATION_START)) {
+  async sendTurn(instruction: string, policy?: Parameters<BuilderAdapter["sendTurn"]>[1]): Promise<TurnResult> {
+    const initialization = policy?.output?.operation === "session-initialization";
+    if (!initialization) { this.instructions.push(instruction); this.beforeTurn?.(this.index); }
+    const response = initialization ? "Ready" : this.turns[this.index++] ?? "";
+    let reply = typeof response === "function" ? response(instruction) : response;
+    let text = typeof reply === "string" ? reply : reply.text;
+    if (policy?.output?.operation === "builder-remediation") {
       const handoffId = /QA failure handoff ID: ([a-f0-9]{64})/.exec(instruction)?.[1] ?? "missing";
       const findingKey = /QA-1 -> ([a-f0-9]{64})/.exec(instruction)?.[1] ?? "missing";
-      text = [
-        BUILDER_QA_REMEDIATION_START,
-        JSON.stringify({
-          version: 2,
+      const report = {
+          version: 3,
           handoff_id: handoffId,
           summary: "Applied QA remediation.",
           findings: [{
@@ -215,13 +218,18 @@ class FakeBuilder implements BuilderAdapter {
             verification: [{ check: "fixture", outcome: "passed", evidence: "fake builder fixture" }],
           }],
           observations: [],
-        }),
-        BUILDER_QA_REMEDIATION_END,
-        'STEP_STATUS: done | summary="fixed"',
-      ].join("\n");
+        };
+      text = "Applied QA remediation.";
+      reply = { text, result: { kind: "completed", summary: report.summary, payload: { status: "done", reason: null, coverage: null, report } } };
     }
-    const result = { text, isError: false, numTurns: 1, costUsd: 0, turnId: `fake-${this.index}`, hostInstruction: instruction, providerInstruction: instruction, rawResponse: text, cleanedResponse: text,
+    let result: TurnResult = { text, isError: false, numTurns: 1, costUsd: 0, turnId: policy?.dispatchId ?? `fake-${this.index}`, hostInstruction: instruction, providerInstruction: instruction, rawResponse: text, cleanedResponse: text,
       providerMetadata: { provider: this.agent, sessionId: this.sessionId(), sessionRef: this.ref } };
+    if (policy?.output) {
+      const native = fixtureReplyTurn(policy, this.sessionId()!, reply, this.agent);
+      if (!native.structured) throw new Error("Native fixture omitted its receipt");
+      result = { ...result, structured: native.structured, selectedDispatch: native.selectedDispatch };
+      if (this.foreignReceipt && result.structured?.state === "candidate") result = { ...result, selectedDispatch: result.selectedDispatch!, structured: { ...result.structured, dispatchId: "foreign-dispatch" } };
+    }
     for (const observer of this.observers) observer({ kind: "turn-complete", result, turnId: result.turnId });
     this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId }); this.eventWaiters.splice(0).forEach((wake) => wake());
     return result;
@@ -267,17 +275,17 @@ test("reported blockers are converted into multiple approaches before a non-inte
   const dir = makeTmpDir();
   try {
     const builder = new FakeBuilder([
-      'STEP_STATUS: needs_input | question="How should Rafi unblock this work?" choices="Safe retry (Recommended)|Use fallback|Wait for access"',
+      ({text:'STEP_STATUS: needs_input | question="How should Rafi unblock this work?" choices="Safe retry (Recommended)|Use fallback|Wait for access"',result:{"kind":"needs-input","question":"How should Rafi unblock this work?","choices":["Safe retry (Recommended)","Use fallback","Wait for access"]}}),
     ]);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir);
 
-    const resolved = await foreman.resolveBlocker(builder, "missing deployment credential");
+    const resolved = await foreman.resolveBlocker(builder, "missing deployment credential", "builder", (await import("rafi-spec")).workReportOutput);
 
     assert.equal(resolved.status.kind, "blocked");
     assert.match(resolved.status.reason ?? "", /waiting for input/);
     assert.ok((resolved.status.reason ?? "").includes(`Resume with rafi resume ${dir}`));
     assert.match(builder.instructions[0] ?? "", /two or three safe, materially different approaches/);
-    assert.match(builder.instructions[0] ?? "", /recommended approach and consequence \(Recommended\)/);
+    assert.match(builder.instructions[0] ?? "", /needs-input/);
   } finally {
     rmSync(dir, { recursive: true });
   }
@@ -289,14 +297,14 @@ test("runBatch completes ticket only after QA passes", async () => {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
 
-    const builder = new FakeBuilder(['implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"'], index => writeBuilderProduct(dir, index));
+    const builder = new FakeBuilder([({text:'implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"',result:{"kind":"completed","summary":"implemented","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaPass]), cwd));
     const startedTickets: string[] = [];
 
     const result = await foreman.runBatch(1, undefined, (ticketId) => {
       startedTickets.push(ticketId);
     });
-    assert.equal(result.outcome, "all-done");
+    assert.equal(result.outcome, "all-done", JSON.stringify(result));
     assert.equal(result.completed, 1);
     assert.deepEqual(startedTickets, ["T001"]);
 
@@ -321,8 +329,8 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
 
     const builder = attachBuilderRef(new FakeBuilder([
-      'implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"',
-      'fixed\nSTEP_STATUS: done | ticket="T001" summary="fixed"',
+      ({text:'implemented\nSTEP_STATUS: done | ticket="T001" summary="implemented"',result:{"kind":"completed","summary":"implemented","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}}),
+      ({text:'fixed\nSTEP_STATUS: done | ticket="T001" summary="fixed"',result:{"kind":"completed","summary":"fixed","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}}),
     ], index => writeBuilderProduct(dir, index)), dir, "T001");
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 1, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaFail]), cwd));
 
@@ -330,7 +338,7 @@ test("runBatch does not complete ticket when QA fails to converge", async () => 
     assert.equal(result.outcome, "blocked", result.detail);
     assert.equal(result.completed, 0);
     assert.match(result.detail ?? "", /Deferred tickets: T001/);
-    assert.match(result.detail ?? "", /invalid QA response contract|complete fresh QA review|required/);
+    assert.match(result.detail ?? "", /QA could not converge after 1 Builder fix attempt/);
 
     const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
     try {
@@ -356,7 +364,7 @@ test("runBatch pins recovery to the requested in-progress ticket", async () => {
     cmdUpdate(dir, "T001", { status: "next", actor: "test" });
     cmdUpdate(dir, "T002", { status: "in_progress", actor: "test" });
 
-    const builder = new FakeBuilder(['continued T002\nSTEP_STATUS: done | ticket="T002" summary="finished recovery"'], index => writeBuilderProduct(dir, index));
+    const builder = new FakeBuilder([({text:'continued T002\nSTEP_STATUS: done | ticket="T002" summary="finished recovery"',result:{"kind":"completed","summary":"finished recovery","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaPass]), cwd));
 
     const result = await foreman.runBatch(1, undefined, undefined, "T002");
@@ -380,7 +388,7 @@ test("explicit recovery reopens a safely paused blocked ticket", async () => {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
     cmdBlock(dir, "T001", { summary: "user chose safe pause", actor: "test" });
-    const builder = new FakeBuilder(['resumed\nSTEP_STATUS: done | ticket="T001" summary="finished after guidance"'], index => writeBuilderProduct(dir, index));
+    const builder = new FakeBuilder([({text:'resumed\nSTEP_STATUS: done | ticket="T001" summary="finished after guidance"',result:{"kind":"completed","summary":"finished after guidance","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async (cwd) => qaHandle(new FakeBuilder([qaPass]), cwd));
 
     const result = await foreman.runBatch(1, undefined, undefined, "T001");
@@ -404,8 +412,8 @@ for (const blocked of [false, true]) test(`scoped recovery ${blocked ? "stops at
     if (blocked) cmdBlock(dir, "T002", { summary: "independent unresolved blocker", actor: "test" });
     else cmdUpdate(dir, "T002", { status: "next", actor: "test" });
     const builder = new FakeBuilder([
-      (instruction: string) => `STEP_STATUS: done | ticket="${/Assigned ticket: ([^\.]+)\./.exec(instruction)?.[1]}"`,
-      (instruction: string) => `STEP_STATUS: done | ticket="${/Assigned ticket: ([^\.]+)\./.exec(instruction)?.[1]}"`,
+      (instruction: string) => ({text:`STEP_STATUS: done | ticket="${/Assigned ticket: ([^\.]+)\./.exec(instruction)?.[1]}"`,result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}}),
+      (instruction: string) => ({text:`STEP_STATUS: done | ticket="${/Assigned ticket: ([^\.]+)\./.exec(instruction)?.[1]}"`,result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}}),
     ], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
     const result = await foreman.runBatch(10, undefined, undefined, "T001", ["T001", "T002"]);
@@ -420,19 +428,19 @@ for (const blocked of [false, true]) test(`scoped recovery ${blocked ? "stops at
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("scoped recovery cannot complete a different ticket named by the provider", async () => {
+test("presentation text cannot change the host-bound assignment ticket", async () => {
   const dir = makeTmpDir();
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001"), makeDef("OTHER")] }));
     cmdUpdate(dir, "T001", { status: "in_progress", actor: "test" });
     cmdUpdate(dir, "OTHER", { status: "next", actor: "test" });
-    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="OTHER"']);
+    const builder = new FakeBuilder([({text:'STEP_STATUS: done | ticket="OTHER"',result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})]);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
     const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
-    assert.equal(result.outcome, "needs-human"); assert.equal(result.completed, 0);
+    assert.equal(result.outcome, "all-done", result.detail); assert.equal(result.completed, 1);
     const db = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
-    try { assert.equal(db.getState("OTHER")?.status, "next"); assert.equal(db.getState("T001")?.status, "in_progress"); }
+    try { assert.equal(db.getState("OTHER")?.status, "next"); assert.equal(db.getState("T001")?.status, "done"); }
     finally { db.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -441,7 +449,7 @@ test("independent QA may write Foreman's own .foreman runtime files", async () =
   const dir = makeTmpDir();
   try {
     const builder = new FakeBuilder([
-      (instruction:string) => `implemented\nSTEP_STATUS: done | ticket="${/Ticket scope: ([^ ]+)\./.exec(instruction)?.[1]}" summary="implemented"`,
+      (instruction:string) => ({text:`implemented\nSTEP_STATUS: done | ticket="${/Ticket scope: ([^ ]+)\./.exec(instruction)?.[1]}" summary="implemented"`,result:{"kind":"completed","summary":"implemented","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}}),
     ], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(
       builder,
@@ -473,7 +481,7 @@ test("independent QA source changes still require human review", async () => {
   try {
     writeFileSync(join(dir, "source.ts"), "before\n", "utf8");
     const builder = new FakeBuilder([
-      (instruction:string) => `implemented\nSTEP_STATUS: done | ticket="${/Ticket scope: ([^ ]+)\./.exec(instruction)?.[1]}" summary="implemented"`,
+      (instruction:string) => ({text:`implemented\nSTEP_STATUS: done | ticket="${/Ticket scope: ([^ ]+)\./.exec(instruction)?.[1]}" summary="implemented"`,result:{"kind":"completed","summary":"implemented","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}}),
     ], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(
       builder,
@@ -516,38 +524,32 @@ test("preflight rejects an adapter error instead of treating it as a plan", asyn
   }
 });
 
-test("every follow-up Builder dispatch re-enters the safe boundary", async () => {
+test("invalid native results stop at the safe boundary without format repair", async () => {
   const dir = makeTmpDir();
   try {
-    const builder = new FakeBuilder(["missing final marker", "STEP_STATUS: done | summary=\"corrected\""]);
+    const builder = new FakeBuilder(["missing final marker", ({text:"STEP_STATUS: done | summary=\"corrected\"",result:{"kind":"completed","summary":"corrected","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})]);
     const boundaries: string[] = [];
     const foreman = new Foreman(
       builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir,
       undefined, undefined, undefined, undefined, undefined, undefined,
       async (adapter, frozenAction) => { boundaries.push(frozenAction); return adapter; },
     );
-    const result = await foreman.runInstruction("perform one action");
-    assert.equal(result.status.kind, "done");
-    assert.equal(boundaries.length, 2);
+    const result = await foreman.runBuilderWork("perform one action");
+    assert.equal(result.status.kind, "unknown");
+    assert.equal(boundaries.length, 1);
+    assert.equal(builder.instructions.length, 1);
   } finally {
     rmSync(dir, { recursive: true });
   }
 });
 
-test("workflow completion can preserve a valid response with trailing commentary", async () => {
+test("text completion callbacks cannot authorize a native result", async () => {
   const dir = makeTmpDir();
   try {
-    const builder = new FakeBuilder(['proposal\nSTEP_STATUS: done | summary="ready"\nprovider notes']);
+    const builder = new FakeBuilder([({text:'STEP_STATUS: done',result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})]);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 1, dir);
-    const result = await foreman.runInstruction("prepare the proposal", {
-      completion: text => {
-        const status = parseStepStatus(text, { requireFinalLine: false });
-        return status.kind === "done" ? status : undefined;
-      },
-    });
-    assert.equal(result.status.kind, "done");
-    assert.equal(builder.instructions.length, 1);
-    assert.match(result.result.text, /provider notes/);
+    await assert.rejects(foreman.runInstruction("prepare the proposal", { completion: () => ({ kind: "done" }), output: (await import("rafi-spec")).workReportOutput }), /Text completion predicates/);
+    assert.equal(builder.instructions.length, 0);
   } finally { rmSync(dir, { recursive: true }); }
 });
 
@@ -570,7 +572,7 @@ for (const mode of ["pending", "answered", "stale", "outside", "run-wide"] as co
     if (["answered", "stale", "outside"].includes(mode)) db.answerHumanDecision("questions", decision.decisionId, "a");
     if (mode === "stale") writeFileSync(join(dir, "rafi-config.yaml"), "changed: true\n");
     const selected = mode === "answered" ? "T001" : "T002";
-    const builder = new FakeBuilder([`STEP_STATUS: done | ticket="${selected}"`], index => writeBuilderProduct(dir, index));
+    const builder = new FakeBuilder([({text:`STEP_STATUS: done | ticket="${selected}"`,result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})], index => writeBuilderProduct(dir, index));
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "questions", true);
     const result = await foreman.runBatch(1, undefined, undefined, mode === "outside" ? "T002" : "T001", mode === "outside" ? ["T002"] : ["T001", "T002"]);
     assert.equal(result.completed, mode === "run-wide" ? 0 : 1, result.detail);
@@ -586,9 +588,9 @@ for (const mode of ["pending", "answered", "stale", "outside", "run-wide"] as co
       const replacement = db.pendingHumanDecisions("questions")[0]!;
       assert.ok(replacement); assert.notEqual(replacement.decisionId, decision.decisionId);
       db.answerHumanDecision("questions", replacement.decisionId, "a");
-      builder.sendTurn = async instruction => {
+      builder.sendTurn = async (instruction, policy) => {
         writeBuilderProduct(dir, 99);
-        return { text: 'STEP_STATUS: done | ticket="T001"', isError: false, numTurns: 1, costUsd: 0 };
+        return nativeFixtureTurn(policy, builder.sessionId()!, { disposition: "modified", evidence: ["fixture"], coverage: null, graphMaintenance: null });
       };
       const resumed = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
       assert.equal(resumed.completed, 1, resumed.detail);
@@ -605,7 +607,7 @@ test("explicit recovery cannot substitute an independent ticket after a blocker"
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001"), makeDef("T002")] }));
     cmdUpdate(dir, "T001", { status: "in_progress", actor: "test" });
     cmdUpdate(dir, "T002", { status: "next", actor: "test" });
-    const builder = new FakeBuilder(['STEP_STATUS: blocked | ticket="T001" reason="Rafi is waiting for input"']);
+    const builder = new FakeBuilder([({text:'STEP_STATUS: blocked | ticket="T001" reason="Rafi is waiting for input"',result:{"kind":"blocked","reason":"Rafi is waiting for input","nextAction":"Resolve the blocker"}})]);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir);
     const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
     assert.equal(result.completed, 0); assert.equal(builder.instructions.length, 1);
@@ -614,17 +616,17 @@ test("explicit recovery cannot substitute an independent ticket after a blocker"
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("scoped completion without ticket identity cannot pass QA or update tracker", async () => {
+test("scoped completion rejects a foreign dispatch identity before QA", async () => {
   const dir = makeTmpDir();
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
     cmdUpdate(dir, "T001", { status: "in_progress", actor: "test" });
-    const builder = new FakeBuilder(['STEP_STATUS: done | summary="ambiguous"']);
+    const builder = new FakeBuilder([({text:'STEP_STATUS: done | summary="claim"',result:{"kind":"completed","summary":"claim","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})], undefined, true);
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, true, 3, dir, undefined, async () => { throw new Error("QA must not run"); });
     const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
-    assert.equal(result.completed, 0); assert.match(result.detail ?? "", /no ticket/);
-    assert.equal(builder.instructions.length, 1, "do not repeat implementation to recover marker identity");
+    assert.equal(result.completed, 0); assert.match(result.detail ?? "", /native result/);
+    assert.equal(builder.instructions.length, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -638,7 +640,7 @@ test("approval covers later work, revalidates edits between turns and binds ever
     for (const ticket of tickets) cmdUpdate(dir, ticket.id, { status: "next", actor: "test" });
     let approvals = 0;
     const gate = createBuildApprovalGate(dir, ["T001", "T002"], false, undefined, async () => { approvals++; });
-    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"', 'STEP_STATUS: done | ticket="T002"'], index => {
+    const builder = new FakeBuilder([({text:'STEP_STATUS: done | ticket="T001"',result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}}), ({text:'STEP_STATUS: done | ticket="T002"',result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})], index => {
       writeBuilderProduct(dir, index);
       if (index === 0) writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [tickets[0], { ...tickets[1], acceptance: ["new requirement"] }] }));
       if (index === 1) assert.equal(approvals, 2, "must approve changed T002 before dispatch");
@@ -681,25 +683,18 @@ test("interruption during an awaited session boundary prevents the next provider
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("response-only protocol correction retains the assigned ticket across safe boundaries", async () => {
+test("invalid structured completion is retained and never repaired by repeating implementation", async () => {
   const dir = makeTmpDir();
   try {
     cmdInit(dir, { appName: "Test", timezone: "UTC" });
     writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [makeDef("T001")] }));
-    cmdUpdate(dir, "T001", { status: "next", actor: "test" });
-    const builder = new FakeBuilder(['STEP_STATUS: done | ticket="T001"}', 'STEP_STATUS: done | ticket="T001"'], index => writeBuilderProduct(dir, index));
+    const builder = new FakeBuilder(['STEP_STATUS: plan_complete | ticket="T001"', ({text:'STEP_STATUS: done | ticket="T001"',result:{"kind":"completed","summary":"Fixture result","payload":{"disposition":"modified","evidence":["Fixture source inspection"],"coverage":null,"graphMaintenance":null}}})], index => writeBuilderProduct(dir, index));
     const boundaries: string[] = [];
     const foreman = new Foreman(builder, new Log(join(dir, ".foreman/test.jsonl")), false, false, 3, dir, undefined, undefined, undefined, undefined, undefined, undefined,
       async (adapter, action) => { boundaries.push(action); return adapter; });
     const result = await foreman.runBatch(1, undefined, undefined, "T001", ["T001"]);
-    assert.equal(result.completed, 1, result.detail);
-    assert.equal(builder.instructions.length, 2);
-    assert.match(builder.instructions[1]!, /Protocol correction only/);
-    assert.match(builder.instructions[1]!, /Do not repeat implementation/);
-    assert.match(builder.instructions[1]!, /malformed STEP_STATUS field/);
-    assert.match(builder.instructions[1]!, /Do not append braces/);
-    assert.match(builder.instructions[1]!, /exact marker form is: STEP_STATUS: done \| ticket="T001"/);
-    assert.ok(builder.instructions.every(instruction => instruction.includes('Ticket scope: T001.') && instruction.includes('ticket="T001"')));
-    assert.ok(boundaries.every(instruction => instruction.includes('Ticket scope: T001.')));
+    assert.equal(result.completed, 0); assert.equal(result.outcome, "needs-human");
+    assert.equal(builder.instructions.length, 1); assert.equal(boundaries.length, 1);
+    assert.match(builder.instructions[0]!, /Ticket scope: T001/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

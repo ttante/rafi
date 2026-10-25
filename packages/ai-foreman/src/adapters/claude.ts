@@ -1,5 +1,7 @@
+import { inheritedStructuredLiveBudget } from "../structuredLiveBudget.js";
 import { ProviderPhaseBarrier, type ProviderTurnPurpose } from "../providerPhase.js";
 import { OperationDeadline } from "../util/deadline.js";
+import { assertActiveProviderDispatch } from "../structuredDispatchAuthority.js";
 import type {
   Query,
   SDKMessage,
@@ -10,6 +12,8 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, relative, isAbsolute } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 /** Lazy-load the Claude Agent SDK. Throws an actionable error if not installed. */
 export async function requireClaudeSDK() {
@@ -50,6 +54,9 @@ import { createProviderSessionRef, validateProviderSessionScope, canonicalSessio
 import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
 import { isFastModeUnavailable, reportFastModeUnavailable } from "./fastMode.js";
 import { handoffSystemInstructions } from "../handoffProtocol.js";
+import { providerControlOperationV2, providerWireContract, renderProviderWireInstruction, validateProviderWireValue, type OutputContract, type ProviderWireContract } from "rafi-spec";
+import { structuredReceipt } from "./structured.js";
+import type { TurnRequest } from "./types.js";
 
 const DEFAULT_PROVIDER_IDLE_TIMEOUT_MS = 30 * 60_000;
 
@@ -60,13 +67,14 @@ const DEFAULT_PROVIDER_IDLE_TIMEOUT_MS = 30 * 60_000;
  */
 export function buildClaudeQueryOptions(
   opts: Omit<BuilderAdapterOptions, "permission">,
+  scratchDirectory = join(dirname(opts.cwd), "scratch"),
 ): Record<string, unknown> {
   const qaReadOnly = opts.sessionRole === "qa" || opts.sandboxMode === "read-only";
   const confinedBuilder = opts.sessionRole === "builder";
   const base: Record<string, unknown> = {
     cwd: opts.cwd,
     pathToClaudeCodeExecutable: opts.runtimeExecutable,
-    env: qaReadOnly ? qaEnvironment(process.env, opts.cwd) : { ...process.env },
+    env: qaReadOnly ? qaEnvironment(process.env, scratchDirectory) : { ...process.env },
     model: opts.model,
     resume: opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId,
     permissionMode: qaReadOnly ? "default" : "acceptEdits",
@@ -90,7 +98,7 @@ export function buildClaudeQueryOptions(
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
       network: { allowedDomains: [], deniedDomains: ["*"] },
-      filesystem: { allowWrite: [join(dirname(opts.cwd), "scratch")], denyWrite: [opts.cwd, ...(opts.configRoot ? [opts.configRoot] : [])] },
+      filesystem: { allowWrite: [scratchDirectory], denyWrite: [opts.cwd, ...(opts.configRoot ? [opts.configRoot] : [])] },
     } } : {}),
   };
   const exactSkills = opts.preloadedSkillContent?.length
@@ -106,9 +114,9 @@ export function buildClaudeQueryOptions(
   return base;
 }
 
-function qaEnvironment(source: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
+function qaEnvironment(source: NodeJS.ProcessEnv, scratchDirectory: string): NodeJS.ProcessEnv {
   const allowed = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM", "NO_COLOR", "FORCE_COLOR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_API_KEY_HELPER_TTL_MS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
-  return { ...Object.fromEntries(allowed.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]!]])), TMPDIR: join(dirname(cwd), "scratch") };
+  return { ...Object.fromEntries(allowed.flatMap((key) => source[key] === undefined ? [] : [[key, source[key]!]])), TMPDIR: scratchDirectory };
 }
 
 export async function probeClaudeSession(
@@ -235,11 +243,16 @@ export class ClaudeAdapter implements BuilderAdapter {
   readonly agent = "claude" as const;
   graphRuntimeSettings() { return { model: this.opts.model, effort: this.opts.effort, fast: this.opts.fast, runtimeExecutable: this.opts.runtimeExecutable }; }
 
-  private readonly inbox = new AsyncQueue<SDKUserMessage>();
+  private inbox = new AsyncQueue<SDKUserMessage>();
   private readonly eventQueue = new BuilderEventQueue();
-  private readonly query: Query;
-  private readonly abort = new AbortController();
-  private readonly pumpDone: Promise<void>;
+  private query!: Query;
+  private abort = new AbortController();
+  private pumpDone!: Promise<void>;
+  private rotatingQuery = false;
+  private configuringTurn = false;
+  private output?: OutputContract;
+  private outputWireContract?: ProviderWireContract;
+  private responseOnlyViolation = false;
   private _sessionId?: string;
   private _sessionRef?: ProviderSessionRefV1;
   private readonly sessionIdentityReady: Promise<ProviderSessionRefV1>;
@@ -261,8 +274,10 @@ export class ClaudeAdapter implements BuilderAdapter {
   private cumulativeUsage: ProviderSessionUsage = { observedAt: new Date(0).toISOString(), source: "provider" };
   private priorTurnUsage: { inputTokens?: number; outputTokens?: number; costUsd?: number } = {};
   private activeProviderTurnId?: string;
+  private activeTurnPolicy?: TurnRequest;
   private activeProviderTurnSpanId?: string;
   private readonly toolSpans = new Map<string, string>();
+  private readonly structuredSubmissionIds = new Set<string>();
   private readonly toolCalls = new Map<string, { name: string; input: unknown }>();
   private readonly completedToolCalls = new Set<string>();
   private readonly unknownToolResults = new Map<string, string>();
@@ -293,6 +308,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   private streamEnded = false;
   private closed = false;
   private closePromise?: Promise<void>;
+  private readonly scratchDirectory?: string;
   private launchScopeObserved = false;
   private providerIdentityObserved = false;
   private toolCwd?: string;
@@ -317,6 +333,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       const model = models.find(item => item.value === (this.opts.model ?? "default"));
       if (model?.supportsFastMode !== true || typeof this.query.applyFlagSettings !== "function") { this.disableFastModeNotice(); return; }
       try {
+        providerControlOperationV2("claude", "applyFlagSettings");
         await new OperationDeadline("Claude fast mode", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ fastMode: true }));
         this.fastModeEnabled = true;
       } catch (error) {
@@ -333,11 +350,14 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   private async disableFastMode(): Promise<void> {
+    providerControlOperationV2("claude", "applyFlagSettings");
     await new OperationDeadline("Claude standard speed", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ fastMode: false }));
     this.disableFastModeNotice();
   }
 
   static async create(opts: BuilderAdapterOptions): Promise<ClaudeAdapter> {
+    const inheritedBudget = inheritedStructuredLiveBudget("claude");
+    opts = { ...opts, queryBudget: opts.queryBudget ?? inheritedBudget };
     try {
       const runtimeExecutable = opts.runtimeExecutable ?? resolveExecutablePath("claude");
       if (!runtimeExecutable) {
@@ -374,7 +394,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private constructor(private readonly opts: BuilderAdapterOptions, query: (o: any) => Query) {
+  private constructor(private readonly opts: BuilderAdapterOptions, private readonly queryFactory: (o: any) => Query) {
     this.phaseBarrier.begin("initialization");
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
     this._sessionRef = opts.resumeSessionRef;
@@ -387,14 +407,48 @@ export class ClaudeAdapter implements BuilderAdapter {
       start: (attemptId) => opts.observer!.store.startSpan(this.observationContext(), { kind: "provider_wait", name: "Waiting for Claude after question answer", attributes: { attemptId } }),
       finish: (spanId, outcome) => opts.observer!.store.finishSpan(spanId, { outcome }),
     } : undefined);
-    this.query = query({
+    // Planning and interpretation also use read-only sessions, without a QA
+    // snapshot's sibling scratch directory. Own a real, private directory for
+    // the complete query lifecycle, including exact-session schema rotations.
+    // macOS's default TMPDIR is too long for the SDK's Unix socket paths.
+    if (opts.sessionRole === "qa" || opts.sandboxMode === "read-only") this.scratchDirectory = mkdtempSync(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "rf-c-"));
+    try { this.startQuery(); }
+    catch (error) { this.finishQueryBudget(); if (this.scratchDirectory) rmSync(this.scratchDirectory, { recursive: true, force: true }); throw error; }
+  }
+
+  private queryBudget?: ReturnType<NonNullable<BuilderAdapterOptions["queryBudget"]>["reserveQuery"]>;
+  private queryBudgetAbort?: () => void;
+  private finishQueryBudget(): void {
+    if (this.queryBudgetAbort) this.queryBudget?.signal.removeEventListener("abort", this.queryBudgetAbort);
+    this.queryBudgetAbort = undefined;
+    this.queryBudget?.close(); this.queryBudget = undefined;
+  }
+
+  private startQuery(): void {
+    const opts = this.opts;
+    this.queryBudget = opts.queryBudget?.reserveQuery("claude");
+    if (this.queryBudget) {
+      const lease = this.queryBudget;
+      this.queryBudgetAbort = () => { this.abort.abort(); void this.close(); };
+      lease.signal.addEventListener("abort", this.queryBudgetAbort, { once: true });
+      if (lease.signal.aborted) { this.finishQueryBudget(); throw new Error("Live query deadline expired before launch"); }
+    }
+    this.query = this.queryFactory({
       prompt: this.providerInputs(),
       options: {
-        ...buildClaudeQueryOptions(opts),
+        ...buildClaudeQueryOptions(opts, this.scratchDirectory),
+        ...(this.queryBudget ? { maxBudgetUsd: this.queryBudget.maximumSpendUsd } : {}),
+        ...(this._sessionId ? { resume: this._sessionId } : {}),
+        ...(this.outputWireContract ? { outputFormat: { type: "json_schema", schema: this.outputWireContract.wireSchema } } : {}),
         abortController: this.abort,
         hooks: {
           PreToolUse: [{ hooks: [async (input: HookInput) => {
             if (input.hook_event_name !== "PreToolUse") return {};
+            if (this.isResultSubmission(input.tool_name, input.tool_input)) {
+              const reason = this.resultSubmissionError(input.tool_input);
+              return reason ? { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: reason } } : {};
+            }
+            if (this.output && this.responseOnlyTurn) this.responseOnlyViolation = true;
             this.toolCwd = input.cwd;
             this.toolCwds.set(input.tool_use_id, input.cwd);
             if (this.toolCwds.size > 1000) this.toolCwds.delete(this.toolCwds.keys().next().value!);
@@ -425,6 +479,11 @@ export class ClaudeAdapter implements BuilderAdapter {
             toolUseID?: string;
           } = {},
         ): Promise<PermissionResult> => {
+          if (this.isResultSubmission(toolName, input)) {
+            const reason = this.resultSubmissionError(input);
+            return reason ? { behavior: "deny", message: reason } : { behavior: "allow", updatedInput: input };
+          }
+          if (this.output && this.responseOnlyTurn) this.responseOnlyViolation = true;
           if (this.responseOnlyTurn) return { behavior: "deny", message: "QA response correction forbids all tools, including read-only tools", interrupt: true };
           const isProviderQuestion = toolName === "AskUserQuestion";
           const questionAttempt = isProviderQuestion ? this.questionTrace?.begin() : undefined;
@@ -457,6 +516,54 @@ export class ClaudeAdapter implements BuilderAdapter {
     this.pumpDone = this.pump();
   }
 
+  private isResultSubmission(name: string, input: unknown): boolean {
+    // Only the SDK's built-in submission in a host-configured structured query.
+    // An MCP name or arbitrary tool cannot acquire this exception.
+    return Boolean(this.pending && this.output && name === "StructuredOutput");
+  }
+
+  private resultSubmissionError(input: unknown): string | undefined {
+    try {
+      // This SDK hook sees provider wire data, not the canonical artifact.
+      // Canonical validation is deliberately deferred until the selected
+      // normalizer runs in structuredReceipt.
+      validateProviderWireValue(this.outputWireContract!, input);
+      return undefined;
+    } catch (error) {
+      // The SDK submission is data, including when malformed. Give its bounded
+      // native retry the actual wire-contract violations, never a mutation-policy
+      // diagnosis. Only a valid wire payload may invoke the SDK submission tool.
+      return `Native structured result violates selected ${this.outputWireContract!.profile} wire contract for ${this.output!.operation}: ${String(error).slice(0, 2400)}. Return every required field with the declared type.`;
+    }
+  }
+
+  private async configureOutput(output: OutputContract | undefined, wireContract?: ProviderWireContract): Promise<void> {
+    const selected = output ? wireContract ?? providerWireContract(output, "claude", "default", { requireRegistered: true }) : undefined;
+    if (selected && (selected.provider !== "claude" || selected.canonical.schemaDigest !== output!.schemaDigest)) throw new Error("Claude received a mismatched provider wire contract");
+    if (output?.schemaDigest === this.output?.schemaDigest && output?.operation === this.output?.operation && selected?.descriptorDigest === this.outputWireContract?.descriptorDigest) return;
+    if (this.pending || this.closed || this.streamEnded) throw new Error("Cannot change output schema on an active or unavailable Claude query");
+    this.rotatingQuery = true;
+    try {
+      this.inbox.close();
+      this.abort.abort();
+      this.query.close?.();
+      await new OperationDeadline("Claude schema transition", this.opts.shutdownTimeoutMs ?? 10_000).run(() => this.pumpDone);
+      this.finishQueryBudget();
+    } catch (error) {
+      this.streamEnded = true;
+      throw error;
+    } finally { this.rotatingQuery = false; }
+    this.inbox = new AsyncQueue<SDKUserMessage>();
+    this.abort = new AbortController();
+    this.output = output;
+    this.outputWireContract = selected;
+    this.fastModePrepared = undefined;
+    this.fastModeEnabled = false;
+    this.providerIdentityObserved = false;
+    this.startQuery();
+    if (this._sessionId) this.eventQueue.push({ kind: "session-transition", transition: "resumed", detail: "Exact session resumed for output schema change" });
+  }
+
   /** Background loop: consume the SDK message stream until it ends. */
   private async *providerInputs(): AsyncGenerator<SDKUserMessage> {
     for await (const message of this.inbox) {
@@ -474,6 +581,7 @@ export class ClaudeAdapter implements BuilderAdapter {
         this.handle(msg);
       }
     } catch (err) {
+      if (this.rotatingQuery) return;
       this.questionTrace?.finish(this.closed ? "closed" : "stream-error");
       // Suppress the AbortError that fires when close() aborts the stream.
       const isShutdownAbort =
@@ -490,6 +598,7 @@ export class ClaudeAdapter implements BuilderAdapter {
         this.settlePending(result);
       }
     } finally {
+      if (this.rotatingQuery) return;
       this.questionTrace?.finish(this.closed ? "closed" : "stream-ended");
       this.streamEnded = true;
       if (!this.closed && this.pending) {
@@ -524,13 +633,21 @@ export class ClaudeAdapter implements BuilderAdapter {
         this.turnSignals.push(`assistant error: ${msg.error}`);
       }
       for (const block of msg.message.content) {
-        this.eventQueue.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType: String(block.type ?? "unknown"), payload: structuredClone(block) as unknown as Record<string, unknown>, payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
+        this.eventQueue.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType: block.type === "tool_use" && this.isResultSubmission(block.name, block.input) ? "structuredOutput" : String(block.type ?? "unknown"), payload: structuredClone(block) as unknown as Record<string, unknown>, payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
         if (block.type === "text" && block.text) {
           if (msg.error && this.fastModeEnabled && isFastModeUnavailable(block.text) && !this.turnSawWork) continue;
           this.turnSawWork = true;
           this.eventQueue.push({ kind: "text", text: block.text, byteCount: Buffer.byteLength(block.text), digest: createHash("sha256").update(block.text).digest("hex"), eventId: randomUUID(), observedAt: new Date().toISOString() });
           this.opts.observer?.signal(true);
         } else if (block.type === "tool_use") {
+          // The SDK result submission is transport, not a domain tool. Retain its
+          // provider-item evidence without falsely reporting an acceptance violation.
+          if (this.isResultSubmission(block.name, block.input)) {
+            this.structuredSubmissionIds.add(block.id);
+            if (this.structuredSubmissionIds.size > 1000) this.structuredSubmissionIds.delete(this.structuredSubmissionIds.values().next().value!);
+            continue;
+          }
+          if (this.output && this.responseOnlyTurn && !this.isResultSubmission(block.name, block.input)) this.responseOnlyViolation = true;
           this.turnSawWork = true;
           const callId = block.id;
           this.toolCalls.set(callId, { name: block.name, input: block.input });
@@ -585,6 +702,7 @@ export class ClaudeAdapter implements BuilderAdapter {
       this.eventQueue.push({ kind: "activity", provider: "claude", state: "running tool", detail: `${msg.tool_name} (${Math.floor(msg.elapsed_time_seconds)}s)`, transient: true });
       const progress = msg as unknown as Record<string, unknown>;
       const callId = typeof progress.tool_use_id === "string" ? progress.tool_use_id : typeof progress.toolUseID === "string" ? progress.toolUseID : undefined;
+      if (callId && this.structuredSubmissionIds.has(callId)) return;
       this.eventQueue.push({ kind: "tool", name: msg.tool_name, input: {}, lifecycle: "progress", callId, durationMs: Math.max(0, msg.elapsed_time_seconds * 1000), completionKnown: false, eventId: randomUUID(), observedAt: new Date().toISOString() });
       this.opts.observer?.signal(false);
     } else if ((msg as unknown as { type?: string }).type === "user") {
@@ -630,7 +748,8 @@ export class ClaudeAdapter implements BuilderAdapter {
           cwd: this.opts.cwd,
           diagnostics: rawDiagnostics,
         } : undefined;
-      const result: TurnResult = {
+      this.queryBudget?.record(msg.total_cost_usd);
+      let result: TurnResult = {
         text: failure ? formatClaudeFailure(failure) : text,
         isError: msg.is_error,
         numTurns: msg.num_turns,
@@ -643,8 +762,19 @@ export class ClaudeAdapter implements BuilderAdapter {
         rawResponse: text,
         cleanedResponse: failure ? formatClaudeFailure(failure) : text,
         providerMetadata: { provider: "claude", sessionId: this._sessionId, sessionRef: this._sessionRef },
+        ...(this.activeTurnPolicy?.selectedDispatch ? { selectedDispatch: this.activeTurnPolicy.selectedDispatch } : {}),
       };
       const rawResult = msg as unknown as Record<string, unknown>;
+      if (this.output) {
+        const selectedDispatch = this.activeTurnPolicy?.selectedDispatch;
+        if (!selectedDispatch || !this._sessionId) throw new Error("Structured terminal lost its sealed dispatch tuple or session");
+        result = { ...result, selectedDispatch, structured: msg.subtype !== "success" || msg.is_error || this.responseOnlyViolation
+          ? { state: "rejected", reason: this.responseOnlyViolation ? "tool-policy-violation" : "execution-not-completed", detail: `Claude terminal ${msg.subtype}`, dispatchId: result.turnId! }
+          : !this.outputWireContract || !this.activeTurnPolicy?.selectedDispatch
+            ? { state: "rejected", reason: "invalid-contract", detail: "Claude structured turn has no sealed descriptor or tuple", dispatchId: result.turnId! }
+            : structuredReceipt(this.output, "claude", rawResult.structured_output, { dispatchId: result.turnId!, sessionId: this._sessionId, nativeTurnId: typeof rawResult.uuid === "string" ? rawResult.uuid : undefined }, "decoded-json", this.outputWireContract, this.activeTurnPolicy.selectedDispatch) };
+        if (result.structured.state === "rejected") result.isError = true;
+      }
       const mergedUsage = mergeClaudeProviderSessionUsage(this.cumulativeUsage, rawResult);
       result.inputTokens = mergedUsage.inputTokens;
       result.outputTokens = mergedUsage.outputTokens;
@@ -659,11 +789,25 @@ export class ClaudeAdapter implements BuilderAdapter {
     }
   }
 
-  async sendTurn(text: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: ProviderTurnPurpose }): Promise<TurnResult> {
-    if (this.pending) throw new Error("a turn is already in progress");
+  async sendTurn(text: string, policy?: import("./types.js").ProviderTurnPolicy): Promise<TurnResult> {
+    if (this.pending || this.configuringTurn) throw new Error("a turn is already in progress");
+    if (policy?.output) assertActiveProviderDispatch(policy, text, "claude", this.sessionRef());
+    this.configuringTurn = true;
+    try {
+      const selected = policy?.output ? policy.wireContract ?? providerWireContract(policy.output, "claude", "default", { requireRegistered: true }) : undefined;
+      if (selected && policy?.renderedWireContractDigest && policy.renderedWireContractDigest !== selected.descriptorDigest) throw new Error("Claude received mismatched rendered wire guidance");
+      if (selected) {
+        text = renderProviderWireInstruction(text, selected);
+        policy = { ...policy, wireContract: selected, renderedWireContractDigest: selected.descriptorDigest };
+      }
+      if (policy?.output?.schemaDigest !== this.output?.schemaDigest || policy?.output?.operation !== this.output?.operation || selected?.descriptorDigest !== this.outputWireContract?.descriptorDigest) await this.configureOutput(policy?.output, selected);
+    }
+    finally { this.configuringTurn = false; }
+    this.responseOnlyViolation = false;
+    this.activeTurnPolicy = policy;
     this.responseOnlyTurn = Boolean(policy?.responseOnly);
     this.phaseBarrier.begin(policy?.purpose ?? (policy?.responseOnly ? "response-repair" : "implementation"));
-    const turnId = randomUUID();
+    const turnId = policy?.dispatchId ?? randomUUID();
     this.activeProviderTurnId = turnId;
     const observer = this.opts.observer;
     if (!observer) {
@@ -694,7 +838,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   private async sendTurnInternal(text: string): Promise<TurnResult> {
     if (this.opts.fast) await this.prepareFastMode();
     const result = await this.sendTurnAttempt(text);
-    if (result.isError && this.fastModeEnabled && !this.turnSawWork && isFastModeUnavailable(result.rawResponse ?? result.text) && !this.streamEnded) {
+    if (!this.output && result.isError && this.fastModeEnabled && !this.turnSawWork && isFastModeUnavailable(result.rawResponse ?? result.text) && !this.streamEnded) {
       await this.disableFastMode();
       return this.sendTurnAttempt(text);
     }
@@ -742,9 +886,9 @@ export class ClaudeAdapter implements BuilderAdapter {
     if (!Array.isArray(body?.content)) return;
     for (const block of body.content as Array<Record<string, unknown>>) {
       if (block.type !== "tool_result") continue;
-      this.eventQueue.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType: "tool_result", payload: structuredClone(block), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
+      this.eventQueue.push({ kind: "provider-item", provider: "claude", lifecycle: "completed", itemType: typeof block.tool_use_id === "string" && this.structuredSubmissionIds.has(block.tool_use_id) ? "structuredOutput" : "tool_result", payload: structuredClone(block), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
       const callId = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
-      if (!callId) continue;
+      if (!callId || this.structuredSubmissionIds.has(callId)) continue;
       if (this.completedToolCalls.has(callId)) continue;
       const call = this.toolCalls.get(callId);
       const spanId = this.toolSpans.get(callId);
@@ -763,11 +907,15 @@ export class ClaudeAdapter implements BuilderAdapter {
           : failed && /cancel(?:led|ed)/i.test(text) ? "cancelled"
             : failed && /permission denied/i.test(text) ? "permission_denied"
               : failed && /not found/i.test(text) ? "not_found"
+                // Claude's Read tool explicitly reports its size guard this
+                // way. It is a terminal, observed rejection, not a
+                // provisional transport error that might later complete.
+                : failed && /\b(?:content|file)\b[\s\S]{0,160}\bexceeds\s+(?:the\s+)?maximum\s+allowed\s+tokens\b/i.test(text) ? "output_limit"
                 : failed && /\b(?:exit(?:ed)?|status)\s+[1-9]\d*\b/i.test(text) ? "nonzero_exit"
                   : failed && /\b(?:failed|error|exception)\b/i.test(text) ? "explicit_error"
                     : failed ? "unexplained_error"
                       : "completed";
-      const status = resultReason === "host_policy_denied" ? "denied" : resultReason === "timeout" ? "timed_out" : resultReason === "cancelled" ? "cancelled" : ["permission_denied", "not_found", "nonzero_exit", "explicit_error"].includes(resultReason) ? "failed" : resultReason === "completed" ? "completed" : "unknown";
+      const status = resultReason === "host_policy_denied" ? "denied" : resultReason === "timeout" ? "timed_out" : resultReason === "cancelled" ? "cancelled" : ["permission_denied", "not_found", "output_limit", "nonzero_exit", "explicit_error"].includes(resultReason) ? "failed" : resultReason === "completed" ? "completed" : "unknown";
       if (status !== "unknown") {
         this.completedToolCalls.add(callId);
         if (this.completedToolCalls.size > 1000) this.completedToolCalls.delete(this.completedToolCalls.values().next().value!);
@@ -814,6 +962,7 @@ export class ClaudeAdapter implements BuilderAdapter {
           // Require an advertised built-in local command; never substitute a
           // model-generated warm-up for QA's pre-dispatch identity validation.
           if (commands.some(command => command.name === "context" && "builtin" in command && command.builtin === true)) {
+            providerControlOperationV2("claude", "/context");
             this.opts.onLifecycleTrace?.({ phase: "local-context-initialization-start", at: new Date().toISOString() });
             const result = await this.sendTurn("/context", { responseOnly: true });
             this.opts.onLifecycleTrace?.({ phase: "local-context-initialization-complete", at: new Date().toISOString() });
@@ -825,7 +974,11 @@ export class ClaudeAdapter implements BuilderAdapter {
         }
         return this.sessionIdentityReady;
       };
-      const ref = await Promise.race([prepare(), interrupted]);
+      const ready = await Promise.race([prepare(), interrupted]);
+      // The identity promise resolves once. A host may later adopt a new scope
+      // for the same conversation (for example a handoff generation), so the
+      // prepared session is the adapter's current reference, as for Codex.
+      const ref = this._sessionRef?.sessionId === ready.sessionId ? this._sessionRef : ready;
       if (!ref.validatedAt) throw new Error("Claude session identity was not provider-validated during initialization");
       return ref;
     } catch (error) {
@@ -865,6 +1018,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   private async compactInternal(): Promise<CompactResult> {
+    providerControlOperationV2("claude", "/compact");
     this.compactResult = undefined;
     this.manualCompactionInFlight = true;
     const normalMs = Math.min(180_000, Math.max(1, this.opts.compactionTimeoutMs ?? 120_000));
@@ -899,7 +1053,9 @@ export class ClaudeAdapter implements BuilderAdapter {
     // for first input. Sending getContextUsage then deadlocks the control
     // queue, including a later local command. Establish identity first.
     if (!this.providerIdentityObserved && typeof this.query.supportedCommands === "function") await this.prepareSession();
+    providerControlOperationV2("claude", "applyFlagSettings");
     await new OperationDeadline("Claude settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ autoCompactEnabled: true }));
+    providerControlOperationV2("claude", "getContextUsage");
     const baseline = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
     if (!Number.isFinite(baseline.maxTokens) || baseline.maxTokens <= 0
       || !Number.isFinite(baseline.autoCompactThreshold) || baseline.autoCompactThreshold === undefined
@@ -912,7 +1068,9 @@ export class ClaudeAdapter implements BuilderAdapter {
     const reserve = baseline.maxTokens - baseline.autoCompactThreshold;
     if (reserve < 0) throw new Error("Claude reported an invalid automatic-compaction reserve");
     const requestedWindow = tokenLimit(baseline.maxTokens, threshold) + reserve;
+    providerControlOperationV2("claude", "applyFlagSettings");
     await new OperationDeadline("Claude settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ autoCompactEnabled: true, autoCompactWindow: requestedWindow }));
+    providerControlOperationV2("claude", "getContextUsage");
     const installed = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
     if (!installed.isAutoCompactEnabled || !Number.isFinite(installed.maxTokens) || installed.maxTokens <= 0
       || !Number.isFinite(installed.autoCompactThreshold) || installed.autoCompactThreshold === undefined) {
@@ -946,6 +1104,7 @@ export class ClaudeAdapter implements BuilderAdapter {
 
   async contextUsage(): Promise<ContextUsage | undefined> {
     try {
+      providerControlOperationV2("claude", "getContextUsage");
       const usage = await new OperationDeadline("Claude context usage", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.getContextUsage());
       const result = { used: usage.totalTokens, maximum: usage.maxTokens, percentage: usage.percentage, observedAt: new Date().toISOString(), source: "provider-query" as const };
       this.eventQueue.push({ kind: "context-usage", ...result });
@@ -960,11 +1119,15 @@ export class ClaudeAdapter implements BuilderAdapter {
   async switchSettings(settings: ProviderSettingSwitch): Promise<CompactResult> {
     if (settings.effort !== this.opts.effort || settings.fast !== this.opts.fast) return { ok: false, error: "Claude SDK cannot change reasoning/fast controls on an existing transport" };
     if (settings.model === this.opts.model) return { ok: true };
+    providerControlOperationV2("claude", "/model");
+    if (settings.model && /[\r\n]/.test(settings.model)) return { ok: false, error: "Model control requires one model identifier" };
     if (this.opts.fast) await this.prepareFastMode();
+    if (this.fastModeEnabled) providerControlOperationV2("claude", "applyFlagSettings");
     if (this.fastModeEnabled) await new OperationDeadline("Claude standard speed", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.query.applyFlagSettings({ fastMode: false }));
     this.fastModeEnabled = false;
     const result = await new OperationDeadline("Claude model settings", this.opts.rpcTimeoutMs ?? 60_000).run(() => this.sendTurn(`/model ${settings.model ?? "default"}`), () => this.abort.abort());
     if (result.isError) return { ok: false, error: result.text, ...(result.failure ? { failure: result.failure } : {}) };
+    if (result.numTurns !== 0 || result.structured) return { ok: false, error: "Model control did not complete as a non-authoritative provider acknowledgement" };
     this.opts.model = settings.model;
     this.fastModePrepared = undefined; this.fastModeUnavailable = false;
     if (this.opts.fast) await this.prepareFastMode();
@@ -991,8 +1154,13 @@ export class ClaudeAdapter implements BuilderAdapter {
     } catch {
       // interrupt is best-effort — ignore if no turn is active
     }
-    this.query.close?.();
-    await new OperationDeadline("Claude shutdown", this.opts.shutdownTimeoutMs ?? 10_000).run(() => this.pumpDone).catch(() => {});
+    try {
+      this.query.close?.();
+      await new OperationDeadline("Claude shutdown", this.opts.shutdownTimeoutMs ?? 10_000).run(() => this.pumpDone).catch(() => {});
+    } finally {
+      this.finishQueryBudget();
+      if (this.scratchDirectory) rmSync(this.scratchDirectory, { recursive: true, force: true });
+    }
   }
 
   private failSessionIdentity(error: Error): void {

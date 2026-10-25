@@ -1,3 +1,4 @@
+import { workFixtureTurn } from "./helpers/nativeOutput.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -59,10 +60,10 @@ test("blocked ticket and its dependent defer while an independent ticket complet
   writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [ticket("T001", 1), ticket("T002", 2, ["T001"]), ticket("T003", 3)] }));
   cmdUpdate(dir, "T001", { status: "next", actor: "test" });
   cmdUpdate(dir, "T003", { status: "next", actor: "test" });
-  const replies = ['STEP_STATUS: blocked | ticket="T001" reason="registry unavailable"', 'STEP_STATUS: done | ticket="T003" summary="implemented independent work"'];
+  const replies = [{ kind: "blocked", reason: "registry unavailable", nextAction: "Restore registry access" }, undefined];
   let turns = 0;
   const instructions: string[] = [];
-  const builder: BuilderAdapter = { agent: "codex", async sendTurn() { turns++; return { text: replies.shift() ?? "STEP_STATUS: plan_complete", isError: false, numTurns: 1, costUsd: 0 }; }, async *events(): AsyncIterable<BuilderEvent> {}, sessionId: () => "session", async close() {} };
+  const builder: BuilderAdapter = { agent: "codex", async sendTurn(_instruction, policy) { turns++; return workFixtureTurn(policy, "session", "codex", replies.shift()); }, async *events(): AsyncIterable<BuilderEvent> {}, sessionId: () => "session", async close() {} };
   const foreman = new Foreman(builder, new Log(join(dir, "log.jsonl")), false, false, 3, dir);
   const result = await foreman.runBatch(1);
   assert.equal(result.completed, 1);
@@ -72,7 +73,7 @@ test("blocked ticket and its dependent defer while an independent ticket complet
   finally { db.close(); }
 });
 
-test("current-branch plan-only resume is retried before QA", async t => {
+test("text-only completion cannot authorize current-branch work or automatic retry", async t => {
   const dir = fixture(t);
   execFileSync("git", ["init", "-q"], { cwd: dir });
   execFileSync("git", ["config", "user.email", "qa@example.test"], { cwd: dir });
@@ -98,8 +99,36 @@ test("current-branch plan-only resume is retried before QA", async t => {
     async close() {},
   };
   const result = await new Foreman(builder, new Log(join(dir, ".foreman/log.jsonl")), false, false, 3, dir).runBatch(1, undefined, undefined, "T001");
-  assert.equal(result.completed, 1);
-  assert.equal(turns, 2);
+  assert.equal(result.completed, 0);
+  assert.equal(turns, 1);
+});
+
+test("plain-text planning response stops without an automatic implementation retry", async t => {
+  const dir = fixture(t);
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "qa@example.test"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "QA Test"], { cwd: dir });
+  execFileSync("git", ["commit", "--allow-empty", "-qm", "base"], { cwd: dir });
+  mkdirSync(join(dir, ".foreman"), { recursive: true });
+  cmdInit(dir, { appName: "Test", timezone: "UTC" });
+  writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [{ id: "T001", order: 1, title: "Implement", area: "test", priority: "P1", size: "S", risk: "Low", summary: "work", acceptance: ["works"], required_tests: ["tests"], likely_files: ["index.mjs"], depends_on: [] }] }));
+  cmdUpdate(dir, "T001", { status: "next", actor: "test" });
+  let turns = 0;
+  const builder: BuilderAdapter = {
+    agent: "codex",
+    async sendTurn() {
+      turns++;
+      if (turns === 1) return { text: "Plan only T001. Do not implement on this turn.", isError: false, numTurns: 1, costUsd: 0 };
+      writeFileSync(join(dir, "index.mjs"), "export const subtract = (a, b) => a - b;\n");
+      return { text: 'STEP_STATUS: done | ticket="T001" summary="implemented"', isError: false, numTurns: 1, costUsd: 0 };
+    },
+    async *events(): AsyncIterable<BuilderEvent> {},
+    sessionId: () => "session",
+    async close() {},
+  };
+  const result = await new Foreman(builder, new Log(join(dir, ".foreman/log.jsonl")), false, false, 3, dir).runBatch(1, undefined, undefined, "T001");
+  assert.equal(result.completed, 0);
+  assert.equal(turns, 1);
 });
 
 test("approved unchanged scope starts automatically, but a material ticket change needs approval even with yes", async t => {
@@ -157,16 +186,14 @@ test("an answered deferred question resumes at a safe boundary once", async t =>
   for (const ticket of tickets) cmdUpdate(dir, ticket.id, { status: "next", actor: "test" });
   const instructions: string[] = [];
   let runId = "";
-  const builder: BuilderAdapter = { agent: "codex", async sendTurn(instruction) {
+  const builder: BuilderAdapter = { agent: "codex", async sendTurn(instruction, policy) {
     instructions.push(instruction);
     if (instructions.length === 2) {
       const db = new WorkflowDb(dir);
       try { const question = db.pendingHumanDecisions(runId)[0]!; db.answerHumanDecision(runId, question.decisionId, "custom", undefined, "Use the local mirror"); }
       finally { db.close(); }
     }
-    const text = instructions.length === 1 ? 'STEP_STATUS: needs_input | ticket="T001" question="Which registry?" choices="Public|Local"'
-      : instructions.length === 2 ? 'STEP_STATUS: done | ticket="T002" summary="independent work"' : 'STEP_STATUS: done | ticket="T001" summary="used the mirror"';
-    return { text, isError: false, numTurns: 1, costUsd: 0 };
+    return workFixtureTurn(policy, "session", "codex", instructions.length === 1 ? { kind: "needs-input", question: "Which registry?", choices: ["Public", "Local"] } : undefined);
   }, async *events(): AsyncIterable<BuilderEvent> {}, sessionId: () => "session", async close() {} };
   const foreman = new Foreman(builder, new Log(join(dir, "log.jsonl")), false, false, 3, dir);
   runId = (foreman as unknown as { qaRunId: string }).qaRunId;

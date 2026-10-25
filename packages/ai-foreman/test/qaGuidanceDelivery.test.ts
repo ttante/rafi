@@ -1,3 +1,6 @@
+import { workReportOutput } from "rafi-spec";
+import { nativePolicy } from "../src/structuredOperation.js";
+import { codexWireFixture } from "./helpers/nativeOutput.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -47,19 +50,30 @@ for(const provider of providers)for(const target of ["builder","qa","both"] as c
     const advice="Preserve the empty-input regression\n  and independently check its edge case. 🧪";
     const make=(cwd:string,role:"builder"|"qa",resumeSessionId?:string):BuilderAdapter=>{
       const ref:ProviderSessionRefV1={version:1,provider,sessionId:resumeSessionId??`${role}-${adapters.length}`,role,stream:role,generation:0,cwd,configRoot:role==="builder"?root:cwd,ticketId:"T001",source:"observed",createdAt:new Date(0).toISOString(),validatedAt:new Date(0).toISOString()};
+      let nativeResult: Record<string, unknown>;
+      const nativeValue = (operation: string) => ({ version: 1, operation,
+        result: operation === "session-initialization" ? { kind: "completed", summary: "Ready", payload: { ready: true } } : nativeResult,
+        continuity: JSON.parse(delta) });
       const respond=(prompt:string):string=>{
         prompts.push({role,text:prompt});let text:string;
+        nativeResult = { kind: "completed", summary: "Implemented", payload: { disposition: "modified", evidence: ["Fixture source inspection"], coverage: null, graphMaintenance: null } };
         if(role==="qa") {
           reviews++;
           if(reviews===1) {
             const command=`/guide-${target} run T001 ${advice}`;const control=new BuildInterventionControl(root,"run","T001");try{instructionId=control.enqueue(parseManagerAction(command,"guide",0)!,command).instructionId;}finally{control.close();}
             text=scenario.startsWith("after-pass")?'STEP_STATUS: qa_pass | summary="Initial work passed"':`RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify(failure)}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="guard missing"`;
           } else if((scenario==="extra-attempt"||scenario==="after-pass-fails")&&reviews===2) text=`RAFI_QA_FAILURE_REPORT_START\n${JSON.stringify(failure)}\nRAFI_QA_FAILURE_REPORT_END\nSTEP_STATUS: qa_fail | issues="guard missing"`;
-          else text=`MANAGER_INSTRUCTION_VERIFIED: ${instructionId}\nSTEP_STATUS: qa_pass | summary="Edge case independently verified"`;
+          else text=`${prompt.includes(instructionId) ? `MANAGER_INSTRUCTION_VERIFIED: ${instructionId}\n` : ""}STEP_STATUS: qa_pass | summary="Edge case independently verified"`;
+          const failed = reviews === 1 ? !scenario.startsWith("after-pass") : (scenario === "extra-attempt" || scenario === "after-pass-fails") && reviews === 2;
+          nativeResult = { kind: "completed", summary: failed ? "Guard missing" : "Edge case independently verified", payload: failed
+            ? { kind: "failed", report: failure, coverage: null, verifiedInstructionIds: [] }
+            : { kind: "passed", coverage: null, verifiedInstructionIds: prompt.includes(instructionId) ? [instructionId] : [] } };
         } else if(prompt.includes("QA failure handoff ID:")) {
           if(process.env.RAFI_GUIDANCE_CRASH)appendFileSync(join(root,".rafi/test-dispatches"),"one\n");
           assert.match(prompt,/missing guard/);writeFileSync(join(cwd,"source.txt"),"guarded edge case\n");
-          text=`RAFI_BUILDER_QA_REMEDIATION_START\n${JSON.stringify({version:3,handoff_id:/QA failure handoff ID: ([a-f0-9]+)/.exec(prompt)![1],summary:"Guarded empty input",findings:[{finding_key:/QA-1 -> ([a-f0-9]+)/.exec(prompt)![1],raw_id:"QA-1",disposition:"fixed",changes:["guarded input"],evidence:"source.txt",verification:[{check:"inspect",outcome:"passed",evidence:"guard exists"}]}],observations:[]})}\nRAFI_BUILDER_QA_REMEDIATION_END\nSTEP_STATUS: done | summary="guard implemented"`;
+          const remediation = {version:3,handoff_id:/QA failure handoff ID: ([a-f0-9]+)/.exec(prompt)![1],summary:"Guarded empty input",findings:[{finding_key:/QA-1 -> ([a-f0-9]+)/.exec(prompt)![1],raw_id:"QA-1",disposition:"fixed",changes:["guarded input"],evidence:"source.txt",verification:[{check:"inspect",outcome:"passed",evidence:"guard exists"}]}],observations:[]};
+          text="Guard implemented";
+          nativeResult = { kind: "completed", summary: remediation.summary, payload: { status: "done", reason: null, coverage: null, report: remediation } };
         } else if(prompt.includes("Builder guidance follow-up after explicit resume.")) {
           if(process.env.RAFI_GUIDANCE_CRASH)appendFileSync(join(root,".rafi/test-dispatches"),"one\n");
           assert.ok(prompt.includes(advice));assert.ok(prompt.includes("Approved ticket requirements"));
@@ -69,40 +83,48 @@ for(const provider of providers)for(const target of ["builder","qa","both"] as c
         if(role==="builder"&&(prompt.includes("QA failure handoff ID:")||prompt.includes("Builder guidance follow-up after explicit resume."))&&process.env.RAFI_GUIDANCE_CRASH==="submission")process.kill(process.pid,"SIGKILL");
         return text+`\nRAFI_CONTINUITY_DELTA: ${delta}`;
       };
-      const options={cwd,resumeSessionId,configRoot:role==="builder"?root:cwd,sessionRole:role,sessionStream:role,ticketId:"T001",permission:async()=>({behavior:"deny" as const,message:"Deterministic transport"}),preparationTimeoutMs:2000};
+      const options={cwd,resumeSessionId,configRoot:role==="builder"?root:cwd,sessionRole:role,sessionStream:role,ticketId:"T001",permission:async()=>({behavior:"deny" as const,message:"Deterministic transport"}),preparationTimeoutMs:2000,turnDeadlineMs:10000};
       let transport:BuilderAdapter;
       if(provider==="claude") {
-        const messages=new AsyncQueue<SDKMessage>();
-        const query=(input:{prompt:AsyncIterable<SDKUserMessage>;options:{abortController:AbortController}}):Query=>{
+        let terminalSequence = 0;
+        const query=(input:{prompt:AsyncIterable<SDKUserMessage>;options:{abortController:AbortController; outputFormat?: { schema: Record<string, any> }}}):Query=>{
+          const messages=new AsyncQueue<SDKMessage>();
           input.options.abortController.signal.addEventListener("abort",()=>messages.close());
           messages.push({type:"system",subtype:"init",session_id:ref.sessionId,cwd} as SDKMessage);
           void (async()=>{for await(const prompt of input.prompt) {
-            const text=respond(String(prompt.message.content));
-            messages.push({type:"result",subtype:"success",session_id:ref.sessionId,result:text,is_error:false,num_turns:1,total_cost_usd:0,usage:{input_tokens:100,output_tokens:10},modelUsage:{}} as unknown as SDKMessage);
+            const operation = input.options.outputFormat?.schema.properties?.operation?.const;
+            const text = operation === "session-initialization" ? `Ready\nRAFI_CONTINUITY_DELTA: ${delta}` : respond(String(prompt.message.content));
+            messages.push({type:"result",subtype:"success",uuid:`terminal-${++terminalSequence}`,session_id:ref.sessionId,result:text,...(operation ? { structured_output: nativeValue(operation) } : {}),is_error:false,num_turns:1,total_cost_usd:0,usage:{input_tokens:100,output_tokens:10},modelUsage:{}} as unknown as SDKMessage);
           }})();
-          return {[Symbol.asyncIterator]:()=>messages[Symbol.asyncIterator](),initializationResult:async()=>({}),getContextUsage:async()=>({maxTokens:10000,usedTokens:100,autoCompactThreshold:6500,isAutoCompactEnabled:true}),applyFlagSettings:async()=>{},interrupt:async()=>messages.close()} as unknown as Query;
+          return {[Symbol.asyncIterator]:()=>messages[Symbol.asyncIterator](),initializationResult:async()=>({}),getContextUsage:async()=>({maxTokens:10000,usedTokens:100,autoCompactThreshold:6500,isAutoCompactEnabled:true}),applyFlagSettings:async()=>{},interrupt:async()=>messages.close(),close:()=>messages.close()} as unknown as Query;
         };
         transport=Reflect.construct(ClaudeAdapter,[options,query]) as ClaudeAdapter;
       } else {
         const native=new CodexAdapter(options);
         const rpc=native as unknown as {ensureConnection():Promise<void>;request(method:string,params:Record<string,unknown>):Promise<unknown>;handle(message:unknown):void};
         rpc.ensureConnection=async()=>{};
+        let terminalSequence = 0;
         rpc.request=async(method,params)=>{
           if(method==="thread/start"||method==="thread/resume")return {thread:{id:ref.sessionId,cwd}};
           if(method==="turn/start") {
-            const prompt=(params.input as Array<{text:string}>).map(item=>item.text).join("\n");const text=respond(prompt);
+            const prompt=(params.input as Array<{text:string}>).map(item=>item.text).join("\n");
+            const schema=params.outputSchema as Record<string, any> | undefined;
+            const operation=schema?.properties?.operation?.const;
+            const legacy=operation === "session-initialization" ? `Ready\nRAFI_CONTINUITY_DELTA: ${delta}` : respond(prompt);
+            const text=operation ? JSON.stringify(codexWireFixture(schema!, nativeValue(operation))) : legacy;
+            const turnId=`native-${++terminalSequence}`;
             setTimeout(()=>{
-              rpc.handle({method:"item/completed",params:{threadId:ref.sessionId,item:{type:"agentMessage",text}}});
-              rpc.handle({method:"turn/completed",params:{threadId:ref.sessionId,turn:{id:`native-${prompts.length}`,status:"completed"}}});
+              rpc.handle({method:"item/completed",params:{threadId:ref.sessionId,turnId,item:{type:"agentMessage",id:`item-${turnId}`,phase:"final_answer",text}}});
+              rpc.handle({method:"turn/completed",params:{threadId:ref.sessionId,turn:{id:turnId,status:"completed"}}});
             },0);
-            return {turn:{id:`native-${prompts.length}`}};
+            return {turn:{id:turnId}};
           }
           return {};
         };
         transport=native;
       }
       const recovering=new RecoveringAdapter({initial:role==="builder"?new CurrentWorkflowGuardAdapter(transport,cwd):transport,runtime:provider,enabled:true,allowSwitch:false,label:role,choose:async()=>{throw new Error("Unexpected retry");},recreate:async()=>{throw new Error("Unexpected recreation");}});
-      const continuous=new ContinuityAdapter({adapter:recovering,projectDir:root,runId:role==="qa"?`run:qa-${adapters.length}`:"run",role,settings:{role,source:"project",make:provider,model:"default",reasoning:"default",fast:false,session_strategy:"compact",display_session_cost:false,auto_compact_threshold_percent:65,compact_maximum:1,settings_revision:1},authoritativeStateRevision:()=>1,durableSingleTurn:role==="qa"});
+      const continuous=new ContinuityAdapter({adapter:recovering,projectDir:root,runId:"run",role,settings:{role,source:"project",make:provider,model:"default",reasoning:"default",fast:false,session_strategy:"compact",display_session_cost:false,auto_compact_threshold_percent:65,compact_maximum:1,settings_revision:1},authoritativeStateRevision:()=>1,durableSingleTurn:role==="qa"});
       const adapter=new RoleStatusAdapter(continuous,()=>{},()=>{});if(role==="builder"&&process.env.RAFI_GUIDANCE_CRASH==="reservation") {
         const original=adapter.sendTurn.bind(adapter);
         adapter.sendTurn=async(prompt,options)=>{if(prompt.includes("QA failure handoff ID:")||prompt.includes("Builder guidance follow-up after explicit resume."))process.kill(process.pid,"SIGKILL");return original(prompt,options);};
@@ -117,14 +139,14 @@ for(const provider of providers)for(const target of ["builder","qa","both"] as c
       const base=execFileSync("git",["branch","--show-current"],{cwd:root,encoding:"utf8"}).trim();
       const options:BranchRunnerOptions={projectDir:root,runId:"run",plan:{baseRef:base,nodes:[{ticket,branch:"ticket/T001",baseRef:base,baseBranch:base,dependencies:[],depth:0}],issues:[]},log:new Log(join(root,".foreman/branch.jsonl")),notificationsEnabled:false,qaEnabled:true,qaMaxFixAttempts:1,createPr:false,prReady:false,keepWorktrees:true,baseWorktreePolicy:"skip",createBuilder:async (cwd,sessionId)=>make(cwd,"builder",sessionId),createQa,builderSessionBoundary:async adapter=>adapter,qaContinuityManaged:true};
       const first=await runBranchPlan(options);assert.ok(["blocked","needs-human"].includes(first[0]?.buildStatus??""),JSON.stringify(first));assert.equal(reviews,1);
-      const db=new WorkflowDb(root);let session:NonNullable<ReturnType<WorkflowDb["branchResumeSession"]>>;try{session=db.branchResumeSession("run","T001")!;assert.ok(session);assert.equal(db.qaTicketHead("run","T001").state,"passed");}finally{db.close();}
+      const db=new WorkflowDb(root);let session:NonNullable<ReturnType<WorkflowDb["branchResumeSession"]>>;try{session=db.branchResumeSession("run","T001")!;assert.ok(session);assert.equal(db.qaTicketHead("run","T001").state,"passed",JSON.stringify(db.operations("run").filter(op=>op.status==="uncertain").map(op=>({error:op.error,raw:db.getEvidence((op.result as {rawDigest:string}).rawDigest)?.toString()}))));}finally{db.close();}
       let recordedBuilders=0;
       const resumed=await runBranchPlan({...options,recordBuilderSession:()=>{recordedBuilders++;},qaProtocolResumeTicket:"T001",resumeSessions:new Map([["T001",{worktreePath:session.worktreePath,sessionId:session.sessionId,sessionRef:session.sessionRef}]])});
       assert.equal(resumed[0]?.buildStatus,"done",JSON.stringify(resumed));assert.equal(reviews,2);assert.equal(prompts.filter(p=>p.role==="builder").length,2,"branch resume sends only one scoped follow-up");
       assert.equal(recordedBuilders,1,"Only the genuinely dispatched authorized Builder follow-up records its session");
     } else if(scenario.startsWith("after-pass")) {
       const assignment=beginBuildAssignment(root,"run","T001",root,"Implement T001");
-      const initial=await foreman.builderAdapter().sendTurn(assignment.instruction);
+      const initial=await foreman.builderAdapter().sendTurn(assignment.instruction,nativePolicy(workReportOutput,{journalRunId:"run"}));
       finishBuildAssignment(root,assignment,initial,{kind:"done",ticket:"T001"});
       const passed=await foreman.runPendingQaRecovery("T001",initial.text);
       assert.equal(passed.outcome,"passed",passed.detail);assert.equal(reviews,1);
@@ -168,7 +190,7 @@ for(const provider of providers)for(const target of ["builder","qa","both"] as c
       if(scenario==="after-pass-withdraw") {assert.equal(prompts.filter(p=>p.role==="builder").length,1);return;}
     } else if(scenario==="extra-attempt") {
       const assignment=beginBuildAssignment(root,"run","T001",root,"Implement T001");
-      const initial=await foreman.builderAdapter().sendTurn("Implement T001");
+      const initial=await foreman.builderAdapter().sendTurn("Implement T001",nativePolicy(workReportOutput,{journalRunId:"run"}));
       finishBuildAssignment(root,assignment,initial,{kind:"done",ticket:"T001"});
       const stopped=await foreman.runPendingQaRecovery("T001",initial.text);
       assert.ok(["blocked","needs-human"].includes(stopped.outcome),stopped.detail);
@@ -189,7 +211,9 @@ for(const provider of providers)for(const target of ["builder","qa","both"] as c
 if(!process.env.RAFI_GUIDANCE_CRASH)for(const provider of providers)for(const target of ["builder","both"] as const)for(const scenario of ["in-cycle","after-pass"])for(const boundary of ["reservation","submission","receipt"] as const)test(`${provider} ${target} ${scenario} guidance survives a process crash after ${boundary} through production wrappers`,{skip:process.platform==="win32"},()=>{
   const root=mkdtempSync(join(tmpdir(),"guidance-wrapper-crash-"));
   try {
-    const child=spawnSync(process.execPath,["--import","tsx","--test",`--test-name-pattern=${provider} ${target} ${scenario} guidance reaches`,new URL(import.meta.url).pathname],{encoding:"utf8",timeout:60000,env:{...process.env,NODE_TEST_CONTEXT:undefined,RAFI_GUIDANCE_CRASH:boundary,RAFI_GUIDANCE_CRASH_ROOT:root}});
+    const child=spawnSync(process.execPath,["--import","tsx","--test","--test-reporter=tap",`--test-name-pattern=${provider} ${target} ${scenario} guidance reaches`,new URL(import.meta.url).pathname],{encoding:"utf8",timeout:60000,env:{...process.env,NODE_TEST_CONTEXT:undefined,RAFI_GUIDANCE_CRASH:boundary,RAFI_GUIDANCE_CRASH_ROOT:root}});
+    // Node 24 defaults to the human-readable reporter, which omits the worker
+    // signal here. Request TAP explicitly because this assertion consumes it.
     // The test runner reports its killed worker as a failed process.
     assert.ok(child.signal==="SIGKILL"||child.stdout.includes("SIGKILL"),child.stdout+child.stderr);
     const db=new WorkflowDb(root);

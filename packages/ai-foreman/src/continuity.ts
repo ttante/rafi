@@ -1,12 +1,17 @@
+import { persistedProviderWireContract } from "rafi-spec";
 import { dispatchWithGraphAccess, withGraphSessionAccess } from "./graph/session.js";
 import { localBuildAuthority, type BuildAdmission } from "./buildAdmission.js";
 import { randomUUID, createHash } from "node:crypto";
 import type { ContinuityCheckpoint, ContinuityDelta, ResolvedAgentSettings } from "rafi-spec";
-import { continuityDeltaV1Schema, zodIssues } from "rafi-spec";
+import { continuityDeltaV1Schema, initializationOutput, providerWireContracts, providerWireContract, validateStructuredCandidate, type OperationResponse, zodIssues } from "rafi-spec";
 import type { BuilderAdapter, CompactResult, ContextUsage, NativeAutoCompactionPolicy, NativeCompaction, ProviderSessionUsage, ProviderSettingSwitch, RuntimeFailure, TurnResult } from "./adapters/types.js";
 import { BuilderEventQueue } from "./activity.js";
 import { providerSessionKey } from "./sessionIdentity.js";
+import { nativePolicy, operationInstruction, journalStructuredDispatch, continuationPolicy } from "./structuredOperation.js";
+import type { BuilderHandoffRequest } from "./handoffs.js";
 import { WorkflowDb } from "./workflowDb.js";
+import { assertSealedDispatch, withFreshRecoveryValidation } from "./structuredDispatchAuthority.js";
+import { verifyPersistedDispatch } from "./structuredDispatchRecord.js";
 
 export const CONTINUITY_MARKER = "RAFI_CONTINUITY_DELTA:";
 
@@ -42,6 +47,8 @@ export class SessionUnavailableContinuityError extends Error {
   }
 }
 
+export const CONTINUITY_REQUIRED_INSTRUCTION = "Include the required bounded continuity object in the operation response; continuity cannot be null for this session.";
+
 export function validateContinuityDelta(value: unknown): ContinuityDelta {
   const problems: string[] = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ContinuityValidationError(["delta must be an object"]);
@@ -65,16 +72,6 @@ export function validateContinuityDelta(value: unknown): ContinuityDelta {
   if (JSON.stringify(output).length > 64_000) problems.push("delta exceeds 64 KiB");
   if (problems.length) throw new ContinuityValidationError(problems);
   return output;
-}
-
-export function parseContinuityDelta(text: string): { delta?: ContinuityDelta; cleanText: string; error?: ContinuityValidationError } {
-  const lines = text.split(/\r?\n/);
-  const markerIndexes = lines.flatMap((line, index) => line.trimStart().startsWith(CONTINUITY_MARKER) ? [index] : []);
-  const cleanText = lines.filter((_line, index) => !markerIndexes.includes(index)).join("\n").trimEnd();
-  if (markerIndexes.length !== 1) return { cleanText, error: new ContinuityValidationError([markerIndexes.length ? "multiple continuity markers" : "missing continuity marker"]) };
-  const raw = lines[markerIndexes[0]!]!.trimStart().slice(CONTINUITY_MARKER.length).trim();
-  try { return { delta: validateContinuityDelta(JSON.parse(raw)), cleanText }; }
-  catch (error) { return { cleanText, error: error instanceof ContinuityValidationError ? error : new ContinuityValidationError([`marker is not valid JSON: ${String(error)}`]) }; }
 }
 
 export function mergeContinuityDeltas(deltas: readonly ContinuityDelta[]): ContinuityDelta {
@@ -120,7 +117,7 @@ export interface ContinuityAdapterOptions {
   /** Explicit compatibility recovery may replace a dead predecessor lease only after its first valid checkpoint. */
   replaceRecoveryLeaseAfterCheckpoint?: boolean;
   /** Host-owned validated Builder handoff request processing at a safe turn boundary. */
-  handleHandoffRequest?: (text: string, predecessor: BuilderAdapter, frozenAction: string) => Promise<BuilderAdapter | undefined>;
+  handleHandoffRequest?: (text: string | BuilderHandoffRequest, predecessor: BuilderAdapter, frozenAction: string) => Promise<BuilderAdapter | undefined>;
   /** QA journals each provider turn separately; wrappers must not repair or redispatch inside one host turn. */
   durableSingleTurn?: boolean;
 }
@@ -150,7 +147,7 @@ export class ContinuityAdapter implements BuilderAdapter {
       db.ensureRun(options.runId);
       if (!db.continuityHead(options.runId, options.role)) {
         db.appendContinuityEvent({ runId: options.runId, role: "host", kind: "role_baseline", payload: { role: options.role, provider: options.settings.make, model: options.settings.model }, authoritativeStateRevision: this.revision() });
-        db.publishContinuityCheckpoint({ runId: options.runId, role: options.role, delta: baselineContinuityDelta(), authoritativeStateRevision: this.revision() });
+        db.publishContinuityCheckpoint({ runId: options.runId, role: options.role, delta: baselineContinuityDelta(), hostEventKind: "role-baseline", inputCheckpointDigests: [], authoritativeStateRevision: this.revision() });
       }
       const initialSession = options.adapter.sessionRef?.() ?? options.adapter.sessionId();
       if (initialSession) db.claimInitialRoleLease(options.runId, options.role, initialSession);
@@ -168,7 +165,8 @@ export class ContinuityAdapter implements BuilderAdapter {
     if (!owner || (current && owner.sessionKey === providerSessionKey(current))) { this.recoveryLeasePending = false; return; }
     this.validatingFreshRecovery = true;
     try {
-      const result = await this.sendTurn("Fresh recovery validation only. Do not use tools, change files, implement work, or request a handoff. Acknowledge this new session and emit the required continuity record using only the supplied instructions.", { responseOnly: true });
+      const result = await withFreshRecoveryValidation(this.options.projectDir, this.options.runId, this.options.role, authorization =>
+        this.sendTurn("Fresh recovery validation only. Do not use tools, change files, implement work, or request a handoff. Acknowledge this new session and include the required continuity object. " + operationInstruction(initializationOutput), nativePolicy(initializationOutput, { responseOnly: true, journalRunId: this.options.runId, dispatchId: `fresh-recovery:${authorization.decisionDigest}` })));
       if (result.isError || result.failure || this.recoveryLeasePending) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "fresh recovery did not establish a valid continuity checkpoint");
     } catch (error) {
       await this.close().catch(() => {});
@@ -178,13 +176,35 @@ export class ContinuityAdapter implements BuilderAdapter {
 
   get agent(): "claude" | "codex" { return this.adapter.agent; }
 
-  async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: import("./providerPhase.js").ProviderTurnPurpose }): Promise<TurnResult> {
-    return withGraphSessionAccess(this.options.projectDir, this.adapter, () => this.sendTurnOwned(instruction, policy));
+  /** Every confirmed dispatch publishes a checkpoint, so continuity is mandatory. */
+  structuredDispatchRequirement(): import("./adapters/types.js").StructuredDispatchRequirement {
+    return { instruction: CONTINUITY_REQUIRED_INSTRUCTION, validate: response => { validateContinuityDelta(response.continuity); } };
   }
-  private async sendTurnOwned(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: import("./providerPhase.js").ProviderTurnPurpose }): Promise<TurnResult> {
-    const providerInstruction = `${instruction}\n\n${continuityInstruction(this.options.role)}`;
+
+  async sendTurn(instruction: string, policy?: import("./adapters/types.js").TurnRequest): Promise<TurnResult> {
+    if (!policy?.output) throw new Error("Continuity dispatch requires a native operation contract");
+    if (policy.dispatchCapability) {
+      assertSealedDispatch(this.options.projectDir, policy.dispatchCapability, policy.selectedDispatch, instruction);
+      return this.sendTurnOwned(instruction, policy);
+    }
+    // The continuity requirement is applied by journalStructuredDispatch through
+    // structuredDispatchRequirement(), before sealing, on every dispatch path.
+    const hostInstruction = instruction;
+    return withGraphSessionAccess(this.options.projectDir, this.adapter, () => policy?.output
+      ? journalStructuredDispatch(this.options.projectDir, this, instruction, { ...policy, journalRunId: policy.journalRunId ?? this.options.runId }, (text, selected) => this.sendTurnOwned(text, selected))
+      : this.sendTurnOwned(instruction, policy)).then(result => {
+        if (result.failure?.category === "session-unavailable") {
+          this.recordSessionUnavailable(result.failure, hostInstruction);
+          throw new SessionUnavailableContinuityError(this.options.runId, this.options.role, result.failure);
+        }
+        return { ...result, hostInstruction };
+      });
+  }
+  private async sendTurnOwned(instruction: string, policy?: import("./adapters/types.js").TurnRequest): Promise<TurnResult> {
+    const providerInstruction = instruction;
     const journal = new WorkflowDb(this.options.projectDir);
-    const dispatchId = `dispatch:${this.options.runId}:${this.options.role}:${randomUUID()}`;
+    const dispatchId = policy?.dispatchId ?? `dispatch:${this.options.runId}:${this.options.role}:${randomUUID()}`;
+    const beforeSession = this.adapter.sessionRef?.();
     let original: TurnResult;
     try {
       journal.atomic(() => {
@@ -200,141 +220,70 @@ export class ContinuityAdapter implements BuilderAdapter {
         if (!(this.validatingFreshRecovery && this.recoveryLeasePending && policy?.responseOnly) && owner && session && (owner.providerSessionId !== session || (owner.sessionKey && ref && owner.sessionKey !== providerSessionKey(ref)))) {
           throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "provider session no longer owns role dispatch authority");
         }
-        if (journal.unresolvedRoleDispatches(this.options.runId, this.options.role).length) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "a previous dispatched turn has no durable completion; reconcile it before sending more work");
-        journal.planOperation({ runId: this.options.runId, idempotencyKey: dispatchId, kind: "provider-dispatch", intent: { role: this.options.role, sessionRef: this.adapter.sessionRef?.(), instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) } });
-        journal.updateOperation(dispatchId, "in_progress");
+        if (journal.unresolvedRoleDispatches(this.options.runId, this.options.role).filter(item => item.idempotencyKey !== dispatchId).length) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "a previous dispatched turn has no durable completion; reconcile it before sending more work");
+        if (!policy?.selectedDispatch) journal.planOperation({ runId: this.options.runId, idempotencyKey: dispatchId, kind: "provider-dispatch", intent: { role: this.options.role, sessionRef: this.adapter.sessionRef?.(), instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) } });
+        if (!policy?.selectedDispatch) journal.updateOperation(dispatchId, "in_progress");
         journal.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "turn_started", payload: { role: this.options.role, dispatchId, instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) }, authoritativeStateRevision: this.revision() });
       });
       try { original = await dispatchWithGraphAccess(this.options.projectDir, this.adapter, providerInstruction, policy, (text, p) => this.adapter.sendTurn(text, p)); }
-      catch (error) { journal.updateOperation(dispatchId, "uncertain", { error: String(error) }); throw error; }
-      const responseDigest = journal.putEvidence("handoff", original.rawResponse ?? original.text);
+      catch (error) { if (!policy?.selectedDispatch) journal.updateOperation(dispatchId, "uncertain", { error: String(error) }); throw error; }
+      // Preserve the native transport result before interpreting it or publishing
+      // a checkpoint. The outer journal remains the sole completion owner.
+      // journalStructuredDispatch owns the one retained raw receipt for native
+      // turns. Continuity records retain only its durable reference/fact.
+      const responseDigest = policy?.selectedDispatch ? undefined : journal.putEvidence("handoff", Buffer.from(JSON.stringify(original)));
       journal.atomic(() => {
-        journal.updateOperation(dispatchId, original.failure?.dispatchState === "unknown" ? "uncertain" : original.failure?.dispatchState === "not-sent" ? "failed" : "confirmed", { result: { responseDigest, isError: original.isError, failure: original.failure, turnId: original.turnId, sessionRef: this.adapter.sessionRef?.() } });
+        journal.appendContinuityEvent({ runId: this.options.runId, role: this.options.role, kind: "provider_response_received",
+          payload: { dispatchId, ...(responseDigest ? { responseDigest } : { journalOwnedEvidence: true }) }, authoritativeStateRevision: this.revision() });
+        if (!policy?.selectedDispatch) journal.updateOperation(dispatchId, original.failure?.dispatchState === "unknown" ? "uncertain" : original.failure?.dispatchState === "not-sent" ? "failed" : "confirmed", { result: { responseDigest, isError: original.isError, failure: original.failure, turnId: original.turnId, sessionRef: this.adapter.sessionRef?.() } });
         if (original.failure?.dispatchState === "not-sent") journal.appendContinuityEvent({ runId: this.options.runId, role: this.options.role, kind: "turn_not_sent", payload: { dispatchId, role: this.options.role }, authoritativeStateRevision: this.revision() });
       });
     } finally { journal.close(); }
-    if (policy?.handback) {
-      const parsed = parseContinuityDelta(original.rawResponse ?? original.text);
-      // The delivery journal owns the sole repair allowance and validates execution
-      // before a checkpoint is published. Never transfer/replay inside this turn.
-      return { ...original, text: parsed.cleanText, hostInstruction: instruction,
-        providerInstruction: original.providerInstruction ?? providerInstruction,
-        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText,
-        continuityErrors: parsed.error?.problems ?? [] };
-    }
-    const activeSession = this.adapter.sessionRef?.() ?? this.adapter.sessionId();
-    if (activeSession) {
-      const leaseDb = new WorkflowDb(this.options.projectDir);
-      try { leaseDb.claimInitialRoleLease(this.options.runId, this.options.role, activeSession); }
-      finally { leaseDb.close(); }
-    }
-    if (original.failure?.category === "session-unavailable") {
-      this.recordSessionUnavailable(original.failure, instruction);
-      throw new SessionUnavailableContinuityError(this.options.runId, this.options.role, original.failure);
-    }
-    if (original.isError || original.failure) return original;
-    const parsed = parseContinuityDelta(original.text);
-    if (parsed.delta && !original.isError && !original.failure) {
-      this.publish(parsed.delta, "turn_completed", original);
-      this.moveRecoveryLeaseAfterCheckpoint();
-      if (this.options.durableSingleTurn || this.validatingFreshRecovery) {
-        return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
-          rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
-      }
-      const successor = await this.options.handleHandoffRequest?.(original.text, this.adapter, instruction);
-      if (successor && successor !== this.adapter) {
-        await this.adoptValidatedSuccessor(successor);
-        return this.sendTurn([
-          "Continue the frozen action after the accepted Rafi handoff. Do not repeat completed side effects.",
-          instruction,
-        ].join("\n\n"), policy);
-      }
-      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
-        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
-    }
+    return original;
+  }
 
-    if (this.options.durableSingleTurn || (this.validatingFreshRecovery && this.recoveryLeasePending && policy?.responseOnly)) {
-      const invalidDb = new WorkflowDb(this.options.projectDir);
-      try {
-        invalidDb.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "continuity_invalid", payload: { problems: parsed.error?.problems }, authoritativeStateRevision: this.revision() });
-      } finally { invalidDb.close(); }
-      return { ...original, isError: true, continuityErrors: parsed.error?.problems ?? ["unknown continuity error"], text: `QA continuity record was invalid: ${parsed.error?.problems.join("; ") ?? "unknown error"}`,
-        hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
-        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
-    }
-
-    const budget = new WorkflowDb(this.options.projectDir);
+  async postConfirmedDispatch(reference: import("./adapters/types.js").ConfirmedDispatchReference): Promise<TurnResult> {
+    const db = new WorkflowDb(this.options.projectDir);
+    let original: TurnResult;
+    let context: ReturnType<WorkflowDb["structuredProcessingContext"]>;
+    let response: OperationResponse;
     try {
-      const maximum = budget.autonomyPolicy(this.options.runId)?.limits.protocolCorrections ?? 1;
-      if (!budget.reserveRecoveryAllowance(this.options.runId, policy?.logicalActionId ?? sha(instruction), "protocol-correction", maximum)) {
-        throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "shared protocol correction budget exhausted");
-      }
-    } finally { budget.close(); }
-    const repair = await dispatchWithGraphAccess(this.options.projectDir, this.adapter, [
-      "Continuity protocol repair only. Do not run tools, repeat work, or change files.",
-      `Your prior turn's continuity record was invalid: ${parsed.error?.problems.join("; ")}.`,
-      continuityInstruction(),
-      "Return only the continuity record.",
-    ].join("\n"), { ...policy, purpose: "response-repair", responseOnly: true }, (text, p) => this.adapter.sendTurn(text, p));
-    const repaired = parseContinuityDelta(repair.text);
-    if (repaired.delta && !repair.isError && !repair.failure) {
-      this.publish(repaired.delta, "turn_completed_after_repair", original);
-      this.moveRecoveryLeaseAfterCheckpoint();
-      const successor = await this.options.handleHandoffRequest?.(original.text, this.adapter, instruction);
-      if (successor && successor !== this.adapter) {
-        await this.adoptValidatedSuccessor(successor);
-        return this.sendTurn(["Continue the frozen action after the accepted Rafi handoff. Do not repeat completed side effects.", instruction].join("\n\n"), policy);
-      }
-      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction: original.providerInstruction ?? providerInstruction,
-        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
+      const operation = db.operation(reference.dispatchId);
+      if (operation?.runId !== this.options.runId || reference.runId !== this.options.runId || db.structuredOwnerDispatch(reference.dispatchId).tupleDigest !== reference.tupleDigest)
+        throw new Error("Continuity postprocessing belongs to a foreign dispatch");
+      original = db.retainedStructuredTurn(reference.dispatchId);
+      context = db.structuredProcessingContext(reference.dispatchId);
+      const tuple = original.selectedDispatch!;
+      const contract = persistedProviderWireContract(tuple)!.canonical;
+      response = db.replayStructuredDispatch(reference.dispatchId, contract) as OperationResponse;
+    } finally { db.close(); }
+    const delta = validateContinuityDelta(response.continuity);
+    if (this.recoveryLeasePending && (response.result.kind !== "completed" || !(response.result.payload as { ready?: boolean }).ready))
+      throw new Error("Fresh recovery requires a completed initialization checkpoint");
+    if (!context.policy.handback) {
+      this.publish(delta, "turn_completed", original);
     }
-
-    const invalidDb = new WorkflowDb(this.options.projectDir);
-    try {
-      invalidDb.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "continuity_invalid_twice", payload: { original: parsed.error?.problems, repair: repaired.error?.problems }, authoritativeStateRevision: this.revision() });
-      invalidDb.setContinuityHeadState(this.options.runId, this.options.role, "invalid");
-    } finally { invalidDb.close(); }
-    const handoff = this.reconstructionHandoff();
-    if (this.options.recoverWithHandoff) {
-      let successor: BuilderAdapter;
+    if (response.result.kind === "handoff-request") {
+      if (context.policy.handback || this.options.durableSingleTurn || this.validatingFreshRecovery) throw new Error("This operation cannot transfer its session");
+      // Publication is complete before the explicitly linked acceptance stage.
+      const completed = new WorkflowDb(this.options.projectDir);
+      try { completed.beginStructuredHandoff(reference.dispatchId); completed.completeStructuredPostprocessing(reference.dispatchId); } finally { completed.close(); }
+      const successor = await this.options.handleHandoffRequest?.({ version: 1, reason: response.result.reason, roleState: response.result.roleState, delta, predecessorDispatchId: reference.dispatchId }, this.adapter, context.instruction);
+      if (!successor || successor === this.adapter) throw new Error("Handoff request did not establish a validated successor");
+      const continuation = new WorkflowDb(this.options.projectDir);
+      let continuationId: string;
       try {
-        successor = await this.options.recoverWithHandoff({
-          reason: "continuity delta and same-session repair were both invalid",
-          reconstruction: handoff,
-          predecessor: this.adapter,
-        });
-      } catch (error) {
-        throw new ContinuityRecoveryRequiredError(
-          this.options.runId,
-          this.options.role,
-          `fresh validated successor also failed after the same-session repair: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      if (!successor.sessionId() || successor.sessionId() === this.adapter.sessionId()) {
-        await successor.close().catch(() => {});
-        throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "validated recovery callback did not return a genuinely fresh successor");
-      }
+        const session = successor.sessionRef?.();
+        if (!session) throw new Error("Handoff successor has no scoped session");
+        continuationId = continuation.planStructuredContinuation(reference.dispatchId, session);
+      } finally { continuation.close(); }
       await this.adoptValidatedSuccessor(successor);
-      return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction,
-        rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
+      const tuple = original.selectedDispatch!;
+      const output = persistedProviderWireContract(tuple)!.canonical;
+      return this.sendTurn("Continue the frozen action after the accepted handoff. Reconcile receipts; do not repeat completed side effects.\n" + context.instruction,
+        nativePolicy(output, { ...continuationPolicy(context.policy, reference.dispatchId), dispatchId: continuationId }));
     }
-    if (!this.options.createSuccessor) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "continuity repair failed in the original session and no validated successor is configured");
-
-    const successor = await this.options.createSuccessor(handoff);
-    const accepted = await dispatchWithGraphAccess(this.options.projectDir, successor, `${handoff}\n\nReply with HANDOFF_ACCEPTED on the first line, then ${continuityInstruction()}`, { purpose: "contract-acceptance", responseOnly: true }, (text, p) => successor.sendTurn(text, p));
-    const successorDelta = parseContinuityDelta(accepted.text);
-    const firstAcceptanceLine = accepted.text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-    if (firstAcceptanceLine !== "HANDOFF_ACCEPTED" || !successorDelta.delta || !successor.sessionId()) {
-      await successor.close().catch(() => {});
-      throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "fresh successor did not validate and accept the cumulative checkpoint");
-    }
-    await this.adoptValidatedSuccessor(successor);
-    this.publish(successorDelta.delta, "fresh_successor_accepted", accepted);
-    const leaseDb = new WorkflowDb(this.options.projectDir);
-    try { leaseDb.moveRoleLeaseAfterValidatedRecovery(this.options.runId, this.options.role, successor.sessionRef?.() ?? successor.sessionId()!, "double-invalid continuity recovery"); }
-    finally { leaseDb.close(); }
-    return { ...original, text: parsed.cleanText, hostInstruction: instruction, providerInstruction,
-      rawResponse: original.rawResponse ?? original.text, cleanedResponse: parsed.cleanText };
+    return { ...original, hostInstruction: context.instruction, continuityErrors: [], continuity: delta };
   }
 
   observeEvents(listener: (event: import("./adapters/types.js").BuilderEvent) => void): () => void {
@@ -342,10 +291,68 @@ export class ContinuityAdapter implements BuilderAdapter {
     return this.adapter.observeEvents(listener);
   }
   acceptHandbackTurn(turn: TurnResult): void {
-    const parsed = parseContinuityDelta(turn.rawResponse ?? turn.text);
-    if (turn.isError || turn.failure || !parsed.delta) throw new Error("cannot publish an invalid handback checkpoint");
-    this.publish(parsed.delta, "handback_turn_completed", turn);
-    this.moveRecoveryLeaseAfterCheckpoint();
+    if (turn.structured) {
+      if (turn.isError || turn.failure || turn.structured.state !== "candidate") throw new Error("cannot publish an invalid handback checkpoint");
+      const db = new WorkflowDb(this.options.projectDir);
+      let retained: TurnResult;
+      try { if (!turn.selectedDispatch || db.operation(turn.selectedDispatch.dispatchId)?.runId !== this.options.runId) throw new Error("Foreign handback dispatch"); retained = db.retainedStructuredTurn(turn.selectedDispatch.dispatchId); }
+      finally { db.close(); }
+      const tuple = retained.selectedDispatch!;
+      const owner = new WorkflowDb(this.options.projectDir);
+      try {
+        const response = verifyPersistedDispatch(persistedProviderWireContract(tuple)!.canonical, owner.structuredOwnerDispatch(tuple.dispatchId), retained.structured, tuple) as OperationResponse;
+        this.publish(validateContinuityDelta(response.continuity), "handback_turn_completed", retained);
+      } finally { owner.close(); }
+      return;
+    }
+    throw new Error("Handback acceptance requires a native receipt and validated continuity");
+  }
+
+  /** Explicit restart recovery of the already accepted action; never repeats acceptance. */
+  async resumePlannedContinuation(): Promise<TurnResult | undefined> {
+    const db = new WorkflowDb(this.options.projectDir);
+    let continuation: ReturnType<WorkflowDb["structuredContinuation"]>;
+    let context: ReturnType<WorkflowDb["structuredProcessingContext"]>;
+    let output: import("rafi-spec").OutputContract;
+    try {
+      continuation = db.structuredContinuation(this.options.runId,this.options.role);
+      if (!continuation) return;
+      const operation = db.operation(continuation.continuationId);
+      if (operation?.status === "confirmed") {
+        if (db.pendingStructuredPostprocessing(this.options.runId).includes(continuation.continuationId)) {
+          await this.postConfirmedDispatch({ dispatchId: continuation.continuationId, runId: this.options.runId,
+            tupleDigest: db.structuredOwnerDispatch(continuation.continuationId).tupleDigest });
+          db.completeStructuredPostprocessing(continuation.continuationId);
+          db.finishStructuredContinuation(continuation.continuationId);
+        }
+        const turn = db.retainedStructuredTurn(continuation.continuationId);
+        const descriptor = persistedProviderWireContract(turn.selectedDispatch!);
+        const response = db.replayStructuredDispatch(continuation.continuationId,descriptor.canonical) as OperationResponse;
+        return {...turn,continuity:validateContinuityDelta(response.continuity)};
+      }
+      if (continuation.state !== "continuation-planned" || operation && operation.status !== "planned") throw new Error("Continuation may already have been submitted; explicit reconciliation is required");
+      const current = this.adapter.sessionRef?.();
+      if (!current || providerSessionKey(current) !== providerSessionKey(continuation.successor)) throw new Error("Reattach the durably accepted successor before continuation recovery");
+      context = db.structuredProcessingContext(continuation.predecessorId);
+      const predecessor = db.retainedStructuredTurn(continuation.predecessorId);
+      output = persistedProviderWireContract(predecessor.selectedDispatch!).canonical;
+    } finally {db.close();}
+    return this.sendTurn("Continue the frozen action after the accepted handoff. Reconcile receipts; do not repeat completed side effects.\n"+context.instruction,
+      nativePolicy(output,{...continuationPolicy(context.policy,continuation.predecessorId),dispatchId:continuation.continuationId}));
+  }
+
+  async recoverConfirmedPublications(): Promise<void> {
+    const db = new WorkflowDb(this.options.projectDir);
+    let pending: string[];
+    try { pending = db.pendingStructuredPostprocessing(this.options.runId); } finally { db.close(); }
+    for (const dispatchId of pending) {
+      const current = new WorkflowDb(this.options.projectDir);
+      let reference: import("./adapters/types.js").ConfirmedDispatchReference;
+      try { reference = {dispatchId, runId:this.options.runId, tupleDigest:current.structuredOwnerDispatch(dispatchId).tupleDigest}; } finally { current.close(); }
+      await this.postConfirmedDispatch(reference);
+      const completed = new WorkflowDb(this.options.projectDir);
+      try { completed.completeStructuredPostprocessing(dispatchId); completed.finishStructuredContinuation(dispatchId); } finally { completed.close(); }
+    }
   }
 
   sessionId(): string | undefined { return this.adapter.sessionId(); }
@@ -391,21 +398,25 @@ export class ContinuityAdapter implements BuilderAdapter {
     const db = new WorkflowDb(this.options.projectDir);
     try {
       const sessionRef = this.adapter.sessionRef?.();
-      return db.atomic(() => {
-        db.appendContinuityEvent({ runId: this.options.runId, role: this.options.role, kind, payload: { isError: result.isError, numTurns: result.numTurns, sessionId: this.adapter.sessionId(), sessionRef, delta }, authoritativeStateRevision: this.revision(), sessionRef });
-        return db.publishContinuityCheckpoint({ runId: this.options.runId, role: this.options.role, delta, authoritativeStateRevision: this.revision(), sessionRef });
+      let moved = false;
+      const checkpoint = db.atomic(() => {
+        if (this.recoveryLeasePending && sessionRef) db.assertFreshRecoveryValidation(result.selectedDispatch!.dispatchId, sessionRef);
+        const prior = db.providerCheckpoint(result.selectedDispatch!.dispatchId, kind);
+        if (prior) {
+          if (JSON.stringify(prior.delta) !== JSON.stringify(delta)) throw new Error("Conflicting repeated continuity publication");
+          return prior;
+        }
+        db.appendContinuityEvent({ runId: this.options.runId, role: this.options.role, kind, payload: { dispatchId: result.selectedDispatch!.dispatchId, isError: result.isError, numTurns: result.numTurns, sessionId: this.adapter.sessionId(), sessionRef, delta }, authoritativeStateRevision: this.revision(), sessionRef });
+        const published = db.publishContinuityCheckpoint({ runId: this.options.runId, role: this.options.role, delta, authoritativeStateRevision: this.revision(), sessionRef, origin: { kind: "provider", dispatchId: result.selectedDispatch!.dispatchId, publicationKind: kind } });
+        if (this.recoveryLeasePending && sessionRef) {
+          db.moveRoleLeaseAfterValidatedRecovery(this.options.runId, this.options.role, sessionRef, "explicit fresh-recovery-only continuation");
+          moved = true;
+        }
+        return published;
       });
+      if (moved) this.recoveryLeasePending = false;
+      return checkpoint;
     } finally { db.close(); }
-  }
-
-  private moveRecoveryLeaseAfterCheckpoint(): void {
-    if (!this.recoveryLeasePending) return;
-    const session = this.adapter.sessionRef?.() ?? this.adapter.sessionId();
-    if (!session) return;
-    const db = new WorkflowDb(this.options.projectDir);
-    try { db.moveRoleLeaseAfterValidatedRecovery(this.options.runId, this.options.role, session, "explicit fresh-recovery-only continuation"); }
-    finally { db.close(); }
-    this.recoveryLeasePending = false;
   }
 
   private recordSessionUnavailable(failure: RuntimeFailure, instruction: string): void {
@@ -430,20 +441,6 @@ export class ContinuityAdapter implements BuilderAdapter {
       if (failure.dispatchState === "unknown") {
         db.setContinuityHeadState(this.options.runId, this.options.role, "degraded");
       }
-    } finally { db.close(); }
-  }
-
-  private reconstructionHandoff(): string {
-    const db = new WorkflowDb(this.options.projectDir);
-    try {
-      const checkpoints = db.continuityCheckpoints(this.options.runId, this.options.role);
-      const events = db.continuityEvents(this.options.runId, checkpoints.at(-1)?.sequence ?? 0);
-      return [
-        `Validated cumulative recovery for run ${this.options.runId}, role ${this.options.role}.`,
-        JSON.stringify(mergeContinuityDeltas(checkpoints.map((checkpoint) => checkpoint.delta))),
-        `Later host facts: ${JSON.stringify(events.map((event) => ({ kind: event.kind, payload: event.payload, digest: event.digest })))}`,
-        "The prior in-flight operation is unknown unless a host fact proves completion. Reconcile receipts before retrying side effects.",
-      ].join("\n\n");
     } finally { db.close(); }
   }
 

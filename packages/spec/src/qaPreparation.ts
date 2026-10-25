@@ -22,6 +22,14 @@ export interface RequirementRef {
   id: string; inputRef: string; locator: string; statement: string; digest: string;
   obligation: "mandatory" | "advisory"; origin: "explicit" | "derived" | "invariant" | "proposed" | "advisory";
   authority: "approved" | "invariant" | "proposed"; conflict?: string;
+  /** Exact approved V2 execution intent when this requirement is executable. */
+  verificationIntent?: import("./providerContracts.js").VerificationRequirementV2;
+  /**
+   * V2 intent is a different authority from its human-readable statement.
+   * `digest` remains the statement digest for compatibility with the existing
+   * requirement inventory; this digest binds the executable V2 object.
+   */
+  verificationIntentDigest?: string;
 }
 export interface DocumentationPolicyV1 {
   required: boolean;
@@ -34,6 +42,8 @@ export interface VerificationMethod {
   equivalentAuthorityId?: string;
 }
 export interface VerificationCheckV1 {
+  /** Assigned by the host; provider drafts cannot claim host authority. */
+  hostKind?: "source-scope" | "graph-maintenance" | "documentation-policy";
   id: string; requirementRefs: string[]; origin: RequirementRef["origin"]; expectedBehavior: string;
   obligation: "mandatory" | "advisory"; timing: "preimplementation" | "postimplementation" | "both";
   applicability: { kind: "unconditional" | "conditional"; predicate?: string; decisionOwner: "host" | "qa"; requiredEvidence: string[] };
@@ -53,6 +63,8 @@ export interface PreparationEvidenceRef {
   graphReceiptRefs?: string[];
 }
 export interface UnresolvedConcern {
+  category?: "evidence-gap" | "contract-gap" | "scope-conflict" | "verification-gap";
+  timing?: "preimplementation" | "postimplementation" | "both";
   reason: string; requirementIds: string[]; checkIds: string[]; material: boolean; owner: string; nextAction: string;
 }
 export interface QaContractCandidateV1 {

@@ -1,6 +1,6 @@
 {
   "name": "rafi-spec",
-  "version": "0.8.18",
+  "version": "0.9.0",
   "description": "Rafi neutral schema: rule packs, skills, agents, and project config shapes shared by special-agents and ai-foreman.",
   "license": "Apache-2.0",
   "type": "module",
@@ -32,14 +32,14 @@
     "test": "tsx --test test/*.test.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   },
   "dependencies": {
     "ajv": "^8.20.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@types/node": "^24.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

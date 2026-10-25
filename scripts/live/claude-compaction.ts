@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { ClaudeAdapter } from "../../packages/ai-foreman/src/adapters/claude.js";
 import { resolveExecutablePath } from "../../packages/ai-foreman/src/runtimeReadiness.js";
 import { createLiveWorkspace, liveProjectPath } from "./workspace.mjs";
+import { runSupervisedStructuredLive } from "./structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("claude-compaction", async (supervisor) => {
 if (process.env.RAFI_LIVE_COMPACTION !== "1") throw new Error("Explicit online authorization is required");
 const deadline = Date.parse(process.env.RAFI_LIVE_DEADLINE ?? "");
 if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error("Authorized deadline is required");
@@ -64,3 +67,6 @@ for (const variant of variants) {
   finally { await adapter.close(); await consume; }
 }
 console.log(JSON.stringify({ outcomes, controls }));
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

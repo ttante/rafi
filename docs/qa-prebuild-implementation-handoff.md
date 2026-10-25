@@ -163,7 +163,7 @@ No matched baseline, 50 completed independently reviewed enforcing work items, 2
 
 ## Validation record
 
-Validation uses Node 20.19.0, matching the existing native SQLite installation. Controlled provider tests make no live model calls.
+Historical validation used Node 20.19.0. Current validation requires Node 24 and a matching native SQLite binary. Controlled provider tests make no live model calls.
 
 | Validation | Result |
 |---|---|

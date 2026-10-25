@@ -349,10 +349,11 @@ test("parseStepStatus extracts branch_dependency", () => {
   assert.equal(status.reason, "needs shared API first");
 });
 
-test("buildQaInstruction includes the QA marker spec", () => {
+test("buildQaInstruction requests the native QA verdict contract", () => {
   const text = buildQaInstruction();
-  assert.ok(text.includes("STEP_STATUS: qa_pass"));
-  assert.ok(text.includes("STEP_STATUS: qa_fail"));
+  assert.ok(text.includes("qa-verdict"));
+  assert.ok(text.includes("passed"));
+  assert.doesNotMatch(text, /STEP_STATUS/);
   assert.ok(text.includes("Triple-check"));
   assert.ok(text.includes("retry the exact required-test command without that extra shell syntax"));
 });
@@ -361,7 +362,8 @@ test("buildQaFixInstruction embeds the reported issues", () => {
   const text = buildQaFixInstruction("- foo broke\n- bar wrong");
   assert.ok(text.includes("- foo broke"));
   assert.ok(text.includes("- bar wrong"));
-  assert.ok(text.includes("STEP_STATUS: done"));
+  assert.ok(text.includes("native remediation result"));
+  assert.doesNotMatch(text, /STEP_STATUS/);
 });
 
 test("buildPrimer anchors turn 1 explicitly to fix off-by-one counting", () => {

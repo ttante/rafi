@@ -7,12 +7,13 @@ import type {
   RoleInstructionRunOptions,
   RoleInstructionRunResult,
 } from "ai-foreman/agent-run.js";
+import { operationResponse } from "ai-foreman/agent-run.js";
 import type {
   CaptureResult,
   LoadedSourceRegistry,
   StructuredSourceRequest,
 } from "ai-foreman/sources/source-registry.js";
-import { discoveryEnvelopeV1Schema, parseProviderContract, type ProjectSourceEntry, type SourceRegistryConfig } from "rafi-spec";
+import { discoveryEnvelopeV1Schema, discoveryOutput, parseProviderContract, type OperationResponse, type ProjectSourceEntry, type SourceRegistryConfig } from "rafi-spec";
 import { findNearestRafiProject, RAFI_CONFIG_FILE, resolveExplicitRafiProject } from "./project.js";
 
 export const DISCOVERY_ENVELOPE_START = "RAFI_DISCOVERY_REPORT_START";
@@ -57,6 +58,7 @@ export interface DiscoveryInventoryEntry {
 }
 
 export interface DiscoveryResult {
+  authorship?: "provider-validated" | "host-partial";
   projectDir: string;
   initialized: boolean;
   answers: DiscoveryAnswers;
@@ -175,11 +177,16 @@ export async function runDiscovery(opts: DiscoveryOptions): Promise<DiscoveryRes
   });
   const runRole = opts.runRole ?? await loadRoleRunner();
   let result = await runRole(buildDiscoveryRunOptions({ ...opts, projectDir, instruction }));
+  const nativeResponse = (run: RoleInstructionRunResult): OperationResponse<DiscoveryEnvelope> | undefined => {
+    if (run.turn.result.isError || run.turn.result.failure) return undefined;
+    try { return operationResponse(run.turn.result, discoveryOutput) as OperationResponse<DiscoveryEnvelope>; } catch { return undefined; }
+  };
+  let response = nativeResponse(result);
   let output = result.turn.result.text;
   let resumeSessionRef = result.sessionRef;
 
   for (let round = 0; round < MAX_SOURCE_ROUNDS; round++) {
-    const requests = filterSourceRequests(sourceRegistryApi.extractSourceRequests(output), sourceAccess, avoidRules);
+    const requests = filterSourceRequests(response?.result.kind === "source-request" ? response.result.requests : [], sourceAccess, avoidRules);
     if (!initialized || sourceAccess === "none" || requests.length === 0) break;
     const registered = await register(projectDir, stagedSources, requests, { storage: selectedStorage });
     stagedSources = registered.registry;
@@ -209,10 +216,14 @@ export async function runDiscovery(opts: DiscoveryOptions): Promise<DiscoveryRes
     result = await runRole(buildDiscoveryRunOptions({ ...opts, projectDir, instruction, resumeSessionRef }));
     resumeSessionRef = result.sessionRef ?? resumeSessionRef;
     output = result.turn.result.text;
+    response = nativeResponse(result);
   }
 
-  if (hasUnresolvedSourceRequest(output, sourceRegistryApi.extractSourceRequests) || !tryExtractDiscoveryEnvelope(output)) {
-    output = buildDiscoveryFallbackReport({
+  let envelope = response?.result.kind === "completed" ? response.result.payload : undefined;
+  const authorship = envelope ? "provider-validated" : "host-partial";
+  if (envelope && response?.result.kind === "completed") output = `${response.result.summary}\n\n${JSON.stringify(envelope, null, 2)}`;
+  if (!envelope) {
+    const fallback = buildDiscoveryFallbackReport({
       projectDir,
       initialized,
       answers,
@@ -223,15 +234,16 @@ export async function runDiscovery(opts: DiscoveryOptions): Promise<DiscoveryRes
       sourceCaptures,
       priorOutput: output,
     });
+    envelope = fallback.envelope;
+    output = fallback.output;
   }
 
   if (initialized && await shouldSaveSources(opts, interactive, savedSources.length, snapshots.length)) {
     save(projectDir, stagedSources);
   }
 
-  const envelope = extractDiscoveryEnvelope(output);
   if (opts.json) {
-    console.log(JSON.stringify({ projectDir, initialized, answers, inventory, output, envelope, savedSources, snapshots, pendingSources }, null, 2));
+    console.log(JSON.stringify({ projectDir, initialized, answers, inventory, output, envelope, authorship, savedSources, snapshots, pendingSources }, null, 2));
   } else {
     console.log(output.trimEnd());
     if (!opts.suppressNextCommand) {
@@ -239,7 +251,7 @@ export async function runDiscovery(opts: DiscoveryOptions): Promise<DiscoveryRes
     }
   }
 
-  return { projectDir, initialized, answers, inventory, output, envelope, savedSources, snapshots, pendingSources };
+  return { projectDir, initialized, answers, inventory, output, envelope, authorship, savedSources, snapshots, pendingSources };
 }
 
 async function loadSourceRegistryApi(opts: DiscoveryOptions): Promise<{
@@ -291,6 +303,7 @@ export function buildDiscoveryRunOptions(opts: {
   return {
     projectDir: opts.projectDir,
     role: "discovery",
+    output: discoveryOutput,
     agent: opts.agent,
     model: opts.model,
     effort: opts.effort as EffortLevel | undefined,
@@ -379,10 +392,7 @@ Stack discovery checklist:
 
 Source intake protocol:
 - Preserve every user source answer verbatim. Do not split it on spaces, commas, or plus signs.
-- If a supported source is needed, emit one JSON object or array between:
-${SOURCE_REQUEST_START}
-{ "type": "local|url|github|gitlab|linear|jira", "description": "exact pending description when resolving one", "label": "human label", "locator": { "...": "normalized non-secret locator fields" } }
-${SOURCE_REQUEST_END}
+- If a supported source is needed, return the native source-request alternative with typed requests, exact pending descriptions, and non-secret locator fields.
 - Online sources must be user-directed. If the online policy disallows refreshes, do not request url, github, gitlab, linear, or jira sources.
 - For Linear and Jira, request only team/filter/site/query and environment-variable names. Never request or emit a secret.
 
@@ -392,12 +402,10 @@ Permissions:
 - Host-owned source registry writes, if any, happen outside this agent after approval.
 
 Output:
-- Print a readable discovery report first.
-- Then print exactly one JSON object between ${DISCOVERY_ENVELOPE_START} and ${DISCOVERY_ENVELOPE_END}.
+- Submit a native completed discovery response with a readable summary and the report payload.
 - Envelope shape: {"version":1,"detected_stack":{"frontend":"...","backend":"...","database":"..."},"discovered_artifacts":[{"path":"workspace-relative/path","kind":"file|directory","bytes":0,"reason":"evidence"}],"likely_current_state":{"state":"...","evidence":["workspace-relative/path"]},"relevant_prior_plans_docs_tickets":[{"path":"workspace-relative/path","status":"current|stale|unknown"}],"rafi_history_confidence":{"answer":"...","confidence":"low|medium|high","basis":"..."},"recommended_next_command":"rafi tickets plan|rafi tickets populate|rafi create|none","source_candidates":[],"excluded_or_avoided_resources":[],"handoff_brief":"..."}.
 - Keep arrays at most 500 items and strings bounded; use workspace-relative paths without absolute paths or parent traversal. These are observations and suggestions only: the host owns source IDs, persistence, snapshots, capture status, and execution of the recommended command. Do not claim a source was captured when it was only suggested.
-- End with exactly one final marker line:
-STEP_STATUS: plan_complete | summary="discovery_complete"`;
+- Use the selected native output schema; source requests are intermediate results.`;
 }
 
 export function discoveryEnvelopePlanningSources(envelope: DiscoveryEnvelope | undefined, answers: DiscoveryAnswers): string | undefined {
@@ -436,16 +444,6 @@ export function discoveryEnvelopeStack(
     backend: value("backend"),
     database: value("database"),
   };
-}
-
-export function extractDiscoveryEnvelope(output: string): DiscoveryEnvelope | undefined {
-  const start = output.lastIndexOf(DISCOVERY_ENVELOPE_START);
-  const end = output.lastIndexOf(DISCOVERY_ENVELOPE_END);
-  if (start < 0 || end <= start) return undefined;
-  const body = output.slice(start + DISCOVERY_ENVELOPE_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  let parsed: unknown;
-  try { parsed = JSON.parse(body); } catch { throw new Error("discovery envelope is not valid JSON"); }
-  return parseProviderContract(discoveryEnvelopeV1Schema, parsed, "discovery envelope") as DiscoveryEnvelope;
 }
 
 export function buildLocalInventory(projectDir: string, docsRoot = "docs", limit = 400): DiscoveryInventoryEntry[] {
@@ -679,25 +677,16 @@ Prior discovery agent output:
 ${opts.priorOutput}
 
 Continue discovery with the full context above. ${opts.finalRound
-    ? `This was the final allowed source-request round. Do not emit ${SOURCE_REQUEST_START}/${SOURCE_REQUEST_END}. Summarize any still-missing sources in excluded_or_avoided_resources and produce the final discovery report and envelope now.`
-    : `If essential sources are still missing, you may request another round using ${SOURCE_REQUEST_START}/${SOURCE_REQUEST_END}. Otherwise produce the final discovery report and envelope.`}
+    ? `This was the final allowed source-request round. Do not request another source round. Summarize any still-missing sources in excluded_or_avoided_resources and produce the final discovery report and envelope now.`
+    : `If essential sources are still missing, you may request another round using the native source-request alternative. Otherwise produce the final discovery report and envelope.`}
 
 Final output requirements:
 - Report latest known project state with evidence.
 - Identify the most recent relevant completed/current/abandoned plan and whether it is stale or current.
 - Recommend the next plan or command.
 - Include confidence and gaps.
-- Print exactly one JSON object between ${DISCOVERY_ENVELOPE_START} and ${DISCOVERY_ENVELOPE_END}.
-- End with exactly one final marker line:
-STEP_STATUS: plan_complete | summary="discovery_complete"`;
-}
-
-function tryExtractDiscoveryEnvelope(output: string): DiscoveryEnvelope | undefined {
-  try {
-    return extractDiscoveryEnvelope(output);
-  } catch {
-    return undefined;
-  }
+- Submit the complete native discovery payload.
+- Use the selected native output schema; source requests are intermediate results.`;
 }
 
 function hasUnresolvedSourceRequest(
@@ -721,7 +710,7 @@ function buildDiscoveryFallbackReport(opts: {
   history: Record<string, unknown>;
   sourceCaptures: DiscoverySourceCapture[];
   priorOutput: string;
-}): string {
+}): { envelope: DiscoveryEnvelope; output: string } {
   const unresolved = opts.priorOutput.includes(SOURCE_REQUEST_START) && opts.priorOutput.includes(SOURCE_REQUEST_END);
   const envelope: DiscoveryEnvelope = {
     version: 1,
@@ -750,14 +739,11 @@ function buildDiscoveryFallbackReport(opts: {
     ],
     handoff_brief: "Discovery ended with a host-generated fallback envelope. Review the listed artifacts and source captures before making irreversible planning decisions.",
   };
-  return `Discovery report
+  return { envelope, output: `Discovery report (host-authored, incomplete)
 
-The discovery agent did not return a usable final envelope after the allowed source-request rounds, so Rafi produced this fallback from host-collected evidence. Treat unresolved or missing source requests as exclusions, not as completed research.
+The discovery agent did not return a usable final response. This partial report contains host-collected facts and does not establish successful agent completion.
 
-${DISCOVERY_ENVELOPE_START}
-${JSON.stringify(envelope, null, 2)}
-${DISCOVERY_ENVELOPE_END}
-STEP_STATUS: plan_complete | summary="discovery_complete"`;
+${JSON.stringify(envelope, null, 2)}` };
 }
 
 async function shouldSaveSources(opts: DiscoveryOptions, interactive: boolean, entryCount: number, snapshotCount: number): Promise<boolean> {

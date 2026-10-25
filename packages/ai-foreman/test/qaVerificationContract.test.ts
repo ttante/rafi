@@ -1,7 +1,8 @@
+import { draftOutput } from "rafi-spec";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { candidate, assessment, digest } from "./qaPreparationFixtures.js";
-import { allocateStableCheckIds, assembleContract, bindUniqueBaselineCheckIds, contractDigest, draftDigest, ensureHostScopeCheck, parsePreparationArtifact, renderVerificationContract, rewriteProviderHostScopeChecks, validateAssessment, validateCandidate, verifyContractDigest } from "../src/qaVerificationContract.js";
+import { allocateStableCheckIds, assembleContract, bindUniqueBaselineCheckIds, contractDigest, draftDigest, ensureHostScopeCheck, renderVerificationContract, rewriteProviderHostScopeChecks, validateAssessment, validateCandidate, verifyContractDigest } from "../src/qaVerificationContract.js";
 import { validateDepthDecision, depthObligations, resolveQaPreparationConfig } from "../src/qaPreparationPolicy.js";
 import { normalizeAssessmentMetadata } from "../src/qaPreparation.js";
 
@@ -18,12 +19,11 @@ test("stable check IDs update exact provider-prose references without changing a
   assert.deepEqual(allocated.requirements, originalRequirements);
 });
 
-test("preparation parser accepts repeated identical artifacts but rejects conflicting ones", () => {
-  const one = "RAFI_QA_CANDIDATE_START\n{\"checks\":[]}\nRAFI_QA_CANDIDATE_END";
-  assert.deepEqual(parsePreparationArtifact(one + "\n" + one, "RAFI_QA_CANDIDATE"), { checks: [] });
-  assert.throws(() => parsePreparationArtifact(one + "\nRAFI_QA_CANDIDATE_START\n{\"checks\":[1]}\nRAFI_QA_CANDIDATE_END", "RAFI_QA_CANDIDATE"), /unambiguous/);
-  assert.deepEqual(parsePreparationArtifact("The text RAFI_QA_CANDIDATE_START is only a label.\n" + one, "RAFI_QA_CANDIDATE"), { checks: [] });
-  assert.throws(() => parsePreparationArtifact("RAFI_QA_CANDIDATE_START\n{\"checks\":[]}", "RAFI_QA_CANDIDATE"), /Expected exactly one/);
+test("native preparation rejects repeated and conflicting marker envelopes", () => {
+  const one = 'RAFI_QA_CANDIDATE_START\n{"checks":[]}\nRAFI_QA_CANDIDATE_END';
+  for (const text of [one, one + "\n" + one, one + '\nRAFI_QA_CANDIDATE_START\n{"checks":[1]}\nRAFI_QA_CANDIDATE_END']) {
+    assert.equal(draftOutput.schema.safeParse(text).success, false);
+  }
 });
 
 test("stable check ID allocation is idempotent for host IDs copied into baseline references", () => {
@@ -124,6 +124,26 @@ test("documentation policy is opt-in, explicit, and delivered with the contract"
   assert.match(renderVerificationContract(contract), /Documentation required: yes/);
   const incomplete = candidate(); incomplete.documentation = { required: true, targets: [], criteria: [] };
   assert.match(validateCandidate(incomplete, incomplete.requirements).join(";"), /Documentation policy requires explicit targets and criteria/);
+});
+
+test("V2 verification intent has its own digest without changing statement identity", () => {
+  const draft = candidate();
+  const intent = {
+    id: "run-unit", summary: "Run the unit suite", timing: "postimplementation" as const,
+    applicability: { kind: "always" as const },
+    methods: [{ kind: "command" as const, argv: ["pnpm", "test"], cwd: ".", runtime: "node", timeout_ms: 60_000, expected_outcome: "passes" }],
+    expected_evidence: ["test output"], depends_on: [],
+  };
+  draft.requirements[0] = {
+    ...draft.requirements[0]!,
+    statement: intent.summary,
+    digest: contractDigest("statement", intent.summary),
+    verificationIntent: intent,
+    verificationIntentDigest: contractDigest("verification-intent-v2", intent),
+  };
+  assert.deepEqual(validateCandidate(draft, draft.requirements), []);
+  draft.requirements[0]!.verificationIntentDigest = contractDigest("verification-intent-v2", { ...intent, summary: "different" });
+  assert.match(validateCandidate(draft, draft.requirements).join(";"), /Invalid V2 verification intent/);
 });
 
 test("independent assessment blockers include their reason and next action", () => {

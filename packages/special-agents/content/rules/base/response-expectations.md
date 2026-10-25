@@ -8,6 +8,7 @@ template: false
 ## Agent Response Expectations
 
 - Be concise and concrete.
+- When the host supplies a structured output contract, use only its declared fields. Express the applicable reporting items below through summary, evidence, coverage, and continuity as supported by that contract; do not append prose, invent fields, or require duplicate reporting sections. Structured coverage that identifies the applicable rule and its observed status satisfies that rule-compliance reporting item. Missing evidence or unmet requirements still need truthful reporting and independent review.
 - In final responses, include:
   - Code changes made.
   - Tests/checks run and whether they passed.

@@ -1,3 +1,4 @@
+import { nativePolicy, operationInstruction, operationPayload, structuredTurnErrorMessage } from "../structuredOperation.js";
 import { finalQaRoleInstructions, resolveEffectiveQaConfiguration } from "../qaEffectiveConfig.js";
 import { activateQaRecoveryBuilder } from "../qaBuilderActivation.js";
 import { graphContext, sendGraphTurn } from "../graph/turn.js";
@@ -11,7 +12,7 @@ import { captureFrozenQaSource } from "../qaSnapshot.js";
 import { finishStartAdmission, superviseStart, supervisedRunId } from "../supervisedStart.js";
 import { assertBuildAssignmentReconciled, isInterruptedBuilderRecovery, assertInterruptedSourceSnapshot } from "../buildAssignment.js";
 import { durableHumanDecision, HumanDecisionRequired, HumanDecisionCancelled, servicePendingHumanDecisions } from "../humanDecision.js";
-import { requiresBuildApproval, buildScopeRevision, createBuildApprovalGate, validatePlanApprovalBinding } from "../buildApproval.js";
+import { requiresBuildApproval, buildScopeRevision, createBuildApprovalGate, validatePlanApprovalBinding, validateFrozenWorkApprovalBinding } from "../buildApproval.js";
 import { Command, Option } from "commander";
 import { accent, error, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
 import { resolve, join, relative } from "node:path";
@@ -47,7 +48,7 @@ import { readDeliveryUnitSession, runBranchPlan } from "../branch/runner.js";
 import { branchPlanLogMetadata, presentBranchPlan } from "../branch/presentation.js";
 import { branchTicketScopeProgress, buildRunSessionBinding, checkpointBuildRun, completeBuildRun, createBuildRun, currentBranchRecoveryTicket, currentBranchTicketProgress, recoveryExecutionTickets, finishBranchTicketScope, finishRecoveredTicketScope, heartbeatBuildRun, persistBuildSession, persistCurrentBuildSession, projectBuildRecovery, readBuildRuns, releaseBuildLease, resumeBuildRun } from "../buildRuns.js";
 import type { AutonomyProfile, BuildRunRecordV2, BuildRunRecordV3, ProviderSessionRefV1, ResolvedAgentSettings, SessionStrategy } from "rafi-spec";
-import { parseProviderContract, qaRemediationProposalV1Schema } from "rafi-spec";
+import { branchAuditOutput, plannerRemediationOutput } from "rafi-spec";
 import type { AgentDefaultsV1, AgentRoleDefaultsV1 } from "rafi-spec";
 import { parse as parseYaml } from "yaml";
 import {
@@ -688,8 +689,10 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       // recovery remains fail-closed on an exact current-plan approval.
       if (recoveryRecord && autoApprovePlanUpdates && recoveryTickets.length > 0) {
         const decision = recoveryRecord.recoveryDecision;
-        if (!decision?.planApproval) fail("saved --yes approval has no exact plan binding; rerun rafi build:resume --yes to approve the current plan");
-        const approvalCheck = validatePlanApprovalBinding(cwd, recoveryTickets, decision.planApproval);
+        if (!decision?.planApproval && !decision?.frozenWorkApproval) fail("saved --yes approval has no exact plan binding; rerun rafi build:resume --yes to approve the current plan");
+        const approvalCheck = decision.frozenWorkApproval
+          ? validateFrozenWorkApprovalBinding(cwd, recoveryRecord.runId, recoveryTickets, decision.frozenWorkApproval)
+          : validatePlanApprovalBinding(cwd, recoveryTickets, decision.planApproval!);
         if (!approvalCheck.valid) fail(`saved --yes approval is stale (${approvalCheck.reason}); rerun rafi build:resume --yes before provider work`);
       }
       if (opts.recoveryMode) {
@@ -1268,7 +1271,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           try {
             const revision = countDb.continuityHead(runId, "builder")?.authoritativeStateRevision ?? settings.settings_revision;
             countDb.appendContinuityEvent({ runId, role: "builder", kind: "builder_requested_handoff_delta", payload: request.delta, authoritativeStateRevision: revision });
-            countDb.publishContinuityCheckpoint({ runId, role: "builder", delta: request.delta, authoritativeStateRevision: revision });
+
             compactionCount = countDb.successfulCompactionCount(runId, "builder", predecessor.sessionRef?.() ?? sessionId);
           }
           finally { countDb.close(); }
@@ -1279,6 +1282,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
             predecessorSessionId: sessionId,
             predecessorSessionRef: predecessor.sessionRef?.(),
             requestedByBuilder: true,
+            predecessorDispatchId: request.predecessorDispatchId,
             roleState: {
               ...request.roleState,
               frozenActionDigest: createHash("sha256").update(frozenAction).digest("hex"),
@@ -1295,7 +1299,8 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
             resources: [{ label: "frozen-action", content: frozenAction, authoritative: true }],
           }, (_handoff, runtime) => createBuilderForSettings(builderCwd, settingsForRequestedRuntime(effectiveSettings, runtime)), handoffRecoveryOptions("builder"));
           log.write("handoff-transfer", {
-            requestedByBuilder: true, reason: request.reason, generation: transfer.manifest.generation,
+            requestedByBuilder: true,
+            predecessorDispatchId: request.predecessorDispatchId, reason: request.reason, generation: transfer.manifest.generation,
             predecessorSessionId: transfer.manifest.predecessorSessionId, successorSessionId: transfer.successorSessionId,
             acceptanceCheckpointDigest: transfer.acceptanceCheckpointDigest,
           });
@@ -1967,9 +1972,11 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           try {
             auditBuilder = await createBuilder(cwd);
             auditViewer = printEvents(auditBuilder.events());
-            const audit = await sendGraphTurn(auditBuilder, buildBranchAuditInstruction(plan.nodes.map((node) => node.ticket)), graphContext(cwd, auditBuilder.sessionRef?.()?.cwd ?? cwd, "branch-dependency-audit", plan.nodes.map(node=>node.ticket.id).join(" ")), { purpose: "planning" });
-            if (audit.isError) throw new Error(audit.text);
-            const auditDependencies = parseAuditDependencies(audit.text);
+            const audit = await sendGraphTurn(auditBuilder, `${buildBranchAuditInstruction(plan.nodes.map((node) => node.ticket))}\n${operationInstruction(branchAuditOutput)}`, graphContext(cwd, auditBuilder.sessionRef?.()?.cwd ?? cwd, "branch-dependency-audit", plan.nodes.map(node=>node.ticket.id).join(" ")), nativePolicy(branchAuditOutput, { purpose: "planning", journalRunId: auditRunId }));
+            if (audit.isError) throw new Error(structuredTurnErrorMessage(audit, "Branch dependency audit"));
+            const auditDependencies = operationPayload<{ dependencies: Array<{ ticket: string; dependsOn: string; reason: string }> }>(audit, branchAuditOutput).dependencies;
+            const selectedIds = new Set(plan.nodes.map(node => node.ticket.id));
+            if (auditDependencies.some(dep => dep.ticket === dep.dependsOn || !selectedIds.has(dep.ticket) || !selectedIds.has(dep.dependsOn))) throw new Error("Branch audit returned a foreign or self dependency");
             plan = buildBranchPlan(tickets, states, {
               steps,
               baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch ?? currentGitRef(cwd),
@@ -2963,8 +2970,7 @@ export function createQaNonconvergenceHandler(projectDir: string, noninteractive
         `User discussion: ${String(discussion)}`,
         `Complete QA history:\n${JSON.stringify(context.history, null, 2)}`,
         `${diffTruncated ? "Builder diff (TRUNCATED at 128 KiB; inspect the actual worktree before relying on it)" : "Full Builder diff"}:\n${diff || "(no tracked diff)"}`,
-        "Return RAFI_QA_REMEDIATION_START, then one JSON object {\"summary\":\"...\",\"fix_instructions\":[\"...\"]}, then RAFI_QA_REMEDIATION_END.",
-        "End with STEP_STATUS: plan_complete | summary=\"QA remediation proposed\"",
+        "Submit the native planner-remediation payload with summary and fix_instructions.",
       ].join("\n\n");
       let resumeSessionId: string | undefined;
       let revision = 0;
@@ -2972,18 +2978,13 @@ export function createQaNonconvergenceHandler(projectDir: string, noninteractive
         revision++;
         const proposalDigest = createHash("sha256").update(JSON.stringify([scope, round, revision, instruction, planner, captureFrozenQaSource(context.builderWorktree).digest])).digest("hex");
         const run = await durableReadOnlyProposal({ projectDir, runId, ticketId: context.ticket.id, digest: proposalDigest, operation: () => runRoleInstruction({
-          projectDir, role: "planner", instruction, label: "QA Planner remediation", agent: planner?.make,
+          projectDir, role: "planner", instruction, output: plannerRemediationOutput, label: "QA Planner remediation", agent: planner?.make,
           model: explicitDefaultValue(planner?.model), effort: explicitEffort(planner?.reasoning), fast: planner?.fast,
           resumeSessionId, permissionConfig: readOnlyPermissionConfig(), sandboxMode: "read-only",
           logPath: makeRoleLogPath(projectDir, "qa-remediation"), logEvent: "rafi-plan",
         }) });
-        if (run.turn.result.isError || run.turn.status.kind !== "plan_complete") throw new Error(`Planner remediation failed: ${run.turn.status.error ?? run.turn.result.text.slice(0, 500)}`);
-        const match = /RAFI_QA_REMEDIATION_START\s*([\s\S]*?)\s*RAFI_QA_REMEDIATION_END/.exec(run.turn.result.text);
-        if (!match) throw new Error("Planner remediation did not return the required structured proposal");
-        let parsed: unknown;
-        try { parsed = JSON.parse(match[1]!.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); }
-        catch (error) { throw new Error(`Planner remediation proposal is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
-        const proposal = parseProviderContract(qaRemediationProposalV1Schema, parsed, "RAFI_QA_REMEDIATION");
+        if (run.turn.result.isError || run.turn.status.kind !== "done") throw new Error(`Planner remediation failed: ${run.turn.status.error ?? run.turn.result.text.slice(0, 500)}`);
+        const proposal = operationPayload<{ summary: string; fix_instructions: string[] }>(run.turn.result, plannerRemediationOutput);
         console.log(`\nPlanner remediation: ${proposal.summary}\n${proposal.fix_instructions.map((item) => `- ${item}`).join("\n")}`);
         const decision = await ask(`QA remediation approval ${revision}: ${JSON.stringify(proposal)}`, [{ id: "approve", label: "Approve" }, { id: "revise", label: "Revise" }, { id: "cancel", label: "Return to choices" }], () => select({ message: "Use this remediation for a new Builder fix session?", options: [
           { value: "approve", label: "Approve (Recommended)" }, { value: "revise", label: "Discuss/revise" }, { value: "cancel", label: "Cancel and return to choices" },
@@ -2991,7 +2992,7 @@ export function createQaNonconvergenceHandler(projectDir: string, noninteractive
         if (decision === "approve") return { action: "remediate", remediation: [proposal.summary, ...proposal.fix_instructions].join("\n") };
         if (isCancel(decision) || decision === "cancel") break;
         const feedback = await ask(`QA Planner revision feedback ${revision}`, [{ id: "custom", label: "Revision feedback" }], () => text({ message: "Planner revision feedback:" })); if (isCancel(feedback)) break;
-        resumeSessionId = run.sessionId; instruction = `Revise the complete QA remediation proposal using this feedback: ${String(feedback)}. Keep the exact structured envelope and final plan_complete marker.`;
+        resumeSessionId = run.sessionId; instruction = `Revise the complete QA remediation proposal using this feedback: ${String(feedback)}. Use the native planner-remediation contract.`;
       }
     }
   };

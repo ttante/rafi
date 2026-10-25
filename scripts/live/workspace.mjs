@@ -15,7 +15,8 @@ function assertProviderPath(path) {
 }
 
 export function createLiveWorkspace(prefix, options = {}) {
-  const evidenceRoot = options.evidenceRoot ? resolve(options.evidenceRoot) : undefined;
+  const retained = options.evidenceRoot ?? process.env.RAFI_STRUCTURED_LIVE_EVIDENCE_ROOT;
+  const evidenceRoot = retained ? resolve(retained) : undefined;
   const configuredBase = process.env.RAFI_LIVE_WORK_ROOT;
   const workBase = resolve(configuredBase || DEFAULT_WORK_BASE);
   mkdirSync(workBase, { recursive: true });

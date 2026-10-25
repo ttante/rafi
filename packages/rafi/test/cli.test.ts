@@ -16,11 +16,6 @@ function tempDir(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "rafi-cli-test-")));
 }
 
-function tsxBin(projectRoot: string): string {
-  const local = join(projectRoot, "node_modules", ".bin", "tsx");
-  if (existsSync(local)) return local;
-  return join(projectRoot, "..", "..", "node_modules", ".bin", "tsx");
-}
 
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
 
@@ -56,7 +51,7 @@ test("create recovery completes the selected interview without creating another"
   const bin = join(root, "fixture-bin");
   installReadyClaude(bin);
   const saved = checkpointInterview(root, createInterviewRecord({ workflow: "create", invocation: { projectDir: root }, checkpoint: "app-name", answers: { appName: "Recovered app" } }), {});
-  const result = spawnSync(process.execPath, ["--import", "tsx", join(HERE, "../src/index.ts"), "create", root, "--defaults", "--no-graph", "--runtime", "claude", "--root-file-mode", "append", "--interview-id", saved.id], { cwd: join(HERE, ".."), env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` }, encoding: "utf8" });
+  const result = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), join(HERE, "../src/index.ts"), "create", root, "--defaults", "--no-graph", "--runtime", "claude", "--root-file-mode", "append", "--interview-id", saved.id], { cwd: join(HERE, ".."), env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` }, encoding: "utf8" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const records = readInterviewRecords(root).records;
   assert.equal(records.length, 1);
@@ -65,7 +60,7 @@ test("create recovery completes the selected interview without creating another"
   assert.equal(records[0]?.answers.appName, "Recovered app");
 });
 
-test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nodeMajor < 24 ? "CLI dependencies require Node 24" : false }, () => {
   const docs = readFileSync(join(HERE, "..", "..", "..", "docs", "cli.md"), "utf8");
   const cases = [
     { heading: "rafi --help", command: program },
@@ -86,7 +81,7 @@ test("docs/cli.md matches Commander help for changed rafi surfaces", { skip: nod
   }
 });
 
-test("status discovers nested projects while explicit paths are exact", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+test("status discovers nested projects while explicit paths are exact", { skip: nodeMajor < 24 ? "CLI dependencies require Node 24" : false }, () => {
   const root = tempDir();
   const nested = join(root, "packages", "web");
   mkdirSync(nested, { recursive: true });
@@ -95,17 +90,17 @@ test("status discovers nested projects while explicit paths are exact", { skip: 
   writeFileSync(join(root, ".foreman", "2026.jsonl"), `${JSON.stringify({ event: "batch-end", outcome: "completed", completed: 1, requested: 1 })}\n`, "utf8");
   const projectRoot = join(HERE, "..");
   const entry = join(projectRoot, "src", "index.ts");
-  const output = execFileSync(tsxBin(projectRoot), [entry, "status"], { cwd: nested, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
+  const output = execFileSync(process.execPath, ["--import", import.meta.resolve("tsx"), entry, "status"], { cwd: nested, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
   assert.match(output, /rafi: project Status App/);
   assert.match(output, new RegExp(`rafi: root ${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   assert.match(output, /foreman: outcome — completed/);
 
-  const explicit = spawnSync(tsxBin(projectRoot), [entry, "status", nested], { cwd: projectRoot, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
+  const explicit = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), entry, "status", nested], { cwd: projectRoot, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
   assert.notEqual(explicit.status, 0);
   assert.match(explicit.stderr, /explicit project directory/);
 });
 
-test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { skip: nodeMajor < 24 ? "CLI dependencies require Node 24" : false }, () => {
   const dir = tempDir();
   const { agent_files, agents, skills, ...legacy } = buildProjectConfig(defaultAnswers());
   void agent_files;
@@ -114,7 +109,7 @@ test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { sk
   writeFileSync(join(dir, "project.yaml"), stringify(legacy), "utf8");
 
   const projectRoot = join(HERE, "..");
-  const output = execFileSync(tsxBin(projectRoot), ["src/index.ts", "compile", dir], {
+  const output = execFileSync(process.execPath, ["--import", import.meta.resolve("tsx"), "src/index.ts", "compile", dir], {
     cwd: projectRoot,
     encoding: "utf8",
     env: { ...process.env, NO_COLOR: "1" },
@@ -132,7 +127,7 @@ test("compile migrates legacy project.yaml to normalized rafi-config.yaml", { sk
   assert.match(config, /skills:/);
 });
 
-test("compile --root-file-mode append overrides update mode for the run", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+test("compile --root-file-mode append overrides update mode for the run", { skip: nodeMajor < 24 ? "CLI dependencies require Node 24" : false }, () => {
   const dir = tempDir();
   const config = buildProjectConfig({ ...defaultAnswers(), useClaude: false });
   config.agent_files.mode = "update";
@@ -140,7 +135,7 @@ test("compile --root-file-mode append overrides update mode for the run", { skip
   writeFileSync(join(dir, "AGENTS.md"), "CUSTOM RULES\n", "utf8");
 
   const projectRoot = join(HERE, "..");
-  execFileSync(tsxBin(projectRoot), ["src/index.ts", "compile", dir, "--root-file-mode", "append"], {
+  execFileSync(process.execPath, ["--import", import.meta.resolve("tsx"), "src/index.ts", "compile", dir, "--root-file-mode", "append"], {
     cwd: projectRoot,
     encoding: "utf8",
   });
@@ -151,7 +146,7 @@ test("compile --root-file-mode append overrides update mode for the run", { skip
   assert.match(readFileSync(join(dir, "rafi-config.yaml"), "utf8"), /mode: update/);
 });
 
-test("create never installs the Claude Agent SDK into the target application", { skip: nodeMajor < 20 ? "CLI dependencies require Node 20+" : false }, () => {
+test("create never installs the Claude Agent SDK into the target application", { skip: nodeMajor < 24 ? "CLI dependencies require Node 24" : false }, () => {
   const dir = tempDir();
   const binDir = join(dir, "bin");
   installReadyClaude(binDir);
@@ -160,9 +155,9 @@ test("create never installs the Claude Agent SDK into the target application", {
 
   const projectRoot = join(HERE, "..");
   const output = execFileSync(
-    tsxBin(projectRoot),
+    process.execPath,
     // This readiness stub is not a semantic-extraction protocol peer.
-    ["src/index.ts", "create", dir, "--defaults", "--runtime", "claude", "--no-graph"],
+    ["--import", import.meta.resolve("tsx"), "src/index.ts", "create", dir, "--defaults", "--runtime", "claude", "--no-graph"],
     {
       cwd: projectRoot,
       encoding: "utf8",

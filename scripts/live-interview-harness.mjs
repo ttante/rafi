@@ -1,3 +1,4 @@
+import { trackStructuredLiveChild } from "./live/structured-live-supervisor.mjs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 
 export const LIVE_ACK_ENV = "RAFI_LIVE_INTERVIEW";
@@ -57,6 +58,7 @@ export function run(command, args, options = {}) {
     cwd: options.cwd,
     stdio: options.stdio ?? "inherit",
     env: { ...process.env, ...(options.env ?? {}) },
+    timeout: process.env.RAFI_STRUCTURED_LIVE_RUNNER ? Math.max(1, Date.parse(process.env.RAFI_LIVE_DEADLINE) - Date.now()) : undefined,
   });
 }
 
@@ -302,6 +304,7 @@ export async function runTtyJourney({ command, cwd, transcript, responder, timeo
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, COLUMNS: "120", LINES: "40" },
     });
+    trackStructuredLiveChild(child);
     let recent = "";
     let settled = false;
     const timeout = setTimeout(() => finish(new Error(`TTY journey exceeded the ${Math.round(timeoutMs / 60_000)} minute timeout`)), timeoutMs);

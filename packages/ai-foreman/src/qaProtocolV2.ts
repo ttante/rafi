@@ -77,6 +77,8 @@ export interface QaSessionHandleV2 {
 }
 
 export interface QaTurnIntentV2 {
+  sealedDispatch?: import("./structuredDispatchRecord.js").SealedDispatchRecordV2;
+  outputContract?: { protocolVersion: 2; operation: string; schemaVersion: number; schemaDigest: string };
   version: 2;
   operationId: string;
   runId: string;
@@ -92,6 +94,9 @@ export interface QaTurnIntentV2 {
 }
 
 export interface QaTurnReceiptV2 {
+  retainedEvidence?: { rawOriginalBytes?: number; rawRetainedBytes?: number; cleanedOriginalBytes: number; cleanedRetainedBytes: number };
+  sealedDispatch?: import("./structuredDispatchRecord.js").SealedDispatchRecordV2;
+  structuredResponseDigest?: string;
   version: 2;
   operationId: string;
   dispatch: "not-dispatched" | "completed" | "uncertain";

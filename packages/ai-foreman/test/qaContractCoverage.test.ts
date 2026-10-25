@@ -5,18 +5,18 @@ import { assembleContract } from "../src/qaVerificationContract.js";
 import { BUILDER_WORK_COVERAGE_INSTRUCTIONS, COVERAGE_INSTRUCTIONS, bindCoverageHostFields, parseContractCoverage, validateContractCoverage } from "../src/qaContractCoverage.js";
 
 test("implementation instructions defer source-bound coverage until the host provides all bindings", () => {
-  assert.match(BUILDER_WORK_COVERAGE_INSTRUCTIONS, /Do not emit RAFI_QA_COVERAGE JSON/);
-  assert.match(BUILDER_WORK_COVERAGE_INSTRUCTIONS, /separate response-only coverage record/);
+  assert.match(BUILDER_WORK_COVERAGE_INSTRUCTIONS, /coverage claims in the completed work-report payload/);
+  assert.match(BUILDER_WORK_COVERAGE_INSTRUCTIONS, /Do not wait for or invent host binding values/);
   assert.match(BUILDER_WORK_COVERAGE_INSTRUCTIONS, /historical ordering/);
   assert.match(BUILDER_WORK_COVERAGE_INSTRUCTIONS, /later passing test cannot prove an earlier failing step/);
   assert.doesNotMatch(BUILDER_WORK_COVERAGE_INSTRUCTIONS, /Return RAFI_QA_COVERAGE_START/);
 });
 const binding = { phase: "qa" as const, sourceDigest: digest, inputBasisDigest: digest, attemptId: "review", sessionId: "reviewer" };
 test("coverage instructions explain the real schema and flat host binding", () => {
-  assert.match(COVERAGE_INSTRUCTIONS, /TOP LEVEL, not inside a binding object/);
+  assert.match(COVERAGE_INSTRUCTIONS, /Do not invent or echo host-owned/);
   assert.match(COVERAGE_INSTRUCTIONS, /checkId \(not id\)/);
   assert.match(COVERAGE_INSTRUCTIONS, /predicateEvidence as an array/);
-  assert.match(COVERAGE_INSTRUCTIONS, /exact host-supplied sourceDigest/);
+  assert.match(COVERAGE_INSTRUCTIONS, /Rafi binds the source digest/);
   assert.match(COVERAGE_INSTRUCTIONS, /reference to that observation's exact evidenceDigest/);
   assert.match(COVERAGE_INSTRUCTIONS, /run every other applicable mandatory check/);
   assert.match(COVERAGE_INSTRUCTIONS, /not leave such a provider-owned check as not-run/);
@@ -24,7 +24,7 @@ test("coverage instructions explain the real schema and flat host binding", () =
   assert.match(COVERAGE_INSTRUCTIONS, /do not block or fail QA/);
   assert.match(COVERAGE_INSTRUCTIONS, /host-retained tool event's exitCode/);
   assert.match(COVERAGE_INSTRUCTIONS, /must not create an echo wrapper/);
-  assert.match(COVERAGE_INSTRUCTIONS, /"required":\["version","phase","runId"/);
+  assert.match(COVERAGE_INSTRUCTIONS, /"required":\["checks"/);
 });
 test("generic success and incomplete mandatory results never pass contract coverage", () => {
   const draft = candidate(), contract = assembleContract(draft, draft.requirements, assessment(draft), "author");
@@ -42,15 +42,15 @@ test("host coverage binding omits null optional limitations without changing evi
   assert.equal(bound.checks[0]!.outcome, "passed");
   assert.deepEqual(validateContractCoverage(contract, bound, binding), []);
 });
-test("host coverage binding canonicalizes applicability copied into outcome", () => {
+test("host coverage binding does not silently repair invalid outcome claims", () => {
   const draft = candidate(); draft.checks[0]!.applicability = { kind: "conditional", predicate: "Optional feature enabled", decisionOwner: "host", requiredEvidence: ["configuration"] };
   const contract = assembleContract(draft, draft.requirements, assessment(draft), "author"), result = coverage(contract);
   result.checks[0]!.applicability = "not-applicable";
   result.checks[0]!.predicateEvidence = ["Inspected configuration: optional feature disabled"];
   (result.checks[0]!.outcome as string) = "not-applicable";
   const bound = bindCoverageHostFields(result, contract, binding);
-  assert.equal(bound.checks[0]!.outcome, "not-run");
-  assert.deepEqual(validateContractCoverage(contract, bound, binding, false), []);
+  assert.equal(bound.checks[0]!.outcome as string, "not-applicable");
+  assert.ok(validateContractCoverage(contract, bound, binding, false).length > 0);
 });
 test("conditional mandatory checks need predicate evidence; advisory checks stay visible without blocking", () => {
   const draft = candidate(); draft.checks[0]!.applicability = { kind: "conditional", predicate: "Token auth enabled", decisionOwner: "qa", requiredEvidence: ["configuration"] };

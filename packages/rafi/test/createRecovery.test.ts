@@ -136,7 +136,7 @@ test("create recovery append choice uses sidecar behavior for oversized root fil
   });
 
   const content = readFileSync(join(dir, "AGENTS.md"), "utf8");
-  assert.ok(content.startsWith("<!-- rafi:start -->"));
+  assert.ok(content.startsWith("CUSTOM RULES\n"));
   assert.ok(content.includes("@AGENTS-rafi.md"));
   assert.ok(content.includes("CUSTOM RULES"));
   assert.ok(existsSync(join(dir, "AGENTS-rafi.md")));

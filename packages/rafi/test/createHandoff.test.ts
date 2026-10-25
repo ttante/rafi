@@ -1,3 +1,6 @@
+import { nativePolicy } from "ai-foreman/agent-run.js";
+import { nativeFixtureTurn } from "./helpers/nativeOutput.js";
+import { structuredPlanOutput } from "rafi-spec";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +33,7 @@ function parent(dir: string) {
   return createInterviewRecord({ workflow: "create", invocation: { projectDir: dir }, checkpoint: "handoff" });
 }
 
-function completedPlanOutput(): string {
+function completedPlanProposal() {
   const proposal = {
     version: 1,
     summary: "Ship the requested feature.",
@@ -54,7 +57,7 @@ function completedPlanOutput(): string {
     }],
     stacks: [],
   };
-  return `${PLAN_PROPOSAL_START}\n${JSON.stringify(proposal)}\n${PLAN_PROPOSAL_END}\nSTEP_STATUS: plan_complete | summary="created ticket-maker-ready Rafi plan"`;
+  return proposal;
 }
 
 test("create hands the explicitly selected runtime to its child plan and checkpoints it", async () => {
@@ -129,8 +132,8 @@ test("create preserves a local source through a docs-rafi plan into Ticket Maker
         yes: true,
         runInstruction: async () => ({
           turn: {
-            result: { text: completedPlanOutput(), isError: false, numTurns: 1, costUsd: 0 },
-            status: { kind: "plan_complete", summary: "created ticket-maker-ready Rafi plan" },
+            result: nativeFixtureTurn(nativePolicy(structuredPlanOutput), "planner-session", completedPlanProposal(), "codex"),
+            status: { kind: "done", summary: "created ticket-maker-ready Rafi plan" },
           },
           runtime: "codex",
           model: "test-model",
@@ -186,8 +189,8 @@ test("create snapshots an external local source and carries it into Ticket Maker
         yes: true,
         runInstruction: async () => ({
           turn: {
-            result: { text: completedPlanOutput(), isError: false, numTurns: 1, costUsd: 0 },
-            status: { kind: "plan_complete", summary: "created ticket-maker-ready Rafi plan" },
+            result: nativeFixtureTurn(nativePolicy(structuredPlanOutput), "planner-session", completedPlanProposal(), "codex"),
+            status: { kind: "done", summary: "created ticket-maker-ready Rafi plan" },
           },
           runtime: "codex",
           model: "test-model",

@@ -18,7 +18,10 @@ export function semanticExchange(chunks: SemanticChunk[], operationId: string): 
 export function parseSemanticResult(text: string, request: SemanticExchangeV1): SemanticExtraction {
   if (Buffer.byteLength(text) > 8 * 1024 * 1024)
     throw new Error("Semantic result exceeds byte budget");
-  const result = parseProviderContract(semanticResultV1Schema, parseStrictJson(text), "graph semantic result") as SemanticExtraction & {
+  return validateSemanticResult(parseStrictJson(text), request);
+}
+export function validateSemanticResult(value: unknown, request: SemanticExchangeV1): SemanticExtraction {
+  const result = parseProviderContract(semanticResultV1Schema, value, "graph semantic result") as SemanticExtraction & {
     kind?: string;
     version?: number;
     operationId?: string;

@@ -9,11 +9,14 @@ import {
   run,
 } from "./live-interview-harness.mjs";
 
+import { runSupervisedStructuredLive } from "./live/structured-live-supervisor.mjs";
+
+await runSupervisedStructuredLive("live-interview", async (supervisor) => {
 const root = resolve(new URL("..", import.meta.url).pathname);
 
 try {
-  requireLiveAcknowledgement("Claude and Codex");
-  const preflight = livePreflightFailures(["claude", "codex"]);
+  requireLiveAcknowledgement(supervisor.config.providers.join(" and "));
+  const preflight = livePreflightFailures(supervisor.config.providers);
   if (preflight.failures.length) throw new Error(`preflight failed:\n${preflight.failures.map((failure) => `- ${failure}`).join("\n")}`);
   buildWorkspace(root);
   const childEnv = { [LIVE_SKIP_BUILD_ENV]: "1" };
@@ -23,3 +26,6 @@ try {
   console.error(`live interview: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 }
+
+if (process.exitCode) throw new Error("Live runner recorded a failure");
+});

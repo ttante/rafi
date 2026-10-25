@@ -1,3 +1,4 @@
+import { grillAuditVerdictV1Schema, grillAuditOutput } from "rafi-spec";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -9,7 +10,6 @@ import {
   collectGrillAuditAnswers,
   defaultGrillVerificationState,
   isGrillMeTextQuestion,
-  parseGrillAuditVerdict,
   recordTextGrillAnswer,
   runIndependentGrillAudit,
 } from "../src/grillAudit.js";
@@ -35,14 +35,11 @@ test("custom and stop textual answers count, while empty answers do not", () => 
   assert.equal(recordTextGrillAnswer(initial, { question: "Which store?", choices, answer: "" }).qualified, false);
 });
 
-test("audit verdict parsing is strict and bounded", () => {
-  const complete = parseGrillAuditVerdict(`${GRILL_AUDIT_START}\n{"status":"complete","evidence":"All product choices are explicit in the brief."}\n${GRILL_AUDIT_END}`);
-  assert.equal(complete.status, "complete");
-  const needs = parseGrillAuditVerdict(`${GRILL_AUDIT_START}\n${JSON.stringify({ status: "needs_user_input", questions: [{ id: "retention", question: "How long?", recommendation: "30 days", rationale: "Matches the brief", alternatives: ["7 days", "Never"] }] })}\n${GRILL_AUDIT_END}`);
-  assert.equal(needs.status, "needs_user_input");
-  assert.throws(() => parseGrillAuditVerdict(`commentary\n${GRILL_AUDIT_START}\n{"status":"complete","evidence":"ok"}\n${GRILL_AUDIT_END}`));
-  assert.throws(() => parseGrillAuditVerdict(`${GRILL_AUDIT_START}\n{"status":"complete","evidence":""}\n${GRILL_AUDIT_END}`));
-  assert.throws(() => parseGrillAuditVerdict(`${GRILL_AUDIT_START}\n{"status":"complete","evidence":"looks fine"}\n${GRILL_AUDIT_END}`));
+test("native audit verdict validation is strict and rejects marker envelopes", () => {
+  assert.equal(grillAuditVerdictV1Schema.safeParse({ status: "complete", evidence: "All product choices are explicit in the brief." }).success, true);
+  assert.equal(grillAuditVerdictV1Schema.safeParse({ status: "needs_user_input", questions: [{ id: "retention", question: "How long?", recommendation: "30 days", rationale: "Matches the brief", alternatives: ["7 days", "Never"] }] }).success, true);
+  assert.equal(grillAuditVerdictV1Schema.safeParse({ status: "complete", evidence: "" }).success, false);
+  assert.equal(grillAuditOutput.schema.safeParse(`${GRILL_AUDIT_START}\n{"status":"complete","evidence":"All choices explicit"}\n${GRILL_AUDIT_END}`).success, false);
 });
 
 test("independent audit uses a fresh read-only grill-me session and fails closed on malformed output", async () => {
@@ -82,6 +79,8 @@ test("audit questions resume at the first unanswered item and stop immediately",
   assert.equal(state.stopped, true);
   assert.equal(state.answers.length, 2);
   assert.match(buildAuditAnswersContinuation(state), /User stopped further questions: yes/);
+  assert.match(buildAuditAnswersContinuation(state), /native structured operation/);
+  assert.doesNotMatch(buildAuditAnswersContinuation(state), /STEP_STATUS|RAFI_PLAN_PROPOSAL/);
 });
 
 test("cancelled audit input is persisted as interrupted", async () => {

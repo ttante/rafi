@@ -1,8 +1,9 @@
+import { inheritedStructuredLiveBudget } from "../structuredLiveBudget.js";
 import type { ProviderTurnPurpose } from "../providerPhase.js";
 import { OperationDeadline } from "../util/deadline.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { loadSkill } from "special-agents";
@@ -14,6 +15,10 @@ import { canonicalSessionPath, createProviderSessionRef, validateProviderSession
 import { SessionUnavailableError, sessionUnavailableResult } from "./sessionFailure.js";
 import { isFastModeUnavailable, reportFastModeUnavailable } from "./fastMode.js";
 import { handoffSystemInstructions } from "../handoffProtocol.js";
+import { providerControlOperationV2, providerWireContract, renderProviderWireInstruction, initializationOutput, validateStructuredCandidate, selectedDispatchTupleV2, structuredDigest } from "rafi-spec";
+import { assertActiveProviderDispatch, withEphemeralInitializationDispatch } from "../structuredDispatchAuthority.js";
+import { CodexRunawayOutputError, CodexTurnCollector, structuredReceipt } from "./structured.js";
+import type { ProviderTurnPolicy } from "./types.js";
 
 export interface CodexLineResult { events: BuilderEvent[]; sessionId?: string; text?: string }
 
@@ -52,6 +57,12 @@ export class CodexAdapter implements BuilderAdapter {
   private closed = false;
   private closePromise?: Promise<void>;
   private activeText: string[] = [];
+  private structuredCollector?: CodexTurnCollector;
+  private turnStreamedBytes = 0;
+  private streamStartedAt = 0;
+  private streamActivityAt = 0;
+  private streamDiagnosticAt = 0;
+  private turnInFlight = false;
   private usage?: ContextUsage;
   private usageRevision = 0;
   private providerSessionUsage?: ProviderSessionUsage;
@@ -116,6 +127,7 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   constructor(private readonly opts: BuilderAdapterOptions) {
+    inheritedStructuredLiveBudget("codex");
     this._sessionId = opts.resumeSessionRef?.sessionId ?? opts.resumeSessionId;
     this._sessionRef = opts.resumeSessionRef;
   }
@@ -167,10 +179,20 @@ export class CodexAdapter implements BuilderAdapter {
     args.push(instruction); return args;
   }
 
-  async sendTurn(instruction: string, policy?: { handback?: boolean; responseOnly?: boolean; logicalActionId?: string; purpose?: ProviderTurnPurpose }): Promise<TurnResult> {
+  async sendTurn(instruction: string, policy?: ProviderTurnPolicy): Promise<TurnResult> {
+    if (this.turnInFlight) throw new Error("a turn is already in progress");
+    if (policy?.output) assertActiveProviderDispatch(policy, instruction, "codex", this.sessionRef());
+    if (policy?.output) {
+      const selected = policy.wireContract ?? providerWireContract(policy.output, "codex", "default", { requireRegistered: true });
+      if (selected.provider !== "codex" || selected.canonical.schemaDigest !== policy.output.schemaDigest) throw new Error("Codex received a mismatched provider wire contract");
+      if (policy.renderedWireContractDigest && policy.renderedWireContractDigest !== selected.descriptorDigest) throw new Error("Codex received mismatched rendered wire guidance");
+      instruction = renderProviderWireInstruction(instruction, selected);
+      policy = { ...policy, wireContract: selected, renderedWireContractDigest: selected.descriptorDigest };
+    }
+    this.turnInFlight = true;
     const prepared = this.instructionWithPendingQaReminder(instruction);
     instruction = prepared.instruction;
-    const turnId = randomUUID();
+    const turnId = policy?.dispatchId ?? randomUUID();
     this.activeProviderTurnId = turnId;
     const observer = this.opts.observer;
     if (!observer) {
@@ -184,7 +206,7 @@ export class CodexAdapter implements BuilderAdapter {
         if (prepared.includedReminder) this.qaReminderEvent("reminder-retained");
         throw error;
       }
-      finally { this.activeProviderTurnId = undefined; this.activeNativeTurnId = undefined; }
+      finally { this.activeProviderTurnId = undefined; this.activeNativeTurnId = undefined; this.structuredCollector = undefined; this.turnInFlight = false; }
     }
     const context = this.observationContext();
     const spanId = observer.store.startSpan(context, { spanId: turnId, kind: "provider_turn", name: `Codex ${activityPhase(this.opts.runtimePhase)}`, providerTurnId: turnId, attributes: { provider: "codex" } });
@@ -203,10 +225,11 @@ export class CodexAdapter implements BuilderAdapter {
     } finally {
       for (const [callId, toolSpanId] of this.toolSpans) { observer.store.finishSpan(toolSpanId, { outcome: "unknown", completionKnown: false }); this.toolSpans.delete(callId); }
       this.activeProviderTurnId = undefined; this.activeNativeTurnId = undefined; this.activeProviderTurnSpanId = undefined;
+      this.structuredCollector = undefined; this.turnInFlight = false;
     }
   }
 
-  private async sendTurnInternal(instruction: string, policy?: { responseOnly?: boolean; purpose?: ProviderTurnPurpose }): Promise<TurnResult> {
+  private async sendTurnInternal(instruction: string, policy?: ProviderTurnPolicy, runawayRetries = 0): Promise<TurnResult> {
     if (this.closed) throw new Error("builder is closed");
     this.eventQueue.push({ kind: "activity", state: "starting Codex turn", provider: "codex", model: this.opts.model });
     let turnStartDispatched = false;
@@ -217,12 +240,25 @@ export class CodexAdapter implements BuilderAdapter {
       const toolsBefore = this.observedToolCalls;
       this.turnSawTool = false;
       this.activeText = [];
+      this.turnStreamedBytes = 0; this.streamStartedAt = 0; this.streamActivityAt = 0; this.streamDiagnosticAt = 0;
       this.lastTurnTokens = undefined;
       this.turnUsageBaseline = this.providerSessionUsage ? { ...this.providerSessionUsage } : undefined;
-      const completion = this.waitFor("turn/completed", (params) => params.threadId === this._sessionId, this.providerIdleTimeoutMs(), true);
-      void completion.catch(() => {});
+      const deadline = new OperationDeadline("Codex active turn", this.opts.turnDeadlineMs ?? 3_600_000);
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearIdle = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = undefined; };
+      const resetIdle = () => {
+        clearIdle();
+        idleTimer = setTimeout(() => collector?.fail(new Error("Codex native turn idle deadline expired; execution outcome requires reconciliation")), this.providerIdleTimeoutMs());
+        idleTimer.unref();
+      };
+      const wire = policy?.output ? policy.wireContract ?? providerWireContract(policy.output, "codex", "default", { requireRegistered: true }) : undefined;
+      const collector = policy?.output ? this.structuredCollector = new CodexTurnCollector(this._sessionId!, true, resetIdle, wire!.maximumResponseBytes) : undefined;
+      const completion = collector ? collector.completion : this.waitFor("turn/completed", (params) => params.threadId === this._sessionId, this.providerIdleTimeoutMs(), true);
+      void completion.then(clearIdle, clearIdle);
       turnStartDispatched = true;
+      const readOnlyTurn = Boolean(policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" || this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa");
       const startParams = {
+        ...(wire ? { outputSchema: wire.wireSchema } : {}),
         threadId: this._sessionId,
         input: [{ type: "text", text: providerInstruction, text_elements: [] }],
         cwd: this.opts.cwd,
@@ -230,38 +266,69 @@ export class CodexAdapter implements BuilderAdapter {
         effort: this.opts.effort ?? null,
         ...(this.opts.fast ? { serviceTier: this.fastTier ?? "default" } : {}),
         approvalPolicy: policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" ? "never" : this.effectiveApprovalPolicy(),
-        sandboxPolicy: policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" || this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa"
+        sandboxPolicy: readOnlyTurn
           ? { type: "readOnly", networkAccess: false }
           : { type: "workspaceWrite", writableRoots: [this.opts.cwd], networkAccess: this.effectiveNetworkAccess() },
       };
       let started: unknown;
-      try { started = await this.request("turn/start", startParams); }
+      try { started = await deadline.run(() => this.request("turn/start", startParams)); }
       catch (error) {
-        if (!this.fastTier || !isFastModeUnavailable(String(error)) || this.turnSawTool || this.activeText.length) throw error;
+        if (policy?.output || !this.fastTier || !isFastModeUnavailable(String(error)) || this.turnSawTool || this.activeText.length) throw error;
         this.disableFastMode();
         started = await this.request("turn/start", { ...startParams, serviceTier: "default" });
       }
       this.activeNativeTurnId = String((started as { turn?: { id?: string } }).turn?.id ?? "") || undefined;
-      const params = await new OperationDeadline("Codex active turn", this.opts.turnDeadlineMs ?? 3_600_000).run(() => completion);
-      const turn = params.turn as Record<string, unknown> | undefined;
-      const responseOnlyViolation = Boolean(policy?.responseOnly && this.observedToolCalls !== toolsBefore);
-      const failed = turn?.status === "failed" || responseOnlyViolation;
+      collector?.bind(this.activeNativeTurnId ?? "");
+      let params: Record<string, unknown>;
+      try { params = await deadline.run(() => completion); }
+      catch (error) {
+        // Runaway output is a definite provider rejection, not an unknown
+        // outcome. A read-only turn cannot change the workspace, so after the
+        // native turn is confirmed stopped it may be asked once more, inside
+        // the same sealed host dispatch. Writable turns are never retried.
+        const nativeTurnId = this.activeNativeTurnId;
+        if (error instanceof CodexRunawayOutputError && runawayRetries < 1 && readOnlyTurn && nativeTurnId && await this.interruptNativeTurn(nativeTurnId)) {
+          this.writeStreamDiagnostic("interrupted", `${error.message}; retrying once`);
+          this.traceLifecycle("runaway-output-retry", { elapsedMs: 0 });
+          this.eventQueue.push({ kind: "retry", provider: "codex", reason: error.message, attempt: 1, maximum: 1, managedBy: "rafi", retryId: nativeTurnId });
+          return this.sendTurnInternal(instruction, policy, runawayRetries + 1);
+        }
+        throw error;
+      }
+      const turn = collector ? params : params.turn as Record<string, unknown> | undefined;
+      const responseOnlyViolation = Boolean(policy?.responseOnly && (collector ? collector.tools : this.observedToolCalls !== toolsBefore));
+      const failed = turn?.status !== "completed" || responseOnlyViolation;
       const error = turn?.error as Record<string, unknown> | null | undefined;
-      const text = this.activeText.join("\n");
-      if (failed && !responseOnlyViolation && this.fastTier && !this.turnSawTool && !text && isFastModeUnavailable(String(error?.message ?? ""))) {
+      let final: { text: string; itemId?: string } | undefined;
+      let invalidFinal: string | undefined;
+      try { final = collector?.final(); } catch (error) { invalidFinal = String(error); }
+      if (this.streamDiagnosticAt) this.writeStreamDiagnostic(failed || invalidFinal ? "interrupted" : "completed", failed ? `Codex terminal ${String(turn?.status)}` : invalidFinal);
+      const text = final?.text ?? this.activeText.join("\n");
+      if (!policy?.output && failed && !responseOnlyViolation && this.fastTier && !this.turnSawTool && !text && isFastModeUnavailable(String(error?.message ?? ""))) {
         this.disableFastMode();
         return this.sendTurnInternal(instruction, policy);
       }
-      const result: TurnResult = {
+      let result: TurnResult = {
         text: failed ? normalizeRuntimeErrorText("codex", String(responseOnlyViolation ? "Response-only correction used tools; its result cannot authorize completion" : error?.message ?? text), null, "app-server turn") : text,
         isError: failed, numTurns: 1, costUsd: 0, costAuthoritative: false,
         turnId: this.activeProviderTurnId, hostInstruction: instruction, providerInstruction,
         rawResponse: text, cleanedResponse: failed ? normalizeRuntimeErrorText("codex", String(responseOnlyViolation ? "Response-only correction used tools; its result cannot authorize completion" : error?.message ?? text), null, "app-server turn") : text,
         providerMetadata: { provider: "codex", sessionId: this._sessionId, sessionRef: this._sessionRef },
+        ...(policy?.selectedDispatch ? { selectedDispatch: policy.selectedDispatch } : {}),
         ...(this.lastTurnTokens ?? {}),
       };
       result.usage = { scope: "turn-delta", inputTokens: result.inputTokens, outputTokens: result.outputTokens,
         ...(result.inputTokens !== undefined || result.outputTokens !== undefined ? { totalTokens: (result.inputTokens ?? 0) + (result.outputTokens ?? 0) } : {}) };
+      if (policy?.output) {
+        const selectedDispatch = policy.selectedDispatch;
+        if (!selectedDispatch || !this._sessionId) throw new Error("Structured terminal lost its sealed dispatch tuple or session");
+        result = { ...result, selectedDispatch, structured: failed ? { state: "rejected", reason: responseOnlyViolation ? "tool-policy-violation" : "execution-not-completed", detail: `Codex terminal ${String(turn?.status)}`, dispatchId: result.turnId! }
+          : invalidFinal ? { state: "rejected", reason: "ambiguous-result", detail: invalidFinal, dispatchId: result.turnId! }
+          : !wire || !policy.selectedDispatch
+            ? { state: "rejected", reason: "invalid-contract", detail: "Codex structured turn has no sealed descriptor or tuple", dispatchId: result.turnId! }
+            : structuredReceipt(policy.output, "codex", final?.itemId ? text : undefined, { dispatchId: result.turnId!, sessionId: this._sessionId, nativeTurnId: this.activeNativeTurnId, nativeItemId: final?.itemId }, "json-text", wire, policy.selectedDispatch) };
+        if (result.structured.state === "rejected") result.isError = true;
+      }
       this.eventQueue.push({ kind: "turn-complete", result, turnId: result.turnId });
       return result;
     } catch (error) {
@@ -275,6 +342,7 @@ export class CodexAdapter implements BuilderAdapter {
         return result;
       }
       const detail = [error instanceof Error ? error.message : String(error), this.stderr].filter(Boolean).join("\n");
+      if (this.turnStreamedBytes) this.writeStreamDiagnostic("interrupted", error instanceof Error ? error.message : String(error));
       const text = normalizeRuntimeErrorText("codex", detail, this.process?.exitCode ?? null, "builder turn");
       this.disconnect(new Error(text));
       const resumed = Boolean(this.opts.resumeSessionRef);
@@ -345,6 +413,7 @@ export class CodexAdapter implements BuilderAdapter {
       }, hardTimeoutMs, false, controller.signal);
       this.manualCompactionInFlight = true;
       try {
+        providerControlOperationV2("codex", "thread/compact/start");
         const acknowledgementFailure = this.request("thread/compact/start", { threadId: this._sessionId }).then(
           () => { this.traceLifecycle("compaction-acknowledged"); return new Promise<never>(() => {}); },
           error => {
@@ -356,6 +425,10 @@ export class CodexAdapter implements BuilderAdapter {
         );
         await deadline.run(() => Promise.race([Promise.all([done, postCompactUsage]), acknowledgementFailure]));
       } finally { this.manualCompactionInFlight = false; }
+      // Manual completion must invalidate delivery receipts just like automatic
+      // compaction. Continuity accounts for this requested compaction separately.
+      this.nativeCompactionSequence++;
+      if (this.qaContractReminder) { this.qaContractReminderPending = true; this.qaReminderEvent("compaction-observed"); }
       this.eventQueue.push({ kind: "session-transition", transition: "compacted" });
       this.traceLifecycle("compaction-completed", { elapsedMs: performance.now() - began });
       return { ok: true };
@@ -395,9 +468,24 @@ export class CodexAdapter implements BuilderAdapter {
     if (!this.usage?.maximum) {
       if (this.opts.allowAutoCompactionSetupTurn === false) return;
       const toolsBefore = this.observedToolCalls;
-      const setup = await this.sendTurnInternal("Rafi internal initialization only. Do not call tools or modify files. Reply briefly that the context is ready.", { purpose: "initialization", responseOnly: true });
+      const descriptor = providerWireContract(initializationOutput, "codex");
+      const instruction = renderProviderWireInstruction("Rafi internal initialization only. Do not call tools or modify files. Submit the native session-initialization result with completed payload {ready:true} and null continuity.", descriptor);
+      const session = this.sessionRef();
+      if (!session) throw new Error("Ephemeral Codex initialization requires a prepared session");
+      const id = randomUUID();
+      const tuple = selectedDispatchTupleV2({ operation: initializationOutput.operation, schemaVersion: initializationOutput.schemaVersion, schemaDigest: initializationOutput.schemaDigest,
+        provider: "codex", profile: descriptor.profile, variant: descriptor.variant, descriptorDigest: descriptor.descriptorDigest,
+        wireSchemaDigest: descriptor.wireSchemaDigest, guidanceDigest: descriptor.guidanceDigest, normalizerId: descriptor.normalizerId,
+        normalizerVersion: descriptor.normalizerVersion, maximumSchemaBytes: descriptor.maximumSchemaBytes, maximumResponseBytes: descriptor.maximumResponseBytes,
+        maximumPageBytes: descriptor.maximumPageBytes ?? null, instructionDigest: structuredDigest(instruction), actionId: id, dispatchId: id, sessionId: session.sessionId, generation: session.generation });
+      const setup = await withEphemeralInitializationDispatch(this.opts.configRoot ?? this.opts.cwd, tuple, dispatchCapability => this.sendTurn(instruction,
+        { purpose: "initialization", responseOnly: true, output: initializationOutput, dispatchId: id, logicalActionId: id, wireContract: descriptor,
+          renderedWireContractDigest: descriptor.descriptorDigest, selectedDispatch: tuple, dispatchCapability }), session);
       if (setup.isError) throw new Error(`Codex automatic-compaction setup failed: ${setup.text.slice(0, 240)}`);
       if (this.observedToolCalls !== toolsBefore) throw new Error("Codex automatic-compaction setup unexpectedly called a tool");
+      if (!setup.selectedDispatch) throw new Error("Codex initialization returned no sealed dispatch tuple");
+      const accepted = validateStructuredCandidate(initializationOutput, setup.structured, providerWireContract(initializationOutput, "codex"), setup.selectedDispatch);
+      if (accepted.result.kind !== "completed" || !accepted.result.payload.ready) throw new Error("Codex initialization did not confirm readiness");
     }
     const maximum = this.usage?.maximum;
     if (!maximum || !Number.isFinite(maximum) || maximum <= 0) {
@@ -475,6 +563,7 @@ export class CodexAdapter implements BuilderAdapter {
   private async closeInternal(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this.turnInFlight && this.turnStreamedBytes) this.writeStreamDiagnostic("interrupted", "adapter closed during an active turn");
     const child = this.process;
     let onExit: (() => void) | undefined;
     const exited = child && child.exitCode === null ? new Promise<void>(resolve => { onExit = resolve; child.once("exit", resolve); }) : Promise.resolve();
@@ -640,7 +729,14 @@ export class CodexAdapter implements BuilderAdapter {
     }
     if (!message.method) return;
     const params = message.params ?? {};
-    if (message.method === "item/started") {
+    this.structuredCollector?.ingest(message.method, params);
+    // Native receipts and tool observations must belong to the same dispatch.
+    // Foreign notifications remain unable to affect completion or evidence.
+    if (this.structuredCollector && (params.threadId && params.threadId !== this._sessionId || this.activeNativeTurnId && params.turnId && params.turnId !== this.activeNativeTurnId)) return;
+    if (message.method === "item/agentMessage/delta") {
+      if (!this.turnInFlight || params.threadId && this._sessionId && params.threadId !== this._sessionId) return;
+      this.observeAgentMessageDelta(params);
+    } else if (message.method === "item/started") {
       const item = params.item as Record<string, unknown> | undefined;
       if (item) this.eventQueue.push({ kind: "provider-item", provider: "codex", lifecycle: "started", itemType: String(item.type ?? "unknown"), payload: exactProviderItem(item), payloadCompleteness: "complete", providerTurnId: this.activeProviderTurnId, eventId: randomUUID(), observedAt: new Date().toISOString() });
       if (isCodexToolItem(item)) {
@@ -800,6 +896,48 @@ export class CodexAdapter implements BuilderAdapter {
     });
   }
 
+  /** Ask the app-server to stop a native turn; true only once its terminal is observed. */
+  private async interruptNativeTurn(nativeTurnId: string): Promise<boolean> {
+    const stopped = this.waitFor("turn/completed", params => params.threadId === this._sessionId && (params.turn as { id?: unknown } | undefined)?.id === nativeTurnId, 15_000)
+      .then(() => true, () => false);
+    try { await new OperationDeadline("Codex turn interrupt", 10_000).run(() => this.request("turn/interrupt", { threadId: this._sessionId, turnId: nativeTurnId })); }
+    catch (error) { this.traceLifecycle("turn-interrupt-failed", { method: error instanceof Error ? error.message.slice(0, 200) : "unknown" }); }
+    return stopped;
+  }
+
+  /** Streamed output is visible progress; it is never treated as a result. */
+  private observeAgentMessageDelta(params: Record<string, unknown>): void {
+    if (typeof params.delta !== "string") return;
+    this.turnStreamedBytes += Buffer.byteLength(params.delta);
+    const now = Date.now();
+    if (!this.streamStartedAt) this.streamStartedAt = now;
+    if (now - this.streamActivityAt >= 1_000) {
+      this.streamActivityAt = now;
+      this.eventQueue.push({ kind: "activity", provider: "codex", state: "writing response", detail: `${formatStreamBytes(this.turnStreamedBytes)} streamed`, transient: true });
+    }
+    if (now - (this.streamDiagnosticAt || this.streamStartedAt) >= 2_000) this.writeStreamDiagnostic("streaming");
+  }
+
+  /**
+   * Bounded interruption evidence for structured turns under .foreman (Rafi's
+   * git-excluded log directory). Diagnostic only: never read back as output.
+   */
+  private writeStreamDiagnostic(state: "streaming" | "completed" | "interrupted", detail?: string): void {
+    const collector = this.structuredCollector, nativeTurnId = this.activeNativeTurnId, threadId = this._sessionId;
+    if (!collector || !nativeTurnId || !threadId) return;
+    this.streamDiagnosticAt = Date.now();
+    try {
+      const safe = (value: string) => value.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 120);
+      const dir = join(this.opts.configRoot ?? this.opts.cwd, ".foreman", "provider-streams");
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, `codex-${safe(threadId)}-${safe(nativeTurnId)}.json`);
+      const body = { version: 1, provider: "codex", state, threadId, nativeTurnId, dispatchId: this.activeProviderTurnId, updatedAt: new Date().toISOString(),
+        ...(detail ? { detail: Buffer.from(detail).subarray(0, 2_000).toString() } : {}), ...collector.streamDiagnostic() };
+      writeFileSync(`${path}.tmp`, JSON.stringify(body, null, 2));
+      renameSync(`${path}.tmp`, path);
+    } catch { /* diagnostics cannot change execution */ }
+  }
+
   private traceLifecycle(phase: string, data: { method?: string; timeoutMs?: number; elapsedMs?: number } = {}): void {
     try { this.opts.onLifecycleTrace?.({ phase, at: new Date().toISOString(), sessionId: this._sessionId, ...data }); } catch { /* diagnostics cannot change execution */ }
   }
@@ -861,6 +999,7 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   private disconnect(error: Error): void {
+    this.structuredCollector?.fail(error);
     this.connectionGeneration++;
     for (const controller of this.approvalRequests.values()) controller.abort();
     this.approvalRequests.clear(); this.answeredApprovalRequests.clear();
@@ -950,4 +1089,8 @@ function loadSkillMarkdown(cwd: string, skill: string): string | undefined {
 
 function cumulativeDelta(before: number | undefined, after: number | undefined): number | undefined {
   return before !== undefined && after !== undefined && after >= before ? after - before : undefined;
+}
+
+function formatStreamBytes(bytes: number): string {
+  return bytes < 1024 ? `${bytes} B` : bytes < 1_048_576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1_048_576).toFixed(1)} MB`;
 }
