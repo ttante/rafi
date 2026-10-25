@@ -448,3 +448,77 @@ test("Codex short successful streams write no interruption evidence", async () =
     assert.equal(existsSync(join(root, ".foreman", "provider-streams")), false);
   } finally { await adapter.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("Codex runaway whitespace is stopped early while ordinary pretty-printed JSON is not", async () => {
+  const { CodexRunawayOutputError, CODEX_RUNAWAY_WHITESPACE_BYTES } = await import("../src/adapters/structured.js");
+  const pretty = new CodexTurnCollector("thread", true, undefined, 1_000_000);
+  pretty.bind("turn");
+  const json = JSON.stringify({ a: [{ b: { c: "d".repeat(500) } }], e: "f" }, null, 40);
+  for (const chunk of json.match(/[\s\S]{1,7}/g)!) pretty.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: chunk });
+  pretty.ingest("item/completed", { threadId: "thread", turnId: "turn", item: { id: "msg", type: "agentMessage", phase: "final_answer", text: json } });
+  pretty.ingest("turn/completed", { threadId: "thread", turn: { id: "turn", status: "completed" } });
+  await pretty.completion;
+  const runaway = new CodexTurnCollector("thread", true, undefined, 1_000_000);
+  runaway.bind("turn");
+  runaway.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: '{"a":"ok"' });
+  for (let i = 0; i < CODEX_RUNAWAY_WHITESPACE_BYTES / 16; i++) runaway.ingest("item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "msg", delta: " ".repeat(15) + "\n" });
+  await assert.rejects(runaway.completion, (error: unknown) => error instanceof CodexRunawayOutputError);
+});
+
+function runawayCodex(root: string, options: { interruptSupported: boolean; writable?: boolean }) {
+  const { adapter, transport, events, policy } = streamingCodex(root, 10_000);
+  const text = '{"version":1,"value":"ok"}';
+  const calls: string[] = [];
+  let turns = 0;
+  transport.request = async (method, ...rest: unknown[]) => {
+    calls.push(method);
+    if (method === "thread/start") return { thread: { id: "stream-thread", cwd: root } };
+    if (method === "turn/interrupt") {
+      if (!options.interruptSupported) throw new Error("unsupported method");
+      const turnId = (rest[0] as { turnId: string }).turnId;
+      setTimeout(() => transport.handle({ method: "turn/completed", params: { threadId: "stream-thread", turn: { id: turnId, status: "interrupted" } } }), 5);
+      return {};
+    }
+    if (method === "turn/start") {
+      const turnId = `native-${++turns}`;
+      setTimeout(() => {
+        if (turnId === "native-1") transport.handle({ method: "item/agentMessage/delta", params: { threadId: "stream-thread", turnId, itemId: "msg-1", delta: '{"version":1,' + " ".repeat(3_000) } });
+        else {
+          transport.handle({ method: "item/completed", params: { threadId: "stream-thread", turnId, item: { id: "msg-2", type: "agentMessage", phase: "final_answer", text } } });
+          transport.handle({ method: "turn/completed", params: { threadId: "stream-thread", turn: { id: turnId, status: "completed" } } });
+        }
+      }, 5);
+      return { turn: { id: turnId } };
+    }
+    return {};
+  };
+  const selected = policy();
+  if (options.writable) Object.assign(selected, { responseOnly: false, purpose: "implementation" });
+  return { adapter, events, calls, policy: selected };
+}
+
+test("Codex read-only runaway output is interrupted and retried once inside the same dispatch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-runaway-retry-"));
+  const { adapter, events, calls, policy } = runawayCodex(root, { interruptSupported: true });
+  try {
+    const turn = await sendTransport(adapter, "stream", policy);
+    assert.equal(turn.isError, false, turn.text);
+    assert.equal(turn.structured?.state, "candidate");
+    if (turn.structured?.state === "candidate") assert.equal(turn.structured.nativeTurnId, "native-2");
+    assert.equal(turn.turnId, "stream-dispatch");
+    assert.deepEqual(calls.filter(call => call.startsWith("turn/")), ["turn/start", "turn/interrupt", "turn/start"]);
+    assert.equal(events.filter(event => event.kind === "retry" && event.managedBy === "rafi").length, 1);
+    assert.equal(events.filter(event => event.kind === "turn-complete").length, 1, "only the accepted attempt has a terminal");
+  } finally { await adapter.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const scenario of ["writable", "interrupt-unconfirmed"] as const) test(`Codex runaway output is not retried when ${scenario}`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-runaway-no-retry-"));
+  const { adapter, calls, policy } = runawayCodex(root, { interruptSupported: scenario !== "interrupt-unconfirmed", writable: scenario === "writable" });
+  try {
+    const turn = await sendTransport(adapter, "stream", policy);
+    assert.equal(turn.isError, true);
+    assert.match(turn.text, /runaway output was stopped/);
+    assert.equal(calls.filter(call => call === "turn/start").length, 1);
+  } finally { await adapter.close(); rmSync(root, { recursive: true, force: true }); }
+});

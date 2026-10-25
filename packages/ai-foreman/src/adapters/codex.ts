@@ -17,7 +17,7 @@ import { isFastModeUnavailable, reportFastModeUnavailable } from "./fastMode.js"
 import { handoffSystemInstructions } from "../handoffProtocol.js";
 import { providerControlOperationV2, providerWireContract, renderProviderWireInstruction, initializationOutput, validateStructuredCandidate, selectedDispatchTupleV2, structuredDigest } from "rafi-spec";
 import { assertActiveProviderDispatch, withEphemeralInitializationDispatch } from "../structuredDispatchAuthority.js";
-import { CodexTurnCollector, structuredReceipt } from "./structured.js";
+import { CodexRunawayOutputError, CodexTurnCollector, structuredReceipt } from "./structured.js";
 import type { ProviderTurnPolicy } from "./types.js";
 
 export interface CodexLineResult { events: BuilderEvent[]; sessionId?: string; text?: string }
@@ -229,7 +229,7 @@ export class CodexAdapter implements BuilderAdapter {
     }
   }
 
-  private async sendTurnInternal(instruction: string, policy?: ProviderTurnPolicy): Promise<TurnResult> {
+  private async sendTurnInternal(instruction: string, policy?: ProviderTurnPolicy, runawayRetries = 0): Promise<TurnResult> {
     if (this.closed) throw new Error("builder is closed");
     this.eventQueue.push({ kind: "activity", state: "starting Codex turn", provider: "codex", model: this.opts.model });
     let turnStartDispatched = false;
@@ -256,6 +256,7 @@ export class CodexAdapter implements BuilderAdapter {
       const completion = collector ? collector.completion : this.waitFor("turn/completed", (params) => params.threadId === this._sessionId, this.providerIdleTimeoutMs(), true);
       void completion.then(clearIdle, clearIdle);
       turnStartDispatched = true;
+      const readOnlyTurn = Boolean(policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" || this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa");
       const startParams = {
         ...(wire ? { outputSchema: wire.wireSchema } : {}),
         threadId: this._sessionId,
@@ -265,7 +266,7 @@ export class CodexAdapter implements BuilderAdapter {
         effort: this.opts.effort ?? null,
         ...(this.opts.fast ? { serviceTier: this.fastTier ?? "default" } : {}),
         approvalPolicy: policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" ? "never" : this.effectiveApprovalPolicy(),
-        sandboxPolicy: policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" || this.opts.sandboxMode === "read-only" || this.opts.sessionRole === "qa"
+        sandboxPolicy: readOnlyTurn
           ? { type: "readOnly", networkAccess: false }
           : { type: "workspaceWrite", writableRoots: [this.opts.cwd], networkAccess: this.effectiveNetworkAccess() },
       };
@@ -278,7 +279,22 @@ export class CodexAdapter implements BuilderAdapter {
       }
       this.activeNativeTurnId = String((started as { turn?: { id?: string } }).turn?.id ?? "") || undefined;
       collector?.bind(this.activeNativeTurnId ?? "");
-      const params = await deadline.run(() => completion);
+      let params: Record<string, unknown>;
+      try { params = await deadline.run(() => completion); }
+      catch (error) {
+        // Runaway output is a definite provider rejection, not an unknown
+        // outcome. A read-only turn cannot change the workspace, so after the
+        // native turn is confirmed stopped it may be asked once more, inside
+        // the same sealed host dispatch. Writable turns are never retried.
+        const nativeTurnId = this.activeNativeTurnId;
+        if (error instanceof CodexRunawayOutputError && runawayRetries < 1 && readOnlyTurn && nativeTurnId && await this.interruptNativeTurn(nativeTurnId)) {
+          this.writeStreamDiagnostic("interrupted", `${error.message}; retrying once`);
+          this.traceLifecycle("runaway-output-retry", { elapsedMs: 0 });
+          this.eventQueue.push({ kind: "retry", provider: "codex", reason: error.message, attempt: 1, maximum: 1, managedBy: "rafi", retryId: nativeTurnId });
+          return this.sendTurnInternal(instruction, policy, runawayRetries + 1);
+        }
+        throw error;
+      }
       const turn = collector ? params : params.turn as Record<string, unknown> | undefined;
       const responseOnlyViolation = Boolean(policy?.responseOnly && (collector ? collector.tools : this.observedToolCalls !== toolsBefore));
       const failed = turn?.status !== "completed" || responseOnlyViolation;
@@ -878,6 +894,15 @@ export class CodexAdapter implements BuilderAdapter {
         arm();
       }
     });
+  }
+
+  /** Ask the app-server to stop a native turn; true only once its terminal is observed. */
+  private async interruptNativeTurn(nativeTurnId: string): Promise<boolean> {
+    const stopped = this.waitFor("turn/completed", params => params.threadId === this._sessionId && (params.turn as { id?: unknown } | undefined)?.id === nativeTurnId, 15_000)
+      .then(() => true, () => false);
+    try { await new OperationDeadline("Codex turn interrupt", 10_000).run(() => this.request("turn/interrupt", { threadId: this._sessionId, turnId: nativeTurnId })); }
+    catch (error) { this.traceLifecycle("turn-interrupt-failed", { method: error instanceof Error ? error.message.slice(0, 200) : "unknown" }); }
+    return stopped;
   }
 
   /** Streamed output is visible progress; it is never treated as a result. */

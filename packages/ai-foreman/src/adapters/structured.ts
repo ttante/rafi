@@ -29,6 +29,16 @@ export function structuredReceipt(contract: OutputContract, provider: "claude" |
 const STREAM_HEAD_BYTES = 65_536;
 const STREAM_TAIL_BYTES = 8_192;
 const STREAM_TEXT_ITEMS = 8;
+/** Pretty-printed JSON never needs this much consecutive whitespace. */
+export const CODEX_RUNAWAY_WHITESPACE_BYTES = 2_048;
+
+/** The provider is emitting a runaway whitespace sequence; its output can never be accepted. */
+export class CodexRunawayOutputError extends Error {
+  constructor(readonly itemId: string, readonly whitespaceBytes: number) {
+    super(`Codex streamed ${whitespaceBytes} consecutive whitespace bytes in one message; runaway output was stopped before completion`);
+    this.name = "CodexRunawayOutputError";
+  }
+}
 
 function headUtf8(text: string, maximum: number): string {
   const bytes = Buffer.from(text);
@@ -47,7 +57,7 @@ function tailUtf8(text: string, maximum: number): string {
 
 /** Bounded, non-authoritative view of one streamed agent message. */
 export interface CodexStreamItemDiagnostic {
-  itemId: string; bytes: number; deltas: number; completed: boolean;
+  itemId: string; bytes: number; deltas: number; completed: boolean; whitespaceRun: number;
   head: string; tail: string; textRetained: boolean; startedAt: string; lastDeltaAt: string;
 }
 export interface CodexStreamDiagnostic { authoritative: false; streamedBytes: number; deltas: number; items: CodexStreamItemDiagnostic[] }
@@ -127,7 +137,7 @@ export class CodexTurnCollector {
     const now = new Date().toISOString();
     let stream = this.streams.get(itemId);
     if (!stream) {
-      stream = { itemId, bytes: 0, deltas: 0, completed: false, head: "", tail: "", textRetained: true, startedAt: now, lastDeltaAt: now };
+      stream = { itemId, bytes: 0, deltas: 0, completed: false, whitespaceRun: 0, head: "", tail: "", textRetained: true, startedAt: now, lastDeltaAt: now };
       this.streams.set(itemId, stream);
       const retained = [...this.streams.values()].filter(item => item.textRetained);
       if (retained.length > STREAM_TEXT_ITEMS) { const oldest = retained[0]!; oldest.head = ""; oldest.tail = ""; oldest.textRetained = false; }
@@ -138,6 +148,9 @@ export class CodexTurnCollector {
     const headBytes = Buffer.byteLength(stream.head);
     if (headBytes < STREAM_HEAD_BYTES) stream.head += headUtf8(delta, STREAM_HEAD_BYTES - headBytes);
     stream.tail = tailUtf8(stream.tail + delta, STREAM_TAIL_BYTES);
+    const trailing = delta.length - delta.trimEnd().length;
+    stream.whitespaceRun = trailing === delta.length ? stream.whitespaceRun + bytes : Buffer.byteLength(delta.slice(delta.length - trailing));
+    if (stream.whitespaceRun >= CODEX_RUNAWAY_WHITESPACE_BYTES) return this.fail(new CodexRunawayOutputError(itemId, stream.whitespaceRun));
     if (stream.bytes > this.maximumResponseBytes) this.fail(new Error(`Codex streamed message exceeded the ${this.maximumResponseBytes}-byte result limit before completion`));
   }
   streamDiagnostic(): CodexStreamDiagnostic {
