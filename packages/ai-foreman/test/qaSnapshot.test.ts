@@ -115,6 +115,10 @@ test("committed-repository QA snapshot projects ignored vendored checkouts witho
     // Ignored only by this checkout's local exclude file, which a clone does not inherit.
     mkdirSync(join(root, "local-only"));
     writeFileSync(join(root, "local-only", "note.txt"), "local\n");
+    // A git template may install info/exclude as a symlink to a shared file;
+    // replace it rather than writing through it.
+    rmSync(join(root, ".git", "info", "exclude"), { force: true });
+    mkdirSync(join(root, ".git", "info"), { recursive: true });
     writeFileSync(join(root, ".git", "info", "exclude"), "local-only/\n");
 
     const snapshot = await createDisposableQaSnapshotAsync(root);
