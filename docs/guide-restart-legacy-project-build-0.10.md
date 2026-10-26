@@ -201,10 +201,15 @@ blockers: StarNet "reports no available agents", the live smoke needs
 - Builder shells run `zsh -lc`, and macOS `path_helper` puts
   `/usr/local/bin` (system Node 18.12.1) first whatever PATH rafi passes.
   Give the builder an explicit Node 22 path (`STARNET_NODE22=…/v22.11.0/bin/node`).
-- Tell the builder through the tracker:
-  `rafi tickets unblock T001` / `rafi tickets update T001 --next-action "<operator note>"`.
-  This changes tracker state only; the ticket definition is untouched.
-  `build:reset` clears it, so set it again after a reset.
+- Tell the builder with a scoped Manager control, then resume:
+  `rafi manager . --ask "/guide-builder <run> T001 <operator note>"`.
+  The note is queued and delivered at the builder's next safe boundary
+  (`/guide-qa` and `/guide-both` reach QA too). A blocked ticket also needs
+  `rafi tickets unblock T001`.
+  Do not rely on `rafi tickets update T001 --next-action`: it only changes
+  the tracker (`docs/ticket-progress.md`), which the builder may never read.
+  It worked once here by chance; a later resume went straight into a QA
+  handback and the builder ignored the note.
 
 **`--steps 4` admits only the tickets that are currently eligible.** Rafi
 prints `requested --steps 4; admitting 1 ticket(s). The next delivery unit
@@ -255,7 +260,7 @@ Run `25630461-…`, started with
    (`plugins/moneystation-studio`), a loopback adapter, contract tests, and an
    ADR. It blocked only because its 25s live timeout was shorter than the
    placeholder model's ~35s per task (the operator measured this).
-3. Operator: `tickets unblock` + `tickets update --next-action` (latency note,
+3. Operator: `tickets unblock` + a tracker note (latency note,
    `STARNET_LIVE_TIMEOUT_MS=180000`), then
    `resume . --run <id> --builder-network --qa-network --yes`. Resume reused
    the exact builder session and the carried-forward plan approval.
