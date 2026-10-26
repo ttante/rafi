@@ -11,7 +11,7 @@ import { durableReadOnlyProposal } from "../readOnlyProposal.js";
 import { captureFrozenQaSource } from "../qaSnapshot.js";
 import { finishStartAdmission, superviseStart, supervisedRunId } from "../supervisedStart.js";
 import { assertBuildAssignmentReconciled, isInterruptedBuilderRecovery, assertInterruptedSourceSnapshot } from "../buildAssignment.js";
-import { durableHumanDecision, HumanDecisionRequired, HumanDecisionCancelled, servicePendingHumanDecisions } from "../humanDecision.js";
+import { durableHumanDecision, HumanDecisionRequired, HumanDecisionCancelled, reusableCapabilityDecision, servicePendingHumanDecisions } from "../humanDecision.js";
 import { requiresBuildApproval, buildScopeRevision, createBuildApprovalGate, validatePlanApprovalBinding, validateFrozenWorkApprovalBinding } from "../buildApproval.js";
 import { Command, Option } from "commander";
 import { accent, error, sanitizeTerminalText, success, warning } from "../terminalStyle.js";
@@ -601,6 +601,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
     .option("--ticket <id>", "select one new ticket, or identify recovery tickets with --resume/--continue/--recover-run", collectTicket, [])
     .option("--skip-delivery-unit <id>", "skip one unfinished delivery unit for this run", collectTicket, [])
     .action(async (project: string, opts, command: Command) => withBuildInvocation(async () => {
+      let waitingForDecision = false;
       try { validateStartOptions(opts, false); } catch (error) { fail((error as Error).message); }
       if (opts.dirtyWork) { opts.branchPerTicket = true; opts.completion = "none"; opts.keepWorktrees = true; }
       const requestedTicketIds = (opts.ticket as string[] | undefined) ?? [];
@@ -667,14 +668,15 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       // requested by flag. A resumed run counts only an explicit --yes.
       const explicitYes = recoveryRecord ? recoveryRecord.recoveryDecision?.planUpdateApprovalSource === "explicit-yes" : Boolean(opts.yes);
       let grantedNetwork = false;
+      let networkDecisionId: string | undefined;
       if (requestedNetwork && explicitYes) {
         grantedNetwork = true;
         console.error("foreman: builder internet for this build approved by --yes (requested with --builder-network)");
       } else if (requestedNetwork) {
         const permissionDb = new WorkflowDb(cwd);
         let networkKey: string;
-        try { networkKey = permissionDb.pendingHumanDecisions(supervisedInvocationId).find(decision => decision.interruptionId.startsWith("builder-network:"))?.interruptionId ?? `builder-network:${process.pid}:${randomUUID()}`; } finally { permissionDb.close(); }
-        const networkDecision = await durableHumanDecision({ projectDir: cwd, runId: supervisedInvocationId, key: networkKey,
+        try { networkKey = reusableCapabilityDecision(permissionDb, supervisedInvocationId, "builder-network:", recoveryRecord?.builderCapabilities?.decisionId) ?? `builder-network:${process.pid}:${randomUUID()}`; } finally { permissionDb.close(); }
+        const networkDecision = await durableHumanDecision({ projectDir: cwd, runId: supervisedInvocationId, key: networkKey, onAnswered: decision => { networkDecisionId = decision.decisionId; },
           prompt: "Allow the builder shell to access the internet for this build? This permits network use by any builder command, not only downloads. Workspace write confinement remains enforced. QA stays offline unless --qa-network is separately approved. Recovery requires approval again unless resumed with --yes.",
           choices: [{ id: "allow-network", label: "Allow builder internet for this build" }, { id: "stay-offline", label: "Stay offline and use a verified local bundle" }],
           operation: async () => {
@@ -684,19 +686,20 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         if (networkDecision === undefined || isCancel(networkDecision)) return;
         grantedNetwork = networkDecision === "allow-network";
       }
-      const builderCapabilities = { requestedNetwork, grantedNetwork, ...(grantedNetwork ? { approvedAt: new Date().toISOString(), grantWorkerPid: process.pid } : {}) };
+      const builderCapabilities = { requestedNetwork, grantedNetwork, ...(grantedNetwork ? { approvedAt: new Date().toISOString(), grantWorkerPid: process.pid } : {}), ...(networkDecisionId ? { decisionId: networkDecisionId } : {}) };
       // Independent QA is offline unless the operator grants --qa-network, e.g.
       // so QA can verify a live local service the ticket requires.
       const requestedQaNetwork = Boolean(opts.qaNetwork || recoveryRecord?.qaCapabilities?.requestedNetwork);
       let grantedQaNetwork = false;
+      let qaNetworkDecisionId: string | undefined;
       if (requestedQaNetwork && explicitYes) {
         grantedQaNetwork = true;
         console.error("foreman: QA network for this build approved by --yes (requested with --qa-network)");
       } else if (requestedQaNetwork) {
         const permissionDb = new WorkflowDb(cwd);
         let qaNetworkKey: string;
-        try { qaNetworkKey = permissionDb.pendingHumanDecisions(supervisedInvocationId).find(decision => decision.interruptionId.startsWith("qa-network:"))?.interruptionId ?? `qa-network:${process.pid}:${randomUUID()}`; } finally { permissionDb.close(); }
-        const qaNetworkDecision = await durableHumanDecision({ projectDir: cwd, runId: supervisedInvocationId, key: qaNetworkKey,
+        try { qaNetworkKey = reusableCapabilityDecision(permissionDb, supervisedInvocationId, "qa-network:", recoveryRecord?.qaCapabilities?.decisionId) ?? `qa-network:${process.pid}:${randomUUID()}`; } finally { permissionDb.close(); }
+        const qaNetworkDecision = await durableHumanDecision({ projectDir: cwd, runId: supervisedInvocationId, key: qaNetworkKey, onAnswered: decision => { qaNetworkDecisionId = decision.decisionId; },
           prompt: "Allow independent QA shell commands to access the network for this build? This lets QA run live checks (for example against a local service). QA keeps a read-only workspace. Recovery requires approval again unless resumed with --yes.",
           choices: [{ id: "allow-qa-network", label: "Allow QA network for this build" }, { id: "qa-offline", label: "Keep QA offline" }],
           operation: async () => {
@@ -706,7 +709,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         if (qaNetworkDecision === undefined || isCancel(qaNetworkDecision)) return;
         grantedQaNetwork = qaNetworkDecision === "allow-qa-network";
       }
-      const qaCapabilities = { requestedNetwork: requestedQaNetwork, grantedNetwork: grantedQaNetwork, ...(grantedQaNetwork ? { approvedAt: new Date().toISOString() } : {}) };
+      const qaCapabilities = { requestedNetwork: requestedQaNetwork, grantedNetwork: grantedQaNetwork, ...(grantedQaNetwork ? { approvedAt: new Date().toISOString() } : {}), ...(qaNetworkDecisionId ? { decisionId: qaNetworkDecisionId } : {}) };
       const readinessOwner = { project: cwd, runId: supervisedInvocationId, authority: localBuildAuthority(cwd)! };
       const autoApprovePlanUpdates = recoveryRecord
         ? recoveryRecord.recoveryDecision?.planUpdateApproval === "auto"
@@ -2861,12 +2864,17 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         if (error instanceof HumanDecisionCancelled) { console.log("ai-foreman: cancelled"); return; }
         if (!(error instanceof HumanDecisionRequired)) throw error;
         console.error(error.message);
-        process.exitCode = 2;
+        waitingForDecision = true;
       } finally {
         finishStartAdmission(cwd, supervisedInvocationId);
       }
+      // Exit explicitly: supervisor IPC, heartbeats and runtime handles keep a
+      // supervised worker alive, so it would otherwise wait forever while its
+      // supervisor waits for it, and `rafi resume` refuses the "live" owner.
+      if (waitingForDecision) process.exit(2);
     }));
 }
+
 
 function ticketSizeBucket(projectDir: string, ticketIds: readonly string[]): string | undefined {
   if (!ticketIds.length || !isTicketsInitialized(projectDir)) return undefined;

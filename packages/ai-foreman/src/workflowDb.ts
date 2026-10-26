@@ -1394,6 +1394,12 @@ export class WorkflowDb {
       .map((row) => parseJson(row.decision_json) as PendingHumanDecision);
   }
 
+  /** Answered decisions for a run, oldest first (e.g. answered with build:decide while no worker waited). */
+  answeredHumanDecisions(runId: string): PendingHumanDecision[] {
+    return (this.db.prepare("SELECT decision_json FROM human_decisions WHERE run_id=? AND status='answered' ORDER BY created_at").all(runId) as Array<{ decision_json: string }>)
+      .map((row) => parseJson(row.decision_json) as PendingHumanDecision);
+  }
+
   decisionContinuationAvailable(runId: string, decisionId: string): boolean {
     const prior = this.operations(runId).filter(op => op.kind === "decision-continuation" && (op.intent as { decisionId?: string }).decisionId === decisionId);
     return prior.every(op => op.status === "failed" && (op.result as { dispatchState?: string } | undefined)?.dispatchState === "not-sent");
