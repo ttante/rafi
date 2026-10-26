@@ -109,9 +109,15 @@ test("committed-repository QA snapshot projects ignored vendored checkouts witho
     writeFileSync(join(root, ".gitignore"), "vendor/\n");
     writeFileSync(join(root, "app.txt"), "builder source\n");
     git(root, "add", "."); git(root, "commit", "-qm", "initial");
-    mkdirSync(join(root, "vendor", "upstream"), { recursive: true });
-    git(join(root, "vendor", "upstream"), "init", "-q");
-    writeFileSync(join(root, "vendor", "upstream", "README.md"), "pinned upstream\n");
+    const upstream = join(root, "vendor", "upstream");
+    mkdirSync(join(upstream, "node_modules", "dep"), { recursive: true });
+    git(upstream, "init", "-q");
+    git(upstream, "config", "user.email", "qa@example.invalid");
+    git(upstream, "config", "user.name", "QA Test");
+    writeFileSync(join(upstream, ".gitignore"), "node_modules/\n");
+    writeFileSync(join(upstream, "README.md"), "pinned upstream\n");
+    git(upstream, "add", "."); git(upstream, "commit", "-qm", "upstream pin");
+    const pin = git(upstream, "rev-parse", "HEAD");
     // Ignored only by this checkout's local exclude file, which a clone does not inherit.
     mkdirSync(join(root, "local-only"));
     writeFileSync(join(root, "local-only", "note.txt"), "local\n");
@@ -125,6 +131,8 @@ test("committed-repository QA snapshot projects ignored vendored checkouts witho
     try {
       assert.notEqual(snapshot.frozenState.head, "unavailable");
       assert.equal(readFileSync(join(snapshot.path, "vendor", "upstream", "README.md"), "utf8"), "pinned upstream\n");
+      // The nested checkout keeps its own identity; a nested node_modules must not shadow it.
+      assert.equal(git(join(snapshot.path, "vendor", "upstream"), "rev-parse", "HEAD"), pin);
       assert.equal(existsSync(join(snapshot.path, "local-only")), false);
       assert.deepEqual(await snapshot.qaChanges(), []);
     } finally {
