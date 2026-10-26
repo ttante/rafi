@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -90,6 +90,39 @@ test("async disposable QA snapshot supports an initialized repository with no co
       assert.deepEqual(await snapshot.qaChanges(), []);
       writeFileSync(join(snapshot.path, "app.txt"), "QA changed it\n");
       assert.deepEqual(await snapshot.qaChanges(), ["app.txt"]);
+    } finally {
+      await snapshot.remove();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("committed-repository QA snapshot projects ignored vendored checkouts without reporting them as QA edits", async () => {
+  // Regression: MoneyTree's ignored vendor/starnet checkout was visible to QA
+  // only while the project had no commit; after the first commit QA lost it.
+  const root = mkdtempSync(join(tmpdir(), "rafi-qa-vendor-test-"));
+  try {
+    git(root, "init", "-q");
+    git(root, "config", "user.email", "qa@example.invalid");
+    git(root, "config", "user.name", "QA Test");
+    writeFileSync(join(root, ".gitignore"), "vendor/\n");
+    writeFileSync(join(root, "app.txt"), "builder source\n");
+    git(root, "add", "."); git(root, "commit", "-qm", "initial");
+    mkdirSync(join(root, "vendor", "upstream"), { recursive: true });
+    git(join(root, "vendor", "upstream"), "init", "-q");
+    writeFileSync(join(root, "vendor", "upstream", "README.md"), "pinned upstream\n");
+    // Ignored only by this checkout's local exclude file, which a clone does not inherit.
+    mkdirSync(join(root, "local-only"));
+    writeFileSync(join(root, "local-only", "note.txt"), "local\n");
+    writeFileSync(join(root, ".git", "info", "exclude"), "local-only/\n");
+
+    const snapshot = await createDisposableQaSnapshotAsync(root);
+    try {
+      assert.notEqual(snapshot.frozenState.head, "unavailable");
+      assert.equal(readFileSync(join(snapshot.path, "vendor", "upstream", "README.md"), "utf8"), "pinned upstream\n");
+      assert.equal(existsSync(join(snapshot.path, "local-only")), false);
+      assert.deepEqual(await snapshot.qaChanges(), []);
     } finally {
       await snapshot.remove();
     }

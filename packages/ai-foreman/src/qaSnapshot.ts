@@ -504,7 +504,9 @@ function projectDependencyTrees(sourceRoot: string, reviewRoot: string, uncommit
     mkdirSync(dirname(target), { recursive: true });
     symlinkSync(source, target, "dir");
   }
-  if (!uncommitted) return;
+  // Ignored top-level directories (vendored checkouts, runtimes) are also
+  // environment. A committed clone links one only when the clone ignores it
+  // too, so the link never appears as an untracked QA edit.
   for (const entry of readdirSync(sourceRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || [".git", ".rafi", ".foreman", "node_modules"].includes(entry.name)) continue;
     const source = join(sourceRoot, entry.name);
@@ -512,6 +514,7 @@ function projectDependencyTrees(sourceRoot: string, reviewRoot: string, uncommit
     if (existsSync(target)) continue;
     const ignored = spawnSync("git", ["-C", sourceRoot, "check-ignore", "-q", "--", entry.name]).status === 0;
     if (!ignored) continue;
+    if (!uncommitted && spawnSync("git", ["-C", reviewRoot, "check-ignore", "-q", "--", entry.name]).status !== 0) continue;
     symlinkSync(source, target, "dir");
   }
 }
