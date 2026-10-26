@@ -97,6 +97,10 @@
       "types": "./dist/recoveryOwners.d.ts",
       "default": "./dist/recoveryOwners.js"
     },
+    "./runtime-preflight.js": {
+      "types": "./dist/runtimePreflight.d.ts",
+      "default": "./dist/runtimePreflight.js"
+    },
     "./process-identity.js": {
       "types": "./dist/processIdentity.d.ts",
       "default": "./dist/processIdentity.js"

@@ -15,7 +15,7 @@
   },
   "homepage": "https://github.com/ttante/rafi#readme",
   "bin": {
-    "rafi": "dist/index.js"
+    "rafi": "dist/launcher.js"
   },
   "exports": {
     ".": {

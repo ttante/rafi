@@ -13,6 +13,7 @@ import { WorkflowReader } from "../workflowReader.js";
 import { WorkflowDb } from "../workflowDb.js";
 import { error, success, warning } from "../terminalStyle.js";
 import { readInterviewRecords } from "../interviews.js";
+import { checkRuntimeEnvironment } from "../runtimePreflight.js";
 
 const PACKAGE_VERSION = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -53,7 +54,7 @@ export function buildDoctorCommand(): Command {
         console.log(`${warning("--")} ${label}${detail ? ` — ${detail}` : ""}`);
       };
 
-      report(Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10) >= 20, "node >=20", process.version);
+      for (const check of checkRuntimeEnvironment()) report(check.ok, check.label, check.fix ? `${check.detail}; fix: ${check.fix}` : check.detail);
       report(Boolean(PACKAGE_VERSION), "foreman package version", PACKAGE_VERSION);
       report(existsSync(cwd), "project directory exists", cwd);
       if (!existsSync(cwd)) process.exit(1);

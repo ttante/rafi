@@ -1173,12 +1173,15 @@ export async function runRafiCli(argv = process.argv): Promise<void> {
   await withActivityContext(command, () => program.parseAsync(argv));
 }
 
-if (isDirectCliEntrypoint()) {
+/** Run the CLI and map failures to exit codes (used by the launcher and direct runs). */
+export function startRafiCli(): void {
   runRafiCli().catch((err) => {
     console.error(`${errorText("rafi:", { stream: process.stderr })} ${err instanceof Error ? err.message : String(err)}`);
     process.exit(err instanceof Error && err.name === "HumanDecisionRequired" ? 2 : 1);
   });
 }
+
+if (isDirectCliEntrypoint()) startRafiCli();
 
 function configureHelpWidth(command: Command, width: number): void {
   command.configureHelp({ helpWidth: width });
