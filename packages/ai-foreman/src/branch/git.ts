@@ -1,3 +1,4 @@
+import { ensureLocalGitExcludes } from "../gitExclude.js";
 import { invalidateGraphWorkspace } from "../graph/lifecycle.js";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -55,11 +56,7 @@ export function ensureCleanBaseWorktree(cwd: string, opts: BaseWorktreeCleanOpti
 }
 
 export function ensureForemanExcluded(cwd: string): void {
-  const excludePath = join(cwd, ".git", "info", "exclude");
-  if (!existsSync(excludePath)) return;
-  const line = ".foreman/";
-  if (readFileSync(excludePath, "utf8").split(/\r?\n/).includes(line)) return;
-  appendFileSync(excludePath, `\n${line}\n`, "utf8");
+  ensureLocalGitExcludes(cwd, [".foreman/"], { leadingBlankLine: true });
 }
 
 export function createTicketWorktree(

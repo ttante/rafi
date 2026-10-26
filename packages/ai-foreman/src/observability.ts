@@ -1,3 +1,4 @@
+import { ensureLocalGitExcludes } from "./gitExclude.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statfsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -911,10 +912,5 @@ function unionMs(intervals: number[][]): number {
   return total + (start === undefined ? 0 : end - start);
 }
 function ensureObservabilityIgnore(projectDir: string): void {
-  const localExclude = join(projectDir, ".git", "info", "exclude");
-  const path = existsSync(localExclude) ? localExclude : join(projectDir, ".gitignore");
-  const entries = [OBSERVABILITY_DB_FILE, `${OBSERVABILITY_DB_FILE}-wal`, `${OBSERVABILITY_DB_FILE}-shm`];
-  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-  const missing = entries.filter(entry => !existing.split(/\r?\n/).includes(entry));
-  if (missing.length) appendFileSync(path, `${existing && !existing.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`, "utf8");
+  ensureLocalGitExcludes(projectDir, [OBSERVABILITY_DB_FILE, `${OBSERVABILITY_DB_FILE}-wal`, `${OBSERVABILITY_DB_FILE}-shm`], { fallbackToGitignore: true });
 }

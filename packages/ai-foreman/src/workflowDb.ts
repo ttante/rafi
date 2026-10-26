@@ -1,3 +1,4 @@
+import { ensureLocalGitExcludes } from "./gitExclude.js";
 import { persistedProviderWireContract } from "rafi-spec";
 import { verifyCheckpointOrigin, verifyContinuityHeads, type CheckpointOrigin } from "./continuityOrigin.js";
 import { registerQaGraphJournalWriter, ensureQaGraphJournalGuards } from "./qaDeliveryJournal.js";
@@ -3692,9 +3693,5 @@ function leaseVerifiedLive(lease: ProjectLease, now: Date, staleMs: number): boo
   return classifyProcess(lease.pid, lease.processStart, lease.host).state !== "dead";
 }
 function ensureRecoveryGitignore(projectDir: string): void {
-  const localExclude = join(projectDir, ".git", "info", "exclude");
-  const path = existsSync(localExclude) ? localExclude : join(projectDir, ".gitignore");
-  const entries = [WORKFLOW_DB_FILE, `${WORKFLOW_DB_FILE}-wal`, `${WORKFLOW_DB_FILE}-shm`, ".rafi/cache/handoffs/", ".rafi/backups/work-admission-v4/"];
-  const existing = existsSync(path) ? readFileSync(path, "utf8") : ""; const missing = entries.filter((entry) => !existing.split(/\r?\n/).includes(entry));
-  if (missing.length) appendFileSync(path, `${existing && !existing.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`, "utf8");
+  ensureLocalGitExcludes(projectDir, [WORKFLOW_DB_FILE, `${WORKFLOW_DB_FILE}-wal`, `${WORKFLOW_DB_FILE}-shm`, ".rafi/cache/handoffs/", ".rafi/backups/work-admission-v4/"], { fallbackToGitignore: true });
 }
