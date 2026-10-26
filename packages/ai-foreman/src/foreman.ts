@@ -196,6 +196,16 @@ export function buildPrimer(n: number, trackerPath?: string, ticketsEnabled = fa
   const preferredTicketRule = preferredTicketId
     ? `\n- Resume and finish ticket ${preferredTicketId} first. Do not substitute a different queued ticket.`
     : "";
+  // With structured tickets the host assigns one whole ticket per step and QA
+  // reviews that ticket after the turn, so "step" must never mean a sub-task.
+  if (ticketsEnabled) return `You are being run by an automated foreman. We will work through up to ${n} assigned tickets, one complete ticket per turn.
+
+Rules:
+- Implement the ENTIRE assigned ticket this turn: every acceptance criterion and required test. Do not split it into sub-steps across turns; independent QA reviews the whole ticket as soon as you report.
+- Return the result using the selected native JSON output contract.
+- If a tool action is denied by foreman policy, do not retry the denied form; report it using the blocked result. The one exception is a required test that you changed by adding a pipe, redirection, substitution, or wrapper: retry the exact required-test command without that extra shell syntax before reporting it blocked.${trackerRule}${preferredTicketRule}
+
+This is ticket 1 of up to ${n} in this batch. Implement the assigned ticket completely now.`;
   return `You are being run by an automated foreman. We will work through your next ${n} tickets or implementation steps, one per turn.
 
 Rules:
@@ -207,7 +217,8 @@ This is step 1 of ${n}. Implement the next ticket or step now.`;
 }
 
 /** Instruction sent on turns 2–N. */
-export function buildNextStepInstruction(i: number, n: number): string {
+export function buildNextStepInstruction(i: number, n: number, ticketsEnabled = false): string {
+  if (ticketsEnabled) return `Implement the assigned ticket completely now — every acceptance criterion and required test, not a sub-step. This is ticket ${i} of up to ${n} in this batch; independent QA reviews the whole ticket when you report. Return the completed work-report through the selected native JSON contract.`;
   return `Implement the next ticket or step now (exactly one) — this is step ${i} of ${n}. Return the completed work-report through the selected native JSON contract.`;
 }
 
@@ -239,13 +250,14 @@ Fix every one of them now. Submit the selected native remediation result so Fore
 }
 
 /** Pre-flight planning turn: ask the builder to list its next N steps without implementing anything. */
-export function buildPlanningTurn(n: number, ticketsContent?: string, preferredTicketId?: string): string {
+export function buildPlanningTurn(n: number, ticketsContent?: string, preferredTicketId?: string, ticketsEnabled = false): string {
   const header = ticketsContent
     ? `Here is the project's ticket list:\n\n${ticketsContent}\n\n`
     : "";
   const preferred = preferredTicketId
     ? ` The first item must be ticket ${preferredTicketId}; this is an interrupted ticket being resumed.`
     : "";
+  if (ticketsEnabled) return `${header}Before we begin, list up to ${n} ticket(s) you plan to implement, in dependency order, one entry per complete ticket.${preferred} Never split one ticket into several entries; each entry is implemented and independently reviewed as a whole ticket. A ticket whose dependencies are earlier entries in your list may be included. List fewer than ${n} if fewer can be built. Do not implement anything yet; return the ordered tickets through the build-preflight response.`;
   return `${header}Before we begin, list the next ${n} ticket(s) or step(s) you plan to implement, in order.${preferred} Be specific — reference ticket IDs or titles where applicable. Do not implement anything yet; return the ordered steps through the build-preflight response.`;
 }
 
@@ -607,7 +619,7 @@ export class Foreman {
   /** Send a planning turn and return the builder's response text. Does not count toward steps. */
   async runPreflight(n: number, ticketsContent?: string, preferredTicketId?: string, executionTickets?: readonly string[]): Promise<string> {
     this.assertNotInterrupted();
-    const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId) + (executionTickets ? `\nAuthorized ticket scope: ${executionTickets.join(", ")}. Plan only these tickets. Tickets awaiting answers are not eligible for implementation.` : "");
+    const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId, this.ticketsEnabled) + (executionTickets ? `\nAuthorized ticket scope: ${executionTickets.join(", ")}. Plan only these tickets. Tickets awaiting answers are not eligible for implementation.` : "");
     if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, instruction);
     this.assertNotInterrupted();
     const policy = nativePolicy(preflightOutput, { purpose: "planning", journalRunId: this.qaRunId });
@@ -978,7 +990,7 @@ export class Foreman {
       // have no preflight still receive the primer for compatibility.
       let instruction = i === 1 && !this.preflightPlan
         ? buildPrimer(n, trackerPath, this.ticketsEnabled, pendingTicketId)
-        : buildNextStepInstruction(i, n);
+        : buildNextStepInstruction(i, n, this.ticketsEnabled);
       if (pendingTicketId) instruction += `\n\nAssigned ticket: ${pendingTicketId}. Implement exactly this ticket. Do not substitute another ticket. Return the native work report for this assigned ticket.`;
       const continuations = answered.filter(decision => decision.interruptionId === `ticket:${pendingTicketId}`);
       const continuationKeys: string[] = [];

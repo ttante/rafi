@@ -13,6 +13,7 @@ import {
   buildQaFixInstruction,
   buildPlanningTurn,
   buildPrimer,
+  buildNextStepInstruction,
 } from "../src/foreman.js";
 
 const CWD = "/work/project";
@@ -375,4 +376,23 @@ test("buildPrimer anchors turn 1 explicitly to fix off-by-one counting", () => {
 test("recovery instructions pin planning and implementation to one ticket", () => {
   assert.match(buildPlanningTurn(1, undefined, "T002"), /first item must be ticket T002/);
   assert.match(buildPrimer(1, undefined, true, "T002"), /Resume and finish ticket T002 first/);
+});
+
+test("structured-ticket batches count whole tickets, never sub-steps of one ticket", () => {
+  // Regression: "step 1 of 4" plus a preflight that split T001 into four parts
+  // led the builder to do inspection only, and whole-ticket QA then failed.
+  const plan = buildPlanningTurn(4, "tickets...", undefined, true);
+  assert.match(plan, /one entry per complete ticket/);
+  assert.match(plan, /Never split one ticket into several entries/);
+  assert.doesNotMatch(plan, /step\(s\)/);
+  const primer = buildPrimer(4, "docs/ticket-progress.md", true);
+  assert.match(primer, /ENTIRE assigned ticket/);
+  assert.match(primer, /ticket 1 of up to 4/);
+  assert.doesNotMatch(primer, /step 1 of/);
+  const next = buildNextStepInstruction(2, 4, true);
+  assert.match(next, /ticket 2 of up to 4/);
+  assert.match(next, /not a sub-step/);
+  // Unstructured batches keep the generic ticket-or-step wording.
+  assert.match(buildNextStepInstruction(2, 4), /ticket or step now \(exactly one\) — this is step 2 of 4/);
+  assert.match(buildPlanningTurn(4), /ticket\(s\) or step\(s\)/);
 });
