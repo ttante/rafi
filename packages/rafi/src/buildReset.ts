@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Command } from "commander";
 import { resetTickets } from "ai-foreman/tickets/reset.js";
-import { WorkflowDb } from "ai-foreman/workflow-db.js";
+import { readRecoveryOwners } from "ai-foreman/recovery-owners.js";
 import { classifyProcess } from "ai-foreman/process-identity.js";
 
 /**
@@ -13,20 +13,12 @@ import { classifyProcess } from "ai-foreman/process-identity.js";
 export function resetBuildState(projectDir: string, now = new Date()): { archiveDir: string; tickets: string[] } {
   const root = resolve(projectDir);
   const dbPath = join(root, ".rafi", "recovery.sqlite3");
-  const workflow = new WorkflowDb(root);
-  try {
-    const admission = workflow.buildAdmission();
-    if (admission && classifyProcess(admission.pid, admission.processStart, admission.host).state !== "dead") {
-      throw new Error(`cannot reset while a live or unverified Rafi process owns the project (run ${admission.runId})`);
+  // Inspect owners without migrating: a database written by an older Rafi
+  // cannot be opened as a writer while it still holds a dead build's admission.
+  for (const owner of readRecoveryOwners(dbPath)) {
+    if (owner.pid === null || classifyProcess(owner.pid, owner.processStart, owner.host).state !== "dead") {
+      throw new Error(`cannot reset while a live or unverified Rafi process owns the project (${owner.source} pid ${owner.pid ?? "unknown"}, run ${owner.runId})`);
     }
-    for (const run of workflow.resumableRuns("build")) {
-      const supervisor = workflow.supervisorState(run.runId);
-      if (supervisor?.status === "running" && supervisor.pid && classifyProcess(supervisor.pid, supervisor.processStart).state !== "dead") {
-        throw new Error(`cannot reset while supervisor ${supervisor.pid} for run ${run.runId} is live or unverified`);
-      }
-    }
-  } finally {
-    workflow.close();
   }
 
   const stamp = now.toISOString().replaceAll(/[^0-9A-Za-z-]/g, "-");

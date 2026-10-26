@@ -93,6 +93,10 @@
       "types": "./dist/workflowReader.d.ts",
       "default": "./dist/workflowReader.js"
     },
+    "./recovery-owners.js": {
+      "types": "./dist/recoveryOwners.d.ts",
+      "default": "./dist/recoveryOwners.js"
+    },
     "./process-identity.js": {
       "types": "./dist/processIdentity.d.ts",
       "default": "./dist/processIdentity.js"
