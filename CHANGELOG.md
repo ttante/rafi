@@ -6,6 +6,31 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+## @rafi-ai/cli 0.10.1 / ai-foreman 2.0.1 / special-agents 0.9.1 / rafi-spec 0.9.1 - 2026-10-26
+
+**Changes**
+
+- `--yes` now means fully hands-off: it never stops to ask, approves the implementation plan and plan updates, and grants the capabilities requested by flag (`--builder-network`, `--qa-network`).
+- New `--qa-network` flag for `start` and `resume`: gives independent QA shell network access for one build, recorded as a durable decision (`qaCapabilities`). Supported for Codex and Claude QA.
+- In ticket mode, one step is one whole ticket. The builder is told to finish its entire assigned ticket instead of spending a step on inspection.
+- New preflight launcher: `rafi` now reports an unsupported Node version or a mismatched/unloadable native SQLite module with a fix, instead of an opaque crash. `rafi doctor` shows the same checks. `RAFI_SKIP_RUNTIME_PREFLIGHT=1` bypasses it.
+- Added a guide for restarting a pre-0.10 project's build: `docs/guide-restart-legacy-project-build-0.10.md`.
+
+**Fixes**
+
+- `build:reset` works on projects whose recovery database predates 0.10: it inspects running owners read-only instead of migrating first, and a stale admission no longer blocks the reset.
+- `build:reset` carries the current plan's completed approval forward, so `resume` no longer refuses with "current plan has no matching completed host approval".
+- A worker that needs a human answer now exits (code 2) instead of hanging when nobody is attached; answers given with `build:decide` are reused on resume.
+- QA snapshots now include ignored vendored checkouts (for example `vendor/<repo>`) and link them before nested `node_modules`.
+- Rafi no longer writes its ignore entries through a `.git/info/exclude` that a git template symlinked to a shared file; the link is replaced by a repository-local copy first.
+
+**Versions**
+
+- Bumped `rafi-spec` to `0.9.1` (adds `qaCapabilities` and `builderCapabilities.decisionId`).
+- Bumped `special-agents` to `0.9.1` with its exact `rafi-spec@0.9.1` dependency.
+- Bumped `ai-foreman` to `2.0.1` with its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.10.1` with its exact `ai-foreman@2.0.1`, `rafi-spec@0.9.1`, and `special-agents@0.9.1` dependencies.
+
 ## @rafi-ai/cli 0.10.0 / ai-foreman 2.0.0 / special-agents 0.9.0 / rafi-spec 0.9.0 - 2026-10-25
 
 **Breaking changes**
