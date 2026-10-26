@@ -206,14 +206,16 @@ Options:
   --id <id>               saved interview id (or unique prefix) to resume
   --discard <id>          discard a saved interview id (or unique prefix)
   --ticket <id>           narrow mutation scope to one ticket while retaining run-wide context
-  --builder-network       request separately approved builder internet access for this resumed
-                          build
+  --builder-network       request builder internet access for this resumed build; asks for approval
+                          unless --yes
+  --qa-network            allow independent QA network access for this resumed build; asks for
+                          approval unless --yes
   --builder-approvals     allow explicit per-operation builder sandbox approval requests; QA stays
                           restricted
   --qa-revision <number>  exact durable QA protocol revision to resume
   --inspect               show recovery state and planned actions without mutation
-  --yes                   auto-approve the implementation plan and later plan updates for this
-                          resumed process
+  --yes                   never stop to ask: approve the implementation plan, plan updates, and
+                          capabilities requested by flag for this resumed process
   --no                    review the implementation plan and later plan updates for this resumed
                           process
   --fresh-with-handoff    start a genuinely fresh session from validated cumulative context
@@ -752,7 +754,9 @@ Options:
   --continue                           resume the most recent logged session for this project
   -t, --tickets <path>                 path to ticket file (.md, .txt, .yaml, …) — passed to the
                                        builder as context
-  -y, --yes                            skip pre-flight confirmation prompt
+  -y, --yes                            never stop to ask: approve the pre-flight plan, plan
+                                       updates, and capabilities requested by flag
+                                       (--builder-network, --qa-network)
   --effort <level>                     reasoning effort level (low|medium|high|xhigh)
   --fast                               use native fast mode when available; keep the model and
                                        reasoning settings
@@ -788,8 +792,11 @@ Options:
   --auto-compact-threshold <percent>   initial Builder context compaction threshold (1-99)
   --max-branch-depth <n>               maximum selected branch stack depth (default: "5")
   --pr-ready                           create ready-for-review PRs instead of draft PRs
-  --builder-network                    request build-scoped builder internet access with separate
-                                       explicit approval; rechecked on resume
+  --builder-network                    request build-scoped builder internet access; asks for
+                                       approval unless --yes; rechecked on resume
+  --qa-network                         allow independent QA network access for this build (e.g.
+                                       live local services); asks for approval unless --yes;
+                                       rechecked on resume
   --builder-approvals                  allow the builder to request explicit per-operation sandbox
                                        approvals; QA stays restricted
   --keep-worktrees                     keep successful ticket worktrees for inspection
@@ -937,7 +944,10 @@ Options:
                                        for this project
   -t, --tickets <path>                 path to ticket file (.md, .txt, .yaml,
                                        …) — passed to the builder as context
-  -y, --yes                            skip pre-flight confirmation prompt
+  -y, --yes                            never stop to ask: approve the
+                                       pre-flight plan, plan updates, and
+                                       capabilities requested by flag
+                                       (--builder-network, --qa-network)
   --effort <level>                     reasoning effort level
                                        (low|medium|high|xhigh)
   --fast                               use native fast mode when available;
@@ -988,7 +998,11 @@ Options:
   --pr-ready                           create ready-for-review PRs instead of
                                        draft PRs
   --builder-network                    request build-scoped builder internet
-                                       access with separate explicit approval;
+                                       access; asks for approval unless --yes;
+                                       rechecked on resume
+  --qa-network                         allow independent QA network access for
+                                       this build (e.g. live local services);
+                                       asks for approval unless --yes;
                                        rechecked on resume
   --builder-approvals                  allow the builder to request explicit
                                        per-operation sandbox approvals; QA
@@ -1055,14 +1069,16 @@ Arguments:
 Options:
   --run <id>              run ID or unique prefix
   --ticket <id>           narrow mutation scope to one ticket while retaining run-wide context
-  --builder-network       request separately approved builder internet access for this resumed
-                          build
+  --builder-network       request builder internet access for this resumed build; asks for approval
+                          unless --yes
+  --qa-network            allow independent QA network access for this resumed build; asks for
+                          approval unless --yes
   --builder-approvals     allow explicit per-operation builder sandbox approval requests; QA stays
                           restricted
   --qa-revision <number>  exact durable QA protocol revision to resume
   --inspect               show recovery state and planned actions without mutation
-  --yes                   auto-approve the implementation plan and later plan updates for this
-                          resumed process
+  --yes                   never stop to ask: approve the implementation plan, plan updates, and
+                          capabilities requested by flag for this resumed process
   --no                    review the implementation plan and later plan updates for this resumed
                           process
   --fresh-with-handoff    start a genuinely fresh session from validated cumulative context
