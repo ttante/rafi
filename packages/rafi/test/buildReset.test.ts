@@ -1,13 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { resetBuildState } from "../src/buildReset.js";
+import { WorkflowDb } from "ai-foreman/workflow-db.js";
 
 // better-sqlite3 is ai-foreman's dependency; resolve it from there.
 const workflowDbUrl = import.meta.resolve("ai-foreman/workflow-db.js");
@@ -82,4 +83,55 @@ test("build:reset still refuses while the admission owner is alive", async () =>
     owner.kill("SIGKILL");
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+function publishPlan(dir: string): void {
+  writeFileSync(join(dir, "rafi-config.yaml"), "docs:\n  root: docs\n", "utf8");
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeFileSync(join(dir, "docs", "rafi-plan.json"), JSON.stringify({ plan_id: "pln_test", revision: 2, content_digest: "d1" }), "utf8");
+}
+function approvePlan(dir: string, digest = "d1"): void {
+  const workflow = new WorkflowDb(dir);
+  try {
+    const state = { planId: "pln_test", revision: 2, digest, decisionReceipt: { version: 1, planDigest: digest } };
+    const run = workflow.createRun({ kind: "plan", checkpoint: "planner-session-before", originalWork: { brief: "b" }, remainingWork: { approval: true } });
+    workflow.transition(run.runId, { status: "completed", checkpoint: "plan-pair-and-config-published", remainingWork: {}, state });
+  } finally { workflow.close(); }
+}
+function approvals(dir: string): Array<Record<string, unknown>> {
+  const workflow = new WorkflowDb(dir);
+  try { return workflow.completedPlanApprovals(); } finally { workflow.close(); }
+}
+
+test("build:reset carries the current plan approval into the fresh database", () => {
+  const dir = project();
+  try {
+    publishPlan(dir);
+    approvePlan(dir, "stale");   // an approval of different plan content is not carried
+    approvePlan(dir);
+    leaveDeadBuildOwner(dir);
+    const result = resetBuildState(dir);
+    assert.equal(result.planApprovalCarried, true);
+    assert.deepEqual(approvals(dir).map(state => state.digest), ["d1"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("build:reset recovers a plan approval that an earlier reset left only in an archive", () => {
+  const dir = project();
+  try {
+    publishPlan(dir);
+    approvePlan(dir);
+    // Simulate an older reset that archived the approval without carrying it.
+    const old = join(dir, ".rafi", "recovery-archive", "2026-01-01T00-00-00-000Z");
+    mkdirSync(old, { recursive: true });
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const source = join(dir, ".rafi", `recovery.sqlite3${suffix}`);
+      if (existsSync(source)) renameSync(source, join(old, `recovery.sqlite3${suffix}`));
+    }
+    leaveDeadBuildOwner(dir);
+    assert.equal(approvals(dir).length, 0);
+    const result = resetBuildState(dir);
+    assert.equal(result.planApprovalCarried, true);
+    assert.deepEqual(approvals(dir).map(state => state.planId), ["pln_test"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
