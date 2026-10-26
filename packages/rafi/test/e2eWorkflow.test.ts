@@ -88,7 +88,9 @@ test("QA preparation failure does not admit the Builder", { timeout: 180_000 }, 
   run(root, ["plan", root, "--brief", "Add a small safe feature", "--agent", "codex", "--yes", "--no-grill-me"]);
   run(root, ["tickets", "setup:init", "--project", root, "--defaults", "--population-mode", "approved_plan", "--branch-strategy", "current", "--completion", "none"]);
   run(root, ["tickets", "populate", "--project", root, "--agent", "codex", "--yes"]);
-  run(root, ["start", root, "--steps", "1", "--no-qa", "--yes", "--agent", "codex", "--dirty-work", "include"], [0, 2]);
+  // Without --yes the plan question is recorded and the non-interactive start
+  // exits (--yes never stops to ask), giving a paused run to resume under bad QA.
+  run(root, ["start", root, "--steps", "1", "--no-qa", "--agent", "codex", "--dirty-work", "include"], [0, 2]);
   const record = readBuildRuns(root)[0]; assert.ok(record);
   const pendingDb = new WorkflowDb(root); let decisionId: string;
   try { const decisions = pendingDb.pendingHumanDecisions(record.runId); assert.equal(decisions.length, 1); decisionId = decisions[0]!.decisionId; } finally { pendingDb.close(); }
