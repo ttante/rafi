@@ -624,6 +624,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       if (settings.fast) args.push("--fast");
       const launchDb = new WorkflowDb(root);
       if (opts.builderNetwork || selected.builderCapabilities?.requestedNetwork) args.push("--builder-network");
+      if (opts.qaNetwork || selected.qaCapabilities?.requestedNetwork) args.push("--qa-network");
       if (opts.builderApprovals) args.push("--builder-approvals");
       try {
         if (!launchAuthority) throw new Error("Recovery launch authority is missing");

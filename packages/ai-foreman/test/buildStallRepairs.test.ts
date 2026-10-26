@@ -160,12 +160,16 @@ test("approved unchanged scope starts automatically, but a material ticket chang
   assert.equal(validatePlanApprovalBinding(dir, ["T001"], binding).valid, false, "a changed plan cannot reuse an old binding");
   writeFileSync(join(dir, "docs/rafi-plan.json"), JSON.stringify(plan));
   assert.equal(requiresBuildApproval(dir, ["T001"], false), false);
-  assert.equal(requiresBuildApproval(dir, ["T001"], true, { branch_strategy: "branch-per-ticket" }), true);
+  assert.equal(requiresBuildApproval(dir, ["T001"], false, { branch_strategy: "branch-per-ticket" }), true);
+  assert.equal(requiresBuildApproval(dir, ["T001"], true, { branch_strategy: "branch-per-ticket" }), false, "--yes never stops to ask");
   assert.equal(requiresBuildApproval(dir, ["T001"], false, { branch_strategy: "current" }), false);
   const later = { ...ticket, id: "T002", acceptance: ["unapproved later ticket"] };
   writeFileSync(join(dir, ".tickets/tickets.yaml"), stringify({ tickets: [ticket, later] }));
   let prompts = 0;
-  const gate = createBuildApprovalGate(dir, ["T001", "T002"], true, { branch_strategy: "current" }, async () => { prompts++; });
+  const gate = createBuildApprovalGate(dir, ["T001", "T002"], false, { branch_strategy: "current" }, async () => { prompts++; });
+  let yesPrompts = 0;
+  await createBuildApprovalGate(dir, ["T001", "T002"], true, { branch_strategy: "current" }, async () => { yesPrompts++; })();
+  assert.equal(yesPrompts, 0, "--yes approves an unapproved later ticket without asking");
   assert.equal(requiresBuildApproval(dir, ["T001"], true), false);
   await gate(); assert.equal(prompts, 1, "later ticket requires approval");
   await gate(); assert.equal(prompts, 1, "same invocation and source reuses approval");
@@ -175,7 +179,8 @@ test("approved unchanged scope starts automatically, but a material ticket chang
   const edited = new StateDb(join(dir, ".tickets/ticket-state.sqlite"));
   edited.updateTicketDefinitionSnapshot("T001", { ...ticket, acceptance: ["changed scope"] });
   edited.close();
-  assert.equal(requiresBuildApproval(dir, ["T001"], true), true);
+  assert.equal(requiresBuildApproval(dir, ["T001"], false), true);
+  assert.equal(requiresBuildApproval(dir, ["T001"], true), false);
 });
 
 test("an answered deferred question resumes at a safe boundary once", async t => {

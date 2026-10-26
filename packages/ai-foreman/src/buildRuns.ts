@@ -44,6 +44,7 @@ export interface CreateBuildRunInput {
   tickets: string[];
   authorizedBatch?: BuildRunRecordV2["authorizedBatch"];
   builderCapabilities?: BuildRunRecordV2["builderCapabilities"];
+  qaCapabilities?: BuildRunRecordV2["qaCapabilities"];
   deliveryUnit?: string;
   branchMode?: BuildRunRecordV2["branchMode"];
   repositoryRoot: string;
@@ -78,6 +79,7 @@ export function createBuildRun(input: CreateBuildRunInput): BuildRunRecordV2 {
     tickets: [...input.tickets],
     authorizedBatch: input.authorizedBatch ?? (input.tickets.length && (input.branchMode ?? "current") === "current" ? { tickets: [...input.tickets], requestedSteps: input.tickets.length, scopeRevision: "explicit-create-selection", startedTickets: [] } : undefined),
     builderCapabilities: input.builderCapabilities,
+    qaCapabilities: input.qaCapabilities,
     deliveryUnit: input.deliveryUnit,
     branchMode: input.branchMode ?? "current",
     checkpoint: "created",

@@ -643,6 +643,8 @@ export interface BuildRunRecordV2 extends Omit<BuildRunRecordV1, "version" | "re
   };
   /** Frozen authorized selection; tickets remain the completion scope, not a dispatch log. */
   builderCapabilities?: { requestedNetwork: boolean; grantedNetwork: boolean; approvedAt?: string; grantWorkerPid?: number };
+  /** Independent QA network grant (--qa-network); QA is offline when absent. */
+  qaCapabilities?: { requestedNetwork: boolean; grantedNetwork: boolean; approvedAt?: string };
   authorizedBatch?: { tickets: string[]; requestedSteps: number; scopeRevision: string; approvalRevisions?: string[]; startedTickets: string[] };
   recoveryDecision?: BuildRecoveryDecisionReceipt;
   /** Canonical provider conversations observed for this run. Raw role sessionIds remain compatibility mirrors only. */

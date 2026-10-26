@@ -568,7 +568,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
     .option("--accept-handoff-role <role>", "role owning the pre-staged handoff (builder | qa)", "builder")
     .option("--continue", "resume the most recent logged session for this project")
     .option("-t, --tickets <path>", "path to ticket file (.md, .txt, .yaml, …) — passed to the builder as context")
-    .option("-y, --yes", "skip pre-flight confirmation prompt")
+    .option("-y, --yes", "never stop to ask: approve the pre-flight plan, plan updates, and capabilities requested by flag (--builder-network, --qa-network)")
     .option("--effort <level>", "reasoning effort level (low|medium|high|xhigh)")
     .option("--fast", "use native fast mode when available; keep the model and reasoning settings")
     .option("--no-qa", "disable per-ticket QA review (enabled by default)")
@@ -593,7 +593,8 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
     .option("--auto-compact-threshold <percent>", "initial Builder context compaction threshold (1-99)")
     .option("--max-branch-depth <n>", "maximum selected branch stack depth", "5")
     .option("--pr-ready", "create ready-for-review PRs instead of draft PRs")
-    .option("--builder-network", "request build-scoped builder internet access with separate explicit approval; rechecked on resume")
+    .option("--builder-network", "request build-scoped builder internet access; asks for approval unless --yes; rechecked on resume")
+    .option("--qa-network", "allow independent QA network access for this build (e.g. live local services); asks for approval unless --yes; rechecked on resume")
     .option("--builder-approvals", "allow the builder to request explicit per-operation sandbox approvals; QA stays restricted")
     .option("--keep-worktrees", "keep successful ticket worktrees for inspection")
     .option("--dirty-work <mode>", "preserve | include: continue in isolated branches without merging into the dirty checkout")
@@ -662,13 +663,19 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         if (!await servicePendingHumanDecisions({ projectDir: cwd, runId: supervisedInvocationId, tickets: requestedTicketIds.length ? requestedTicketIds : recoveryRecord?.tickets.length ? recoveryRecord.tickets : undefined, scopeRevision: isTicketsInitialized(cwd) ? buildScopeRevision(cwd) : undefined })) return;
       }
       const requestedNetwork = Boolean(opts.builderNetwork || recoveryRecord?.builderCapabilities?.requestedNetwork);
+      // --yes never stops to ask: it approves capabilities the operator
+      // requested by flag. A resumed run counts only an explicit --yes.
+      const explicitYes = recoveryRecord ? recoveryRecord.recoveryDecision?.planUpdateApprovalSource === "explicit-yes" : Boolean(opts.yes);
       let grantedNetwork = false;
-      if (requestedNetwork) {
+      if (requestedNetwork && explicitYes) {
+        grantedNetwork = true;
+        console.error("foreman: builder internet for this build approved by --yes (requested with --builder-network)");
+      } else if (requestedNetwork) {
         const permissionDb = new WorkflowDb(cwd);
         let networkKey: string;
         try { networkKey = permissionDb.pendingHumanDecisions(supervisedInvocationId).find(decision => decision.interruptionId.startsWith("builder-network:"))?.interruptionId ?? `builder-network:${process.pid}:${randomUUID()}`; } finally { permissionDb.close(); }
         const networkDecision = await durableHumanDecision({ projectDir: cwd, runId: supervisedInvocationId, key: networkKey,
-          prompt: "Allow the builder shell to access the internet for this build? This permits network use by any builder command, not only downloads. Workspace write confinement remains enforced. QA stays offline. Recovery requires approval again; --yes does not approve this permission.",
+          prompt: "Allow the builder shell to access the internet for this build? This permits network use by any builder command, not only downloads. Workspace write confinement remains enforced. QA stays offline unless --qa-network is separately approved. Recovery requires approval again unless resumed with --yes.",
           choices: [{ id: "allow-network", label: "Allow builder internet for this build" }, { id: "stay-offline", label: "Stay offline and use a verified local bundle" }],
           operation: async () => {
             const action = await select({ message: "Allow builder internet for this build?", options: [{ value: "stay-offline", label: "Stay offline" }, { value: "allow-network", label: "Allow builder internet for this build" }] });
@@ -678,6 +685,28 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         grantedNetwork = networkDecision === "allow-network";
       }
       const builderCapabilities = { requestedNetwork, grantedNetwork, ...(grantedNetwork ? { approvedAt: new Date().toISOString(), grantWorkerPid: process.pid } : {}) };
+      // Independent QA is offline unless the operator grants --qa-network, e.g.
+      // so QA can verify a live local service the ticket requires.
+      const requestedQaNetwork = Boolean(opts.qaNetwork || recoveryRecord?.qaCapabilities?.requestedNetwork);
+      let grantedQaNetwork = false;
+      if (requestedQaNetwork && explicitYes) {
+        grantedQaNetwork = true;
+        console.error("foreman: QA network for this build approved by --yes (requested with --qa-network)");
+      } else if (requestedQaNetwork) {
+        const permissionDb = new WorkflowDb(cwd);
+        let qaNetworkKey: string;
+        try { qaNetworkKey = permissionDb.pendingHumanDecisions(supervisedInvocationId).find(decision => decision.interruptionId.startsWith("qa-network:"))?.interruptionId ?? `qa-network:${process.pid}:${randomUUID()}`; } finally { permissionDb.close(); }
+        const qaNetworkDecision = await durableHumanDecision({ projectDir: cwd, runId: supervisedInvocationId, key: qaNetworkKey,
+          prompt: "Allow independent QA shell commands to access the network for this build? This lets QA run live checks (for example against a local service). QA keeps a read-only workspace. Recovery requires approval again unless resumed with --yes.",
+          choices: [{ id: "allow-qa-network", label: "Allow QA network for this build" }, { id: "qa-offline", label: "Keep QA offline" }],
+          operation: async () => {
+            const action = await select({ message: "Allow QA network for this build?", options: [{ value: "qa-offline", label: "Keep QA offline" }, { value: "allow-qa-network", label: "Allow QA network for this build" }] });
+            return isCancel(action) ? undefined : action;
+          } });
+        if (qaNetworkDecision === undefined || isCancel(qaNetworkDecision)) return;
+        grantedQaNetwork = qaNetworkDecision === "allow-qa-network";
+      }
+      const qaCapabilities = { requestedNetwork: requestedQaNetwork, grantedNetwork: grantedQaNetwork, ...(grantedQaNetwork ? { approvedAt: new Date().toISOString() } : {}) };
       const readinessOwner = { project: cwd, runId: supervisedInvocationId, authority: localBuildAuthority(cwd)! };
       const autoApprovePlanUpdates = recoveryRecord
         ? recoveryRecord.recoveryDecision?.planUpdateApproval === "auto"
@@ -1146,6 +1175,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           configRoot: cwd,
           sessionRole: "qa" as const,
           sessionStream: "qa",
+          networkAccess: grantedQaNetwork,
           runtimeExecutable: ready.executable,
           runtimePhase: "qa" as const,
           preparationTimeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
@@ -1428,6 +1458,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           configRoot: cwd,
           sessionRole: "qa" as const,
           sessionStream: "qa",
+          networkAccess: grantedQaNetwork,
           runtimeExecutable: ready.executable,
           runtimePhase: "qa" as const,
           preparationTimeoutMs: frozenPolicy.runtimeDeadlines?.preparation_ms,
@@ -2087,7 +2118,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           && (opts.qaRevision !== undefined || pendingQaRecoveryPacket(cwd, recoveryRecord.runId, requestedTicketIds[0])));
         let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { ...(branchQaOnlyRecovery ? {} : { builder: capturedBranchBuilder, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null }), qa: capturedBranchQa, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
           runId: invocationRunId,
-          builderCapabilities, tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
+          builderCapabilities, qaCapabilities, tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
           repositoryRoot: cwd, branchMode: branchPresentation.allocationMode, baseRef: plan.baseRef, builder: capturedBranchBuilder, qa: capturedBranchQa,
           frozenPolicy, autonomyProfile, qaEnabled,
           runDecisions: { dirtyWork, workMode: "branch-per-ticket", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBranchBuilder.auto_compact_threshold_percent ?? 65, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
@@ -2113,7 +2144,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         }
 
         for (const node of plan.nodes) admitApprovedTicket(cwd, masterRun.runId, node.ticket.id, buildScopeRevision(cwd), `build invocation ${invocationRunId}: approved branch plan`);
-        masterRun = checkpointBuildRun(cwd, masterRun, "capabilities-resolved", { builderCapabilities });
+        masterRun = checkpointBuildRun(cwd, masterRun, "capabilities-resolved", { builderCapabilities, qaCapabilities });
         const qaResumedRecovery = recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord) ? pendingQaRecoveryPacket(cwd, masterRun.runId, requestedTicketIds[0]) : undefined;
         let qaProtocolResumeTicket: string | undefined;
         if (recoveryRecord && !qaResumedRecovery && !isInterruptedBuilderRecovery(recoveryRecord)) {
@@ -2400,11 +2431,11 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         && (opts.qaRevision !== undefined || pendingQaRecoveryPacket(cwd, recoveryRecord.runId, requestedTicketIds[0])));
       let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { ...(qaOnlyRecovery ? {} : { builder: capturedBuilder, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null }), qa: capturedQa, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
         runId: invocationRunId,
-        tickets: [...(executionTickets ?? [])], builderCapabilities, authorizedBatch: { tickets: [...(executionTickets ?? [])], requestedSteps: steps, scopeRevision: buildScopeRevision(cwd, approvalConsequences), startedTickets: [] }, repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
+        tickets: [...(executionTickets ?? [])], builderCapabilities, qaCapabilities, authorizedBatch: { tickets: [...(executionTickets ?? [])], requestedSteps: steps, scopeRevision: buildScopeRevision(cwd, approvalConsequences), startedTickets: [] }, repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
         frozenPolicy, autonomyProfile, qaEnabled,
         runDecisions: { workMode: "current", workModeSource, branchPrefix, branchPrefixSource: resolvedPrefix.source, autoCompactThresholdPercent: capturedBuilder.auto_compact_threshold_percent ?? 65, thresholdSource: thresholdOverride === undefined ? "project" : "cli" },
       });
-      buildRun = checkpointBuildRun(cwd, buildRun, "capabilities-resolved", { builderCapabilities });
+      buildRun = checkpointBuildRun(cwd, buildRun, "capabilities-resolved", { builderCapabilities, qaCapabilities });
       activeObserver?.store.attachExecutionLease(activeObserver.executionId, readCurrentWorkflowLease(cwd)?.generation);
       activeContinuityRunId = buildRun.runId;
       publishActivatedBuilderSession = ref => { buildRun = persistCurrentBuildSession(cwd, buildRun, "builder", ref); };
