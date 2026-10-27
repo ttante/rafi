@@ -1,6 +1,5 @@
-import { describeLegacyQaTranscript } from "./legacyCommunicationDisplay.js";
 import { BoundedTurnEvents, boundedUtf8, receiptFingerprint } from "./boundedTurnEvidence.js";
-import { qaStructuredResponse, qaStructuredStatus } from "./qaStructuredResponse.js";
+import { describeNativeQaResponse, qaStructuredResponse, qaStructuredStatus } from "./qaStructuredResponse.js";
 import { journalStructuredDispatch, operationInstruction, operationPayload, operationResponse, nativePolicy } from "./structuredOperation.js";
 import { durableOwnerDispatch } from "./structuredDispatchAuthority.js";
 import { providerWireContract, qaVerdictOutput, qaRecoveryOutput, initializationOutput, remediationOutput, type OutputContract, type QaVerdictPayload } from "rafi-spec";
@@ -20,13 +19,13 @@ import { assertBuildAssignmentReconciled, BuildAssignmentRejected, captureBuildS
 import { checkQaPrerequisites } from "./qaPrerequisites.js";
 import { boundedQaHistory } from "./qaHandbackHistory.js";
 import {
-  QA_FAILURE_REPORT_END, QA_FAILURE_REPORT_START, qaFailureReportV1Schema,
+  qaFailureReportV1Schema,
   type ProviderSessionRefV1, type QaFailureReportV1, type QaFindingRefV2, type SessionStrategy,
 } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent, CompactResult, TurnResult } from "./adapters/types.js";
 import { SessionUnavailableError } from "./adapters/sessionFailure.js";
 import { currentActivity, withActivityPhase } from "./activity.js";
-import { buildQaInstruction, parseStepStatus } from "./foreman.js";
+import { buildQaInstruction } from "./foreman.js";
 import { captureFrozenQaSourceAsync, captureProspectiveGitTree, createDisposableQaSnapshotAsync, deterministicChangeSummaryAsync, prospectiveGitTreeMatches, QaSourceInstabilityError, type FrozenQaSourceState } from "./qaSnapshot.js";
 import type { RunObserver } from "./observability.js";
 import type { TicketDef } from "./tickets/ticketSchema.js";
@@ -42,7 +41,7 @@ import { loadProjectAutonomyConfig, resolveAutonomyPolicy } from "./recoveryPoli
 import {
   appendQaRecoveryAttempt, appendQaRecoveryResource, appendQaRecoveryReviewedState, compareQaRecoveryReviewedState, createQaRecoveryPacket, ensureQaRecoveryExcluded, loadQaRecoveryPacket, materializeQaRecoveryContext, qaRecoveryInventory,
   qaReportDigest, renderQaRecoveryAcknowledgementInstruction, updateQaRecoveryPosition, updateQaRecoveryReviewIdentity,
-  validateManualQaReport, validateQaRecoveryAcknowledgement, type QaRecoveryPacket, type QaRecoveryPacketInput, type QaRecoveryPendingAction,
+  validateManualQaReport, type QaRecoveryPacket, type QaRecoveryPacketInput, type QaRecoveryPendingAction,
 } from "./qaRecovery.js";
 import { canonicalJson, createQaFindingRefs, qaDigest, type FrozenQaSourceStateV2, type HandoffAcceptanceReceiptV2, type QaConfinementV2, type QaReviewBasisV2, type QaTurnIntentV2, type QaTurnReceiptV2 } from "./qaProtocolV2.js";
 import { createHostQaComparison, findHostQaCheck, inspectHostQaComparison } from "./hostQaComparison.js";
@@ -177,6 +176,10 @@ function pauseQaReview(opts: IsolatedQaOptions, stage: string, detail: string, f
  * The allowance is shared by all protocol failures for this ticket and survives restart.
  * oneReview's finally closes the predecessor before the loop allocates a new snapshot.
  */
+/** Frozen source of the review an automatic fresh retry replaces, so a retry
+ * that cannot be dispatched safely still pauses at that exact boundary. */
+const freshRetryState = new WeakMap<IsolatedQaOptions, FrozenQaSourceState>();
+
 function retryFreshQaReview(opts: IsolatedQaOptions, stage: string, detail: string, frozenState: FrozenQaSourceState): IsolatedQaResult | { outcome: "retry-modification" } {
   const db = new WorkflowDb(opts.recovery.projectDir);
   let retry = false;
@@ -190,6 +193,7 @@ function retryFreshQaReview(opts: IsolatedQaOptions, stage: string, detail: stri
     }
   } finally { db.close(); }
   if (!retry) return pauseQaReview(opts, stage, `${detail}; automatic fresh QA review allowance exhausted`, frozenState);
+  freshRetryState.set(opts, frozenState);
   opts.resumedRecovery = undefined;
   currentActivity()?.update("qa-recovery", `${opts.ticket.id}: ${detail}. Running a complete fresh QA review.`);
   opts.evidence?.({ cycle: 0, outcome: "qa_fresh_review_retry", detail });
@@ -404,7 +408,15 @@ async function runIsolatedQaOwned(opts: IsolatedQaOptions): Promise<IsolatedQaRe
     opts.qaHistory = [...history];
     reviewAttempt += 1;
     const attemptId = randomUUID();
-    const review = await withActivityPhase(`running QA review ${cycle} (${automaticFixes}/${maxBuilderFixes} fixes used)`, () => observedQaReview(opts, { cycle, reviewAttempt, remediationGeneration, attemptId }));
+    let review: Awaited<ReturnType<typeof observedQaReview>>;
+    try { review = await withActivityPhase(`running QA review ${cycle} (${automaticFixes}/${maxBuilderFixes} fixes used)`, () => observedQaReview(opts, { cycle, reviewAttempt, remediationGeneration, attemptId }));
+    } catch (error) {
+      // An automatic fresh review that graph-access revocation blocks before
+      // dispatch pauses safely instead of failing the build.
+      const frozen = freshRetryState.get(opts);
+      if (frozen && /Graph access changed/.test(String(error))) return pauseQaReview(opts, "graph-access-changed", String(error).replace(/^Error: /, ""), frozen);
+      throw error;
+    }
     if (review.outcome === "retry-modification") {
       const durableFixes = persistedQaFixCount(opts);
       cycle += Math.max(0, durableFixes - automaticFixes);
@@ -859,8 +871,8 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
     if (turn.continuityErrors?.length && !turn.failure) return pauseQaReview(opts, "invalid-continuity", `QA continuity record was invalid: ${turn.continuityErrors.join("; ")}`, reviewedSnapshot.frozenState);
     if (!responseContract.valid && !turn.failure) {
       const retained = resumedPacket
-        ? await retainInvalidResumedResponse(opts, identity, resumedPacket, snapshot, turn, responseContract.errors, qaEvents)
-        : await retainInvalidQaResponse(opts, identity, snapshot, qa, qaHandle, handoff, turn, responseContract.errors, qaEvents);
+        ? await retainInvalidResumedResponse(opts, identity, resumedPacket, snapshot, turn, responseContract.errors, qaEvents, true)
+        : await retainInvalidQaResponse(opts, identity, snapshot, qa, qaHandle, handoff, turn, responseContract.errors, qaEvents, true);
       return retained.result;
     }
     if (turn.isError || turn.failure) return pauseQaReview(opts, "qa-turn-error", `QA turn failed: ${sanitizePreview(turn.text)}`, reviewedSnapshot.frozenState);
@@ -931,7 +943,8 @@ async function retainInvalidResumedResponse(
   originalTurn: TurnResult,
   originalErrors: string[],
   qaEvents: BuilderEvent[],
-): Promise<{ outcome: "failed"; result: IsolatedQaResult }> {
+  retryFresh = false,
+): Promise<{ outcome: "failed"; result: IsolatedQaResult | { outcome: "retry-modification" } }> {
   const originalResponse = effectiveTurnText(originalTurn);
   let packet = appendQaRecoveryResource(initialPacket, `qa-responses/resumed-${identity.attemptId}.txt`, originalResponse, {
     purpose: "Exact first cleaned QA report response after resumed packet acknowledgement", exact: true,
@@ -939,10 +952,11 @@ async function retainInvalidResumedResponse(
   await awaitQaTurnEvent(qaEvents, originalTurn);
   packet = await appendTurnObservation(packet, `resumed-original-${identity.attemptId}`, originalTurn, originalTurn.hostInstruction, originalErrors, "resumed-fail-closed", qaEvents);
   packet = appendQaRecoveryResource(packet, `validation/resumed-${identity.attemptId}.json`, {
-    status: parseStepStatus(originalResponse), errors: originalErrors, recoveryStage: "resumed-fail-closed",
+    status: describeNativeQaResponse(originalResponse).status, errors: originalErrors, recoveryStage: "resumed-fail-closed",
   }, { purpose: "Validation result for the first resumed QA report response" });
 
-  return { outcome: "failed", result: pauseQaReview(opts, "resumed-invalid-contract", `Resumed QA response failed validation. Evidence retained at ${packet.directory}. ${originalErrors.map(error => sanitizePreview(error)).join("; ")}`, snapshot.frozenState) };
+  const resumedDetail = `Resumed QA response failed validation. Evidence retained at ${packet.directory}. ${originalErrors.map(error => sanitizePreview(error)).join("; ")}`;
+  return { outcome: "failed", result: retryFresh ? retryFreshQaReview(opts, "resumed-invalid-contract", resumedDetail, snapshot.frozenState) : pauseQaReview(opts, "resumed-invalid-contract", resumedDetail, snapshot.frozenState) };
 }
 
 export function buildQaReviewHandoff(ticket: TicketDef, builderSummary: string, diffDigest: string, validationChecklist: string[], changeSummary?: unknown, history: QaReportHistoryEntry[] = []): string {
@@ -954,7 +968,7 @@ export function buildQaReviewHandoff(ticket: TicketDef, builderSummary: string, 
     `Prior authoritative QA/report and Builder-remediation history: ${history.length ? JSON.stringify(boundedQaHistory(history)) : "(none; perform a complete first review)"}`,
     `Failure report JSON Schema: ${JSON.stringify(qaFailureReportV1Schema)}`,
     QA_COMMAND_DISCIPLINE,
-    "Submit the native qa-verdict payload. A failed verdict must include the complete failure report; a passed verdict must include all required coverage claims.",
+    "Submit the native qa-verdict payload. Every verdict, passed or failed, includes coverage and verifiedInstructionIds. Coverage holds the required coverage claims when a verification contract exists; otherwise it is null. A failed verdict also includes the complete failure report.",
     "Be very thorough. Don't leave anything out. Make sure all required fields are added. Triple check your work to ensure nothing is left out and all required fields are added and populated correctly.",
     "Do not change source, configuration, documentation, tickets, or control files. Only ignored cache, coverage, and build output is allowed.",
   ].join("\n");
@@ -985,7 +999,8 @@ async function retainInvalidQaResponse(
   originalTurn: TurnResult,
   originalErrors: string[],
   qaEvents: BuilderEvent[],
-): Promise<{ outcome: "failed"; result: IsolatedQaResult }> {
+  retryFresh = false,
+): Promise<{ outcome: "failed"; result: IsolatedQaResult | { outcome: "retry-modification" } }> {
   const originalResponse = effectiveTurnText(originalTurn);
   const runId = opts.recovery?.runId ?? `volatile-${identity.attemptId}`;
   const continuity = qaContinuityRecoveryContext(opts);
@@ -994,7 +1009,7 @@ async function retainInvalidQaResponse(
     projectDir: opts.recovery?.projectDir ?? opts.builderWorktree, frozenState: snapshot.frozenState,
     runId, ticketId: opts.ticket.id, cycle: identity.cycle, reviewAttempt: identity.reviewAttempt,
     reviewAttemptId: identity.attemptId,
-    recoveryStage: "same-session", correctionTurns: 0, reportJson: extractReportBody(originalResponse),
+    recoveryStage: "same-session", correctionTurns: 0, reportJson: describeNativeQaResponse(originalResponse).reportJson ?? "{}\n",
     resources: {
       ticket: { value: opts.ticket, purpose: "Complete authoritative ticket definition" },
       "qa-review-prompt": { value: reviewPrompt, purpose: "Exact original QA review instruction", exactText: true },
@@ -1005,7 +1020,7 @@ async function retainInvalidQaResponse(
       "original-provider-prompt": { value: originalTurn.providerInstruction ?? { unavailable: "adapter did not expose provider-dispatched instruction" }, purpose: "Exact provider-dispatched original QA instruction or explicit unavailable marker", exactText: typeof originalTurn.providerInstruction === "string" },
       "original-raw-response": { value: originalTurn.transportEvidence ?? { unavailable: true }, purpose: "Retained bounded transport references" },
       "original-cleaned-response": { value: originalTurn.transportEvidence ?? { unavailable: true }, purpose: "Retained bounded cleaned evidence references" },
-      "original-validation": { value: { errors: originalErrors, parsedStatus: parseStepStatus(originalResponse), responseBytes: Buffer.byteLength(originalResponse), turn: turnMetadata(originalTurn) }, purpose: "Parsed status, validator result, and complete host-observable turn metadata" },
+      "original-validation": { value: { errors: originalErrors, parsedStatus: describeNativeQaResponse(originalResponse).status, responseBytes: Buffer.byteLength(originalResponse), turn: turnMetadata(originalTurn) }, purpose: "Parsed status, validator result, and complete host-observable turn metadata" },
       "qa-history": { value: opts.qaHistory ?? [], purpose: "Earlier valid reports, observations, fixes, and unresolved history" },
       "tool-events": { value: qaEvents instanceof BoundedTurnEvents ? qaEvents.metadata() : { unavailable: true }, purpose: "All QA tool/activity events available through BuilderEvent, or an explicit unavailable marker" },
       continuity: { value: continuity, purpose: "Cumulative continuity checkpoints, later host facts, handoff lineage, and recovery history" },
@@ -1021,7 +1036,8 @@ async function retainInvalidQaResponse(
   } finally { packetDb.close(); }
   let packet = existingPacket ? appendQaRecoveryAttempt(existingPacket, packetInput) : createQaRecoveryPacket(packetInput);
   packet = appendQaRecoveryResource(packet, "qa-responses/native-receipt.json", originalTurn.structured ?? { unavailable: true }, { purpose: "Original native provider receipt retained without changing or repeating completed QA work" });
-  return { outcome: "failed", result: pauseQaReview(opts, "invalid-native-qa-response", `QA response failed validation. Evidence retained at ${packet.directory}. ${originalErrors.join("; ")}`, snapshot.frozenState) };
+  const invalidDetail = `QA response failed validation. Evidence retained at ${packet.directory}. ${originalErrors.join("; ")}`;
+  return { outcome: "failed", result: retryFresh ? retryFreshQaReview(opts, "invalid-native-qa-response", invalidDetail, snapshot.frozenState) : pauseQaReview(opts, "invalid-native-qa-response", invalidDetail, snapshot.frozenState) };
 }
 async function exhausted(
   packet: QaRecoveryPacket, originalResponse: string, opts: IsolatedQaOptions,
@@ -1031,7 +1047,7 @@ async function exhausted(
   unavailableOperatorReason?: string,
   requireFreshReviewReason?: string,
 ): Promise<{ outcome: "failed"; result: IsolatedQaResult } | { outcome: "retry" } | { outcome: "manual"; qa: BuilderAdapter; snapshot?: Awaited<ReturnType<typeof createDisposableQaSnapshotAsync>>; report: QaFailureReportV1 } | { outcome: "operator"; decision: Extract<QaReportRecoveryDecision, { action: "fresh" | "guidance" }>; packet: QaRecoveryPacket }> {
-  const synopsis = describeLegacyQaTranscript(originalResponse).issues?.trim();
+  const synopsis = describeNativeQaResponse(originalResponse).issues?.trim();
   let currentPrefix = prefix;
   if (packet.manifest.pendingAction !== "operator-menu") {
     packet = updateQaRecoveryPosition(packet, "operator-menu", packet.manifest.correctionTurns, "operator-menu");
@@ -1087,11 +1103,6 @@ function normalizeUnsupportedOperator<T extends { outcome: string }>(result: T, 
     : result as Exclude<T, { outcome: "operator" }>;
 }
 
-function extractReportBody(text: string): string {
-  const start = text.split(/\r?\n/).findIndex((line) => line.trim() === QA_FAILURE_REPORT_START);
-  const lines = text.split(/\r?\n/); const end = lines.findIndex((line, index) => index > start && line.trim() === QA_FAILURE_REPORT_END);
-  return start >= 0 && end > start ? lines.slice(start + 1, end).join("\n") : "{}\n";
-}
 function boundedBuilderSummary(text: string): string { return Buffer.from(text).subarray(0, 16 * 1024).toString(); }
 function latestBuilderResponse(opts: IsolatedQaOptions): string {
   return opts.state.builderResponseHistory?.filter((entry) => entry.ticketId === opts.ticket.id).at(-1)?.response ?? opts.builderSummary;

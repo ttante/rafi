@@ -134,3 +134,14 @@ export async function servicePendingHumanDecisions(input: {
     return applicable().length === 0;
   } finally { db.close(); }
 }
+
+/**
+ * A capability question answered while no worker was waiting (rafi
+ * build:decide after a non-interactive exit) is reused once on resume rather
+ * than asked again. The answer that produced the previous grant is never reused.
+ */
+export function reusableCapabilityDecision(db: WorkflowDb, runId: string, prefix: string, consumedDecisionId?: string): string | undefined {
+  const pending = db.pendingHumanDecisions(runId).find(decision => decision.interruptionId.startsWith(prefix));
+  if (pending) return pending.interruptionId;
+  return db.answeredHumanDecisions(runId).filter(decision => decision.interruptionId.startsWith(prefix) && decision.decisionId !== consumedDecisionId).at(-1)?.interruptionId;
+}

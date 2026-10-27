@@ -1,7 +1,6 @@
 import type { SourceRegistryConfig, SourceSnapshotStorage, StructuredSourceRequestContract } from "rafi-spec";
 import {
   discardStagedSourceCaptures,
-  extractSourceRequests,
   registerSourceRequests,
   saveSourceRegistry,
   sourceContext,
@@ -28,7 +27,7 @@ export async function handlePlanningInput(options: {
   projectDir: string;
   output: string;
   /** Present (including empty) for native operations; disables legacy text parsing. */
-  sourceRequests?: StructuredSourceRequestContract[];
+  sourceRequests: StructuredSourceRequestContract[];
   question?: string;
   choices?: string[];
   registry: SourceRegistryConfig;
@@ -37,7 +36,7 @@ export async function handlePlanningInput(options: {
   context?: (registry: SourceRegistryConfig) => unknown;
   prompts?: PlanningInputPrompts;
 }): Promise<PlanningInputResult> {
-  const requests = options.sourceRequests ?? extractSourceRequests(options.output);
+  const requests = options.sourceRequests;
   const received = requests.length
     ? await registerSourceRequests(options.projectDir, options.registry, requests, { storage: options.storage })
     : { registry: options.registry, snapshots: [] };

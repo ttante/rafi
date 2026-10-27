@@ -6,6 +6,45 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+## @rafi-ai/cli 0.10.1 / ai-foreman 2.0.1 / special-agents 0.9.1 / rafi-spec 0.9.1 - 2026-10-26
+
+**Changes**
+
+- `--yes` now means fully hands-off: it never stops to ask, approves the implementation plan and plan updates, and grants the capabilities requested by flag (`--builder-network`, `--qa-network`).
+- New `--qa-network` flag for `start` and `resume`: gives independent QA shell network access for one build, recorded as a durable decision (`qaCapabilities`). Supported for Codex and Claude QA.
+- In ticket mode, one step is one whole ticket. The builder is told to finish its entire assigned ticket instead of spending a step on inspection.
+- New preflight launcher: `rafi` now reports an unsupported Node version or a mismatched/unloadable native SQLite module with a fix, instead of an opaque crash. `rafi doctor` shows the same checks. `RAFI_SKIP_RUNTIME_PREFLIGHT=1` bypasses it.
+- Added a guide for restarting a pre-0.10 project's build: `docs/guide-restart-legacy-project-build-0.10.md`.
+- Resume works wherever a run stops. When a step cannot continue, it restarts from its beginning with the same saved inputs; implementation keeps continuing from the current files. Covered for builds (planning, setup, QA preparation, coverage, implementation, QA, handoffs), `plan`, and `tickets populate` against an invalid answer, a provider crash, a stalled provider, and Rafi itself being killed.
+- An invalid answer is retried automatically once before Rafi stops: a fresh QA review for QA verdicts, and one restart of the step for build planning, QA preparation, `plan`, and `tickets populate`.
+- `rafi resume --yes` resumes saved `plan` and ticket sessions without prompts, and with no `--run`/`--id` it picks the most recent unfinished item. Resumed sessions keep the original run's `--yes`.
+- New `RAFI_PROVIDER_IDLE_TIMEOUT_MS` sets how long Rafi waits on a silent provider turn (default 30 minutes).
+- New `pnpm --filter @rafi-ai/cli test:resume-matrix`: runs the real CLI against a scripted provider that fails once at every step, and requires plain `rafi resume --yes` to finish the build.
+
+**Fixes**
+
+- A QA review interrupted mid-turn can be recovered; recovery matched the QA turn to its dispatch by an instruction digest the two records compute differently, so it always refused with "QA dispatch does not match the frozen review turn".
+- An answered but invalid provider turn is recorded as failed, not as an unknown outcome, so it no longer blocks every later turn. A turn Rafi refuses before sending is recorded as not sent.
+- The QA verdict instructions say `coverage` is required on every verdict, not only on a pass.
+- `--yes` builds no longer stop to ask how to recover a rejected handoff; Rafi retries with a fresh successor (up to three times).
+- QA preparation no longer fails the whole build after an interrupted call, no longer counts interrupted calls against its allowances, does not count time while the build was stopped, and restarts when Rafi's own tracker update moves the pre-implementation source fingerprint.
+- An interrupted ticket population no longer blocks with "Ticket population artifact already exists"; the unfinished lineage is retired and population restarts from page one.
+- Single agent calls outside a build (planning, ticket population, uninstall proposals) are no longer listed by `rafi resume` as builds and no longer block build launches.
+- Removed the remaining pre-v2 communication code: `STEP_STATUS` parsing, text envelopes for QA reports, recovery acknowledgements, handoff requests, source requests, ticket plans, and risk-note repairs, and prompt text describing them. The QA timeline and QA recovery evidence now read native responses.
+
+- `build:reset` works on projects whose recovery database predates 0.10: it inspects running owners read-only instead of migrating first, and a stale admission no longer blocks the reset.
+- `build:reset` carries the current plan's completed approval forward, so `resume` no longer refuses with "current plan has no matching completed host approval".
+- A worker that needs a human answer now exits (code 2) instead of hanging when nobody is attached; answers given with `build:decide` are reused on resume.
+- QA snapshots now include ignored vendored checkouts (for example `vendor/<repo>`) and link them before nested `node_modules`.
+- Rafi no longer writes its ignore entries through a `.git/info/exclude` that a git template symlinked to a shared file; the link is replaced by a repository-local copy first.
+
+**Versions**
+
+- Bumped `rafi-spec` to `0.9.1` (adds `qaCapabilities` and `builderCapabilities.decisionId`).
+- Bumped `special-agents` to `0.9.1` with its exact `rafi-spec@0.9.1` dependency.
+- Bumped `ai-foreman` to `2.0.1` with its exact shared-package dependencies.
+- Bumped `@rafi-ai/cli` to `0.10.1` with its exact `ai-foreman@2.0.1`, `rafi-spec@0.9.1`, and `special-agents@0.9.1` dependencies.
+
 ## @rafi-ai/cli 0.10.0 / ai-foreman 2.0.0 / special-agents 0.9.0 / rafi-spec 0.9.0 - 2026-10-25
 
 **Breaking changes**

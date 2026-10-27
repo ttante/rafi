@@ -155,6 +155,7 @@ export class CodexAdapter implements BuilderAdapter {
   buildInstruction(instruction: string): string {
     return [this.opts.systemPromptAppend,
       this.opts.sessionRole === "builder" ? `Builder runtime contract: shell network ${this.effectiveNetworkAccess() ? "explicitly approved for this build" : "disabled"}; sandbox escalation ${this.effectiveApprovalPolicy() === "on-request" ? "requires separate approval for each exact operation" : "disabled"}. Web tools do not establish shell network access. If acquisition needs unavailable capabilities, request input before running acquisition, or use a local source/dependency bundle with verified provenance. A ticket answer does not change runtime permissions.` : undefined,
+      this.qaNetworkAccess() ? "QA runtime contract: shell network explicitly approved for this review (--qa-network); you may run live checks against operator-provided local or remote services. Workspace stays read-only." : undefined,
       this.buildSkillsAppendix(), instruction]
       .filter((part): part is string => Boolean(part)).join("\n\n");
   }
@@ -267,7 +268,7 @@ export class CodexAdapter implements BuilderAdapter {
         ...(this.opts.fast ? { serviceTier: this.fastTier ?? "default" } : {}),
         approvalPolicy: policy?.responseOnly || policy?.purpose && policy.purpose !== "implementation" ? "never" : this.effectiveApprovalPolicy(),
         sandboxPolicy: readOnlyTurn
-          ? { type: "readOnly", networkAccess: false }
+          ? { type: "readOnly", networkAccess: this.qaNetworkAccess() }
           : { type: "workspaceWrite", writableRoots: [this.opts.cwd], networkAccess: this.effectiveNetworkAccess() },
       };
       let started: unknown;
@@ -947,8 +948,13 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   private providerIdleTimeoutMs(): number {
-    const configured = this.opts.providerIdleTimeoutMs;
+    const configured = this.opts.providerIdleTimeoutMs ?? Number(process.env.RAFI_PROVIDER_IDLE_TIMEOUT_MS);
     return Number.isFinite(configured) && configured! > 0 ? configured! : DEFAULT_PROVIDER_IDLE_TIMEOUT_MS;
+  }
+
+  /** Read-only QA may reach the network only with the operator's --qa-network grant. */
+  private qaNetworkAccess(): boolean {
+    return this.opts.sessionRole === "qa" && this.opts.networkAccess === true;
   }
 
   private effectiveNetworkAccess(): boolean {

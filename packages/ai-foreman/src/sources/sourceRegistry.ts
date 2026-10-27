@@ -22,8 +22,6 @@ import { structuredSourceRequestSchema, zodIssues } from "rafi-spec";
 
 const execFileAsync = promisify(execFile);
 
-export const SOURCE_REQUEST_START = "RAFI_SOURCE_REQUEST_START";
-export const SOURCE_REQUEST_END = "RAFI_SOURCE_REQUEST_END";
 const CONFIG_FILE = "rafi-config.yaml";
 const DEFAULT_REGISTRY: SourceRegistryConfig = { version: 1, snapshot_storage: "local", entries: [] };
 
@@ -161,37 +159,6 @@ export function appendLegacyTicketSources(registry: SourceRegistryConfig, source
   const next = cloneRegistry(registry); const warnings: string[] = [];
   for (const source of sources) migrateTicketSource(next, source, warnings);
   return next;
-}
-
-export function extractSourceRequests(output: string): StructuredSourceRequest[] {
-  const requests: StructuredSourceRequest[] = [];
-  let cursor = 0;
-  while (true) {
-    const start = output.indexOf(SOURCE_REQUEST_START, cursor);
-    if (start < 0) break;
-    const end = output.indexOf(SOURCE_REQUEST_END, start + SOURCE_REQUEST_START.length);
-    if (end < 0) throw new Error(`source request is missing ${SOURCE_REQUEST_END}`);
-    const body = output.slice(start + SOURCE_REQUEST_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-    let value: unknown;
-    try { value = JSON.parse(body); } catch (error) { throw new Error(`source request is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
-    const values = Array.isArray(value) ? value : [value];
-    for (const item of values) {
-      const parsed = structuredSourceRequestSchema.safeParse(item);
-      if (!parsed.success) throw new Error(`source request contract validation failed:\n${zodIssues(parsed.error).map((issue) => `- ${issue}`).join("\n")}`);
-      requests.push(parsed.data);
-    }
-    cursor = end + SOURCE_REQUEST_END.length;
-  }
-  // Compatibility with the original single-line protocol. Preserve the complete remainder.
-  for (const match of output.matchAll(/^SOURCE_REQUEST:\s*(.+)$/gim)) {
-    const legacy = structuredSourceRequestSchema.safeParse({ description: match[1]!.trim() });
-    // Legacy lines are intentionally converted into the same typed contract;
-    // they remain description-only pending requests after registration, but
-    // they no longer bypass shape validation.
-    if (!legacy.success) throw new Error(`legacy source request contract validation failed:\n${zodIssues(legacy.error).map((issue) => `- ${issue}`).join("\n")}`);
-    requests.push(legacy.data);
-  }
-  return requests;
 }
 
 /** Deterministically recognize only an entire obvious locator; all other language stays pending for agent interpretation. */

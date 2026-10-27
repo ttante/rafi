@@ -23,8 +23,6 @@ import { normalizeDeliveryConfig, validateDeliveryConfig, type DeliveryConfig } 
 import { loadTicketSetupConfig, mergeTicketSetup, saveTicketSetupConfig, type TicketBuildSetupConfig } from "./tickets/setupConfig.js";
 import { ticketPlanProposalV1Schema, zodIssues } from "rafi-spec";
 
-export const PROPOSAL_START = "RAFI_PROPOSAL_START";
-export const PROPOSAL_END = "RAFI_PROPOSAL_END";
 
 export interface TicketEdit { id: string; patch: Partial<Omit<TicketDef, "id">>; }
 export interface TicketSupersession { replaced: string[]; replacements: string[]; reason: string; }
@@ -99,20 +97,6 @@ export function ticketPlanningFingerprint(projectDir: string): PlanningFingerpri
 
 export function planningFingerprintChanges(projectDir: string, expected: PlanningFingerprint[]): string[] {
   return expected.filter((item) => fileHash(join(projectDir, item.path)) !== item.sha256).map((item) => item.path);
-}
-
-export function extractTicketPlanProposal(output: string, existingTickets: TicketDef[] = [], context: TicketPlanValidationContext = {}): TicketPlanProposal {
-  const start = output.lastIndexOf(PROPOSAL_START);
-  const end = output.lastIndexOf(PROPOSAL_END);
-  if (start < 0 || end <= start) throw new Error(`planner output is missing ${PROPOSAL_START}/${PROPOSAL_END}`);
-  const raw = output.slice(start + PROPOSAL_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch (err) { throw new Error(`planner proposal is not valid JSON: ${err instanceof Error ? err.message : String(err)}`); }
-  const contract = ticketPlanProposalV1Schema.safeParse(parsed);
-  if (!contract.success) throw new Error(`planner proposal contract validation failed:\n${zodIssues(contract.error).map((issue) => `- ${issue}`).join("\n")}`);
-  const issues = validateTicketPlanProposal(contract.data, existingTickets, context);
-  if (issues.length) throw new Error(`invalid planner proposal:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
-  return contract.data;
 }
 
 export function validateTicketPlanProposal(value: unknown, existingTickets: TicketDef[] = [], context: TicketPlanValidationContext = {}): string[] {

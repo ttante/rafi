@@ -1,6 +1,6 @@
 {
   "name": "@rafi-ai/cli",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Interactive AI app engineering for Claude and Codex: interview, plan, ticket, and build with QA.",
   "preferGlobal": true,
   "license": "Apache-2.0",
@@ -15,7 +15,7 @@
   },
   "homepage": "https://github.com/ttante/rafi#readme",
   "bin": {
-    "rafi": "dist/index.js"
+    "rafi": "dist/launcher.js"
   },
   "exports": {
     ".": {
@@ -33,6 +33,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts test/*.test.mjs",
+    "test:resume-matrix": "RAFI_RESUME_MATRIX=full tsx --test --test-concurrency=4 test/resumeMatrix.test.ts",
     "prepack": "pnpm build",
     "prepublishOnly": "pnpm test && pnpm typecheck"
   },
@@ -41,11 +42,11 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.4.0",
-    "ai-foreman": "2.0.0",
+    "ai-foreman": "2.0.1",
     "ajv": "^8.20.0",
     "commander": "^12.1.0",
-    "rafi-spec": "0.9.0",
-    "special-agents": "0.9.0",
+    "rafi-spec": "0.9.1",
+    "special-agents": "0.9.1",
     "yaml": "^2.5.1",
     "zod": "4.4.3"
   },

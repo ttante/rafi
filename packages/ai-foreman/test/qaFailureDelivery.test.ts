@@ -13,8 +13,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  BUILDER_QA_REMEDIATION_END,
-  BUILDER_QA_REMEDIATION_START,
   type ProviderSessionRefV1,
   type QaFailureReportV1,
 } from "rafi-spec";
@@ -25,6 +23,9 @@ import { qaReportDigest } from "../src/qaRecovery.js";
 import { captureFrozenQaSourceAsync } from "../src/qaSnapshot.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
 import { WorkflowDb } from "../src/workflowDb.js";
+// Legacy text markers, kept only to prove old-format output is rejected.
+const BUILDER_QA_REMEDIATION_START = "RAFI_BUILDER_QA_REMEDIATION_START";
+const BUILDER_QA_REMEDIATION_END = "RAFI_BUILDER_QA_REMEDIATION_END";
 
 const ticket: TicketDef = {
   id: "T001",

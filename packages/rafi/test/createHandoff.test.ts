@@ -14,7 +14,9 @@ import { loadSourceRegistry } from "ai-foreman/sources/source-registry.js";
 import { runCreateTicketHandoff } from "../src/index.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 import { runPlanWorkflow } from "../src/plan.js";
-import { PLAN_PROPOSAL_END, PLAN_PROPOSAL_START } from "../src/structuredPlan.js";
+// Legacy text markers, kept only to prove old-format output is rejected.
+const PLAN_PROPOSAL_START = "RAFI_PLAN_PROPOSAL_START";
+const PLAN_PROPOSAL_END = "RAFI_PLAN_PROPOSAL_END";
 
 const CANCEL = Symbol("cancel");
 

@@ -27,8 +27,8 @@ function fixture(confinementMode="read-only", unknownResult: unknown = {unknown:
  const source=captureFrozenQaSource(root);const fields={version:2,sourceMode:confinementMode,scratchMode:"isolated",networkMode:"disabled",settingsSources:"none",environmentDigest:"e".repeat(64),policyDigest:"a".repeat(64)};const confinement={...fields,digest:qaDigest("qa-confinement",fields)};
  const basisFields={version:2 as const,ticketDigest:qaDigest("ticket",loadTickets(join(root,".tickets/tickets.yaml"))[0]),instructionDigest:"instruction",roleInstructionsDigest:"role",skillsDigest:"skills",runtimeDigest:"runtime",validationChecklistDigest:"check",confinementDigest:confinement.digest};const basis={...basisFields,digest:qaDigest("review-basis-fields",basisFields)};
  const head=db.commitQaReviewReady({version:2,runId:run.runId,ticketId:"T001",originDigest:source.originDigest,contentDigest:source.contentDigest,digest:source.digest,capturedAt:source.capturedAt,paths:source.pathInventory},basis,ref,confinement,{attemptId:"review-1",cycle:1,remediationGeneration:0},0);
- const turn:QaTurnIntentV2={version:2,operationId:"qa-turn",runId:run.runId,ticketId:"T001",reviewNumber:head.reviewNumber,sessionGeneration:ref.generation,slot:"initial",sourceStateDigest:source.digest,reviewBasisDigest:basis.digest,providerSession:{version:2,provider:ref.provider,sessionId:ref.sessionId,role:"qa",stream:"qa",generation:ref.generation,cwd:ref.cwd!,configRoot:ref.configRoot!,createdAt:ref.createdAt,validatedAt:ref.validatedAt},instructionDigest:"raw-instruction-digest",intendedAt:new Date().toISOString()};db.commitQaTurnIntent(turn,head.revision);
- db.planOperation({runId:run.runId,idempotencyKey:"qa-dispatch",kind:"provider-dispatch",intent:{role:"qa",sessionRef:ref,instructionDigest:turn.instructionDigest}});db.updateOperation("qa-dispatch","in_progress");db.updateOperation("qa-dispatch","uncertain",{result:unknownResult});db.close();run=releaseBuildLease(root,run,"recoverable");
+ const turn:QaTurnIntentV2={version:2,operationId:"qa-dispatch",runId:run.runId,ticketId:"T001",reviewNumber:head.reviewNumber,sessionGeneration:ref.generation,slot:"initial",sourceStateDigest:source.digest,reviewBasisDigest:basis.digest,providerSession:{version:2,provider:ref.provider,sessionId:ref.sessionId,role:"qa",stream:"qa",generation:ref.generation,cwd:ref.cwd!,configRoot:ref.configRoot!,createdAt:ref.createdAt,validatedAt:ref.validatedAt},instructionDigest:"raw-instruction-digest",intendedAt:new Date().toISOString()};db.commitQaTurnIntent(turn,head.revision);
+ db.planOperation({runId:run.runId,idempotencyKey:"qa-dispatch",kind:"provider-dispatch",intent:{role:"qa",sessionRef:ref,instructionDigest:"rendered-provider-instruction-digest"}});db.updateOperation("qa-dispatch","in_progress");db.updateOperation("qa-dispatch","uncertain",{result:unknownResult});db.close();run=releaseBuildLease(root,run,"recoverable");
  const recovery=new WorkflowDb(root);const admission=recovery.acquireBuildRecoveryAdmission(run.runId);const lease=recovery.acquireLease(run.runId);
  return {root,run,ref,recovery,close(){recovery.releaseLease(lease);recovery.releaseBuildAdmission(admission);recovery.close();rmSync(root,{recursive:true,force:true});}};
 }
@@ -45,17 +45,17 @@ test("interrupted read-only QA requires native quiescence and never invents a pa
 
 test("interrupted QA reconciles an exact recorded host-completed turn with unknown provider outcome without accepting it",()=>{const f=fixture("read-only",{isError:true,failure:{dispatchState:"unknown"}});try{
  const receipt={dispatch:"completed",hostInterrupted:true};
- (f.recovery as any).db.prepare("UPDATE qa_turns SET status='completed',receipt_json=? WHERE operation_id='qa-turn'").run(JSON.stringify(receipt));
+ (f.recovery as any).db.prepare("UPDATE qa_turns SET status='completed',receipt_json=? WHERE operation_id='qa-dispatch'").run(JSON.stringify(receipt));
  const before=f.recovery.qaTicketHead(f.run.runId,"T001");
  if(process.platform==="win32"){assert.throws(()=>f.recovery.reconcileInterruptedQaDispatch(f.run.runId,"T001"));return;}
  assert.equal(f.recovery.reconcileInterruptedQaDispatch(f.run.runId,"T001"),true);
  assert.deepEqual(f.recovery.qaTicketHead(f.run.runId,"T001"),before);
- assert.deepEqual(JSON.parse((f.recovery as any).db.prepare("SELECT receipt_json FROM qa_turns WHERE operation_id='qa-turn'").get().receipt_json),receipt);
+ assert.deepEqual(JSON.parse((f.recovery as any).db.prepare("SELECT receipt_json FROM qa_turns WHERE operation_id='qa-dispatch'").get().receipt_json),receipt);
  assert.equal((f.recovery.operation("qa-dispatch")!.result as any).outcomeUnknown,true);
 }finally{f.close();}});
 
 test("a completed QA turn without a typed unknown provider failure cannot be reinterpreted",()=>{const f=fixture();try{
- (f.recovery as any).db.prepare("UPDATE qa_turns SET status='completed' WHERE operation_id='qa-turn'").run();
+ (f.recovery as any).db.prepare("UPDATE qa_turns SET status='completed' WHERE operation_id='qa-dispatch'").run();
  assert.throws(()=>f.recovery.reconcileInterruptedQaDispatch(f.run.runId,"T001"));
  assert.equal(f.recovery.operation("qa-dispatch")!.status,"uncertain");
 }finally{f.close();}});
@@ -69,7 +69,7 @@ for(const condition of ["writable-confinement","live-worker","changed-requiremen
  assert.throws(()=>f.recovery.reconcileInterruptedQaDispatch(f.run.runId,"T001"));assert.equal(f.recovery.operation("qa-dispatch")!.status,"uncertain");
  }finally{f.close();}});
 
-for (const condition of ["confinement-checksum","basis-checksum","missing-source","wrong-generation","wrong-config-root","wrong-role","wrong-instruction","wrong-turn-source"] as const) test(`interrupted QA preserves uncertainty for invalid ${condition} proof`,()=>{
+for (const condition of ["confinement-checksum","basis-checksum","missing-source","wrong-generation","wrong-config-root","wrong-role","foreign-turn","wrong-turn-source"] as const) test(`interrupted QA preserves uncertainty for invalid ${condition} proof`,()=>{
  const f=fixture();
  try {
   // Fault injection uses the already-authorized fixture connection, preserving
@@ -86,7 +86,7 @@ for (const condition of ["confinement-checksum","basis-checksum","missing-source
    if(condition==="wrong-generation")mutate("operation_journal","intent_json",value=>{value.sessionRef.generation+=1;});
    if(condition==="wrong-config-root")mutate("operation_journal","intent_json",value=>{value.sessionRef.configRoot=tmpdir();});
    if(condition==="wrong-role")mutate("operation_journal","intent_json",value=>{value.sessionRef.role="builder";});
-   if(condition==="wrong-instruction")mutate("operation_journal","intent_json",value=>{value.instructionDigest="foreign-turn";});
+   if(condition==="foreign-turn")mutate("qa_turns","intent_json",value=>{value.operationId="foreign-turn";});
    if(condition==="wrong-turn-source")mutate("qa_turns","intent_json",value=>{value.sourceStateDigest="foreign-source";});
   }
   assert.throws(()=>f.recovery.reconcileInterruptedQaDispatch(f.run.runId,"T001"));

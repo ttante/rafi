@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -90,6 +90,51 @@ test("async disposable QA snapshot supports an initialized repository with no co
       assert.deepEqual(await snapshot.qaChanges(), []);
       writeFileSync(join(snapshot.path, "app.txt"), "QA changed it\n");
       assert.deepEqual(await snapshot.qaChanges(), ["app.txt"]);
+    } finally {
+      await snapshot.remove();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("committed-repository QA snapshot projects ignored vendored checkouts without reporting them as QA edits", async () => {
+  // Regression: MoneyTree's ignored vendor/starnet checkout was visible to QA
+  // only while the project had no commit; after the first commit QA lost it.
+  const root = mkdtempSync(join(tmpdir(), "rafi-qa-vendor-test-"));
+  try {
+    git(root, "init", "-q");
+    git(root, "config", "user.email", "qa@example.invalid");
+    git(root, "config", "user.name", "QA Test");
+    writeFileSync(join(root, ".gitignore"), "vendor/\n");
+    writeFileSync(join(root, "app.txt"), "builder source\n");
+    git(root, "add", "."); git(root, "commit", "-qm", "initial");
+    const upstream = join(root, "vendor", "upstream");
+    mkdirSync(join(upstream, "node_modules", "dep"), { recursive: true });
+    git(upstream, "init", "-q");
+    git(upstream, "config", "user.email", "qa@example.invalid");
+    git(upstream, "config", "user.name", "QA Test");
+    writeFileSync(join(upstream, ".gitignore"), "node_modules/\n");
+    writeFileSync(join(upstream, "README.md"), "pinned upstream\n");
+    git(upstream, "add", "."); git(upstream, "commit", "-qm", "upstream pin");
+    const pin = git(upstream, "rev-parse", "HEAD");
+    // Ignored only by this checkout's local exclude file, which a clone does not inherit.
+    mkdirSync(join(root, "local-only"));
+    writeFileSync(join(root, "local-only", "note.txt"), "local\n");
+    // A git template may install info/exclude as a symlink to a shared file;
+    // replace it rather than writing through it.
+    rmSync(join(root, ".git", "info", "exclude"), { force: true });
+    mkdirSync(join(root, ".git", "info"), { recursive: true });
+    writeFileSync(join(root, ".git", "info", "exclude"), "local-only/\n");
+
+    const snapshot = await createDisposableQaSnapshotAsync(root);
+    try {
+      assert.notEqual(snapshot.frozenState.head, "unavailable");
+      assert.equal(readFileSync(join(snapshot.path, "vendor", "upstream", "README.md"), "utf8"), "pinned upstream\n");
+      // The nested checkout keeps its own identity; a nested node_modules must not shadow it.
+      assert.equal(git(join(snapshot.path, "vendor", "upstream"), "rev-parse", "HEAD"), pin);
+      assert.equal(existsSync(join(snapshot.path, "local-only")), false);
+      assert.deepEqual(await snapshot.qaChanges(), []);
     } finally {
       await snapshot.remove();
     }

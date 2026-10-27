@@ -56,3 +56,21 @@ test("actual Codex turn/start RPC uses readOnly and never escalation for every n
   await internal.sendTurnInternal("Implement", { purpose: "implementation" }); assert.equal((dispatched?.sandboxPolicy as { type: string }).type, "workspaceWrite");
   assert.equal(adapter.contractCapabilities().nativeCompactionBarrier, false);
 });
+
+test("QA turns reach the network only with the operator's --qa-network grant", async () => {
+  const dispatchFor = async (opts: { sessionRole: "qa" | "builder"; networkAccess?: boolean }, purpose: ProviderTurnPurpose) => {
+    const adapter = new CodexAdapter({ cwd: "/private/tmp", sandboxMode: opts.sessionRole === "qa" ? "read-only" : undefined, ...opts, permission: async () => ({ behavior: "allow" }) });
+    const internal = adapter as unknown as { ensureThread(): Promise<void>; request(method: string, params: Record<string, unknown>): Promise<unknown>; waitFor(): Promise<unknown>; sendTurnInternal(text: string, policy: { purpose: ProviderTurnPurpose }): Promise<unknown> };
+    let dispatched: Record<string, unknown> | undefined;
+    internal.ensureThread = async () => {}; internal.waitFor = async () => ({ turn: { status: "completed" } });
+    internal.request = async (_method, params) => { dispatched = params; return { turn: { id: "native" } }; };
+    await internal.sendTurnInternal("Review", { purpose });
+    return dispatched!;
+  };
+  const granted = await dispatchFor({ sessionRole: "qa", networkAccess: true }, "implementation");
+  assert.deepEqual(granted.sandboxPolicy, { type: "readOnly", networkAccess: true });
+  assert.match(JSON.stringify(granted.input), /QA runtime contract: shell network explicitly approved/);
+  assert.deepEqual((await dispatchFor({ sessionRole: "qa" }, "implementation")).sandboxPolicy, { type: "readOnly", networkAccess: false });
+  // A builder network grant never leaks into read-only builder phases.
+  assert.deepEqual((await dispatchFor({ sessionRole: "builder", networkAccess: true }, "planning")).sandboxPolicy, { type: "readOnly", networkAccess: false });
+});

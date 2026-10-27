@@ -17,7 +17,7 @@ function scripted(values: unknown[]): PlanningInputPrompts & { calls: Array<Reco
 }
 
 async function input(prompts: PlanningInputPrompts, choices?: string[]) {
-  return handlePlanningInput({ projectDir: "/tmp", output: "", question: "Which approach?", choices, registry, interactive: true, prompts });
+  return handlePlanningInput({ projectDir: "/tmp", output: "", sourceRequests: [], question: "Which approach?", choices, registry, interactive: true, prompts });
 }
 
 test("planning input returns the exact selected planner choice", async () => {

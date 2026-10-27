@@ -80,10 +80,9 @@ export function requiresBuildApproval(projectDir: string, ticketIds: readonly st
     } catch { changedConsequences = true; }
   }
   if (scope.approved && !changedConsequences) return false;
-  if (!explicitYes) return true;
-  const db = new WorkflowDb(projectDir);
-  try { return db.completedPlanApprovals().length > 0; }
-  finally { db.close(); }
+  // --yes is the operator's standing approval for this invocation: it never
+  // stops to ask, even when the scope differs from the recorded plan approval.
+  return !explicitYes;
 }
 
 /** Bind decisions to current files so an old answer cannot approve a changed scope. */

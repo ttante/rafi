@@ -7,12 +7,12 @@ import { PermissionPolicy } from "../src/permissions/policy.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { readOnlyPermissionConfig } from "../src/agentRun.js";
 import {
-  parseStepStatus,
   looksLikeQuestion,
   buildQaInstruction,
   buildQaFixInstruction,
   buildPlanningTurn,
   buildPrimer,
+  buildNextStepInstruction,
 } from "../src/foreman.js";
 
 const CWD = "/work/project";
@@ -260,93 +260,10 @@ test("read-only agents may run validation commands but not dependency installati
   }
 });
 
-test("parseStepStatus reads the marker line", () => {
-  const done = parseStepStatus('blah blah\nSTEP_STATUS: done | summary="did x" next="do y"');
-  assert.equal(done.kind, "done");
-  assert.equal(done.summary, "did x");
-  assert.equal(done.next, "do y");
-
-  const blocked = parseStepStatus('STEP_STATUS: blocked | reason="missing creds"');
-  assert.equal(blocked.kind, "blocked");
-  assert.equal(blocked.reason, "missing creds");
-
-  assert.equal(parseStepStatus("no marker here").kind, "unknown");
-  assert.equal(parseStepStatus("STEP_STATUS: plan_complete").kind, "plan_complete");
-});
-
-test("parseStepStatus requires one marker on the final non-empty line", () => {
-  const trailing = parseStepStatus('STEP_STATUS: done | summary="did x"\nextra text');
-  assert.equal(trailing.kind, "unknown");
-  assert.match(trailing.error ?? "", /final/);
-
-  const duplicate = parseStepStatus(
-    'STEP_STATUS: done | summary="one"\nSTEP_STATUS: done | summary="two"',
-  );
-  assert.equal(duplicate.kind, "unknown");
-  assert.match(duplicate.error ?? "", /multiple/);
-});
-
-test("parseStepStatus handles escaped quotes and rejects malformed fields", () => {
-  const escaped = parseStepStatus('STEP_STATUS: done | summary="added \\"quoted\\" label"');
-  assert.equal(escaped.kind, "done");
-  assert.equal(escaped.summary, 'added "quoted" label');
-
-  const malformed = parseStepStatus('STEP_STATUS: done | summary="unterminated');
-  assert.equal(malformed.kind, "unknown");
-  assert.match(malformed.error ?? "", /unterminated/);
-});
-
-test("parseStepStatus parses needs_input with question and choices", () => {
-  const status = parseStepStatus(
-    'STEP_STATUS: needs_input | question="Should I update tests?" choices="Yes|No|Skip for now"',
-  );
-  assert.equal(status.kind, "needs_input");
-  assert.equal(status.question, "Should I update tests?");
-  assert.deepEqual(status.choices, ["Yes", "No", "Skip for now"]);
-});
-
-test("parseStepStatus handles needs_input without choices", () => {
-  const status = parseStepStatus(
-    'STEP_STATUS: needs_input | question="Which approach do you prefer?"',
-  );
-  assert.equal(status.kind, "needs_input");
-  assert.equal(status.question, "Which approach do you prefer?");
-  assert.equal(status.choices, undefined);
-});
-
 test("looksLikeQuestion detects trailing questions", () => {
   assert.equal(looksLikeQuestion("I did the thing. Should I also update the docs?"), true);
   assert.equal(looksLikeQuestion("Which option do you prefer"), true);
   assert.equal(looksLikeQuestion("Implemented the feature and tests pass."), false);
-});
-
-test("parseStepStatus recognizes qa_pass", () => {
-  const status = parseStepStatus(
-    'all checks green\nSTEP_STATUS: qa_pass | summary="all tests pass, ticket satisfied"',
-  );
-  assert.equal(status.kind, "qa_pass");
-  assert.equal(status.summary, "all tests pass, ticket satisfied");
-});
-
-test("parseStepStatus recognizes qa_fail and extracts issues", () => {
-  const status = parseStepStatus(
-    'STEP_STATUS: qa_fail | issues="missing test for empty-input case; lint warning in src/foo.ts"',
-  );
-  assert.equal(status.kind, "qa_fail");
-  assert.equal(
-    status.issues,
-    "missing test for empty-input case; lint warning in src/foo.ts",
-  );
-});
-
-test("parseStepStatus extracts branch_dependency", () => {
-  const status = parseStepStatus(
-    'STEP_STATUS: blocked | ticket="T010" branch_dependency="T003" reason="needs shared API first"',
-  );
-  assert.equal(status.kind, "blocked");
-  assert.equal(status.ticket, "T010");
-  assert.equal(status.branchDependency, "T003");
-  assert.equal(status.reason, "needs shared API first");
 });
 
 test("buildQaInstruction requests the native QA verdict contract", () => {
@@ -375,4 +292,23 @@ test("buildPrimer anchors turn 1 explicitly to fix off-by-one counting", () => {
 test("recovery instructions pin planning and implementation to one ticket", () => {
   assert.match(buildPlanningTurn(1, undefined, "T002"), /first item must be ticket T002/);
   assert.match(buildPrimer(1, undefined, true, "T002"), /Resume and finish ticket T002 first/);
+});
+
+test("structured-ticket batches count whole tickets, never sub-steps of one ticket", () => {
+  // Regression: "step 1 of 4" plus a preflight that split T001 into four parts
+  // led the builder to do inspection only, and whole-ticket QA then failed.
+  const plan = buildPlanningTurn(4, "tickets...", undefined, true);
+  assert.match(plan, /one entry per complete ticket/);
+  assert.match(plan, /Never split one ticket into several entries/);
+  assert.doesNotMatch(plan, /step\(s\)/);
+  const primer = buildPrimer(4, "docs/ticket-progress.md", true);
+  assert.match(primer, /ENTIRE assigned ticket/);
+  assert.match(primer, /ticket 1 of up to 4/);
+  assert.doesNotMatch(primer, /step 1 of/);
+  const next = buildNextStepInstruction(2, 4, true);
+  assert.match(next, /ticket 2 of up to 4/);
+  assert.match(next, /not a sub-step/);
+  // Unstructured batches keep the generic ticket-or-step wording.
+  assert.match(buildNextStepInstruction(2, 4), /ticket or step now \(exactly one\) — this is step 2 of 4/);
+  assert.match(buildPlanningTurn(4), /ticket\(s\) or step\(s\)/);
 });

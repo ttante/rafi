@@ -48,7 +48,7 @@ import type { QaRecoveryPacket } from "./qaRecovery.js";
 import { WorkflowDb } from "./workflowDb.js";
 import { assertBuildAssignmentReconciled, beginBuildAssignment, BuildAssignmentRejected, captureBuildSource, finishBuildAssignment, validateBuildAssignment } from "./buildAssignment.js";
 
-/** Parsed STEP_STATUS marker from a builder's turn. */
+/** A role turn's outcome, derived from its native structured result. */
 export interface StepStatus {
   kind:
     | "done"
@@ -70,8 +70,8 @@ export interface StepStatus {
 }
 
 /**
- * Workflow-specific completion is opt-in. Callers may preserve a valid
- * structured response before the generic strict STEP_STATUS repair path runs.
+ * Workflow-specific completion is opt-in. Callers may interpret a valid
+ * structured response before the generic native result handling runs.
  */
 export type InstructionCompletion = (text: string) => StepStatus | undefined;
 
@@ -85,87 +85,6 @@ const QUESTION_HINTS = [
   "could you clarify",
   "which option",
 ];
-
-/**
- * Pull the STEP_STATUS marker out of a turn's final text.
- * Format: `STEP_STATUS: <kind> | key="value" key="value"`.
- */
-export function parseStepStatus(text: string, options: { requireFinalLine?: boolean } = {}): StepStatus {
-  const markerLines = text.split(/\r?\n/).filter((line) => /^\s*STEP_STATUS:/.test(line));
-  const markerCount = markerLines.length;
-  if (markerCount > 1) {
-    return { kind: "unknown", error: "builder emitted multiple STEP_STATUS markers" };
-  }
-  const lines = text.trimEnd().split(/\r?\n/).filter((line) => line.trim().length > 0);
-  const last = lines[lines.length - 1] ?? "";
-  if (!last.includes("STEP_STATUS:")) {
-    if (markerCount === 1 && options.requireFinalLine !== false) {
-      return { kind: "unknown", error: "STEP_STATUS marker was not the final non-empty line" };
-    }
-    if (markerCount === 0) return { kind: "unknown" };
-  }
-
-  const marker = options.requireFinalLine === false ? markerLines[0]?.trim() ?? "" : last;
-  const match = marker.match(
-    /^STEP_STATUS:\s*(done|blocked|plan_complete|needs_input|qa_pass|qa_fail)\b\s*(?:\|\s*(.*))?$/i,
-  );
-  if (!match) {
-    return { kind: "unknown", error: "malformed STEP_STATUS marker" };
-  }
-  const kind = match[1].toLowerCase() as StepStatus["kind"];
-  const fields = parseMarkerFields(match[2] ?? "");
-  if (fields instanceof Error) {
-    return { kind: "unknown", error: fields.message };
-  }
-  return {
-    kind,
-    summary: fields.summary,
-    next: fields.next,
-    reason: fields.reason,
-    question: fields.question,
-    issues: fields.issues,
-    ticket: fields.ticket,
-    branchDependency: fields.branch_dependency,
-    choices: fields.choices
-      ? fields.choices.split("|").map((c) => c.trim()).filter(Boolean)
-      : undefined,
-  };
-}
-
-function parseMarkerFields(input: string): Record<string, string> | Error {
-  const fields: Record<string, string> = {};
-  let rest = input.trim();
-  while (rest.length > 0) {
-    const key = rest.match(/^(\w+)="/);
-    if (!key) return new Error(`malformed STEP_STATUS field near: ${rest.slice(0, 40)}`);
-    const name = key[1];
-    let i = key[0].length;
-    let value = "";
-    let closed = false;
-    while (i < rest.length) {
-      const ch = rest[i];
-      if (ch === "\\") {
-        const next = rest[i + 1];
-        if (next === undefined) return new Error(`unterminated escape in STEP_STATUS field: ${name}`);
-        value += next;
-        i += 2;
-        continue;
-      }
-      if (ch === "\"") {
-        closed = true;
-        i++;
-        break;
-      }
-      value += ch;
-      i++;
-    }
-    if (!closed) return new Error(`unterminated STEP_STATUS field: ${name}`);
-    if (fields[name] !== undefined) return new Error(`duplicate STEP_STATUS field: ${name}`);
-    fields[name] = value;
-    rest = rest.slice(i).trim();
-  }
-  return fields;
-}
 
 /** Heuristic: did a marker-less turn end by asking the human something? */
 export function looksLikeQuestion(text: string): boolean {
@@ -196,6 +115,16 @@ export function buildPrimer(n: number, trackerPath?: string, ticketsEnabled = fa
   const preferredTicketRule = preferredTicketId
     ? `\n- Resume and finish ticket ${preferredTicketId} first. Do not substitute a different queued ticket.`
     : "";
+  // With structured tickets the host assigns one whole ticket per step and QA
+  // reviews that ticket after the turn, so "step" must never mean a sub-task.
+  if (ticketsEnabled) return `You are being run by an automated foreman. We will work through up to ${n} assigned tickets, one complete ticket per turn.
+
+Rules:
+- Implement the ENTIRE assigned ticket this turn: every acceptance criterion and required test. Do not split it into sub-steps across turns; independent QA reviews the whole ticket as soon as you report.
+- Return the result using the selected native JSON output contract.
+- If a tool action is denied by foreman policy, do not retry the denied form; report it using the blocked result. The one exception is a required test that you changed by adding a pipe, redirection, substitution, or wrapper: retry the exact required-test command without that extra shell syntax before reporting it blocked.${trackerRule}${preferredTicketRule}
+
+This is ticket 1 of up to ${n} in this batch. Implement the assigned ticket completely now.`;
   return `You are being run by an automated foreman. We will work through your next ${n} tickets or implementation steps, one per turn.
 
 Rules:
@@ -207,7 +136,8 @@ This is step 1 of ${n}. Implement the next ticket or step now.`;
 }
 
 /** Instruction sent on turns 2–N. */
-export function buildNextStepInstruction(i: number, n: number): string {
+export function buildNextStepInstruction(i: number, n: number, ticketsEnabled = false): string {
+  if (ticketsEnabled) return `Implement the assigned ticket completely now — every acceptance criterion and required test, not a sub-step. This is ticket ${i} of up to ${n} in this batch; independent QA reviews the whole ticket when you report. Return the completed work-report through the selected native JSON contract.`;
   return `Implement the next ticket or step now (exactly one) — this is step ${i} of ${n}. Return the completed work-report through the selected native JSON contract.`;
 }
 
@@ -239,13 +169,14 @@ Fix every one of them now. Submit the selected native remediation result so Fore
 }
 
 /** Pre-flight planning turn: ask the builder to list its next N steps without implementing anything. */
-export function buildPlanningTurn(n: number, ticketsContent?: string, preferredTicketId?: string): string {
+export function buildPlanningTurn(n: number, ticketsContent?: string, preferredTicketId?: string, ticketsEnabled = false): string {
   const header = ticketsContent
     ? `Here is the project's ticket list:\n\n${ticketsContent}\n\n`
     : "";
   const preferred = preferredTicketId
     ? ` The first item must be ticket ${preferredTicketId}; this is an interrupted ticket being resumed.`
     : "";
+  if (ticketsEnabled) return `${header}Before we begin, list up to ${n} ticket(s) you plan to implement, in dependency order, one entry per complete ticket.${preferred} Never split one ticket into several entries; each entry is implemented and independently reviewed as a whole ticket. A ticket whose dependencies are earlier entries in your list may be included. List fewer than ${n} if fewer can be built. Do not implement anything yet; return the ordered tickets through the build-preflight response.`;
   return `${header}Before we begin, list the next ${n} ticket(s) or step(s) you plan to implement, in order.${preferred} Be specific — reference ticket IDs or titles where applicable. Do not implement anything yet; return the ordered steps through the build-preflight response.`;
 }
 
@@ -607,7 +538,7 @@ export class Foreman {
   /** Send a planning turn and return the builder's response text. Does not count toward steps. */
   async runPreflight(n: number, ticketsContent?: string, preferredTicketId?: string, executionTickets?: readonly string[]): Promise<string> {
     this.assertNotInterrupted();
-    const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId) + (executionTickets ? `\nAuthorized ticket scope: ${executionTickets.join(", ")}. Plan only these tickets. Tickets awaiting answers are not eligible for implementation.` : "");
+    const instruction = buildPlanningTurn(n, ticketsContent, preferredTicketId, this.ticketsEnabled) + (executionTickets ? `\nAuthorized ticket scope: ${executionTickets.join(", ")}. Plan only these tickets. Tickets awaiting answers are not eligible for implementation.` : "");
     if (this.beforeBuilderTurn) this.builder = await this.beforeBuilderTurn(this.builder, instruction);
     this.assertNotInterrupted();
     const policy = nativePolicy(preflightOutput, { purpose: "planning", journalRunId: this.qaRunId });
@@ -978,7 +909,7 @@ export class Foreman {
       // have no preflight still receive the primer for compatibility.
       let instruction = i === 1 && !this.preflightPlan
         ? buildPrimer(n, trackerPath, this.ticketsEnabled, pendingTicketId)
-        : buildNextStepInstruction(i, n);
+        : buildNextStepInstruction(i, n, this.ticketsEnabled);
       if (pendingTicketId) instruction += `\n\nAssigned ticket: ${pendingTicketId}. Implement exactly this ticket. Do not substitute another ticket. Return the native work report for this assigned ticket.`;
       const continuations = answered.filter(decision => decision.interruptionId === `ticket:${pendingTicketId}`);
       const continuationKeys: string[] = [];

@@ -97,14 +97,15 @@ export function buildClaudeQueryOptions(
       failIfUnavailable: true,
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
-      network: { allowedDomains: [], deniedDomains: ["*"] },
+      // QA stays offline unless the operator granted --qa-network for this build.
+      network: opts.networkAccess === true ? { allowedDomains: ["*"] } : { allowedDomains: [], deniedDomains: ["*"] },
       filesystem: { allowWrite: [scratchDirectory], denyWrite: [opts.cwd, ...(opts.configRoot ? [opts.configRoot] : [])] },
     } } : {}),
   };
   const exactSkills = opts.preloadedSkillContent?.length
     ? ["# Preloaded Skills", "Use the following skills for this run.", ...opts.preloadedSkillContent.map((skill) => skill.content)].join("\n\n")
     : undefined;
-  const systemAppend = [handoffSystemInstructions(opts.sessionRole, opts.systemPromptAppend), opts.sessionRole === "builder" ? `Builder runtime contract: shell network ${opts.networkAccess === true ? "explicitly approved for this build" : "disabled"}; sandbox fallback disabled. If acquisition requires unavailable access, request input first or use a provenance-verified local bundle. A ticket answer does not grant runtime permissions.` : undefined, exactSkills].filter((part): part is string => Boolean(part)).join("\n\n");
+  const systemAppend = [handoffSystemInstructions(opts.sessionRole, opts.systemPromptAppend), opts.sessionRole === "builder" ? `Builder runtime contract: shell network ${opts.networkAccess === true ? "explicitly approved for this build" : "disabled"}; sandbox fallback disabled. If acquisition requires unavailable access, request input first or use a provenance-verified local bundle. A ticket answer does not grant runtime permissions.` : undefined, opts.sessionRole === "qa" && opts.networkAccess === true ? "QA runtime contract: shell network explicitly approved for this review (--qa-network); you may run live checks against operator-provided local or remote services. Workspace stays read-only." : undefined, exactSkills].filter((part): part is string => Boolean(part)).join("\n\n");
   if (systemAppend) {
     base.systemPrompt = { type: "preset", preset: "claude_code", append: systemAppend };
   }
@@ -1290,7 +1291,7 @@ export class ClaudeAdapter implements BuilderAdapter {
   }
 
   private providerIdleTimeoutMs(): number {
-    const configured = this.opts.providerIdleTimeoutMs;
+    const configured = this.opts.providerIdleTimeoutMs ?? Number(process.env.RAFI_PROVIDER_IDLE_TIMEOUT_MS);
     return Number.isFinite(configured) && configured! > 0 ? configured! : DEFAULT_PROVIDER_IDLE_TIMEOUT_MS;
   }
 

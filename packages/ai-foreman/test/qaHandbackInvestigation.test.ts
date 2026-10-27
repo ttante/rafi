@@ -8,16 +8,19 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUILDER_QA_REMEDIATION_START as START, BUILDER_QA_REMEDIATION_END as END, type QaFailureReportV1, type ProviderSessionRefV1 } from "rafi-spec";
+import { type QaFailureReportV1, type ProviderSessionRefV1 } from "rafi-spec";
 import type { BuilderAdapter, BuilderEvent, TurnResult } from "../src/adapters/types.js";
 import { baselineContinuityDelta, ContinuityAdapter } from "../src/continuity.js";
 import { QaFailureDeliveryService } from "../src/qaFailureDelivery.js";
 import { canonicalJson, createQaFindingRefs, qaDigest } from "../src/qaProtocolV2.js";
 import { qaReportDigest } from "../src/qaRecovery.js";
-import { type QaSessionHandle } from "../src/qaReview.js";
+import type { QaSessionHandle } from "../src/qaReview.js";
 import { captureFrozenQaSourceAsync } from "../src/qaSnapshot.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
+// Legacy text markers, kept only to prove old-format output is rejected.
+const START = "RAFI_BUILDER_QA_REMEDIATION_START";
+const END = "RAFI_BUILDER_QA_REMEDIATION_END";
 
 const ticket: TicketDef = { id: "T001", order: 1, title: "Reproducible install", area: "core", priority: "P2", size: "M", risk: "Medium", depends_on: [], summary: "Commit a lockfile", acceptance: ["Frozen installation works"], required_tests: ["pnpm install --frozen-lockfile"], likely_files: ["pnpm-lock.yaml"] };
 const report: QaFailureReportV1 = { version: 1, summary: "Lockfile missing", checks_run: [{ check: "audit", outcome: "failed", evidence: "ERR_PNPM_AUDIT_NO_LOCKFILE" }], findings: [{ id: "QA-1", requirement: "Reproducible install", locations: ["pnpm-lock.yaml"], problem: "Lockfile missing", evidence: "Audit fails", expected: "Lockfile exists", fix_direction: "Generate a real lockfile", verification: ["pnpm install --frozen-lockfile"] }], observations: [] };

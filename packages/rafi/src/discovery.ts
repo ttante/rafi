@@ -16,10 +16,6 @@ import type {
 import { discoveryEnvelopeV1Schema, discoveryOutput, parseProviderContract, type OperationResponse, type ProjectSourceEntry, type SourceRegistryConfig } from "rafi-spec";
 import { findNearestRafiProject, RAFI_CONFIG_FILE, resolveExplicitRafiProject } from "./project.js";
 
-export const DISCOVERY_ENVELOPE_START = "RAFI_DISCOVERY_REPORT_START";
-export const DISCOVERY_ENVELOPE_END = "RAFI_DISCOVERY_REPORT_END";
-export const SOURCE_REQUEST_START = "RAFI_SOURCE_REQUEST_START";
-export const SOURCE_REQUEST_END = "RAFI_SOURCE_REQUEST_END";
 const MAX_SOURCE_ROUNDS = 3;
 const VALID_EFFORT = ["low", "medium", "high", "xhigh"] as const;
 
@@ -89,7 +85,6 @@ export interface DiscoveryOptions {
   registerSources?: (projectDir: string, registry: SourceRegistryConfig, requests: StructuredSourceRequest[], opts?: { capture?: boolean; storage?: SourceRegistryConfig["snapshot_storage"] }) => Promise<CaptureResult>;
   saveSources?: (projectDir: string, registry: SourceRegistryConfig) => void;
   sourceRequestFromAnswer?: (answer: string, projectDir: string) => StructuredSourceRequest;
-  extractSourceRequests?: (output: string) => StructuredSourceRequest[];
   setSourceStorage?: (registry: SourceRegistryConfig, storage: SourceRegistryConfig["snapshot_storage"]) => SourceRegistryConfig;
   prompt?: DiscoveryPromptAdapter;
 }
@@ -233,6 +228,7 @@ export async function runDiscovery(opts: DiscoveryOptions): Promise<DiscoveryRes
       history,
       sourceCaptures,
       priorOutput: output,
+      unresolvedSourceRequest: response?.result.kind === "source-request" && response.result.requests.length > 0,
     });
     envelope = fallback.envelope;
     output = fallback.output;
@@ -259,7 +255,6 @@ async function loadSourceRegistryApi(opts: DiscoveryOptions): Promise<{
   registerSources: NonNullable<DiscoveryOptions["registerSources"]>;
   saveSources: NonNullable<DiscoveryOptions["saveSources"]>;
   sourceRequestFromAnswer: NonNullable<DiscoveryOptions["sourceRequestFromAnswer"]>;
-  extractSourceRequests: NonNullable<DiscoveryOptions["extractSourceRequests"]>;
   setSourceStorage: NonNullable<DiscoveryOptions["setSourceStorage"]>;
 }> {
   if (
@@ -267,7 +262,6 @@ async function loadSourceRegistryApi(opts: DiscoveryOptions): Promise<{
     opts.registerSources &&
     opts.saveSources &&
     opts.sourceRequestFromAnswer &&
-    opts.extractSourceRequests &&
     opts.setSourceStorage
   ) {
     return {
@@ -275,7 +269,6 @@ async function loadSourceRegistryApi(opts: DiscoveryOptions): Promise<{
       registerSources: opts.registerSources,
       saveSources: opts.saveSources,
       sourceRequestFromAnswer: opts.sourceRequestFromAnswer,
-      extractSourceRequests: opts.extractSourceRequests,
       setSourceStorage: opts.setSourceStorage,
     };
   }
@@ -285,7 +278,6 @@ async function loadSourceRegistryApi(opts: DiscoveryOptions): Promise<{
     registerSources: opts.registerSources ?? mod.registerSourceRequests,
     saveSources: opts.saveSources ?? mod.saveSourceRegistry,
     sourceRequestFromAnswer: opts.sourceRequestFromAnswer ?? mod.sourceRequestFromAnswer,
-    extractSourceRequests: opts.extractSourceRequests ?? mod.extractSourceRequests,
     setSourceStorage: opts.setSourceStorage ?? mod.setSourceStorage,
   };
 }
@@ -689,17 +681,6 @@ Final output requirements:
 - Use the selected native output schema; source requests are intermediate results.`;
 }
 
-function hasUnresolvedSourceRequest(
-  output: string,
-  extract: (output: string) => StructuredSourceRequest[],
-): boolean {
-  try {
-    return extract(output).length > 0;
-  } catch {
-    return output.includes(SOURCE_REQUEST_START) && output.includes(SOURCE_REQUEST_END);
-  }
-}
-
 function buildDiscoveryFallbackReport(opts: {
   projectDir: string;
   initialized: boolean;
@@ -710,8 +691,9 @@ function buildDiscoveryFallbackReport(opts: {
   history: Record<string, unknown>;
   sourceCaptures: DiscoverySourceCapture[];
   priorOutput: string;
+  unresolvedSourceRequest: boolean;
 }): { envelope: DiscoveryEnvelope; output: string } {
-  const unresolved = opts.priorOutput.includes(SOURCE_REQUEST_START) && opts.priorOutput.includes(SOURCE_REQUEST_END);
+  const unresolved = opts.unresolvedSourceRequest;
   const envelope: DiscoveryEnvelope = {
     version: 1,
     discovered_artifacts: opts.inventory,

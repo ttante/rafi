@@ -14,10 +14,10 @@ export async function streamTicketPopulation(input: { projectDir: string; interv
   instruction: string; checkpoint(scope: TicketPopulationPageScope): void;
   dispatch(instruction: string, policy: TurnRequest & { output: OutputContract }): Promise<PageTurn> }): Promise<{ proposal: TicketPopulationProposalV1Contract; turn: PageTurn }> {
   const runId = `ticket-population:${input.interviewId}`;
-  const artifactId = `${runId}:artifact:${input.correction}`;
   const db = new WorkflowDb(input.projectDir);
   try {
     db.enableStructuredCommunication();
+    const artifactId = restartableArtifactId(db, runId, `${runId}:artifact:${input.correction}`);
     const prior = db.operation(artifactId);
     if (prior) {
       const retained = prior.intent as TicketPopulationPageScope & { instructionDigest: string };
@@ -96,4 +96,25 @@ export async function streamTicketPopulation(input: { projectDir: string; interv
       throw error;
     }
   } finally { db.close(); }
+}
+
+/**
+ * An earlier population attempt that never reached its terminal page (a bad
+ * answer, a provider crash or a stalled turn, or Rafi itself stopping) is
+ * retired with its unanswered page calls, and population restarts from its
+ * first page under a new lineage with the same instruction. A terminal
+ * lineage is kept so its retained pages can be replayed.
+ */
+function restartableArtifactId(db: WorkflowDb, runId: string, baseId: string): string {
+  for (let restart = 0; ; restart++) {
+    const artifactId = restart ? `${baseId}:restart-${restart}` : baseId;
+    const prior = db.operation(artifactId);
+    if (!prior || db.populationPageLedger(artifactId)?.state === "terminal") return artifactId;
+    if (prior.status === "failed") continue;
+    db.atomic(() => {
+      for (const dispatch of db.operations(runId).filter(op => op.kind === "provider-dispatch" && ["in_progress", "uncertain"].includes(op.status)))
+        db.updateOperation(dispatch.idempotencyKey, "failed", { result: { recovery: "population-restart", outcomeUnknown: true, providerReplayAuthorized: false, priorResult: dispatch.result }, error: "Unfinished ticket population page; population restarts from its first page" });
+      db.updateOperation(artifactId, "failed", { result: { recovery: "population-restart", priorResult: prior.result }, error: "Unfinished ticket population lineage retired; population restarts from its first page" });
+    });
+  }
 }

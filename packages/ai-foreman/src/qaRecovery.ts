@@ -536,22 +536,6 @@ export function renderQaRecoveryAcknowledgementInstruction(packet: QaRecoveryPac
   ].join("\n");
 }
 
-export function validateQaRecoveryAcknowledgement(text: string, packet: QaRecoveryPacket, options: { continuityAlreadyValidated?: boolean } = {}): string[] {
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const expected = `RAFI_QA_RECOVERY_ACK packet="${packet.manifest.packetDigest}" reviewed_state="${packet.manifest.reviewedStateDigest}" required_resources_read="all"`;
-  const errors: string[] = [];
-  if (lines[0] !== expected) errors.push("missing or malformed exact recovery-packet acknowledgement");
-  const acknowledgement = /^RAFI_QA_RECOVERY_ACK packet="([a-f0-9]{64})" reviewed_state="([a-f0-9]{64})" required_resources_read="(all)"$/.exec(lines[0] ?? "");
-  if (acknowledgement) {
-    try { parseProviderContract(qaRecoveryAcknowledgementV1Schema, { packet: acknowledgement[1], reviewed_state: acknowledgement[2], required_resources_read: acknowledgement[3] }, "RAFI_QA_RECOVERY_ACK"); }
-    catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
-  }
-  if (options.continuityAlreadyValidated) {
-    if (lines.length !== 1) errors.push("recovery acknowledgement must not contain additional text");
-  } else if (lines.length !== 2 || !/^RAFI_CONTINUITY_DELTA(?:\s|$)/.test(lines[1] ?? "")) errors.push("exactly one continuity record must follow the recovery acknowledgement");
-  return errors;
-}
-
 export function qaRecoveryInventory(packet: QaRecoveryPacket): string {
   return packet.manifest.resources.map((resource) => `${resource.path}\t${resource.purpose}\t${resource.mediaType}\t${resource.bytes}\t${resource.digest}\t${resource.integrityPolicy}`).join("\n");
 }

@@ -14,10 +14,7 @@ import {
 } from "ai-foreman/agent-run.js";
 import {
   applyApprovedTicketPlan,
-  extractTicketPlanProposal,
   planningFingerprintChanges,
-  PROPOSAL_END,
-  PROPOSAL_START,
   readTicketPlanningContext,
   ticketPlanningFingerprint,
   validateTicketPlanProposal,
@@ -34,8 +31,6 @@ import {
   sourceContext,
   sourceRequestFromAnswer,
   validateSourceVersionRef,
-  SOURCE_REQUEST_END,
-  SOURCE_REQUEST_START,
 } from "ai-foreman/sources/source-registry.js";
 import { chooseStagedSourceDisposition, handlePlanningInput, parseSourceStorage, promptSourceStorage } from "./planningDriver.js";
 import { resolvePlanningRuntime } from "./planningRuntime.js";

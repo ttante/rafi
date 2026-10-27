@@ -68,12 +68,15 @@ test("shared orchestration persists ready contract after independent assessment 
     assert.equal(store.head("run", "T1", digest).state, "ready");
   } finally { db.close(); }
 });
-test("unknown dispatch remains uncertain, survives restart and is not automatically repeated", async () => {
+test("an interrupted preparation call is retired and its phase restarts on the next attempt", async () => {
   const { db, store } = storeFixture(); let calls = 0;
   const deps = { store, normalizeDraft, now: () => 1000, inputsCurrent: () => true, dispatch: async () => { calls++; throw new Error("provider disconnected after send"); } };
   try {
     const initial = candidate(); assert.equal((await prepareVerificationContract(initial, initial.requirements, deps)).status, "uncertain");
-    assert.equal((await prepareVerificationContract(initial, initial.requirements, deps)).status, "uncertain"); assert.equal(calls, 1);
+    assert.equal((await prepareVerificationContract(initial, initial.requirements, deps)).status, "uncertain"); assert.equal(calls, 2);
+    const budget = store.budget(initial.runId, initial.workId, initial.admissionDigest)!;
+    assert.equal(budget.reservations.filter(item => item.interruptedAt).length, 1, "the first call was retired as interrupted, never treated as a result");
+    assert.equal(budget.reservations.filter(item => item.resultDigest).length, 0);
   } finally { db.close(); }
 });
 test("semantic assessor concerns block publication even when structural coverage passes", async () => {

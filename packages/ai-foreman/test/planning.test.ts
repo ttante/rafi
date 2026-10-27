@@ -11,9 +11,6 @@ import { StateDb } from "../src/tickets/stateDb.js";
 import { loadTicketSetupConfig } from "../src/tickets/setupConfig.js";
 import {
   applyApprovedTicketPlan,
-  extractTicketPlanProposal,
-  PROPOSAL_END,
-  PROPOSAL_START,
   ticketPlanningFingerprint,
   validateTicketPlanProposal,
   type TicketPlanProposal,
@@ -28,25 +25,23 @@ function proposal(additions: TicketDef[] = [ticket("T001")]): TicketPlanProposal
   return { version: 1, title: "Plan", markdown: "# Plan\n\nApproved work.", additions, edits: [], supersessions: [], state_changes: [], source_reconciliation: [], future_work: [], next: { ticket_ids: additions.map((item) => item.id), replace_existing: false } };
 }
 
-test("proposal envelope parses and validation enforces provenance", () => {
+test("proposal validation enforces provenance", () => {
   const value = proposal();
-  const output = `Readable\n${PROPOSAL_START}\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\`\n${PROPOSAL_END}\nSTEP_STATUS: plan_complete | summary="proposal_ready"`;
-  assert.deepEqual(extractTicketPlanProposal(output), value);
+  assert.deepEqual(validateTicketPlanProposal(value), []);
   value.source_reconciliation.push({ source: "spec", item: "REQ-1", disposition: "mapped", ticket_ids: ["T001"] });
   assert.match(validateTicketPlanProposal(value).join("\n"), /missing source_refs provenance/);
   value.additions[0]!.source_refs = [{ source: "spec", item: "REQ-1" }];
   assert.deepEqual(validateTicketPlanProposal(value), []);
 });
 
-test("proposal envelope validates edits against existing tracker tickets", () => {
+test("proposal validation checks edits against existing tracker tickets", () => {
   const existing = ticket("T001");
   const value = proposal([]);
   value.edits = [{ id: "T001", patch: { summary: "Refined implementation" } }];
   value.next = { ticket_ids: ["T001"], replace_existing: false };
-  const output = `${PROPOSAL_START}\n${JSON.stringify(value)}\n${PROPOSAL_END}`;
 
-  assert.deepEqual(extractTicketPlanProposal(output, [existing]), value);
-  assert.throws(() => extractTicketPlanProposal(output), /unknown ticket T001/);
+  assert.deepEqual(validateTicketPlanProposal(value, [existing]), []);
+  assert.match(validateTicketPlanProposal(value).join("\n"), /unknown ticket T001/);
 });
 
 test("proposal validation rejects unsupported state and future-work changes before publication", () => {

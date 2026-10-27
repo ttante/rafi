@@ -642,7 +642,10 @@ export interface BuildRunRecordV2 extends Omit<BuildRunRecordV1, "version" | "re
     thresholdSource: "project" | "cli" | "live" | "resume";
   };
   /** Frozen authorized selection; tickets remain the completion scope, not a dispatch log. */
-  builderCapabilities?: { requestedNetwork: boolean; grantedNetwork: boolean; approvedAt?: string; grantWorkerPid?: number };
+  /** decisionId: the durable answer that produced this grant; one answer grants at most once. */
+  builderCapabilities?: { requestedNetwork: boolean; grantedNetwork: boolean; approvedAt?: string; grantWorkerPid?: number; decisionId?: string };
+  /** Independent QA network grant (--qa-network); QA is offline when absent. */
+  qaCapabilities?: { requestedNetwork: boolean; grantedNetwork: boolean; approvedAt?: string; decisionId?: string };
   authorizedBatch?: { tickets: string[]; requestedSteps: number; scopeRevision: string; approvalRevisions?: string[]; startedTickets: string[] };
   recoveryDecision?: BuildRecoveryDecisionReceipt;
   /** Canonical provider conversations observed for this run. Raw role sessionIds remain compatibility mirrors only. */

@@ -343,7 +343,7 @@ for (const route of ["automatic", "operator", "resumed-operator"] as const) {
   });
 }
 
-test("invalid native result stops once after same-session compaction revalidation", async () => {
+test("invalid native result gets one fresh review after same-session compaction revalidation", async () => {
   const dir = repository();
   try {
     let calls = 0;
@@ -359,8 +359,8 @@ test("invalid native result stops once after same-session compaction revalidatio
       },
       fix: async () => ({ ok: false, detail: "intentional test stop after corrected report" }),
     });
-    assert.equal(calls, 1);
-    assert.equal(result.outcome, "needs-human");
+    assert.equal(calls, 2, "the invalid result is followed by exactly one fresh review");
+    assert.equal(result.outcome, "blocked", "the fresh review's failure reaches the intentional fix stop");
     const db = new WorkflowDb(dir);
     try { assert.equal(db.qaReviewAttempts("session-revalidation", "T1")[0]?.status, "interrupted"); }
     finally { db.close(); }
@@ -744,7 +744,7 @@ test("resumed recovery acknowledges the packet and reconstructs only when review
   }
 });
 
-test("a malformed resumed report is retained without automatic fresh review", async () => {
+test("a malformed resumed report is retained and replaced by one automatic fresh review", async () => {
   const dir = repository();
   try {
     const packet = createQaRecoveryPacket({
@@ -768,16 +768,17 @@ test("a malformed resumed report is retained without automatic fresh review", as
       state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0, createQa: async (cwd) => ++created === 1 ? qaHandleForPacket(qa, cwd, packet) : qaHandle(successor, cwd), sessionBoundary: unavailableBoundary,
       continuityManaged: true, resumedRecovery: packet, fix: async () => ({ ok: false }),
     });
-    assert.equal(result.outcome, "needs-human");
+    assert.equal(result.outcome, "passed", "one automatic fresh review replaces the malformed report");
     assert.equal(qa.instructions.length, 2, "acknowledgement and one report response only");
-    assert.equal(created, 1);
-    assert.equal(successor.instructions.length, 0);
+    assert.equal(created, 2);
+    assert.ok(successor.instructions.length >= 1, "the fresh review runs in a new QA session");
 
     const db = new WorkflowDb(dir);
     try {
-      assert.notEqual(db.qaRecoveryHead("resume-invalid", "T1")?.pendingAction, "resolved");
+      // The passing fresh review resolves the recovery; the malformed attempt stays interrupted.
+      assert.equal(db.qaRecoveryHead("resume-invalid", "T1")?.pendingAction, "resolved");
       assert.equal(db.unresolvedQaReports("resume-invalid", "T1").length, 0);
-      assert.equal(db.qaReviewAttempts("resume-invalid", "T1").at(-1)?.status, "interrupted");
+      assert.ok(db.qaReviewAttempts("resume-invalid", "T1").some(attempt => attempt.status === "interrupted"));
     } finally { db.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -1307,12 +1308,13 @@ test("plain fallback is not used as an authoritative Builder remediation route",
     assert.equal(result.outcome, "needs-human");
     assert.equal(fixes, 0, "plain fallback is not dispatched to Builder");
     assert.equal(menuCalls, 0);
-    assert.equal(secondReviewPrompt, "", "invalid native output never triggers a fresh review");
+    assert.notEqual(secondReviewPrompt, "", "invalid native output gets one automatic fresh review");
     assert.match(result.detail ?? "", /response failed validation/i);
+    assert.match(result.detail ?? "", /allowance exhausted/i, "a second invalid result stops for a human");
     const db = new WorkflowDb(dir);
     const head = db.qaTicketHead("packet-reuse", "T1");
     const packet = loadQaRecoveryPacket(db.qaRecoveryHead("packet-reuse", "T1")!.packetPath);
-    assert.equal(packet.manifest.reviewAttempt, 1);
+    assert.equal(packet.manifest.reviewAttempt, 2, "the packet belongs to the automatic fresh review");
     assert.equal(packet.manifest.reviewAttempt, head.reviewNumber);
     assert.equal(db.qaReviewAttempt(packet.manifest.reviewAttemptId)?.reviewNumber, head.reviewNumber);
     assert.ok(packet.manifest.resources.some((resource) => resource.path === "context/original-raw-response.json"));

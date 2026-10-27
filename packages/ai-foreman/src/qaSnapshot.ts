@@ -486,6 +486,21 @@ async function cloneRepositoryAsync(root: string, review: string, head: string):
  * commands in the independent clone can resolve the same installed toolchain.
  */
 function projectDependencyTrees(sourceRoot: string, reviewRoot: string, uncommitted = false): void {
+  // Ignored top-level directories (vendored checkouts, runtimes) are also
+  // environment. A committed clone links one only when the clone ignores it
+  // too, so the link never appears as an untracked QA edit. Link these first:
+  // projecting a nested node_modules would otherwise create the parent as a
+  // plain directory and hide the checkout (e.g. vendor/starnet/.git).
+  for (const entry of readdirSync(sourceRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || [".git", ".rafi", ".foreman", "node_modules"].includes(entry.name)) continue;
+    const source = join(sourceRoot, entry.name);
+    const target = join(reviewRoot, entry.name);
+    if (existsSync(target)) continue;
+    const ignored = spawnSync("git", ["-C", sourceRoot, "check-ignore", "-q", "--", entry.name]).status === 0;
+    if (!ignored) continue;
+    if (!uncommitted && spawnSync("git", ["-C", reviewRoot, "check-ignore", "-q", "--", entry.name]).status !== 0) continue;
+    symlinkSync(source, target, "dir");
+  }
   const parents = ["", ...readdirSync(sourceRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && entry.name !== ".git" && entry.name !== "node_modules")
     .flatMap((entry) => {
@@ -502,16 +517,6 @@ function projectDependencyTrees(sourceRoot: string, reviewRoot: string, uncommit
     const relativeTarget = parent ? `${parent.replaceAll("\\", "/")}/node_modules` : "node_modules";
     if (!uncommitted && spawnSync("git", ["-C", reviewRoot, "check-ignore", "-q", "--", relativeTarget]).status !== 0) continue;
     mkdirSync(dirname(target), { recursive: true });
-    symlinkSync(source, target, "dir");
-  }
-  if (!uncommitted) return;
-  for (const entry of readdirSync(sourceRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory() || [".git", ".rafi", ".foreman", "node_modules"].includes(entry.name)) continue;
-    const source = join(sourceRoot, entry.name);
-    const target = join(reviewRoot, entry.name);
-    if (existsSync(target)) continue;
-    const ignored = spawnSync("git", ["-C", sourceRoot, "check-ignore", "-q", "--", entry.name]).status === 0;
-    if (!ignored) continue;
     symlinkSync(source, target, "dir");
   }
 }

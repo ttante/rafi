@@ -1,11 +1,7 @@
 import type { BuilderQaRemediationReport, QaFailureReportV1, QaFindingRefV2 } from "./types.js";
 import type { ValidationResult } from "./validate.js";
 
-export const QA_FAILURE_REPORT_START = "RAFI_QA_FAILURE_REPORT_START";
-export const QA_FAILURE_REPORT_END = "RAFI_QA_FAILURE_REPORT_END";
 export const QA_FAILURE_REPORT_MAX_BYTES = 64 * 1024;
-export const BUILDER_QA_REMEDIATION_START = "RAFI_BUILDER_QA_REMEDIATION_START";
-export const BUILDER_QA_REMEDIATION_END = "RAFI_BUILDER_QA_REMEDIATION_END";
 export const BUILDER_QA_REMEDIATION_MAX_BYTES = 128 * 1024;
 
 export interface ParsedQaFailureReport {

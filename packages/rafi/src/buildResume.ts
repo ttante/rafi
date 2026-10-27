@@ -425,6 +425,8 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       }
       const interruptedQaBoundary = role === "qa" && Boolean(pendingQaProtocolTicket) && ["turn-intended", "turn-uncertain", "operator-menu"].includes(db.qaTicketHead(selected.runId, pendingQaProtocolTicket!).state);
       if (!mode && (qaRecoveryPacket || interruptedQaBoundary) && reconstructable) mode = "fresh-with-handoff";
+      // An interrupted QA review can only continue as a fresh immutable review.
+      if (!mode && role === "qa" && pendingQaProtocolTicket && db.unresolvedRoleDispatches(selected.runId, "qa").length) mode = "fresh-with-handoff";
       if (!mode && !qaRecoveryPacket && !guidedAvailable) mode = projection.exactSessionId ? "exact-session" : reconstructable ? "fresh-with-handoff" : "fresh-recovery-only";
       if (!mode && process.stdin.isTTY && process.stdout.isTTY) {
         mode = await promptMode(!qaRecoveryPacket && !guidedAvailable && Boolean(projection.exactSessionId), reconstructable, guidedAvailable, Boolean(qaRecoveryPacket));
@@ -464,6 +466,17 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       let receipt!: BuildRecoveryDecisionReceipt;
       try {
       if (recoveryStateVersion(db, selected.runId) !== recoveryVersion) throw new Error("Recovery state changed while the resume decision was being prepared; inspect and retry the current revision");
+      // Interrupted steps outside implementation and QA review work (for
+      // example preflight or a handoff confirmation) restart from their
+      // beginning instead of blocking every later turn.
+      try {
+        const restarted = [...db.reconcileInterruptedSteps(selected.runId, "builder"), ...db.reconcileInterruptedSteps(selected.runId, "qa")];
+        if (restarted.length) console.log(`rafi resume: restarting ${restarted.length} interrupted step(s) from the beginning; their earlier outcome remains unknown and is not replayed.`);
+      } catch (error) {
+        commandOpts.onOutcome?.("paused"); process.exitCode = 2;
+        console.log(`rafi resume: step recovery is paused: ${(error as Error).message}. Work and unknown receipts are preserved; inspect this build, then retry. No new provider work started.`);
+        return;
+      }
       if (role === "qa" && pendingQaProtocolTicket && db.unresolvedRoleDispatches(selected.runId, "qa").length) {
         if (mode !== "fresh-with-handoff") throw new Error("An interrupted QA review requires a fresh immutable review and validated handoff");
         try {
@@ -624,6 +637,7 @@ export function buildBuildResumeCommand(commandOpts: BuildResumeCommandOptions):
       if (settings.fast) args.push("--fast");
       const launchDb = new WorkflowDb(root);
       if (opts.builderNetwork || selected.builderCapabilities?.requestedNetwork) args.push("--builder-network");
+      if (opts.qaNetwork || selected.qaCapabilities?.requestedNetwork) args.push("--qa-network");
       if (opts.builderApprovals) args.push("--builder-approvals");
       try {
         if (!launchAuthority) throw new Error("Recovery launch authority is missing");

@@ -41,3 +41,18 @@ export function remediationStructuredResponse(turn: TurnResult, expected: { hand
     return { valid: !errors.length, errors, status, fields: status === "blocked" ? { reason: reason! } : { summary: result.summary }, report, rawReportJson: JSON.stringify(report) };
   } catch (error) { return { valid: false, errors: [String(error)], status: "unknown", fields: {} }; }
 }
+
+/** Describe a retained native qa-verdict response for evidence and display.
+ * It never authorizes a result; workflow decisions use qaStructuredResponse. */
+export function describeNativeQaResponse(text: string): { status: "qa_pass" | "qa_fail" | "blocked" | "needs_input" | "unknown"; valid: boolean; issues?: string; reportJson?: string } {
+  let value: { operation?: unknown; result?: { kind?: unknown; summary?: unknown; reason?: unknown; question?: unknown; payload?: { kind?: unknown; report?: unknown } } };
+  try { value = JSON.parse(text); } catch { return { status: "unknown", valid: false, issues: "Response is not native JSON" }; }
+  const result = value?.result;
+  if (value?.operation !== "qa-verdict" || !result || typeof result !== "object") return { status: "unknown", valid: false, issues: "Response is not a qa-verdict result" };
+  if (result.kind === "blocked") return { status: "blocked", valid: true, issues: typeof result.reason === "string" ? result.reason : undefined };
+  if (result.kind === "needs-input") return { status: "needs_input", valid: true, issues: typeof result.question === "string" ? result.question : undefined };
+  const summary = typeof result.summary === "string" ? result.summary : undefined;
+  if (result.kind === "completed" && result.payload?.kind === "passed") return { status: "qa_pass", valid: true, issues: summary };
+  if (result.kind === "completed" && result.payload?.kind === "failed") return { status: "qa_fail", valid: true, issues: summary, reportJson: JSON.stringify(result.payload.report ?? {}) };
+  return { status: "unknown", valid: false, issues: summary };
+}

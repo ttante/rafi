@@ -2,8 +2,6 @@ import { grillAuditVerdictV1Schema, grillAuditOutput } from "rafi-spec";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  GRILL_AUDIT_END,
-  GRILL_AUDIT_START,
   GRILL_ME_STOP_CHOICE,
   buildAuditAnswersContinuation,
   candidateDigest,
@@ -14,6 +12,9 @@ import {
   runIndependentGrillAudit,
 } from "../src/grillAudit.js";
 import type { RoleBuilder } from "ai-foreman/agent-run.js";
+// Legacy text markers, kept only to prove old-format output is rejected.
+const GRILL_AUDIT_START = "RAFI_GRILL_AUDIT_START";
+const GRILL_AUDIT_END = "RAFI_GRILL_AUDIT_END";
 
 const choices = ["Use SQLite (Recommended)", "Use Postgres", GRILL_ME_STOP_CHOICE];
 

@@ -1,3 +1,4 @@
+import { ensureLocalGitExcludes } from "./gitExclude.js";
 import { persistedProviderWireContract } from "rafi-spec";
 import { verifyCheckpointOrigin, verifyContinuityHeads, type CheckpointOrigin } from "./continuityOrigin.js";
 import { registerQaGraphJournalWriter, ensureQaGraphJournalGuards } from "./qaDeliveryJournal.js";
@@ -79,7 +80,25 @@ import {
 } from "./qaProtocolV2.js";
 
 export const WORKFLOW_DB_FILE = ".rafi/recovery.sqlite3";
-export type WorkflowKind = "plan" | "ticket-plan" | "ticket-populate" | "uninstall" | "build" | "qa-remediation" | "recovery" | "legacy";
+export type WorkflowKind = "plan" | "ticket-plan" | "ticket-populate" | "uninstall" | "build" | "qa-remediation" | "recovery" | "legacy" | "operation";
+
+/** Role steps that change no project files, so an interrupted one can run
+ * again from its beginning with its original inputs. */
+// QA preparation runs in a disposable snapshot, so its steps are restartable too.
+const QA_PREPARATION_STEPS = ["qa-preparation-depth", "qa-preparation-draft", "qa-preparation-assessment", "qa-preparation-challenge"];
+const RESTARTABLE_STEPS: Record<"builder" | "qa", ReadonlySet<string>> = {
+  builder: new Set(["build-preflight", "session-initialization", "handoff-acceptance", "builder-coverage", "branch-dependency-audit", "qa-contract-acceptance", "qa-contract-segment", "status", "escalation", ...QA_PREPARATION_STEPS]),
+  qa: new Set(["session-initialization", "handoff-acceptance", "qa-recovery-acceptance", "qa-contract-acceptance", "qa-contract-segment", ...QA_PREPARATION_STEPS]),
+};
+
+/** Journal runs for agent calls outside a build use these run-id prefixes. */
+export const NON_BUILD_RUN_PREFIXES = ["operation:", "ticket-population:", "qa-"] as const;
+export function isNonBuildRunId(runId: string): boolean {
+  return NON_BUILD_RUN_PREFIXES.some(prefix => runId.startsWith(prefix));
+}
+function defaultRunKind(runId: string): WorkflowKind {
+  return isNonBuildRunId(runId) ? "operation" : "build";
+}
 export type WorkflowRunStatus = "running" | "paused" | "blocked" | "completed" | "failed" | "cancelled" | "superseded";
 
 export interface WorkflowRunSnapshot {
@@ -593,7 +612,10 @@ export class WorkflowDb {
       for (const owner of this.runningSupervisors()) {
         if (owner.state.pid && classifyProcess(owner.state.pid, owner.state.processStart).state !== "dead") throw new Error(`supervisor already active for project (run ${owner.runId})`);
       }
-      const uncertain = this.db.prepare("SELECT run_id FROM operation_journal WHERE kind='provider-dispatch' AND status IN ('in_progress','uncertain') LIMIT 1").get() as {run_id:string}|undefined;
+      // Single agent calls outside builds ("operation:<id>" runs: planning,
+      // ticket population, uninstall proposals) are read-only proposals; an
+      // unknown outcome there cannot conflict with a build.
+      const uncertain = this.db.prepare("SELECT run_id FROM operation_journal WHERE kind='provider-dispatch' AND status IN ('in_progress','uncertain') AND run_id NOT LIKE 'operation:%' AND run_id NOT LIKE 'ticket-population:%' AND run_id NOT LIKE 'qa-%' LIMIT 1").get() as {run_id:string}|undefined;
       if (uncertain) throw new Error(`Build ${uncertain.run_id} has unresolved provider dispatch; reconcile before another launch`);
       for (const row of this.db.prepare("SELECT DISTINCT run_id FROM build_owned_processes WHERE state<>'quiescent'").all() as Array<{run_id:string}>) {
         if (this.unresolvedPreparationProcesses(row.run_id).length) throw new Error(`Build ${row.run_id} has unverified preparation descendants; reconcile before another launch`);
@@ -614,7 +636,7 @@ export class WorkflowDb {
     return this.atomic(() => {
       this.assertExecutionProtocol();
       this.assertNoLegacyBuildOwner();
-      const otherDispatch = this.db.prepare("SELECT run_id FROM operation_journal WHERE run_id<>? AND kind='provider-dispatch' AND status IN ('in_progress','uncertain') LIMIT 1").get(runId) as {run_id:string}|undefined;
+      const otherDispatch = this.db.prepare("SELECT run_id FROM operation_journal WHERE run_id<>? AND kind='provider-dispatch' AND status IN ('in_progress','uncertain') AND run_id NOT LIKE 'operation:%' AND run_id NOT LIKE 'ticket-population:%' AND run_id NOT LIKE 'qa-%' LIMIT 1").get(runId) as {run_id:string}|undefined;
       if (otherDispatch) throw new Error(`Build ${otherDispatch.run_id} has unresolved provider dispatch; reconcile before starting another recovery workflow`);
       const current = localBuildAuthority(this.projectDir);
       if (current && current.runId === runId && this.buildAdmission()?.token === current.token) { this.writerAuthority = current; return current; }
@@ -913,7 +935,7 @@ export class WorkflowDb {
   }
 
   /** Ensure non-workflow build records can use the same durable event store. */
-  ensureRun(runId: string, kind: WorkflowKind = "build", now = new Date()): WorkflowRunSnapshot {
+  ensureRun(runId: string, kind: WorkflowKind = defaultRunKind(runId), now = new Date()): WorkflowRunSnapshot {
     const existing = this.getRun(runId);
     if (existing) return existing;
     const at = now.toISOString();
@@ -1391,6 +1413,12 @@ export class WorkflowDb {
 
   pendingHumanDecisions(runId: string): PendingHumanDecision[] {
     return (this.db.prepare("SELECT decision_json FROM human_decisions WHERE run_id=? AND status='pending' ORDER BY created_at").all(runId) as Array<{ decision_json: string }>)
+      .map((row) => parseJson(row.decision_json) as PendingHumanDecision);
+  }
+
+  /** Answered decisions for a run, oldest first (e.g. answered with build:decide while no worker waited). */
+  answeredHumanDecisions(runId: string): PendingHumanDecision[] {
+    return (this.db.prepare("SELECT decision_json FROM human_decisions WHERE run_id=? AND status='answered' ORDER BY created_at").all(runId) as Array<{ decision_json: string }>)
       .map((row) => parseJson(row.decision_json) as PendingHumanDecision);
   }
 
@@ -2300,6 +2328,46 @@ export class WorkflowDb {
     })();
   }
 
+  /** Retire this run's unresolved dispatches on a provider session the host
+   * has just closed after a failed call. The closed provider can no longer
+   * act, so the call's outcome is final: unknown, never replayed. */
+  retireClosedSessionDispatches(runId: string, sessionId: string | undefined, reason: string): string[] {
+    if (!sessionId) return [];
+    const dispatches = [...this.unresolvedRoleDispatches(runId, "builder"), ...this.unresolvedRoleDispatches(runId, "qa")]
+      .filter(dispatch => (dispatch.intent as { sessionRef?: { sessionId?: string } }).sessionRef?.sessionId === sessionId);
+    this.atomic(() => {
+      for (const dispatch of dispatches) this.updateOperation(dispatch.idempotencyKey, "failed", { result: { recovery: "provider-closed", outcomeUnknown: true, providerReplayAuthorized: false, priorResult: dispatch.result }, error: reason });
+    });
+    return dispatches.map(dispatch => dispatch.idempotencyKey);
+  }
+
+  /** Retire interrupted role turns that are not implementation or bound QA
+   * review work (for example build preflight, coverage, or handoff
+   * acceptance) so the step restarts from its beginning. Implementation and
+   * review turns keep their own recovery. The interrupted outcome stays unknown and is
+   * never replayed or treated as a result. Returns the retired dispatch IDs. */
+  reconcileInterruptedSteps(runId: string, role: "builder" | "qa"): string[] {
+    // Only steps that are safe to run again from their beginning. Implementation
+    // turns, bound QA review turns and turns of unknown kind keep their own recovery.
+    const reviewTurn = this.db.prepare("SELECT 1 FROM qa_turns WHERE operation_id=?");
+    const dispatches = this.unresolvedRoleDispatches(runId, role).filter(dispatch => {
+      const operation = String((dispatch.intent as { operation?: unknown }).operation ?? "");
+      return RESTARTABLE_STEPS[role].has(operation) && (role === "builder" || !reviewTurn.get(dispatch.idempotencyKey));
+    });
+    if (!dispatches.length) return [];
+    const lease = this.currentLease();
+    if (lease?.runId !== runId || lease.pid !== process.pid) throw new Error("Step recovery requires the original build recovery lease");
+    const worker = this.events(runId).filter(event => event.type === "worker_started").at(-1)?.payload as { workerPid?: number; processStart?: string; host?: string } | undefined;
+    if (!worker?.workerPid || classifyProcess(worker.workerPid, worker.processStart, worker.host).state !== "dead" || !processGroupQuiescent(worker.workerPid)
+      || this.readinessProcesses().length) throw new Error("The interrupted step and all owned provider processes must be verified stopped before it restarts");
+    const reconciliationId = `${role}-step-restart:${runId}:${randomUUID()}`;
+    this.atomic(() => {
+      for (const dispatch of dispatches) this.updateOperation(dispatch.idempotencyKey, "failed", { result: { recovery: "step-restart", reconciliationId, outcomeUnknown: true, providerReplayAuthorized: false, operation: (dispatch.intent as { operation?: unknown }).operation ?? null, priorResult: dispatch.result }, error: "Interrupted step outcome remains unknown; the step restarts from its beginning with its original inputs" });
+      this.appendContinuityEvent({ runId, role: "host", kind: "interrupted_step_restarted", payload: { role, reconciliationId, dispatchIds: dispatches.map(dispatch => dispatch.idempotencyKey), outcomeUnknown: true, providerReplayAuthorized: false }, authoritativeStateRevision: this.continuityHead(runId, "run")?.authoritativeStateRevision ?? 0 });
+    });
+    return dispatches.map(dispatch => dispatch.idempotencyKey);
+  }
+
   /** Retire an interrupted, proven read-only review transport, never a QA pass
    * or Builder remediation. A fresh immutable review must still run afterward. */
   reconcileInterruptedQaDispatch(runId: string, ticketId: string): boolean {
@@ -2320,25 +2388,29 @@ export class WorkflowDb {
     // A cancellation can have a durable host terminal receipt while the
     // provider dispatch is still unknown. Exact frozen-turn bindings remain
     // required; the old receipt is never promoted to an accepted QA result.
+    // A QA turn and its provider dispatch share one ID: the turn's operation ID
+    // is the dispatch's idempotency key. Instruction digests are not comparable
+    // across the two records (the dispatch hashes the full rendered provider
+    // instruction), so binding is by that shared ID.
+    // A host-completed turn is recoverable only when its dispatch recorded a
+    // typed unknown provider outcome.
     const rows = this.db.prepare("SELECT status,intent_json FROM qa_turns WHERE run_id=? AND ticket_id=? AND status IN ('intended','uncertain','unknown','completed')").all(runId, ticketId) as Array<{ status: string; intent_json: string }>;
-    const turns = rows.flatMap(row => {
+    const turns = new Map(rows.flatMap(row => {
       const turn = parseJson(row.intent_json) as QaTurnIntentV2;
-      if (row.status === "completed" && !dispatches.some(dispatch => {
-        const result = dispatch.result as { isError?: boolean; failure?: { dispatchState?: string } } | undefined;
-        return result?.isError === true && result.failure?.dispatchState === "unknown"
-          && (dispatch.intent as { instructionDigest?: string }).instructionDigest === turn.instructionDigest;
-      })) return [];
-      return [turn];
-    });
+      const result = dispatches.find(dispatch => dispatch.idempotencyKey === turn.operationId)?.result as { isError?: boolean; failure?: { dispatchState?: string } } | undefined;
+      if (row.status === "completed" && !(result?.isError === true && result.failure?.dispatchState === "unknown")) return [];
+      return [[turn.operationId, turn] as const];
+    }));
     const bindings = dispatches.map(dispatch => {
-      const intent = dispatch.intent as { sessionRef?: ProviderSessionRefV1; instructionDigest?: string };
+      const intent = dispatch.intent as { sessionRef?: ProviderSessionRefV1 };
       const ref = intent.sessionRef;
       if (!ref || !owner?.sessionKey || ref.role !== "qa" || ref.stream !== "qa" || !Number.isSafeInteger(ref.generation) || ref.generation < 0
         || !ref.configRoot || canonicalProject(ref.configRoot) !== canonicalProject(this.projectDir) || !ref.validatedAt || Number.isNaN(Date.parse(ref.validatedAt))
         || ref.source !== "observed" || providerSessionKey(ref) !== owner.sessionKey) throw new Error("QA dispatch has no validated owner binding");
-      const turn = turns.find(turn => turn.reviewNumber === head.reviewNumber && turn.instructionDigest === intent.instructionDigest
-        && turn.providerSession.sessionId === ref.sessionId && turn.providerSession.provider === ref.provider && turn.providerSession.generation === ref.generation
-        && turn.providerSession.cwd === ref.cwd && turn.providerSession.configRoot === ref.configRoot);
+      const candidate = turns.get(dispatch.idempotencyKey);
+      const turn = candidate && candidate.reviewNumber === head.reviewNumber
+        && candidate.providerSession.sessionId === ref.sessionId && candidate.providerSession.provider === ref.provider && candidate.providerSession.generation === ref.generation
+        && candidate.providerSession.cwd === ref.cwd && candidate.providerSession.configRoot === ref.configRoot ? candidate : undefined;
       if (!turn || turn.sourceStateDigest !== head.sourceStateDigest || turn.reviewBasisDigest !== head.reviewBasisDigest) throw new Error("QA dispatch does not match the frozen review turn");
       const sessions = this.db.prepare("SELECT session_json FROM qa_sessions WHERE run_id=? AND ticket_id=? AND generation=? AND source_state_digest=? AND review_basis_digest=?").all(runId, ticketId, ref.generation, turn.sourceStateDigest, turn.reviewBasisDigest) as Array<{ session_json: string }>;
       const session = sessions.map(row => parseJson(row.session_json) as { session: ProviderSessionRefV1; confinement?: Record<string, unknown> }).find(session => providerSessionKey(session.session) === owner.sessionKey && session.confinement);
@@ -3686,9 +3758,5 @@ function leaseVerifiedLive(lease: ProjectLease, now: Date, staleMs: number): boo
   return classifyProcess(lease.pid, lease.processStart, lease.host).state !== "dead";
 }
 function ensureRecoveryGitignore(projectDir: string): void {
-  const localExclude = join(projectDir, ".git", "info", "exclude");
-  const path = existsSync(localExclude) ? localExclude : join(projectDir, ".gitignore");
-  const entries = [WORKFLOW_DB_FILE, `${WORKFLOW_DB_FILE}-wal`, `${WORKFLOW_DB_FILE}-shm`, ".rafi/cache/handoffs/", ".rafi/backups/work-admission-v4/"];
-  const existing = existsSync(path) ? readFileSync(path, "utf8") : ""; const missing = entries.filter((entry) => !existing.split(/\r?\n/).includes(entry));
-  if (missing.length) appendFileSync(path, `${existing && !existing.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`, "utf8");
+  ensureLocalGitExcludes(projectDir, [WORKFLOW_DB_FILE, `${WORKFLOW_DB_FILE}-wal`, `${WORKFLOW_DB_FILE}-shm`, ".rafi/cache/handoffs/", ".rafi/backups/work-admission-v4/"], { fallbackToGitignore: true });
 }

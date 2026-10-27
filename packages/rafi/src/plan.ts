@@ -55,8 +55,6 @@ import {
   regenerateStructuredPlanMarkdown,
   renderStructuredPlanMarkdown,
   writeStructuredPlanArtifacts,
-  PLAN_PROPOSAL_END,
-  PLAN_PROPOSAL_START,
 } from "./structuredPlan.js";
 import {
   loadSourceRegistry,
@@ -66,8 +64,6 @@ import {
   sourceContext,
   sourceRequestFromAnswer,
   validateSourceVersionRef,
-  SOURCE_REQUEST_END,
-  SOURCE_REQUEST_START,
   type StructuredSourceRequest,
 } from "ai-foreman/sources/source-registry.js";
 import { chooseStagedSourceDisposition, handlePlanningInput, parseSourceStorage, promptSourceStorage } from "./planningDriver.js";
@@ -342,7 +338,7 @@ export function isSuccessfulPlanStatus(kind: string): boolean {
 
 export function validatePlanMarkdown(planMarkdown: string, planningMode: PlanningMode = "standard"): string[] {
   const missing: string[] = [];
-  const markdown = stripFinalStepStatusMarker(planMarkdown);
+  const markdown = planMarkdown;
 
   for (const section of REQUIRED_PLAN_SECTIONS) {
     if (!findSection(markdown, section)) missing.push(`section: ${section}`);
@@ -362,14 +358,6 @@ export function validatePlanMarkdown(planMarkdown: string, planningMode: Plannin
 
 export function formatPlanValidationFailures(missing: string[]): string {
   return `planner returned an incomplete plan:\n${missing.map((item) => `- missing ${item}`).join("\n")}`;
-}
-
-export function stripFinalStepStatusMarker(text: string): string {
-  const lines = text.trimEnd().split(/\r?\n/);
-  if (/^STEP_STATUS:/i.test(lines[lines.length - 1] ?? "")) {
-    lines.pop();
-  }
-  return lines.join("\n").trimEnd();
 }
 
 export function nextPopulateCommand(projectDir: string, latestRel: string): string {
@@ -540,7 +528,7 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
     } else if (!opts.resumeSession) {
       interview = createInterviewRecord({
         workflow: "plan",
-        invocation: { projectDir, agent: opts.agent, model: opts.model, effort: opts.effort, fast: Boolean(opts.fast), label: opts.invocationLabel },
+        invocation: { projectDir, agent: opts.agent, model: opts.model, effort: opts.effort, fast: Boolean(opts.fast), yes: Boolean(opts.yes), label: opts.invocationLabel },
         checkpoint: "planning-brief",
         outputs: ["docs/rafi-plan.md"],
         planningMode,
@@ -737,6 +725,9 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
       const observed = recordNativeGrillAnswer(grillState, event);
       persistGrillState(observed.state, observed.qualified ? "grill_answer_collected" : "provider_question_nonqualifying");
     };
+    // One automatic restart of a failed planner step (a bad answer, a
+    // provider crash, or a stalled turn) before the plan stops for a human.
+    let plannerRestartUsed = false;
     while (true) {
       if (runInstruction) {
         run = await runInstruction(buildPlanAgentRunOptions({
@@ -788,6 +779,15 @@ async function runPlanWorkflowOwned(opts: PlanWorkflowOptions): Promise<Workflow
       });
       workflow.transition(workflowRunId, { checkpoint: "planner-session-after", state: { sessionId: run.sessionId, runtime: run.runtime, model: run.model }, event: "planner_session" });
       const turn = run.turn;
+      if (turn.result.isError && !plannerRestartUsed) {
+        plannerRestartUsed = true;
+        console.error("rafi plan: the planner turn failed; restarting this planning step once with the same instruction.");
+        // Restart the provider and continue its saved conversation, which keeps
+        // earlier planning turns; the failed turn left no accepted answer.
+        if (directPlanner) { await directPlanner.builder.close().catch(() => {}); directPlanner = undefined; }
+        resumeSessionId = run.sessionId ?? resumeSessionId;
+        continue;
+      }
       if (turn.result.isError) return failPlanOutcome(projectDir, workflow, workflowRunId, workflowLease, interview, "planner turn errored", run.sessionId, brief, planningMode);
       if (turn.status.kind === "blocked") {
         const diagnostic = `blocked - ${turn.status.reason ?? "planner reported blocked"}`;
@@ -1196,7 +1196,7 @@ async function promptGrillAuditRecovery(): Promise<"retry" | "cancel"> {
 
 
 function normalizePlanMarkdown(planMarkdown: string): string {
-  return `${stripFinalStepStatusMarker(planMarkdown).trimEnd()}\n`;
+  return `${planMarkdown.trimEnd()}\n`;
 }
 
 export async function resolveBrief(opts: { brief?: string; briefFile?: string }): Promise<string> {

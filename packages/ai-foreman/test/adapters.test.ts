@@ -249,3 +249,11 @@ for (const networkAccess of [false, true]) test(`Claude builder sandbox applies 
   assert.equal(sandbox.enabled, true); assert.equal(sandbox.failIfUnavailable, true); assert.equal(sandbox.allowUnsandboxedCommands, false);
   assert.deepEqual(sandbox.network, networkAccess ? { allowedDomains: ["*"] } : { allowedDomains: [], deniedDomains: ["*"] });
 });
+
+test("Claude QA sandbox stays offline unless --qa-network is granted", () => {
+  const offline = buildClaudeQueryOptions({ ...BASE_OPTS, cwd: "/tmp/qa/review", sessionRole: "qa", sandboxMode: "read-only" });
+  assert.deepEqual((offline.sandbox as { network: unknown }).network, { allowedDomains: [], deniedDomains: ["*"] });
+  const granted = buildClaudeQueryOptions({ ...BASE_OPTS, cwd: "/tmp/qa/review", sessionRole: "qa", sandboxMode: "read-only", networkAccess: true });
+  assert.deepEqual((granted.sandbox as { network: unknown }).network, { allowedDomains: ["*"] });
+  assert.match(JSON.stringify(granted.systemPrompt), /QA runtime contract: shell network explicitly approved/);
+});

@@ -15,8 +15,6 @@ import { signalAttention } from "./notify.js";
 
 export const HANDOFF_CACHE_RETENTION_DAYS = 30;
 export const HANDOFF_ACCEPTED = "HANDOFF_ACCEPTED";
-export const HANDOFF_REQUEST_START = "RAFI_HANDOFF_REQUEST_START";
-export const HANDOFF_REQUEST_END = "RAFI_HANDOFF_REQUEST_END";
 
 function handoffSessionIdentity(ref: ProviderSessionRefV1): string {
   return JSON.stringify([ref.version, ref.provider, ref.sessionId, ref.role, ref.stream, ref.generation, resolve(ref.cwd), resolve(ref.configRoot), ref.workspaceIdentity, ref.ticketId, ref.deliveryUnitId]);
@@ -50,27 +48,10 @@ export interface BuilderHandoffRequest {
   roleState: Record<string, unknown>;
 }
 
-export function parseBuilderHandoffRequest(text: string | BuilderHandoffRequest): BuilderHandoffRequest | undefined {
-  if (typeof text !== "string") return text; // Already validated native handoff proposal.
-  const starts = [...text.matchAll(/RAFI_HANDOFF_REQUEST_START/g)];
-  const ends = [...text.matchAll(/RAFI_HANDOFF_REQUEST_END/g)];
-  if (starts.length === 0 && ends.length === 0) return undefined;
-  if (starts.length !== 1 || ends.length !== 1 || starts[0]!.index! >= ends[0]!.index!) throw new Error("malformed structured Builder handoff request envelope");
-  const raw = text.slice(starts[0]!.index! + HANDOFF_REQUEST_START.length, ends[0]!.index!).trim();
-  let parsed: Record<string, unknown>;
-  try { parsed = JSON.parse(raw) as Record<string, unknown>; } catch { throw new Error("Builder handoff request is not valid JSON"); }
-  const contract = parseProviderContract(builderHandoffRequestV1Schema, parsed, "Builder handoff request");
-  return {
-    version: 1,
-    reason: clean(contract.reason, 2_000),
-    delta: {
-      version: 1,
-      decisions: contract.decisions, constraints: contract.constraints, discoveries: contract.discoveries,
-      completedActions: contract.completed_actions, evidence: contract.evidence, failures: contract.failures,
-      blockers: contract.blockers, openWork: contract.open_work, nextAction: contract.next_action,
-    },
-    roleState: sanitizeObject(contract.role_state),
-  };
+/** Builder handoff requests arrive only as validated native proposals; plain
+ * provider text never requests a handoff. */
+export function parseBuilderHandoffRequest(request: string | BuilderHandoffRequest): BuilderHandoffRequest | undefined {
+  return typeof request === "string" ? undefined : request;
 }
 
 export interface CreateHandoffInput {

@@ -149,7 +149,7 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
       : buildRun?.branchMode === "per-ticket"
         ? "Host-owned delivery-mode fact: this admitted build uses isolated branch-per-ticket semantics. Verify branch/worktree identity when the contract requires it; do not infer it from the independent QA snapshot."
         : "Host-owned delivery-mode fact: delivery mode was not available from the authoritative build record; do not invent branch-isolation requirements without an explicit approved requirement.";
-    const result = await prepareVerificationContract(initial, inventory, {
+    const runPreparation = () => prepareVerificationContract(initial, inventory, {
       provider: builder.agent,
       store, now: Date.now, hostFacts: `${qaHostGraphFact(projectDir)}\n${deliveryFact}\nHost-owned baseline fact: Rafi captured the complete preimplementation per-file path manifest and will perform the exact unchanged-file and scope comparison. Its digest is ${preimplementationPathManifestDigest}. Do not require the provider to receive or reproduce the raw manifest; cite the retained host-preimplementation-source observation and assess the host comparison result instead. Do not author a provider-executed check for Rafi's host postimplementation path manifest, complete changed-path inventory, or unchanged-file comparison; Rafi performs that comparison outside the provider snapshot. Ordinary approved product paths, exports, and tests are not a material QA concern merely because the provider cannot prove whether they were present before implementation; Rafi owns that comparison. Do not reconstruct or disclose the full baseline. For current-branch additive tickets, a provider-authored or inferred request to test the branch with an already-completed sibling feature removed is not an applicable requirement when the approved scope says not to remove or reconstruct that sibling; verify the ticket's own behavior and tests against the shared baseline instead. Treat sibling-absence testing as binding only when the user explicitly approved that absence requirement. Escalate only an actual host-observed out-of-scope, destructive, protected-file, or requirement-relevant change.`,
       normalizeDraft: (draft, response) => {
@@ -215,7 +215,11 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
             const payload = preparationTurnPayload(turn);
             if (turn.isError || turn.failure || !role.builder.sessionId()) throw new Error(`planner-unavailable: ${turn.text}`);
             return { text: payload.text, structured: turn.structured, selectedDispatch: turn.selectedDispatch, output, graphReceiptRefs: turn.graphReceiptRefs, sessionId: role.builder.sessionId()!, usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
-          } finally { await role.builder.close(); }
+          } finally {
+            const closedSession = role.builder.sessionId();
+            await role.builder.close();
+            db.retireClosedSessionDispatches(runId, closedSession ?? undefined, "Preparation planner session closed after its call ended; the phase restarts if needed");
+          }
         }
         const snapshot = await createDisposableQaSnapshotAsync(workspace);
         let adapter: BuilderAdapter | undefined;
@@ -233,9 +237,21 @@ async function ensureBuilderContractWithProvenance(projectDir: string, runId: st
           if (turn.isError || turn.failure || !adapter.sessionId()) throw new Error(`Preparation provider unavailable: ${turn.text}`);
           if (captureBuildSource(workspace).contentDigest !== before.contentDigest) throw new Error("Source changed during preparation; retained dispatch requires reconciliation");
           return { text: payload.text, structured: turn.structured, selectedDispatch: turn.selectedDispatch, output, graphReceiptRefs: turn.graphReceiptRefs, sessionId: adapter.sessionId()!, workspacePaths: mapSnapshotWorkingDirectories(operationPayload<Partial<QaContractCandidateV1>>(turn, output), snapshot.path), usage: { inputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.inputTokens : turn.inputTokens, outputTokens: turn.usage?.scope === "turn-delta" ? turn.usage.outputTokens : turn.outputTokens, costUsd: turn.costAuthoritative ? turn.costUsd : undefined } };
-        } finally { try { await adapter?.close(); } finally { await snapshot.remove(); } }
+        } finally {
+          const closedSession = adapter?.sessionId();
+          try { await adapter?.close(); } finally { await snapshot.remove(); }
+          db.retireClosedSessionDispatches(runId, closedSession ?? undefined, "Preparation QA session closed after its call ended; the phase restarts if needed");
+        }
       }),
     });
+    let result = await runPreparation();
+    // A failed or interrupted provider call restarts its preparation phase
+    // once automatically; budget limits and real concerns still stop here.
+    // Shadow mode only observes; its result is not used, so it is not retried.
+    if (policy.mode !== "shadow" && (result.status === "uncertain" || result.status === "incomplete" && /Preparation provider unavailable|planner-unavailable|Structured result violates|invalid-contract/i.test(result.detail))) {
+      console.log(`foreman: QA preparation call failed (${result.detail.slice(0, 160)}); restarting that preparation phase once.`);
+      result = await runPreparation();
+    }
     if (result.status !== "ready") {
       if (policy.mode === "shadow") return "";
       const budget = store.budget(runId, workId, admission.requirementsDigest);
