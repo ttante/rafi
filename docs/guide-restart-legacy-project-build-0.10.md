@@ -249,6 +249,19 @@ crashes. `rafi doctor` shows the same checks.
 Don't treat `batch-start` as success. Check the step records, the builder's
 file changes, the QA result, and run the project's tests yourself.
 
+## 7. If the run stops
+
+Run `rafi resume . --yes` (or `rafi resume . --run <id> --yes`). From 0.10.1
+resume works wherever a run stopped: an interrupted step restarts from its
+beginning with its saved inputs, implementation continues from the current
+files, and an invalid answer gets one automatic retry before Rafi stops. With
+no `--run`, `--yes` picks the most recent unfinished build or saved `plan`/
+ticket session.
+
+Before 0.10.1, an invalid QA verdict could stall a run permanently: the
+resumed QA turn could not be matched to its dispatch record ("QA dispatch
+does not match the frozen review turn"). MoneyTree hit this on 2026-10-26.
+
 ## MoneyTree run log (2026-10-26, branch build)
 
 Run `25630461-…`, started with

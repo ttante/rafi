@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProviderSessionRefV1, QaFailureReportV1 } from "rafi-spec";
-import { BUILDER_QA_REMEDIATION_START as START, BUILDER_QA_REMEDIATION_END as END } from "rafi-spec";
 import { BuilderEventQueue } from "../src/activity.js";
 import { RecoveringAdapter } from "../src/adapters/recovering.js";
 import { CurrentWorkflowGuardAdapter } from "../src/branch/currentGuard.js";
@@ -20,6 +19,9 @@ import { createQaFindingRefs, canonicalJson } from "../src/qaProtocolV2.js";
 import { captureFrozenQaSourceAsync } from "../src/qaSnapshot.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import type { TicketDef } from "../src/tickets/ticketSchema.js";
+// Legacy text markers, kept only to prove old-format output is rejected.
+const START = "RAFI_BUILDER_QA_REMEDIATION_START";
+const END = "RAFI_BUILDER_QA_REMEDIATION_END";
 
 const report: QaFailureReportV1 = { version: 1, summary: "Needs a fix", checks_run: [{ check: "static", outcome: "failed", evidence: "missing guard" }], findings: [{ id: "QA-1", requirement: "guard", locations: ["source.txt"], problem: "missing guard", evidence: "source", expected: "guard", fix_direction: "add guard", verification: ["inspect"] }], observations: [] };
 const ticket: TicketDef = { id: "T1", order: 1, title: "Guard", area: "core", priority: "P2", size: "S", risk: "Low", depends_on: [], summary: "Guard", acceptance: ["guard"], required_tests: ["inspect"], likely_files: ["source.txt"] };

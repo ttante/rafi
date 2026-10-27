@@ -6,8 +6,6 @@ import type { StructuredPlanDeliveryUnit, StructuredPlanSlice, StructuredPlanSta
 import { structuredPlanProposalV1Schema, zodIssues } from "rafi-spec";
 import { capturePreimage, finalizeOwnedWrite } from "./ownership.js";
 
-export const PLAN_PROPOSAL_START = "RAFI_PLAN_PROPOSAL_START";
-export const PLAN_PROPOSAL_END = "RAFI_PLAN_PROPOSAL_END";
 export const MAX_PLAN_STACK_DEPTH = 5;
 
 export interface PlanSliceProposal {

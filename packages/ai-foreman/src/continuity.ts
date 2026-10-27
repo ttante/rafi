@@ -1,4 +1,5 @@
 import { persistedProviderWireContract } from "rafi-spec";
+import { markDispatchNotSent } from "./dispatchNotSent.js";
 import { dispatchWithGraphAccess, withGraphSessionAccess } from "./graph/session.js";
 import { localBuildAuthority, type BuildAdmission } from "./buildAdmission.js";
 import { randomUUID, createHash } from "node:crypto";
@@ -13,7 +14,6 @@ import { WorkflowDb } from "./workflowDb.js";
 import { assertSealedDispatch, withFreshRecoveryValidation } from "./structuredDispatchAuthority.js";
 import { verifyPersistedDispatch } from "./structuredDispatchRecord.js";
 
-export const CONTINUITY_MARKER = "RAFI_CONTINUITY_DELTA:";
 
 export class ContinuityValidationError extends Error {
   constructor(readonly problems: string[]) { super(`invalid continuity delta: ${problems.join("; ")}`); }
@@ -87,16 +87,6 @@ export function mergeContinuityDeltas(deltas: readonly ContinuityDelta[]): Conti
 
 export function baselineContinuityDelta(nextAction = "Await the first role action."): ContinuityDelta {
   return { version: 1, decisions: [], constraints: [], discoveries: [], completedActions: [], evidence: [], failures: [], blockers: [], openWork: [], nextAction };
-}
-
-export function continuityInstruction(role?: "builder" | "qa"): string {
-  return [
-    "Before your final STEP_STATUS line (or as the final line when STEP_STATUS is not requested), emit exactly one single-line continuity record:",
-    `${CONTINUITY_MARKER} {"version":1,"decisions":[],"constraints":[],"discoveries":[],"completedActions":[],"evidence":[],"failures":[],"blockers":[],"openWork":[],"nextAction":"specific next action"}`,
-    "The continuity record is JSON. A requested STEP_STATUS line is separate plain text: never add JSON braces, a trailing comma, or a code fence to that status line.",
-    ...(role === "qa" ? ["QA protocol: this continuity record is required even when the review requests only a report or status. Put it before RAFI_QA_FAILURE_REPORT_START when returning a failure envelope, outside the report JSON. Rafi strips the record before validating the report, so keep the report envelope immediately followed by STEP_STATUS."] : []),
-    "Keep it concise and cumulative for facts learned this turn. Do not include credentials, hidden reasoning, or raw transcripts.",
-  ].join("\n");
 }
 
 export interface ContinuityAdapterOptions {
@@ -207,7 +197,7 @@ export class ContinuityAdapter implements BuilderAdapter {
     const beforeSession = this.adapter.sessionRef?.();
     let original: TurnResult;
     try {
-      journal.atomic(() => {
+      try { journal.atomic(() => {
         if (this.buildAuthority) journal.assertBuildAdmission(this.buildAuthority);
         else if (journal.buildAdmission()) throw new ContinuityRecoveryRequiredError(this.options.runId, this.options.role, "dispatch requires original build admission authority");
         if (process.send && process.env.RAFI_BUILD_WORKER_RUN === this.options.runId) {
@@ -224,7 +214,7 @@ export class ContinuityAdapter implements BuilderAdapter {
         if (!policy?.selectedDispatch) journal.planOperation({ runId: this.options.runId, idempotencyKey: dispatchId, kind: "provider-dispatch", intent: { role: this.options.role, sessionRef: this.adapter.sessionRef?.(), instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) } });
         if (!policy?.selectedDispatch) journal.updateOperation(dispatchId, "in_progress");
         journal.appendContinuityEvent({ runId: this.options.runId, role: "host", kind: "turn_started", payload: { role: this.options.role, dispatchId, instructionDigest: sha(instruction), instructionBytes: Buffer.byteLength(instruction) }, authoritativeStateRevision: this.revision() });
-      });
+      }); } catch (error) { throw markDispatchNotSent(error); }
       try { original = await dispatchWithGraphAccess(this.options.projectDir, this.adapter, providerInstruction, policy, (text, p) => this.adapter.sendTurn(text, p)); }
       catch (error) { if (!policy?.selectedDispatch) journal.updateOperation(dispatchId, "uncertain", { error: String(error) }); throw error; }
       // Preserve the native transport result before interpreting it or publishing

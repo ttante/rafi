@@ -64,7 +64,8 @@ for (const kind of ["completed", "blocked", "invalid"] as const) test(`offline p
     try {
       const operation = db.operation(calls[0]!.policy!.dispatchId!);
       assert.equal(operation?.kind, "provider-dispatch");
-      assert.equal(operation?.status, kind === "invalid" ? "uncertain" : "confirmed");
+      // An answered but invalid turn has a known outcome: failed, not uncertain.
+      assert.equal(operation?.status, kind === "invalid" ? "failed" : "confirmed");
       assert.ok(operation?.result);
     } finally { db.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }

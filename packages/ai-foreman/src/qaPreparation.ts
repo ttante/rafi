@@ -110,8 +110,13 @@ export async function prepareVerificationContract(initial: QaContractCandidateV1
   const decisionIssues = initial.depthDecision ? validateDepthDecision(initial.depthDecision) : ["Missing planner depth assessment"];
   // Missing decisions begin with Standard's ceiling, never the synthetic Low placeholder.
   const budget = store.ensureBudget(initial.runId, initial.workId, initial.admissionDigest, decisionIssues.length ? 2 : initial.depthDecision.level, deps.now());
-  const unresolvedDispatch = budget.reservations.find(item => !item.resultDigest);
-  if (unresolvedDispatch) return { status: "uncertain", detail: head.detail ?? `Uncertain preparation dispatch ${unresolvedDispatch.operationId}`, nextAction: "Reconcile retained provider receipt before retrying" };
+  // Preparation runs inside the build worker. A call still open when a new
+  // preparation starts belongs to an earlier, ended attempt (its provider was
+  // closed or its process is gone), so that phase restarts from the beginning.
+  if (budget.reservations.some(item => !item.resultDigest && !item.interruptedAt)) {
+    store.reconcileInterruptedReservations(budget, deps.now(), "preparation restarted after an interrupted provider call");
+    Object.assign(budget, store.budget(initial.runId, initial.workId, initial.admissionDigest)!);
+  }
   const retained = store.progress<{ candidate: QaContractCandidateV1; authorSessionId: string }>(budget, "draft");
   const priorAssessment = store.progress<QaSemanticAssessmentV1>(budget, "assessment");
   const priorChallenge = store.progress<QaChallengeReceiptV1>(budget, "challenge");
@@ -120,12 +125,23 @@ export async function prepareVerificationContract(initial: QaContractCandidateV1
   store.retainProgress(budget, "inventory", inventory);
   let candidate = retained ? structuredClone(retained.candidate) : structuredClone(initial);
   if (retainedDepth) candidate.depthDecision = retainedDepth;
-  if (retained && canonicalContractJson(candidate.inputs) !== canonicalContractJson(initial.inputs)) return { status: "blocked", detail: "Retained draft inputs changed", nextAction: "Reconcile authoritative input changes" };
+  if (retained && canonicalContractJson(candidate.inputs) !== canonicalContractJson(initial.inputs)) {
+    const now = new Map(initial.inputs.map(input => [input.id, canonicalContractJson(input)]));
+    const changed = [...new Set([...candidate.inputs.filter(input => now.get(input.id) !== canonicalContractJson(input)).map(input => input.id), ...initial.inputs.filter(input => !candidate.inputs.some(prior => prior.id === input.id)).map(input => input.id)])];
+    // Only the pre-implementation source fingerprint moved (for example the
+    // host re-rendered its tracker while the build was stopped). Nothing has
+    // been implemented yet, so preparation restarts against current files.
+    if (changed.length === 1 && changed[0] === "preimplementation-source") {
+      store.restartDrafting(budget, deps.now(), "Pre-implementation source changed before implementation; preparation restarts against current files");
+      return prepareVerificationContract(initial, inventory, deps);
+    }
+    return { status: "blocked", detail: `Retained draft inputs changed: ${changed.join(", ") || "input order"}`, nextAction: "Reconcile authoritative input changes" };
+  }
   let correctionIssues: string[] = [];
   const run = async (phase: Parameters<PreparationDependencies["dispatch"]>[0], kind: LogicalPreparationBudget["reservations"][number]["kind"], instruction: string, resultId?: string, artifact?: OutputContract): Promise<PreparationProviderResult> => {
     const output = artifact ?? (phase === "planner" ? depthOutput : phase === "assess" ? assessmentOutput : phase === "challenge" ? challengeOutput : draftOutput);
     const effectivePhase = phase === "prepare" && correctionIssues.length > 0 ? "repair" : phase;
-    if (phase === "assess") instruction = `This is QA PREPARATION semantic assessment before Builder work, not final QA. Do not emit RAFI_QA_FAILURE_REPORT, RAFI_QA_COVERAGE, QA findings, or STEP_STATUS; return only the requested preparation-assessment result.\n\n${instruction}`;
+    if (phase === "assess") instruction = `This is QA PREPARATION semantic assessment before Builder work, not final QA. Do not report QA findings; return only the requested preparation-assessment result.\n\n${instruction}`;
     if (phase === "prepare") instruction = `This is a fresh draft response. Use only check IDs declared in this response; do not copy allocated check IDs or baseline/coverage references from an earlier draft or correction attempt. Every check reference in prose, procedures, expected evidence, and mappings must use the exact check.id declared in this response; never use descriptive aliases such as qa-subtract-export. Rafi will allocate stable IDs after validating this response.\n\n${instruction}`;
     if (phase === "assess") instruction = `The authoritative scope is the exact inventory and admitted slice in this prompt. Plan-level acceptance or test criteria outside the admitted slice are context only and must not be reported as missing inventory requirements.\n\n${instruction}`;
     if (effectivePhase === "repair") instruction = `Targeted QA contract repair only. Preserve valid checks, methods, bindings, and evidence; change only what the validation issues require. Do not redo investigation, expand scope, invent evidence, or change host-owned fields. Return the complete corrected artifact for the supplied operation schema.\n\n${instruction}`;
@@ -351,7 +367,7 @@ export async function prepareVerificationContract(initial: QaContractCandidateV1
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     const current = store.budget(initial.runId, initial.workId, initial.admissionDigest)!;
-    const status = current.reservations.some(reservation => !reservation.resultDigest) ? "uncertain" : "incomplete";
+    const status = current.reservations.some(reservation => !reservation.resultDigest && !reservation.interruptedAt) ? "uncertain" : "incomplete";
     store.setState(initial.runId, initial.workId, initial.admissionDigest, status, detail, store.head(initial.runId, initial.workId, initial.admissionDigest).generation);
     store.metric(initial.runId, initial.workId, initial.admissionDigest, `metric:preparation-failure:${current.id}:${current.reservations.length}`, "preparation-failure", { status: "blocked" });
     const failureDigest = createHash("sha256").update(JSON.stringify({ status, detail })).digest("hex");

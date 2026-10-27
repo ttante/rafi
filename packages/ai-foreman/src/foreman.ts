@@ -48,7 +48,7 @@ import type { QaRecoveryPacket } from "./qaRecovery.js";
 import { WorkflowDb } from "./workflowDb.js";
 import { assertBuildAssignmentReconciled, beginBuildAssignment, BuildAssignmentRejected, captureBuildSource, finishBuildAssignment, validateBuildAssignment } from "./buildAssignment.js";
 
-/** Parsed STEP_STATUS marker from a builder's turn. */
+/** A role turn's outcome, derived from its native structured result. */
 export interface StepStatus {
   kind:
     | "done"
@@ -70,8 +70,8 @@ export interface StepStatus {
 }
 
 /**
- * Workflow-specific completion is opt-in. Callers may preserve a valid
- * structured response before the generic strict STEP_STATUS repair path runs.
+ * Workflow-specific completion is opt-in. Callers may interpret a valid
+ * structured response before the generic native result handling runs.
  */
 export type InstructionCompletion = (text: string) => StepStatus | undefined;
 
@@ -85,87 +85,6 @@ const QUESTION_HINTS = [
   "could you clarify",
   "which option",
 ];
-
-/**
- * Pull the STEP_STATUS marker out of a turn's final text.
- * Format: `STEP_STATUS: <kind> | key="value" key="value"`.
- */
-export function parseStepStatus(text: string, options: { requireFinalLine?: boolean } = {}): StepStatus {
-  const markerLines = text.split(/\r?\n/).filter((line) => /^\s*STEP_STATUS:/.test(line));
-  const markerCount = markerLines.length;
-  if (markerCount > 1) {
-    return { kind: "unknown", error: "builder emitted multiple STEP_STATUS markers" };
-  }
-  const lines = text.trimEnd().split(/\r?\n/).filter((line) => line.trim().length > 0);
-  const last = lines[lines.length - 1] ?? "";
-  if (!last.includes("STEP_STATUS:")) {
-    if (markerCount === 1 && options.requireFinalLine !== false) {
-      return { kind: "unknown", error: "STEP_STATUS marker was not the final non-empty line" };
-    }
-    if (markerCount === 0) return { kind: "unknown" };
-  }
-
-  const marker = options.requireFinalLine === false ? markerLines[0]?.trim() ?? "" : last;
-  const match = marker.match(
-    /^STEP_STATUS:\s*(done|blocked|plan_complete|needs_input|qa_pass|qa_fail)\b\s*(?:\|\s*(.*))?$/i,
-  );
-  if (!match) {
-    return { kind: "unknown", error: "malformed STEP_STATUS marker" };
-  }
-  const kind = match[1].toLowerCase() as StepStatus["kind"];
-  const fields = parseMarkerFields(match[2] ?? "");
-  if (fields instanceof Error) {
-    return { kind: "unknown", error: fields.message };
-  }
-  return {
-    kind,
-    summary: fields.summary,
-    next: fields.next,
-    reason: fields.reason,
-    question: fields.question,
-    issues: fields.issues,
-    ticket: fields.ticket,
-    branchDependency: fields.branch_dependency,
-    choices: fields.choices
-      ? fields.choices.split("|").map((c) => c.trim()).filter(Boolean)
-      : undefined,
-  };
-}
-
-function parseMarkerFields(input: string): Record<string, string> | Error {
-  const fields: Record<string, string> = {};
-  let rest = input.trim();
-  while (rest.length > 0) {
-    const key = rest.match(/^(\w+)="/);
-    if (!key) return new Error(`malformed STEP_STATUS field near: ${rest.slice(0, 40)}`);
-    const name = key[1];
-    let i = key[0].length;
-    let value = "";
-    let closed = false;
-    while (i < rest.length) {
-      const ch = rest[i];
-      if (ch === "\\") {
-        const next = rest[i + 1];
-        if (next === undefined) return new Error(`unterminated escape in STEP_STATUS field: ${name}`);
-        value += next;
-        i += 2;
-        continue;
-      }
-      if (ch === "\"") {
-        closed = true;
-        i++;
-        break;
-      }
-      value += ch;
-      i++;
-    }
-    if (!closed) return new Error(`unterminated STEP_STATUS field: ${name}`);
-    if (fields[name] !== undefined) return new Error(`duplicate STEP_STATUS field: ${name}`);
-    fields[name] = value;
-    rest = rest.slice(i).trim();
-  }
-  return fields;
-}
 
 /** Heuristic: did a marker-less turn end by asking the human something? */
 export function looksLikeQuestion(text: string): boolean {

@@ -25,7 +25,6 @@ import {
   resolvablePendingLocalSourceRequests,
   runPlanWorkflow,
   ticketSetupAction,
-  stripFinalStepStatusMarker,
   validatePlanMarkdown,
   writePlanArtifacts,
   writeValidatedPlanArtifacts,
@@ -37,7 +36,9 @@ import {
   materializeStructuredPlan,
   type StructuredPlanProposalV1,
 } from "../src/structuredPlan.js";
-import { GRILL_AUDIT_END, GRILL_AUDIT_START } from "../src/grillAudit.js";
+// Legacy text markers, kept only to prove old-format output is rejected.
+const GRILL_AUDIT_START = "RAFI_GRILL_AUDIT_START";
+const GRILL_AUDIT_END = "RAFI_GRILL_AUDIT_END";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "rafi-plan-test-"));
@@ -422,7 +423,7 @@ test("writePlanArtifacts preserves versioned history and refreshes latest", () =
     const first = writePlanArtifacts(
       dir,
       "docs-rafi",
-      "# First\nSTEP_STATUS: plan_complete | summary=\"done\"",
+      "# First",
       new Date("2026-01-02T03:04:05.006Z"),
     );
     const second = writePlanArtifacts(
@@ -457,11 +458,6 @@ test("writePlanArtifacts rejects output paths that escape through symlinks", () 
     rmSync(dir, { recursive: true });
     rmSync(outside, { recursive: true });
   }
-});
-
-test("stripFinalStepStatusMarker removes only the final marker", () => {
-  const stripped = stripFinalStepStatusMarker("Keep this line\nSTEP_STATUS: plan_complete | summary=\"done\"\n");
-  assert.equal(stripped, "Keep this line");
 });
 
 test("nextPopulateCommand points tickets populate at the latest plan", () => {

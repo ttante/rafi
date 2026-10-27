@@ -948,7 +948,7 @@ export class CodexAdapter implements BuilderAdapter {
   }
 
   private providerIdleTimeoutMs(): number {
-    const configured = this.opts.providerIdleTimeoutMs;
+    const configured = this.opts.providerIdleTimeoutMs ?? Number(process.env.RAFI_PROVIDER_IDLE_TIMEOUT_MS);
     return Number.isFinite(configured) && configured! > 0 ? configured! : DEFAULT_PROVIDER_IDLE_TIMEOUT_MS;
   }
 

@@ -12,7 +12,7 @@ export type PreparationState = "preparation-required" | "preparing" | "validatin
 export interface LogicalPreparationBudget {
   id: string; runId: string; workId: string; admissionDigest: string; policy: QaPreparationConfigV1;
   startMs: number; deadlineMs: number; level: QaPreparationLevel;
-  reservations: Array<{ operationId: string; kind: "planning" | "investigation" | "assessment" | "challenge" | "escalation" | "repair"; resultId?: string; resultDigest?: string }>;
+  reservations: Array<{ operationId: string; kind: "planning" | "investigation" | "assessment" | "challenge" | "escalation" | "repair"; resultId?: string; resultDigest?: string; interruptedAt?: string }>;
   usage: { inputTokens: number | null; outputTokens: number | null; costUsd: number | null };
   extensions: Array<{ authorityId: string; actor: string; reason: string; previousDeadlineMs: number; deadlineMs: number }>;
   caps?: Partial<Record<LogicalPreparationBudget["reservations"][number]["kind"], number>>;
@@ -207,13 +207,35 @@ export class QaPreparationStore {
     this.atomic(() => {
       const current = this.budget(budget.runId, budget.workId, budget.admissionDigest)!;
       if (nowMs >= current.deadlineMs) throw new Error("Preparation budget exhausted; authorized operational extension required");
-      const unresolved = current.reservations.find(item => !item.resultDigest);
+      const unresolved = current.reservations.find(item => !item.resultDigest && !item.interruptedAt);
       if (unresolved) throw new Error(`Uncertain preparation dispatch ${unresolved.operationId}; reconcile retained result before retry`);
-      const count = current.reservations.filter(item => item.kind === kind && (kind !== "repair" || item.resultId === resultId)).length;
+      // Interrupted attempts were never answered; they do not use the allowance.
+      const count = current.reservations.filter(item => !item.interruptedAt && item.kind === kind && (kind !== "repair" || item.resultId === resultId)).length;
       const maximum = current.caps?.[kind] ?? (kind === "planning" ? 1 : kind === "investigation" ? current.level <= 2 ? 2 : 3 : kind === "assessment" ? 3 : 2);
       if (count >= maximum) throw new Error(`Preparation ${kind} allowance exhausted`);
       current.reservations.push({ operationId, kind, ...(resultId ? { resultId } : {}) }); this.saveBudget(current);
       this.db.prepare("INSERT INTO qa_preparation_attempts VALUES(?,?,?,?,NULL)").run(operationId, current.id, "uncertain", this.protectedJson(intent));
+    });
+  }
+  /** Close preparation calls that never returned a result. Only the current
+   * owner may call this, after the call that made them has ended (the
+   * provider was closed or the process that made it is gone). The phase runs
+   * again; the unknown outcome is never used as a result. Time the build
+   * spent stopped does not count against the preparation window. */
+  reconcileInterruptedReservations(budget: LogicalPreparationBudget, nowMs: number, reason: string): string[] {
+    this.assertOwner(budget.runId);
+    return this.atomic(() => {
+      const current = this.budget(budget.runId, budget.workId, budget.admissionDigest)!;
+      const open = current.reservations.filter(item => !item.resultDigest && !item.interruptedAt);
+      if (!open.length) return [];
+      const at = new Date(nowMs).toISOString();
+      for (const item of open) {
+        item.interruptedAt = at;
+        this.db.prepare("UPDATE qa_preparation_attempts SET state='interrupted',result_json=? WHERE operation_id=?").run(this.protectedJson({ interruptedAt: at, reason }), item.operationId);
+      }
+      current.deadlineMs = Math.max(current.deadlineMs, nowMs + current.policy.wallTimeMs[current.level - 1]!);
+      this.saveBudget(current);
+      return open.map(item => item.operationId);
     });
   }
   retainResult(budget: LogicalPreparationBudget, operationId: string, result: unknown, usage?: Partial<LogicalPreparationBudget["usage"]>): string {
@@ -258,13 +280,28 @@ export class QaPreparationStore {
       const head = this.head(budget.runId, budget.workId, budget.admissionDigest);
       if (head.digest !== authority.predecessorDigest || !["ready", "amendment-required", "incomplete", "reconciling", "validating", "preparing"].includes(head.state) || !authority.reason.trim()) throw new Error("Amendment requires current predecessor and explicit input authority");
       const current = this.budget(budget.runId, budget.workId, budget.admissionDigest)!;
-      if (current.reservations.some(item => !item.resultDigest)) throw new Error("Uncertain preparation dispatch requires reconciliation before another input amendment");
+      if (current.reservations.some(item => !item.resultDigest && !item.interruptedAt)) throw new Error("Uncertain preparation dispatch requires reconciliation before another input amendment");
       const priorInventory = this.progress(budget, "inventory");
       this.putArtifact("amendment-intent", { budgetId: budget.id, priorInventory, inventory, authority });
       this.db.prepare("DELETE FROM qa_preparation_progress WHERE budget_id=? AND stage IN ('draft','assessment','challenge','inventory')").run(budget.id);
       this.retainProgress(budget, "inventory", inventory);
       this.retainProgress(budget, "amendment-inputs", { inputDigest: authority.inputDigest, predecessorDigest: authority.predecessorDigest });
       this.setState(budget.runId, budget.workId, budget.admissionDigest, "reconciling", authority.reason, head.generation);
+    });
+  }
+  /** Set aside retained drafting progress so preparation restarts from its
+   * beginning against current inputs. Earlier attempts no longer count
+   * against the allowances; their evidence stays retained. */
+  restartDrafting(budget: LogicalPreparationBudget, nowMs: number, reason: string): void {
+    this.assertOwner(budget.runId);
+    this.atomic(() => {
+      const current = this.budget(budget.runId, budget.workId, budget.admissionDigest)!;
+      const at = new Date(nowMs).toISOString();
+      for (const item of current.reservations) if (!item.interruptedAt) item.interruptedAt = at;
+      current.deadlineMs = Math.max(current.deadlineMs, nowMs + current.policy.wallTimeMs[current.level - 1]!);
+      this.saveBudget(current);
+      this.db.prepare("DELETE FROM qa_preparation_progress WHERE budget_id=? AND stage IN ('draft','assessment','challenge')").run(current.id);
+      this.event(current.runId, current.workId, `restart-drafting:${current.id}:${at}`, "preparation-restarted", { reason });
     });
   }
   progress<T>(budget: LogicalPreparationBudget, stage: string): T | undefined {
@@ -343,7 +380,7 @@ export class QaPreparationStore {
       if (issues.length) throw new Error(issues.join("; "));
       const head = this.head(contract.runId, contract.workId, contract.admissionDigest);
       const budget = this.budget(contract.runId, contract.workId, contract.admissionDigest);
-      if (!budget || nowMs >= budget.deadlineMs || budget.reservations.some(item => !item.resultDigest)) throw new Error("Expired or uncertain preparation cannot publish ready");
+      if (!budget || nowMs >= budget.deadlineMs || budget.reservations.some(item => !item.resultDigest && !item.interruptedAt)) throw new Error("Expired or uncertain preparation cannot publish ready");
       if (head.generation !== expectedGeneration || contract.predecessorDigest !== (head.digest ?? undefined) || contract.revision !== (head.digest ? this.contract(head.digest).revision + 1 : 1)) throw new Error("Stale contract revision/publication");
       if (head.digest) {
         const prior = this.contract(head.digest);

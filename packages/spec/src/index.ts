@@ -39,7 +39,6 @@ export {
   assertBuilderQaRemediationReportV2,
 } from "./validate.js";
 export * from "./qaFailureReport.js";
-export { describeHistoricalQaTranscript } from "./legacyQaDisplay.js";
 
 export type { BuildWorkAdmissionV1, ManagerActionRequestV1 } from "./types.js";
 export { buildWorkAdmissionV1Schema, managerActionRequestV1Schema } from "./schemas.js";

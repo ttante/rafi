@@ -33,6 +33,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts test/*.test.mjs",
+    "test:resume-matrix": "RAFI_RESUME_MATRIX=full tsx --test --test-concurrency=4 test/resumeMatrix.test.ts",
     "prepack": "pnpm build",
     "prepublishOnly": "pnpm test && pnpm typecheck"
   },

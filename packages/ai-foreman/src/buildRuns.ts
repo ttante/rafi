@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
 import type { AutonomyProfile, BuildRunRecord, BuildRunRecordV1, BuildRunRecordV2, BuildRunRecordV3, ProviderSessionRefV1, ResolvedAgentSettings, ResolvedAutonomyPolicy, SessionAvailabilityV1 } from "rafi-spec";
-import { WorkflowDb, heartbeatCurrentWorkflowLease, readCurrentWorkflowLease, type WorkflowRunStatus, type ProjectLease } from "./workflowDb.js";
+import { WorkflowDb, heartbeatCurrentWorkflowLease, isNonBuildRunId, readCurrentWorkflowLease, type WorkflowRunStatus, type ProjectLease } from "./workflowDb.js";
 import { WorkflowReader } from "./workflowReader.js";
 import { canonicalSessionPath, captureWorkspaceIdentity, createProviderSessionRef, latestSessionBinding, upsertSessionBinding } from "./sessionIdentity.js";
 import { resolveProviderSessionAvailability, type ResolveSessionAvailabilityOptions } from "./sessionAvailability.js";
@@ -420,6 +420,9 @@ export function readBuildRuns(projectDir: string): BuildRunRecordV2[] {
     try { const value = JSON.parse(readFileSync(join(directory, name), "utf8")) as BuildRunRecord; candidates.set(value.runId, value); } catch { /* authoritative DB state can repair an absent or partial projection */ }
   }
   for (const stored of workflow.buildRuns()) {
+    // Journal runs for agent calls outside a build were once stored with the
+    // build kind; they are never builds.
+    if (isNonBuildRunId(stored.runId)) continue;
     const value = stored.state as unknown as BuildRunRecord;
     if (value?.runId) candidates.set(value.runId, value);
     else if (!["completed", "superseded", "cancelled"].includes(stored.status) && !candidates.has(stored.runId)) {

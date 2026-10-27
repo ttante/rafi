@@ -175,21 +175,8 @@ function optionWasProvided(command: Command, name: string): boolean {
 
 const TICKET_POPULATE_ROLE = "ticket-maker";
 const RAFI_CONFIG_FILES = ["rafi-config.yaml", "project.yaml"] as const;
-const RISK_NOTE_REPAIR_START = "RAFI_RISK_NOTE_REPAIR_START";
-const RISK_NOTE_REPAIR_END = "RAFI_RISK_NOTE_REPAIR_END";
 
 export interface RiskNoteRepairProposal { version: 1; tickets: Array<{ id: string; rollback: string }> }
-
-export function extractRiskNoteRepairProposal(output: string): RiskNoteRepairProposal {
-  const start = output.lastIndexOf(RISK_NOTE_REPAIR_START); const end = output.lastIndexOf(RISK_NOTE_REPAIR_END);
-  if (start < 0 || end <= start) throw new Error(`Ticket Maker repair output is missing ${RISK_NOTE_REPAIR_START}/${RISK_NOTE_REPAIR_END}`);
-  const raw = output.slice(start + RISK_NOTE_REPAIR_START.length, end).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch (error) { throw new Error(`Ticket Maker risk-note repair is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
-  const validated = riskNoteRepairProposalV1Schema.safeParse(parsed);
-  if (!validated.success) throw new Error(`Ticket Maker risk-note repair contract validation failed:\n${zodIssues(validated.error).map((issue) => `- ${issue}`).join("\n")}`);
-  return validated.data;
-}
 
 /** Validate a deliberately narrow repair: only exactly the missing rollback fields may change. */
 export function applyRiskNoteRepairProposal(tickets: import("../tickets/ticketSchema.js").TicketDef[], proposal: RiskNoteRepairProposal): import("../tickets/ticketSchema.js").TicketDef[] {
@@ -1531,7 +1518,14 @@ export async function cmdPopulateCli(opts: PopulateCommandOptions): Promise<void
       checkpoint: scope => { planningRecord = checkpointInterview(dir, planningRecord, { decisions: { ...planningRecord.decisions, populationArtifact: scope } }); },
       dispatch: (instruction, policy) => foreman.runInstruction(instruction, policy),
     });
-    const initialPopulation = await population(buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc), 0);
+    const populateInstruction = buildPopulateInstruction(approvedPlan.path, contextSources, ticketsConfig.paths.progressDoc);
+    let initialPopulation: Awaited<ReturnType<typeof population>>;
+    try { initialPopulation = await population(populateInstruction, 0); }
+    catch (error) {
+      // One automatic restart of a failed population before stopping for a human.
+      console.log(`foreman tickets: ticket population failed (${String(error).slice(0, 200)}); restarting it once from the first page.`);
+      initialPopulation = await population(populateInstruction, 0);
+    }
     let turn = initialPopulation.turn;
     planningRecord = checkpointInterview(dir, planningRecord, { runtime: { runtime: roleBuilder.runtime, model: roleBuilder.model, sessionId: builder.sessionId() }, decisions: { ...planningRecord.decisions, proposalResponse: turn.result.text, structuredResponse: turn.result.structured } });
 

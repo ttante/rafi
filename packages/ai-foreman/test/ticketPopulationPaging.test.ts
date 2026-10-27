@@ -20,11 +20,15 @@ function fixture(root: string, failSecond = false, correction = 0) {
     async sendTurn(instruction, policy) {
       assertActiveProviderDispatch(policy!, instruction, "claude", ref);
       const db = new WorkflowDb(root);
-      try { assert.ok(db.populationPageLedger(`ticket-population:interview:artifact:${correction}`)); }
+      // A restarted population uses a fresh lineage (":restart-N") for the same correction.
+      const base = `ticket-population:interview:artifact:${correction}`;
+      try { assert.ok([base, `${base}:restart-1`, `${base}:restart-2`].some(id => db.populationPageLedger(id))); }
       finally { db.close(); }
       sends++;
       if (failSecond && sends === 2) throw new Error("uncertain send");
-      return canonicalFixtureTurn(policy, ref.sessionId, { plan_id: "plan", revision: 1, tickets: [], retirements: [], terminal: sends === 2 });
+      // Each lineage is two pages long.
+      const page = Number(/Return page (\d+)/.exec(instruction)?.[1] ?? 1);
+      return canonicalFixtureTurn(policy, ref.sessionId, { plan_id: "plan", revision: 1, tickets: [], retirements: [], terminal: page === 2 });
     }, async *events() {}, async close() {} };
   return { adapter, sends: () => sends,
     input: { projectDir: root, interviewId: "interview", correction, instruction: "Populate approved plan",
@@ -50,13 +54,20 @@ test("population seals before page one, appends each native page, and replays te
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("an uncertain page cannot be automatically repeated after restart", async () => {
+test("an unfinished lineage is retired and population restarts from page one", async () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-uncertain-pages-"));
   try {
     const f = fixture(root, true);
     await assert.rejects(streamTicketPopulation(f.input), /uncertain send/);
-    await assert.rejects(streamTicketPopulation(f.input), /reconcile retained pages/);
-    assert.equal(f.sends(), 2);
+    const result = await streamTicketPopulation(f.input);
+    assert.equal(result.proposal.plan_id, "plan");
+    assert.equal(f.sends(), 4, "two sends in the retired lineage, two in the restarted one");
+    const db = new WorkflowDb(root);
+    try {
+      assert.equal(db.operation("ticket-population:interview:artifact:0")?.status, "failed");
+      assert.equal(db.operation("ticket-population:interview:artifact:0:restart-1")?.status, "confirmed");
+      assert.equal(db.operations("ticket-population:interview").filter(op => op.kind === "provider-dispatch" && ["in_progress", "uncertain"].includes(op.status)).length, 0);
+    } finally { db.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -73,14 +84,15 @@ test("a generic owner cannot select the subordinate ticket page", async () => {
 });
 
 
-test("cancellation before page one never sends and restart requires reconciliation", async () => {
+test("cancellation before page one never sends and a later attempt restarts the population", async () => {
   const root = mkdtempSync(join(tmpdir(), "rafi-cancel-pages-"));
   try {
     const f = fixture(root);
     await assert.rejects(streamTicketPopulation({ ...f.input, checkpoint() { throw new Error("cancelled before page one"); } }), /cancelled/);
     assert.equal(f.sends(), 0);
-    await assert.rejects(streamTicketPopulation(f.input), /reconcile retained pages/);
-    assert.equal(f.sends(), 0);
+    const result = await streamTicketPopulation(f.input);
+    assert.equal(result.proposal.plan_id, "plan");
+    assert.equal(f.sends(), 2);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

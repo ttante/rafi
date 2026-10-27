@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import {
-  extractSourceRequests,
   deactivateSource,
   loadSourceRegistry,
   removeSource,
@@ -57,21 +56,12 @@ test("local source versions append by fingerprint and support spaces and storage
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("structured requests and URL answers preserve commas and plus signs", () => {
+test("URL answers preserve commas and plus signs", () => {
   const dir = temp();
   try {
     const url = "https://example.com/issues?q=a+b,c";
     assert.equal(sourceRequestFromAnswer(url, dir).locator?.url, url);
-    const requests = extractSourceRequests(`before\nRAFI_SOURCE_REQUEST_START\n[{"type":"local","label":"Docs","locator":{"path":"docs with spaces"}}]\nRAFI_SOURCE_REQUEST_END\nSTEP_STATUS: needs_input | question="Which files?"`);
-    assert.deepEqual(requests, [{ type: "local", label: "Docs", locator: { path: "docs with spaces" } }]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test("legacy source-request lines pass through the structured contract boundary", () => {
-  assert.deepEqual(extractSourceRequests("SOURCE_REQUEST: inspect docs and issue exports"), [
-    { description: "inspect docs and issue exports" },
-  ]);
-  assert.throws(() => extractSourceRequests("RAFI_SOURCE_REQUEST_START\n{\"type\":\"local\",\"unexpected\":true}\nRAFI_SOURCE_REQUEST_END"), /contract validation failed/);
 });
 
 test("prose ending in a file path remains a description", () => {

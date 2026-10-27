@@ -7,7 +7,6 @@ import { PermissionPolicy } from "../src/permissions/policy.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { readOnlyPermissionConfig } from "../src/agentRun.js";
 import {
-  parseStepStatus,
   looksLikeQuestion,
   buildQaInstruction,
   buildQaFixInstruction,
@@ -261,93 +260,10 @@ test("read-only agents may run validation commands but not dependency installati
   }
 });
 
-test("parseStepStatus reads the marker line", () => {
-  const done = parseStepStatus('blah blah\nSTEP_STATUS: done | summary="did x" next="do y"');
-  assert.equal(done.kind, "done");
-  assert.equal(done.summary, "did x");
-  assert.equal(done.next, "do y");
-
-  const blocked = parseStepStatus('STEP_STATUS: blocked | reason="missing creds"');
-  assert.equal(blocked.kind, "blocked");
-  assert.equal(blocked.reason, "missing creds");
-
-  assert.equal(parseStepStatus("no marker here").kind, "unknown");
-  assert.equal(parseStepStatus("STEP_STATUS: plan_complete").kind, "plan_complete");
-});
-
-test("parseStepStatus requires one marker on the final non-empty line", () => {
-  const trailing = parseStepStatus('STEP_STATUS: done | summary="did x"\nextra text');
-  assert.equal(trailing.kind, "unknown");
-  assert.match(trailing.error ?? "", /final/);
-
-  const duplicate = parseStepStatus(
-    'STEP_STATUS: done | summary="one"\nSTEP_STATUS: done | summary="two"',
-  );
-  assert.equal(duplicate.kind, "unknown");
-  assert.match(duplicate.error ?? "", /multiple/);
-});
-
-test("parseStepStatus handles escaped quotes and rejects malformed fields", () => {
-  const escaped = parseStepStatus('STEP_STATUS: done | summary="added \\"quoted\\" label"');
-  assert.equal(escaped.kind, "done");
-  assert.equal(escaped.summary, 'added "quoted" label');
-
-  const malformed = parseStepStatus('STEP_STATUS: done | summary="unterminated');
-  assert.equal(malformed.kind, "unknown");
-  assert.match(malformed.error ?? "", /unterminated/);
-});
-
-test("parseStepStatus parses needs_input with question and choices", () => {
-  const status = parseStepStatus(
-    'STEP_STATUS: needs_input | question="Should I update tests?" choices="Yes|No|Skip for now"',
-  );
-  assert.equal(status.kind, "needs_input");
-  assert.equal(status.question, "Should I update tests?");
-  assert.deepEqual(status.choices, ["Yes", "No", "Skip for now"]);
-});
-
-test("parseStepStatus handles needs_input without choices", () => {
-  const status = parseStepStatus(
-    'STEP_STATUS: needs_input | question="Which approach do you prefer?"',
-  );
-  assert.equal(status.kind, "needs_input");
-  assert.equal(status.question, "Which approach do you prefer?");
-  assert.equal(status.choices, undefined);
-});
-
 test("looksLikeQuestion detects trailing questions", () => {
   assert.equal(looksLikeQuestion("I did the thing. Should I also update the docs?"), true);
   assert.equal(looksLikeQuestion("Which option do you prefer"), true);
   assert.equal(looksLikeQuestion("Implemented the feature and tests pass."), false);
-});
-
-test("parseStepStatus recognizes qa_pass", () => {
-  const status = parseStepStatus(
-    'all checks green\nSTEP_STATUS: qa_pass | summary="all tests pass, ticket satisfied"',
-  );
-  assert.equal(status.kind, "qa_pass");
-  assert.equal(status.summary, "all tests pass, ticket satisfied");
-});
-
-test("parseStepStatus recognizes qa_fail and extracts issues", () => {
-  const status = parseStepStatus(
-    'STEP_STATUS: qa_fail | issues="missing test for empty-input case; lint warning in src/foo.ts"',
-  );
-  assert.equal(status.kind, "qa_fail");
-  assert.equal(
-    status.issues,
-    "missing test for empty-input case; lint warning in src/foo.ts",
-  );
-});
-
-test("parseStepStatus extracts branch_dependency", () => {
-  const status = parseStepStatus(
-    'STEP_STATUS: blocked | ticket="T010" branch_dependency="T003" reason="needs shared API first"',
-  );
-  assert.equal(status.kind, "blocked");
-  assert.equal(status.ticket, "T010");
-  assert.equal(status.branchDependency, "T003");
-  assert.equal(status.reason, "needs shared API first");
 });
 
 test("buildQaInstruction requests the native QA verdict contract", () => {

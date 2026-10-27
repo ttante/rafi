@@ -1,4 +1,5 @@
 import { sealTicketPopulationPage } from "./ticketPopulationPageAuthority.js";
+import { dispatchWasNotSent } from "./dispatchNotSent.js";
 import { boundedUtf8 } from "./boundedTurnEvidence.js";
 import { randomUUID } from "node:crypto";
 import { assertIntermediateResultV2, historicProviderWireContract, providerWireContract, renderProviderWireInstruction, selectedDispatchTupleV2, structuredDigest, validateStructuredCandidate, type OperationResponse, type OutputContract } from "rafi-spec";
@@ -71,6 +72,8 @@ export async function journalStructuredDispatch(root: string, adapter: BuilderAd
   const db = new WorkflowDb(root);
   try {
     db.enableStructuredCommunication();
+    // A single agent call outside a build journals under its own run, which is
+    // never listed or resumed as a build.
     db.ensureRun(runId);
     if (adapter.postConfirmedDispatch) for (const pendingId of db.pendingStructuredPostprocessing(runId)) {
       if (pendingId === selected.parentDispatchId) continue;
@@ -135,29 +138,39 @@ export async function journalStructuredDispatch(root: string, adapter: BuilderAd
     });
     let turn: TurnResult;
     try { turn = await withSealedDispatch(root, tuple, dispatchCapability => dispatch(renderedInstruction, { ...sealedPolicy, journalRunId: runId, dispatchCapability }), before); }
-    catch (error) { if (db.operation(key)?.status === "in_progress") db.updateOperation(key, "uncertain", { error: boundedUtf8(String(error), 4000).toString() }); throw error; }
+    catch (error) {
+      // A host refusal before transport is a known unsent turn, not an unknown outcome.
+      if (db.operation(key)?.status === "in_progress") db.updateOperation(key, dispatchWasNotSent(error) ? "failed" : "uncertain", { error: boundedUtf8(String(error), 4000).toString(), ...(dispatchWasNotSent(error) ? { result: { dispatchState: "not-sent" } } : {}) });
+      throw error;
+    }
     const after = adapter.sessionRef?.();
     const sameScope = before && after && before.provider === after.provider && before.role === after.role &&
       before.stream === after.stream && before.cwd === after.cwd && before.configRoot === after.configRoot &&
       before.workspaceIdentity === after.workspaceIdentity && before.ticketId === after.ticketId && before.deliveryUnitId === after.deliveryUnitId;
+    // A receipt from another dispatch, session or generation leaves this
+    // dispatch's own outcome unknown.
+    let receiptMismatch = false;
     const observedCompaction = sameScope && (adapter.contractCompactionSequence?.() ?? 0) > compactionBefore && after!.generation >= before!.generation;
     if (turn.structured?.state === "candidate" && (turn.structured.profile !== wireContract.profile || turn.structured.wireContractDigest !== wireContract.descriptorDigest ||
       turn.structured.wireSchemaDigest !== wireContract.wireSchemaDigest || turn.structured.wireVariant !== wireContract.variant || turn.structured.dispatchId !== key || turn.structured.sessionId !== adapter.sessionId() ||
       before && (!sameScope || !observedCompaction && (before.sessionId !== after!.sessionId || before.generation !== after!.generation)))) {
       turn = { ...turn, selectedDispatch: tuple, isError: true, structured: { state: "rejected", reason: "invalid-contract", detail: "Dispatch/session/generation receipt mismatch", dispatchId: key } };
+      receiptMismatch = true;
     }
     // Exact raw provider material is retained once in the evidence store. The
     // journal only carries the digest/reference and validation fact, so it
     // cannot become a second, differently-redacted copy of the provider turn.
     turn = { ...turn, selectedDispatch: tuple };
     let receiptValidated = false;
+    let requirementRejected = false;
     if (turn.structured?.state === "rejected") turn = { ...turn, isError: true };
     else if (!turn.isError && !turn.failure) {
       try {
         const response = verifyPersistedDispatch(policy.output, db.structuredOwnerDispatch(key), turn.structured, tuple);
         // A response that cannot satisfy host requirements is rejected before
         // confirmation instead of failing in postprocessing after it.
-        requirement?.validate(response as OperationResponse);
+        try { requirement?.validate(response as OperationResponse); }
+        catch (error) { requirementRejected = true; throw error; }
         receiptValidated = true;
       } catch (error) {
         turn = { ...turn, selectedDispatch: tuple, isError: true, structured: { state: "rejected", reason: "invalid-contract", detail: boundedUtf8(String(error), 4000).toString(), dispatchId: key } };
@@ -186,12 +199,19 @@ export async function journalStructuredDispatch(root: string, adapter: BuilderAd
     const rawDigest = db.putEvidence("handoff", retainedRaw);
     const responseDigest = db.putEvidence("handoff", Buffer.from(JSON.stringify(retained)));
     db.recordCommunicationEvidenceRefs(key, [responseDigest, rawDigest, ...(retained.valueDigest ? [retained.valueDigest] : []), ...(retained.rejectedValue ? [retained.rejectedValue.evidenceDigest] : [])]);
-    const status = turn.failure?.dispatchState === "not-sent" ? "failed" : turn.failure?.dispatchState === "unknown" || !receiptValidated ? "uncertain" : "confirmed";
+    // A provider that finished its turn with a response that fails validation
+    // has a known outcome: the answer was rejected. Only a missing or
+    // interrupted turn leaves the outcome unknown.
+    // Only the answer's own content counts: a wire-schema violation or a failed
+    // host requirement. Binding and receipt failures stay unknown.
+    const answeredInvalid = !receiptValidated && !turn.failure && !receiptMismatch && turn.structured?.state === "rejected" && turn.structured.reason === "invalid-contract"
+      && (requirementRejected || turn.structured.detail.includes("Structured result violates wire schema"));
+    const status = turn.failure?.dispatchState === "not-sent" || answeredInvalid ? "failed" : turn.failure?.dispatchState === "unknown" || !receiptValidated ? "uncertain" : "confirmed";
     turn = { ...turn, transportEvidence: { rawDigest, responseDigest, rawBytes: raw.length, retainedRawBytes: retainedRaw.length,
       valueDigest: retained.valueDigest, rejectedValueDigest: retained.rejectedValue?.evidenceDigest } };
     db.atomic(() => {
     if (status === "confirmed" && adapter.postConfirmedDispatch) db.requireStructuredPostprocessing(key, { instruction, policy: continuationPolicy(selected, key) });
-    db.updateOperation(key, status, { result: { responseDigest, rawDigest, rawBytes: raw.length, retainedRawBytes: retainedRaw.length, validation: receiptValidated ? "accepted" : turn.structured?.state ?? "missing-receipt", wireContractDigest: wireContract.descriptorDigest } });
+    db.updateOperation(key, status, { result: { responseDigest, rawDigest, rawBytes: raw.length, retainedRawBytes: retainedRaw.length, validation: receiptValidated ? "accepted" : turn.structured?.state ?? "missing-receipt", wireContractDigest: wireContract.descriptorDigest, ...(answeredInvalid ? { dispatchState: "answered-invalid" } : {}) } });
     });
     if (status === "confirmed" && adapter.postConfirmedDispatch) {
       try {

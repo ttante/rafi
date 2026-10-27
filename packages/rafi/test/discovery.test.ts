@@ -11,14 +11,15 @@ import {
   buildDiscoveryInstruction,
   buildDiscoveryRunOptions,
   buildLocalInventory,
-  DISCOVERY_ENVELOPE_END,
-  DISCOVERY_ENVELOPE_START,
   discoveryEnvelopePlanningSources,
   discoveryEnvelopeStack,
   runDiscovery,
 } from "../src/discovery.js";
 import { buildProjectConfig, defaultAnswers } from "../src/project.js";
 import type { RoleInstructionRunOptions, RoleInstructionRunResult } from "ai-foreman/agent-run.js";
+// Legacy text markers, kept only to prove old-format output is rejected.
+const DISCOVERY_ENVELOPE_START = "RAFI_DISCOVERY_REPORT_START";
+const DISCOVERY_ENVELOPE_END = "RAFI_DISCOVERY_REPORT_END";
 
 const SOURCE_REQUEST_START = "RAFI_SOURCE_REQUEST_START";
 const SOURCE_REQUEST_END = "RAFI_SOURCE_REQUEST_END";
@@ -77,7 +78,6 @@ test("discovery preserves linguistic answers in the agent instruction", async ()
     registerSources: async (projectDir, registry) => ({ registry, entries: [], snapshots: [], pending: [] }),
     saveSources: () => {},
     sourceRequestFromAnswer: () => ({}),
-    extractSourceRequests: () => [],
     setSourceStorage: (registry) => registry,
     runRole: async (opts: RoleInstructionRunOptions) => {
       seen.push(opts.instruction);
@@ -139,7 +139,6 @@ test("uninitialized discovery does not write rafi-config.yaml or save sources", 
     yes: true,
     loadSources: () => emptyLoadedSources(),
     sourceRequestFromAnswer: () => ({}),
-    extractSourceRequests: () => [],
     setSourceStorage: (registry) => registry,
     runRole: async () => finalResult(),
     registerSources: async (projectDir, registry) => {
@@ -165,12 +164,6 @@ test("discovery processes source requests and stops after three rounds", async (
     loadSources: () => emptyLoadedSources(),
     saveSources: () => {},
     sourceRequestFromAnswer: () => ({}),
-    extractSourceRequests: (output) => {
-      const start = output.indexOf(SOURCE_REQUEST_START);
-      const end = output.indexOf(SOURCE_REQUEST_END);
-      if (start < 0 || end < 0) return [];
-      return [JSON.parse(output.slice(start + SOURCE_REQUEST_START.length, end).trim())];
-    },
     setSourceStorage: (registry) => registry,
     runRole: async () => {
       runs += 1;
@@ -210,9 +203,6 @@ test("source continuation keeps original context, accumulated captures, prior ou
     loadSources: () => emptyLoadedSources(),
     saveSources: () => {},
     sourceRequestFromAnswer: () => ({}),
-    extractSourceRequests: (output) => output.includes(SOURCE_REQUEST_START)
-      ? [{ type: "local", label: "Current plan", locator: { path: "docs/current-plan.md" } }]
-      : [],
     setSourceStorage: (registry) => registry,
     registerSources: async (projectDir, registry, requests) => ({
       registry,

@@ -1086,6 +1086,9 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
 
       const handoffRecoveryOptions = (role: "builder" | "qa") => ({
         allowProviderSwitch: true,
+        // --yes never stops to ask: retry with a fresh successor. The handoff
+        // still pauses after three rejected successors.
+        ...(explicitYes ? { choose: async () => "retry" as const } : {}),
         desktopNotifications: config.notifications.enabled,
         terminalBell: config.notifications.terminal_bell,
         onAccepted: (accepted: { successor: BuilderAdapter }) => {

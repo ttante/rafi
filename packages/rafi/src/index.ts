@@ -895,9 +895,11 @@ function runSelfCommandStatus(args: string[]): number {
   return result.status ?? 1;
 }
 
-async function resumeInterview(projectDir: string, record: InterviewRecord): Promise<void> {
+async function resumeInterview(projectDir: string, record: InterviewRecord, options: { yes?: boolean } = {}): Promise<void> {
   const entry = fileURLToPath(import.meta.url);
   const invocation = record.invocation;
+  // A resumed workflow keeps the original run's hands-off choice.
+  const yes = Boolean(options.yes || invocation.yes);
   let args: string[];
   if (record.workflow === "plan") {
     const brief = record.answers.brief;
@@ -909,6 +911,7 @@ async function resumeInterview(projectDir: string, record: InterviewRecord): Pro
       if (typeof invocation[key] === "string") args.push(option, invocation[key] as string);
     }
     if (invocation.fast) args.push("--fast");
+    if (yes) args.push("--yes");
     if (record.runtime.sessionId) args.push("--resume-session", record.runtime.sessionId);
   } else if (record.workflow === "create") {
     if (record.checkpoint === "ticket-setup-prompt" || record.checkpoint === "child-plan-completed") {
@@ -933,6 +936,7 @@ async function resumeInterview(projectDir: string, record: InterviewRecord): Pro
     if (record.runtime.sessionId) args.push("--resume-session", record.runtime.sessionId);
     if (Array.isArray(invocation.sources)) args.push("--sources", ...invocation.sources.map(String));
     for (const [key, option] of [["agent", "--agent"], ["model", "--model"], ["effort", "--effort"]] as const) if (typeof invocation[key] === "string") args.push(option, String(invocation[key]));
+    if (yes) args.push("--yes");
   } else {
     args = ["tickets", record.workflow === "tickets-setup-init" ? "setup:init" : "setup:update", "--project", projectDir, "--interview-id", record.id];
   }

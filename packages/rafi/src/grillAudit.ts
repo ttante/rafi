@@ -17,8 +17,6 @@ export { GRILL_ME_STOP_CHOICE } from "ai-foreman/provider-questions.js";
 
 export { grillAuditOutput } from "rafi-spec";
 
-export const GRILL_AUDIT_START = "RAFI_GRILL_AUDIT_START";
-export const GRILL_AUDIT_END = "RAFI_GRILL_AUDIT_END";
 export const GRILL_STATE_DECISION_KEY = "grillVerification";
 
 export type GrillAuditStatus =

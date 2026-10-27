@@ -10,7 +10,6 @@ import { tmpdir } from "node:os";
 import { stringify } from "yaml";
 
 import { AuthorizedForeman as Foreman } from "./helpers/workAdmission.js";
-import { parseStepStatus } from "../src/foreman.js";
 import { Log } from "../src/log.js";
 import { cmdBlock, cmdInit, cmdUpdate } from "../src/tickets/commands.js";
 import { StateDb } from "../src/tickets/stateDb.js";
@@ -21,7 +20,10 @@ import { qaDigest } from "../src/qaProtocolV2.js";
 import { WorkflowReader } from "../src/workflowReader.js";
 import { createBuildRun, releaseBuildLease } from "../src/buildRuns.js";
 import { readQaEvidenceSnapshot } from "../src/qaEvidenceReader.js";
-import { BUILDER_QA_REMEDIATION_END, BUILDER_QA_REMEDIATION_START, type ProviderSessionRefV1 } from "rafi-spec";
+import type { ProviderSessionRefV1 } from "rafi-spec";
+// Legacy text markers, kept only to prove old-format output is rejected.
+const BUILDER_QA_REMEDIATION_START = "RAFI_BUILDER_QA_REMEDIATION_START";
+const BUILDER_QA_REMEDIATION_END = "RAFI_BUILDER_QA_REMEDIATION_END";
 
 test("intentional stop prevents any further planning or implementation dispatch", async () => {
   const dir = makeTmpDir();
@@ -551,11 +553,6 @@ test("text completion callbacks cannot authorize a native result", async () => {
     await assert.rejects(foreman.runInstruction("prepare the proposal", { completion: () => ({ kind: "done" }), output: (await import("rafi-spec")).workReportOutput }), /Text completion predicates/);
     assert.equal(builder.instructions.length, 0);
   } finally { rmSync(dir, { recursive: true }); }
-});
-
-test("strict STEP_STATUS parsing still rejects trailing commentary by default", () => {
-  assert.equal(parseStepStatus('STEP_STATUS: done\nnotes').kind, "unknown");
-  assert.equal(parseStepStatus("STEP_STATUS: done\nnotes", { requireFinalLine: false }).kind, "done");
 });
 
 for (const mode of ["pending", "answered", "stale", "outside", "run-wide"] as const) test(`recovery decision eligibility: ${mode}`, async () => {

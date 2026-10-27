@@ -31,7 +31,7 @@ export function resumeChoices(projectDir: string): ResumeChoice[] {
 
 export function buildResumeCommand(options: {
   resumeBuild: (args: string[]) => Promise<void>;
-  resumeInterview: (projectDir: string, record: InterviewRecord) => Promise<void>;
+  resumeInterview: (projectDir: string, record: InterviewRecord, options?: { yes?: boolean }) => Promise<void>;
   select?: (choices: ResumeChoice[]) => Promise<string | undefined>;
 }): Command {
   return addBuildRecoveryOptions(new Command("resume")
@@ -44,7 +44,9 @@ export function buildResumeCommand(options: {
       if ([opts.run, opts.id, opts.discard].filter(Boolean).length > 1) throw new Error("choose only one of --run, --id, or --discard");
       const projectDir = resolve(project);
       const recoveryArgs = buildRecoveryArguments(opts);
-      if (recoveryArgs.length && (opts.id || opts.discard)) throw new Error("Build recovery options cannot be used with an interview operation");
+      // --yes also applies to saved interviews; other build recovery options do not.
+      const buildOnlyArgs = recoveryArgs.filter(arg => arg !== "--yes");
+      if (buildOnlyArgs.length && (opts.id || opts.discard)) throw new Error("Build recovery options cannot be used with an interview operation");
       if (opts.discard) {
         if (!discardInterview(projectDir, String(opts.discard))) throw new Error(`interview not found: ${opts.discard}`);
         console.log(`rafi resume: discarded ${opts.discard}`);
@@ -56,8 +58,13 @@ export function buildResumeCommand(options: {
         const choices = resumeChoices(projectDir);
         if (!choices.length) { console.log("rafi resume: no unfinished builds or interviews found"); return; }
         let chosen: string | undefined;
+        const resumable = choices.filter(choice => !choice.cleanupOnly);
         if (options.select) chosen = await options.select(choices);
-        else {
+        else if (opts.yes && resumable.length) {
+          // --yes never stops to ask: resume the most recently updated unfinished item.
+          chosen = resumable[0]!.value;
+          console.log(`rafi resume: resuming the most recent unfinished item (${resumable[0]!.label})${resumable.length > 1 ? `; ${resumable.length - 1} other(s) remain, see rafi resume` : ""}`);
+        } else {
           if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("provide --run <id> or --id <id> when stdin/stdout is not a TTY");
           const { select, isCancel } = await import("@clack/prompts");
           const answer = await select({ message: "What should Rafi resume?", options: choices });
@@ -67,7 +74,7 @@ export function buildResumeCommand(options: {
         const choice = choices.find(item => item.value === chosen);
         if (!choice) throw new Error("selected resume entry is no longer available");
         if (choice.kind === "build") return options.resumeBuild([projectDir, "--run", choice.id, ...recoveryArgs]);
-        if (recoveryArgs.length) throw new Error("Build recovery options cannot be used with an interview operation");
+        if (buildOnlyArgs.length) throw new Error("Build recovery options cannot be used with an interview operation");
         record = findInterviewRecord(projectDir, choice.id);
       }
       if (!record) throw new Error(`interview not found: ${opts.id}`);
@@ -80,6 +87,6 @@ export function buildResumeCommand(options: {
       console.log(`rafi resume: ${record.workflow} at ${record.checkpoint}`);
       if (record.runtime.sessionId) console.log(`rafi resume: saved ${record.runtime.runtime ?? "agent"} session ${record.runtime.sessionId} will be requested by the workflow.`);
       else if (record.checkpoint === "agent-run") console.log("rafi resume: the prior agent session is unavailable; the workflow will start a fresh session with the saved brief and answers.");
-      await options.resumeInterview(projectDir, record);
+      await options.resumeInterview(projectDir, record, { yes: Boolean(opts.yes) });
     });
 }

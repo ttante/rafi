@@ -638,7 +638,7 @@ for (const role of ["builder", "qa"] as const) test(`${role} missing composed co
     assert.equal(provider.turnPolicies.length, 1);
     const db = new WorkflowDb(projectDir);
     try { assert.equal(db.handoffs("run-1").length, 0); assert.equal(db.pendingStructuredPostprocessing("run-1").length, 0, "rejected transport never enters domain postprocessing");
-      assert.equal(db.operations("run-1").find(operation => operation.kind === "provider-dispatch")?.status, "uncertain"); assert.equal(db.roleMutationLease("run-1", role)?.providerSessionId, "session-1"); } finally { db.close(); }
+      assert.equal(db.operations("run-1").find(operation => operation.kind === "provider-dispatch")?.status, "failed", "an answered but invalid turn has a known outcome"); assert.equal(db.roleMutationLease("run-1", role)?.providerSessionId, "session-1"); } finally { db.close(); }
   } finally { await wrapper.close(); }
 });
 

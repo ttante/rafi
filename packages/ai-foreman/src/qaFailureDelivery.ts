@@ -18,8 +18,6 @@ import { reportOccurrenceId } from "./qaHandbackMigration.js";
 import type { QaDeliveryOutcome, QaDeliveryTurn, QaDeliveryInvocationV3 } from "./qaDeliveryJournal.js";
 import { boundedQaHistory, evidenceDigest, utf8Prefix } from "./qaHandbackHistory.js";
 import {
-  BUILDER_QA_REMEDIATION_END,
-  BUILDER_QA_REMEDIATION_START,
   builderQaRemediationReportV3Schema,
   type BuilderQaRemediationContract,
   type ProviderSessionRefV1,
