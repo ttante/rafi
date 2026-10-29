@@ -90,7 +90,23 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-function pendingQaRecoveryPacket(projectDir: string, runId: string, ticketId?: string): QaRecoveryPacket | undefined {
+/**
+ * Whether a QA recovery packet is pending. Runs every check the full load runs, but never
+ * canonicalizes, so an existence check cannot write a new packet revision.
+ */
+export function hasPendingQaRecoveryPacket(projectDir: string, runId: string, ticketId?: string): boolean {
+  return Boolean(pendingQaRecoveryPacket(projectDir, runId, ticketId, { canonicalize: false }));
+}
+
+/** The shared packet copy, only while it is still the durable current revision. */
+function currentRunQaRecoveryPacket(projectDir: string, packet: QaRecoveryPacket | undefined): QaRecoveryPacket | undefined {
+  if (!packet) return undefined;
+  const db = new WorkflowDb(projectDir);
+  try { return db.qaRecoveryHead(packet.manifest.runId, packet.manifest.ticketId)?.packetDigest === packet.manifest.packetDigest ? packet : undefined; }
+  finally { db.close(); }
+}
+
+export function pendingQaRecoveryPacket(projectDir: string, runId: string, ticketId?: string, options: { canonicalize?: boolean } = {}): QaRecoveryPacket | undefined {
   recoverPendingQaRecoveryPublications(projectDir, runId);
   const db = new WorkflowDb(projectDir);
   try {
@@ -98,7 +114,8 @@ function pendingQaRecoveryPacket(projectDir: string, runId: string, ticketId?: s
     if (pending.length > 1 && !ticketId) throw new Error(`run ${runId} has multiple pending QA recovery packets; select one with --ticket`);
     const selected = ticketId ? pending.find((item) => item.ticketId === ticketId) : pending[0];
     if (!selected || selected.pendingAction === "resolved") return undefined;
-    const packet = canonicalizeQaRecoveryRequirements(loadQaRecoveryPacket(selected.packetPath));
+    const loaded = loadQaRecoveryPacket(selected.packetPath);
+    const packet = options.canonicalize === false ? loaded : canonicalizeQaRecoveryRequirements(loaded);
     const state = db.qaRecoveryHead(runId, packet.manifest.ticketId);
     if (!state || packet.manifest.packetDigest !== state.packetDigest || packet.manifest.runId !== runId
       || packet.manifest.ticketId !== state.ticketId || packet.manifest.packetId !== state.packetId
@@ -1647,6 +1664,9 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         } finally { receiptDb.close(); }
       };
 
+      // The QA recovery packet this run resumes from. The QA hand-off receipt must bind the same
+      // copy QA is given, so it is loaded once and shared rather than reloaded.
+      let runQaRecoveryPacket: QaRecoveryPacket | undefined;
       const createQa = async (qaCwd: string, sessionId?: string): Promise<QaSessionHandle> => {
         const recoveryMode = String(opts.recoveryMode ?? "");
         // A disposable QA cwd is never eligible for exact reuse, even when a
@@ -1684,7 +1704,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
           adapter = accepted.successor;
           pendingHandoffGeneration = undefined;
           explicitRecoveryAccepted = true;
-          const packet = pendingQaRecoveryPacket(cwd, recoveryRecord!.runId, requestedTicketIds[0]);
+          const packet = currentRunQaRecoveryPacket(cwd, runQaRecoveryPacket) ?? pendingQaRecoveryPacket(cwd, recoveryRecord!.runId, requestedTicketIds[0]);
           if (!packet) throw new Error("accepted QA recovery handoff has no current durable packet");
           const boundaryDb = new WorkflowDb(cwd);
           let afterOwnedRemediation = false;
@@ -2121,7 +2141,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         };
         const firstResumeRef = plan.nodes[0] ? resumeSessionByTicket.get(plan.nodes[0].ticket.id)?.sessionRef : undefined;
         const branchQaOnlyRecovery = Boolean(recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord)
-          && (opts.qaRevision !== undefined || pendingQaRecoveryPacket(cwd, recoveryRecord.runId, requestedTicketIds[0])));
+          && (opts.qaRevision !== undefined || hasPendingQaRecoveryPacket(cwd, recoveryRecord.runId, requestedTicketIds[0])));
         let masterRun = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { ...(branchQaOnlyRecovery ? {} : { builder: capturedBranchBuilder, builderSessionId: firstResumeRef?.sessionId ?? null, builderSessionRef: firstResumeRef ?? null }), qa: capturedBranchQa, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
           runId: invocationRunId,
           builderCapabilities, qaCapabilities, tickets: plan.nodes.map((node) => node.ticket.id), deliveryUnit: selectedStacks.length ? selectedStacks.map((stack) => stack.id).join(",") : deliveryRun?.unit.id,
@@ -2152,6 +2172,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
         for (const node of plan.nodes) admitApprovedTicket(cwd, masterRun.runId, node.ticket.id, buildScopeRevision(cwd), `build invocation ${invocationRunId}: approved branch plan`);
         masterRun = checkpointBuildRun(cwd, masterRun, "capabilities-resolved", { builderCapabilities, qaCapabilities });
         const qaResumedRecovery = recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord) ? pendingQaRecoveryPacket(cwd, masterRun.runId, requestedTicketIds[0]) : undefined;
+        runQaRecoveryPacket = qaResumedRecovery;
         let qaProtocolResumeTicket: string | undefined;
         if (recoveryRecord && !qaResumedRecovery && !isInterruptedBuilderRecovery(recoveryRecord)) {
           const protocolDb = new WorkflowDb(cwd);
@@ -2434,7 +2455,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       // QA recovery owns the QA session only. Its CLI model overrides and unused
       // Builder adapter must not replace the saved Builder that continues later.
       const qaOnlyRecovery = Boolean(recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord)
-        && (opts.qaRevision !== undefined || pendingQaRecoveryPacket(cwd, recoveryRecord.runId, requestedTicketIds[0])));
+        && (opts.qaRevision !== undefined || hasPendingQaRecoveryPacket(cwd, recoveryRecord.runId, requestedTicketIds[0])));
       let buildRun: BuildRunRecordV2 = recoveryRecord ? resumeBuildRun(cwd, recoveryRecord.runId, { ...(qaOnlyRecovery ? {} : { builder: capturedBuilder, builderSessionId: resumeSessionId ?? null, builderSessionRef: resumeSessionRef ?? null }), qa: capturedQa, expectedRecoveryDecisionDigest: opts.recoveryDecisionDigest }) : createBuildRun({
         runId: invocationRunId,
         tickets: [...(executionTickets ?? [])], builderCapabilities, qaCapabilities, authorizedBatch: { tickets: [...(executionTickets ?? [])], requestedSteps: steps, scopeRevision: buildScopeRevision(cwd, approvalConsequences), startedTickets: [] }, repositoryRoot: cwd, branchMode: "current", baseRef: (opts.base as string | undefined) ?? loadTicketSetupConfig(cwd)?.build.base_branch, builder: capturedBuilder, qa: capturedQa,
@@ -2446,6 +2467,7 @@ export function buildStartCommand(options: { beforeFreshStart?: (projectDir: str
       activeContinuityRunId = buildRun.runId;
       publishActivatedBuilderSession = ref => { buildRun = persistCurrentBuildSession(cwd, buildRun, "builder", ref); };
       const qaResumedRecovery = recoveryRecord && !isInterruptedBuilderRecovery(recoveryRecord) ? pendingQaRecoveryPacket(cwd, buildRun.runId, requestedTicketIds[0]) : undefined;
+      runQaRecoveryPacket = qaResumedRecovery;
       let qaFinalizationTicket: string | undefined;
       let qaProtocolResumeTicket: string | undefined;
       if (recoveryRecord && !qaResumedRecovery && !isInterruptedBuilderRecovery(recoveryRecord)) {
@@ -2954,7 +2976,10 @@ export function createQaNonconvergenceHandler(projectDir: string, noninteractive
   return async (context) => {
     const runId = activeRunId?.();
     if (!runId) throw new Error("QA nonconvergence requires its owning build run");
-    const scope = createHash("sha256").update(JSON.stringify([buildScopeRevision(projectDir), context.ticket, context.history])).digest("hex");
+    // Bind the question to the failure it answers, so a saved answer survives a resume
+    // that reloads history in a different shape.
+    const failure = context.history.at(-1);
+    const scope = createHash("sha256").update(JSON.stringify([buildScopeRevision(projectDir), context.ticket, failure?.attemptId || failure?.reportDigest ? { attemptId: failure.attemptId, reportDigest: failure.reportDigest } : failure ?? null])).digest("hex");
     let round = 0;
     let waiverDecisionId: string | undefined;
     const ask = <T>(phase: string, choices: Array<{ id: string; label: string }>, operation: () => Promise<T>) => durableHumanDecision({

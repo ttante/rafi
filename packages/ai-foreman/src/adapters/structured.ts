@@ -1,5 +1,8 @@
 import { boundedJson, structuredDigest, providerWireContract, validateStructuredCandidate, type OutputContract, type SelectedDispatchTupleV2, type StructuredResponse } from "rafi-spec";
 
+/** Prefix for a completed answer whose structured result is not valid JSON. */
+export const STRUCTURED_RESULT_NOT_JSON = "Structured result is not valid JSON";
+
 export function structuredReceipt(contract: OutputContract, provider: "claude" | "codex", value: unknown,
   identity: { dispatchId: string; sessionId: string; nativeTurnId?: string; nativeItemId?: string },
   representation: "json-text" | "decoded-json", selected: ReturnType<typeof providerWireContract>, tuple: SelectedDispatchTupleV2): StructuredResponse {
@@ -10,9 +13,11 @@ export function structuredReceipt(contract: OutputContract, provider: "claude" |
     if (representation === "json-text" && typeof value === "string" && Buffer.byteLength(value) <= selected.maximumResponseBytes) observedValue = { representation, value, digest: structuredDigest(value) };
     else if (representation === "decoded-json") observedValue = { representation, value: boundedJson(value, representation, selected.maximumResponseBytes), digest: structuredDigest(value) };
     if (!identity.sessionId || !identity.nativeTurnId) throw new Error("Missing native receipt identity");
-    boundedJson(value, representation, selected.maximumResponseBytes);
     if (tuple.provider !== provider || tuple.operation !== contract.operation || tuple.schemaDigest !== contract.schemaDigest || tuple.descriptorDigest !== selected.descriptorDigest ||
       tuple.dispatchId !== identity.dispatchId || tuple.sessionId !== identity.sessionId) throw new Error("Receipt identity does not match selected dispatch tuple v2");
+    // Identity is bound above, so a parse failure here is the answer's own content.
+    try { boundedJson(value, representation, selected.maximumResponseBytes); }
+    catch (error) { throw new Error(`${STRUCTURED_RESULT_NOT_JSON}: ${error instanceof Error ? error.message : String(error)}`); }
     const candidate: StructuredResponse = { state: "candidate", protocolVersion: 2, operation: contract.operation,
       schemaVersion: contract.schemaVersion, schemaDigest: contract.schemaDigest, wireSchemaDigest: selected.wireSchemaDigest, profile: selected.profile,
       wireContractDigest: selected.descriptorDigest, wireVariant: selected.variant,

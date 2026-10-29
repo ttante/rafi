@@ -200,6 +200,32 @@ function retryFreshQaReview(opts: IsolatedQaOptions, stage: string, detail: stri
   return { outcome: "retry-modification" };
 }
 
+/**
+ * Restores the failed review a pause interrupted when nothing has happened since: it is the
+ * latest review, the head still points at it, no Builder fix was attempted, and the live
+ * source is byte-identical to what it reviewed.
+ */
+async function restoreUnchangedFailedReview(
+  opts: IsolatedQaOptions,
+  head: import("./qaProtocolV2.js").QaReducerStateV2,
+  reviews: ReturnType<WorkflowDb["qaReviewAttempts"]>,
+  remediations: ReturnType<WorkflowDb["qaRemediationAttempts"]>,
+): Promise<{ head: import("./qaProtocolV2.js").QaReducerStateV2; report: ReturnType<WorkflowDb["unresolvedQaReports"]>[number] } | undefined> {
+  const latest = reviews.at(-1);
+  if (!latest || latest.status !== "failed" || !latest.reportDigest || latest.reviewNumber !== head.reviewNumber || latest.sourceDigest !== head.sourceStateDigest) return undefined;
+  if (remediations.some((item) => item.reviewAttemptId === latest.attemptId)) return undefined;
+  if ((await captureFrozenQaSourceAsync(opts.builderWorktree)).digest !== latest.sourceDigest) return undefined;
+  const db = new WorkflowDb(opts.recovery.projectDir);
+  try {
+    const report = db.unresolvedQaReports(opts.recovery.runId, opts.ticket.id)
+      .find((item) => item.reviewNumber === latest.reviewNumber && item.reportDigest === latest.reportDigest && item.sourceStateDigest === latest.sourceDigest);
+    if (!report || !head.openReportDigests.includes(report.reportDigest)) return undefined;
+    const restored = db.transitionQa(opts.recovery.runId, opts.ticket.id, head.revision,
+      { type: "failed-review-restored", reviewNumber: latest.reviewNumber, sourceStateDigest: latest.sourceDigest, reportDigest: report.reportDigest });
+    return { head: restored, report };
+  } finally { db.close(); }
+}
+
 function pauseQaProtocol(opts: IsolatedQaOptions, stage: string, detail: string, outcome: IsolatedQaResult["outcome"] = "needs-human"): IsolatedQaResult {
   const db = new WorkflowDb(opts.recovery.projectDir);
   let head: import("./qaProtocolV2.js").QaReducerStateV2;
@@ -324,6 +350,12 @@ async function runIsolatedQaOwned(opts: IsolatedQaOptions): Promise<IsolatedQaRe
     ? resumedHeadDb.unresolvedQaReports(opts.recovery.runId, opts.ticket.id).at(-1)
     : undefined;
   resumedHeadDb.close();
+  // Paused at the operator menu right after a failed review, with the source unchanged since:
+  // a fresh review could only repeat it. Restore that failure and continue from it.
+  if (resumedHead.state === "operator-menu") {
+    const restored = await restoreUnchangedFailedReview(opts, resumedHead, durableReviews, durableRemediations);
+    if (restored) ({ head: resumedHead, report: resumedReport } = restored);
+  }
   if (opts.resumeBuilderGuidance && resumedHead.state === "passed") {
     const controlDb = new WorkflowDb(opts.recovery.projectDir);
     let waiting = false;
@@ -380,13 +412,26 @@ async function runIsolatedQaOwned(opts: IsolatedQaOptions): Promise<IsolatedQaRe
     const durableReport = resumedReport;
     const attemptControlDb = new WorkflowDb(opts.recovery.projectDir);
     try {opts.qaRemediationAuthorization ??= attemptControlDb.consumeInstructionControls(opts.recovery.runId,opts.ticket.id,"attempts");} finally {attemptControlDb.close();}
-    if (automaticFixes >= maxBuilderFixes && !opts.qaRemediationAuthorization) return pauseQaProtocol(opts, "qa-nonconvergence", `QA remediation budget is exhausted with unresolved report ${durableReport.reportDigest}`, "nonconverged");
     const report = durableReport.report as QaFailureReportV1;
     const causing = durableReviews.find((item) => item.reviewNumber === durableReport.reviewNumber)?.attemptId;
     if (!causing) throw new Error("QA recovery invariant lost its causing review attempt after validation");
-    const request: QaFixRequest = {
-      kind: "validated-report", report, reportDigest: resumedReport.reportDigest, history: [...history], latestBuilderResult: latestBuilderResponse(opts),
-    };
+    let remediation: string | undefined;
+    if (automaticFixes >= maxBuilderFixes && !opts.qaRemediationAuthorization) {
+      const detail = `QA remediation budget is exhausted with unresolved report ${durableReport.reportDigest}`;
+      if (!opts.onNonconvergence) return pauseQaProtocol(opts, "qa-nonconvergence", detail, "nonconverged");
+      // Ask (or reuse the saved answer) for this exact failure instead of re-reviewing it.
+      const decision = await opts.onNonconvergence({ ticket: opts.ticket, history: [...history], builderWorktree: opts.builderWorktree });
+      if (decision.action === "pause") return pauseQaProtocol(opts, "qa-nonconvergence", detail, "nonconverged");
+      if (decision.action === "waive") { waiveV2Reports(opts, "Operator explicitly waived unresolved QA findings", decision.authorizationRef); markQaRecoveryResolved(opts); return { outcome: "waived", detail: history.at(-1)?.detail ?? detail, summary: "QA explicitly waived by user" }; }
+      remediation = decision.action === "remediate" ? decision.remediation : undefined;
+      if (decision.action === "remediate" && !remediation) return pauseQaProtocol(opts, "planner-remediation-missing", "Planner remediation did not produce approved fix instructions", "nonconverged");
+      const authorizationDb = new WorkflowDb(opts.recovery.projectDir);
+      try { opts.qaRemediationAuthorization = authorizationDb.authorizeQaRemediation(opts.recovery.runId, opts.ticket.id, causing, `Operator selected ${decision.action}`); }
+      finally { authorizationDb.close(); }
+    }
+    const request: QaFixRequest = remediation
+      ? { kind: "planner-remediation", report, reportDigest: resumedReport.reportDigest, remediation, history: [...history], latestBuilderResult: latestBuilderResponse(opts) }
+      : { kind: "validated-report", report, reportDigest: resumedReport.reportDigest, history: [...history], latestBuilderResult: latestBuilderResponse(opts) };
     const fix = await observedQaFix(opts, "resuming pending QA remediation", request, causing, Boolean(opts.qaRemediationAuthorization));
     opts.qaRemediationAuthorization = undefined;
     if (!fix.ok) return pauseQaProtocol(opts, "builder-remediation-failed", fix.detail ?? "Builder QA remediation failed during restart recovery", fix.outcome === "needs-input" ? "needs-human" : "blocked");
@@ -770,18 +815,13 @@ async function oneReview(opts: IsolatedQaOptions, identity: { cycle: number; rev
         try { recoveryDb.clearQaRemediationStop(opts.recovery.runId, opts.ticket.id, "Validated fresh-session recovery acceptance; QA must re-evaluate current source and prerequisites"); }
         finally { recoveryDb.close(); }
       } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        const synthetic: TurnResult = { text: "", rawResponse: "", cleanedResponse: "", isError: true, numTurns: 0, costUsd: 0 };
-        const recovery = await retainInvalidResumedResponse(opts, identity, resumedPacket!, snapshot, synthetic, [detail], qaEvents);
-        return recovery.result;
+        return pauseHostRejectedRecovery(opts, identity.attemptId, resumedPacket!, snapshot.frozenState, "recovery-acceptance-rejected", error instanceof Error ? error.message : String(error));
       }
       let comparison: ReturnType<typeof compareQaRecoveryReviewedState>;
       try { comparison = compareQaRecoveryReviewedState(opts.resumedRecovery, snapshot.frozenState); }
       catch (error) {
-        const reason = `QA recovery error: current reviewed state cannot be reconstructed: ${error instanceof Error ? error.message : String(error)}`;
-        const synthetic: TurnResult = { text: "", rawResponse: "", cleanedResponse: "", isError: true, numTurns: 0, costUsd: 0 };
-        const recovery = await retainInvalidResumedResponse(opts, identity, resumedPacket!, snapshot, synthetic, [reason], qaEvents);
-        return recovery.result;
+        const reason = `current reviewed state cannot be reconstructed: ${error instanceof Error ? error.message : String(error)}`;
+        return pauseHostRejectedRecovery(opts, identity.attemptId, resumedPacket!, snapshot.frozenState, "recovery-state-unreconstructable", reason);
       }
       if (!comparison.matches) {
         resumedPacket = appendQaRecoveryResource(resumedPacket!, `recovery-history/drift-${identity.attemptId}.json`, { originalDigest: comparison.originalDigest, currentDigest: comparison.currentDigest, drift: comparison.drift, priorReports: "historical" }, { purpose: "Deterministic current-source drift summary; every earlier report is historical" });
@@ -933,6 +973,17 @@ function finishDurableQaReview(opts: IsolatedQaOptions, attemptId: string, patch
 
 function qaFindingRefs(runId: string, ticketId: string, reviewAttemptId: string, reportDigest: string, rawFindingIds: string[]): QaFindingRefV2[] {
   return createQaFindingRefs({ runId, ticketId, reviewAttemptId, reportDigest, rawFindingIds });
+}
+
+/**
+ * Rafi refused its own QA resume hand-off before QA ran. Record that as host evidence, never as an
+ * empty QA reply, and say plainly that QA did not run.
+ */
+function pauseHostRejectedRecovery(opts: IsolatedQaOptions, attemptId: string, packet: QaRecoveryPacket, frozenState: FrozenQaSourceState, stage: string, reason: string): IsolatedQaResult {
+  appendQaRecoveryResource(packet, `validation/host-rejected-${attemptId}.json`, { stage, reason, qaRan: false }, {
+    purpose: "Rafi rejected its own QA recovery hand-off before QA ran; QA produced no response",
+  });
+  return pauseQaReview(opts, stage, `Rafi rejected its own QA hand-off before QA ran: ${reason}. QA was not run; this is a rafi problem, not a QA answer`, frozenState);
 }
 
 async function retainInvalidResumedResponse(

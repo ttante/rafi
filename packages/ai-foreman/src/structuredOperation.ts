@@ -1,6 +1,7 @@
 import { sealTicketPopulationPage } from "./ticketPopulationPageAuthority.js";
 import { dispatchWasNotSent } from "./dispatchNotSent.js";
 import { boundedUtf8 } from "./boundedTurnEvidence.js";
+import { STRUCTURED_RESULT_NOT_JSON } from "./adapters/structured.js";
 import { randomUUID } from "node:crypto";
 import { assertIntermediateResultV2, historicProviderWireContract, providerWireContract, renderProviderWireInstruction, selectedDispatchTupleV2, structuredDigest, validateStructuredCandidate, type OperationResponse, type OutputContract } from "rafi-spec";
 import { WorkflowDb } from "./workflowDb.js";
@@ -58,6 +59,11 @@ export function nativePolicy(output: OutputContract, policy: TurnRequest = {}): 
 }
 
 /** Reuses the workflow journal. A receipt is retained before domain interpretation. */
+/** A rejection caused by the answer's own content (not its binding or receipt). */
+export function answerContentRejected(detail: string): boolean {
+  return detail.includes("Structured result violates wire schema") || detail.includes(STRUCTURED_RESULT_NOT_JSON);
+}
+
 export async function journalStructuredDispatch(root: string, adapter: BuilderAdapter, instruction: string, policy: TurnRequest,
   dispatch: (text: string, policy: TurnRequest) => Promise<TurnResult>): Promise<TurnResult> {
   if (!policy.output) return dispatch(instruction, policy);
@@ -205,7 +211,7 @@ export async function journalStructuredDispatch(root: string, adapter: BuilderAd
     // Only the answer's own content counts: a wire-schema violation or a failed
     // host requirement. Binding and receipt failures stay unknown.
     const answeredInvalid = !receiptValidated && !turn.failure && !receiptMismatch && turn.structured?.state === "rejected" && turn.structured.reason === "invalid-contract"
-      && (requirementRejected || turn.structured.detail.includes("Structured result violates wire schema"));
+      && (requirementRejected || answerContentRejected(turn.structured.detail));
     const status = turn.failure?.dispatchState === "not-sent" || answeredInvalid ? "failed" : turn.failure?.dispatchState === "unknown" || !receiptValidated ? "uncertain" : "confirmed";
     turn = { ...turn, transportEvidence: { rawDigest, responseDigest, rawBytes: raw.length, retainedRawBytes: retainedRaw.length,
       valueDigest: retained.valueDigest, rejectedValueDigest: retained.rejectedValue?.evidenceDigest } };

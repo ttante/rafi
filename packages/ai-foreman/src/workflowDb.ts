@@ -1,5 +1,5 @@
 import { ensureLocalGitExcludes } from "./gitExclude.js";
-import { persistedProviderWireContract } from "rafi-spec";
+import { parseStrictJson, persistedProviderWireContract } from "rafi-spec";
 import { verifyCheckpointOrigin, verifyContinuityHeads, type CheckpointOrigin } from "./continuityOrigin.js";
 import { registerQaGraphJournalWriter, ensureQaGraphJournalGuards } from "./qaDeliveryJournal.js";
 import { canonicalJson } from "./qaProtocolV2.js";
@@ -78,6 +78,12 @@ import {
   type QaTurnIntentV2,
   type QaTurnReceiptV2,
 } from "./qaProtocolV2.js";
+
+/** Decision keys that embed the raw ticket scope revision, so a different revision means stale. */
+function scopeRevisionKeyed(runId: string, key: string): boolean {
+  const local = key.startsWith(`${runId}:`) ? key.slice(runId.length + 1) : key;
+  return local.startsWith("builder:") || local.startsWith("ticket-question:");
+}
 
 export const WORKFLOW_DB_FILE = ".rafi/recovery.sqlite3";
 export type WorkflowKind = "plan" | "ticket-plan" | "ticket-populate" | "uninstall" | "build" | "qa-remediation" | "recovery" | "legacy" | "operation";
@@ -1443,7 +1449,9 @@ export class WorkflowDb {
   /** Unconsumed answers to an older definition must not silently reopen a ticket. */
   staleTicketDecisions(runId: string, scopeRevision: string): PendingHumanDecision[] {
     return (this.db.prepare("SELECT decision_key,decision_json FROM human_decisions WHERE run_id=? AND status='answered'").all(runId) as Array<{ decision_key: string; decision_json: string }>)
-      .filter(row => !row.decision_key.includes(`:${scopeRevision}:`))
+      // Only builder and ticket-question keys carry the raw scope revision. Others (such as QA
+      // nonconvergence) bind scope through their own hash, so a missing revision doesn't mean stale.
+      .filter(row => scopeRevisionKeyed(runId, row.decision_key) && !row.decision_key.includes(`:${scopeRevision}:`))
       .map(row => parseJson(row.decision_json) as PendingHumanDecision)
       .filter(decision => decision.interruptionId.startsWith("ticket:") && this.decisionContinuationAvailable(runId, decision.decisionId) && !this.operation(`decision-supersession:${decision.decisionId}`));
   }
@@ -1452,7 +1460,7 @@ export class WorkflowDb {
     this.atomic(() => {
       for (const prior of this.pendingHumanDecisions(runId)) {
         const key = this.humanDecisionKey(prior.decisionId) ?? "";
-        if (!prior.interruptionId.startsWith("ticket:") || tickets && !tickets.includes(prior.interruptionId.slice(7)) || key.includes(`:${scopeRevision}:`) || !(key.startsWith(`${runId}:builder:`) || key.startsWith(`${runId}:ticket-question:`))) continue;
+        if (!prior.interruptionId.startsWith("ticket:") || tickets && !tickets.includes(prior.interruptionId.slice(7)) || key.includes(`:${scopeRevision}:`) || !scopeRevisionKeyed(runId, key)) continue;
         this.ensureHumanDecision({ runId, decisionKey: `${runId}:ticket-question:${scopeRevision}:supersedes:${prior.decisionId}`, interruptionId: prior.interruptionId, prompt: prior.prompt, choices: prior.choices, evidence: prior.evidence });
         this.db.prepare("UPDATE human_decisions SET status='cancelled',decision_json=?,updated_at=? WHERE decision_id=? AND status='pending'").run(json({ ...prior, status: "cancelled", cancellationReason: "ticket scope changed before the question was answered" }), new Date().toISOString(), prior.decisionId);
         this.insertEvent(runId, "human_decision_superseded", "question-revised", { decisionId: prior.decisionId, scopeRevision }, new Date().toISOString());
@@ -1804,8 +1812,36 @@ export class WorkflowDb {
   }
 
   unresolvedRoleDispatches(runId: string, role: string): OperationRecord[] {
+    this.reconcileAnsweredInvalidJsonDispatches(runId);
     const rows = this.db.prepare("SELECT * FROM operation_journal WHERE run_id=? AND kind='provider-dispatch' AND status IN ('in_progress','uncertain')").all(runId) as DbOperation[];
     return rows.map(operationFromRow).filter(row => (row.intent as { role?: string }).role === role);
+  }
+
+  /**
+   * Earlier versions left a completed answer that was not valid JSON as "uncertain", which
+   * blocked every later turn for that role. The retained reply text proves the outcome, so
+   * record it as answered-invalid. Only untruncated JSON-text replies that fail to parse qualify.
+   */
+  reconcileAnsweredInvalidJsonDispatches(runId: string): number {
+    const rows = this.db.prepare("SELECT * FROM operation_journal WHERE run_id=? AND kind='provider-dispatch' AND status='uncertain'").all(runId) as DbOperation[];
+    let reconciled = 0;
+    for (const op of rows.map(operationFromRow)) {
+      const result = op.result as { validation?: string; responseDigest?: string } | undefined;
+      if (result?.validation !== "rejected" || !result.responseDigest) continue;
+      const retainedBytes = this.getEvidence(result.responseDigest);
+      if (!retainedBytes) continue;
+      let retained: { receipt?: { state?: string; reason?: string }; rejectedValue?: { representation?: string; evidenceDigest?: string; originalBytes?: number; retainedBytes?: number } };
+      try { retained = JSON.parse(retainedBytes.toString()); } catch { continue; }
+      const rejected = retained.rejectedValue;
+      if (retained.receipt?.state !== "rejected" || retained.receipt.reason !== "invalid-contract" || rejected?.representation !== "json-text"
+        || !rejected.evidenceDigest || rejected.originalBytes !== rejected.retainedBytes) continue;
+      const text = this.getEvidence(rejected.evidenceDigest);
+      if (!text) continue;
+      try { parseStrictJson(text.toString()); continue; } catch { /* the answer itself is not valid JSON */ }
+      this.updateOperation(op.idempotencyKey, "failed", { result: { ...result, dispatchState: "answered-invalid" } });
+      reconciled++;
+    }
+    return reconciled;
   }
 
   reserveRecoveryAllowance(runId: string, scope: string, kind: string, maximum: number): boolean {

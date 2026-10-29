@@ -88,6 +88,26 @@ export interface QaRecoveryPacketInput {
   reportJson?: string;
 }
 
+const CANONICAL_BUNDLE_REVISION = /^canonical-recovery-bundle\/r(\d+)\.json$/;
+const CURRENT_REVIEWED_STATE_REVISION = /\/current-r(\d+)\/integrity\.json$/;
+
+/**
+ * The resource whose path carries the highest `r<N>` revision. Resources are kept in path-name
+ * order, which stops matching revision order once N passes 99 ("r92" sorts after "r125").
+ * Paths without a revision number are ignored.
+ */
+export function highestRevisionResource<T extends { path: string }>(resources: readonly T[], pattern: RegExp): T | undefined {
+  let best: T | undefined;
+  let bestRevision = -1;
+  for (const resource of resources) {
+    const match = pattern.exec(resource.path);
+    if (!match) continue;
+    const revision = Number(match[1]);
+    if (revision >= bestRevision) { best = resource; bestRevision = revision; }
+  }
+  return best;
+}
+
 /**
  * Keeps an unresolved packet auditable without making a successor reread every
  * failed attempt.  Sealed history remains in the packet and in its digest
@@ -134,7 +154,7 @@ export function canonicalizeQaRecoveryRequirements(packet: QaRecoveryPacket): Qa
     currentRequiredResources: current,
     retainedHistory: history,
   }, false);
-  const priorBundle = loaded.manifest.resources.filter((resource) => resource.path.startsWith("canonical-recovery-bundle/")).at(-1);
+  const priorBundle = highestRevisionResource(loaded.manifest.resources.filter((resource) => resource.path.startsWith("canonical-recovery-bundle/")), CANONICAL_BUNDLE_REVISION);
   const unchanged = priorBundle && priorBundle.digest === hash(bundleBytes)
     && loaded.manifest.resources.every((resource) => resource.requiredForRecovery === (isCurrent(resource) || resource.path === priorBundle.path));
   if (unchanged) return loaded;
@@ -238,7 +258,7 @@ function currentReviewedStatePrefix(packet: QaRecoveryPacket): string {
       return declared.digest === packet.manifest.currentReviewedStateDigest;
     } catch { return false; }
   });
-  const selected = matches.at(-1);
+  const selected = highestRevisionResource(matches, CURRENT_REVIEWED_STATE_REVISION) ?? matches.at(-1);
   if (!selected) throw new Error("current reviewed-state inventory is missing");
   return selected.path.slice(0, -"/integrity.json".length);
 }

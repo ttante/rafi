@@ -21,7 +21,7 @@ for (const provider of ["claude", "codex"] as const) test(`${provider} native bl
   const invalid = nativeFixtureTurn(policy, "session", null, provider, { kind: "blocked", reason: "Bad dependency", nextAction: "Resolve", branchDependency: "../unrelated" });
   assert.equal(operationStatus(invalid, workReportOutput, "T001").kind, "unknown");
 });
-function fake(result: unknown) {
+function fake(result: unknown, mangle: (wireText: string) => string = text => text) {
   const calls: Array<{ text: string; policy?: TurnRequest }> = [];
   const session = { version: 1 as const, provider: "codex" as const, sessionId: "session", role: "builder" as const, stream: "builder", generation: 0, cwd: "/fixture", configRoot: "/fixture", source: "observed" as const, createdAt: "2026-01-01T00:00:00.000Z" };
   const adapter: BuilderAdapter = { agent: "codex", sessionId: () => "session", close: async () => {}, events: async function* () {},
@@ -39,7 +39,7 @@ function fake(result: unknown) {
             nextAction: (result as any).nextAction, question: null, choices: [], continuity: null }
           : canonical;
       return { text: "Human summary contains no result", isError: false, numTurns: 1, costUsd: 0, turnId: policy?.dispatchId, selectedDispatch: policy!.selectedDispatch!,
-        structured: structuredReceipt(ticketPopulationOutput, "codex", JSON.stringify(wire),
+        structured: structuredReceipt(ticketPopulationOutput, "codex", mangle(JSON.stringify(wire)),
           { dispatchId: policy?.dispatchId ?? "dispatch", sessionId: "session", nativeTurnId: `native-${calls.length}` }, "json-text", policy!.wireContract!, policy!.selectedDispatch!) };
     } };
   adapter.prepareSession = async () => adapter.sessionRef!()!;
@@ -67,6 +67,32 @@ for (const kind of ["completed", "blocked", "invalid"] as const) test(`offline p
       // An answered but invalid turn has a known outcome: failed, not uncertain.
       assert.equal(operation?.status, kind === "invalid" ? "failed" : "confirmed");
       assert.ok(operation?.result);
+    } finally { db.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a completed answer that is not valid JSON is answered-invalid, and old stuck records reconcile", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rafi-native-malformed-"));
+  // Drop one comma: the provider finished its turn, but the answer itself is malformed.
+  const { adapter, calls } = fake({ kind: "completed", summary: "proposal", payload }, text => text.replace(",", " "));
+  try {
+    const foreman = new Foreman(adapter, new Log(join(dir, "run.jsonl")), { desktop: false, terminalBell: false }, false, 3, dir);
+    const turn = await foreman.runInstruction("Propose tickets", { output: ticketPopulationOutput });
+    assert.equal(turn.result.isError, true);
+    assert.match(turn.result.structured?.state === "rejected" ? turn.result.structured.detail : "", /Structured result is not valid JSON/);
+    const db = new WorkflowDb(dir);
+    try {
+      const key = calls[0]!.policy!.dispatchId!;
+      const operation = db.operation(key)!;
+      assert.equal(operation.status, "failed");
+      assert.equal((operation.result as { dispatchState?: string }).dispatchState, "answered-invalid");
+      // Earlier versions recorded the same turn as uncertain, which blocked every later turn.
+      (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
+        .prepare("UPDATE operation_journal SET status='uncertain', result_json=json_remove(result_json,'$.dispatchState') WHERE idempotency_key=?").run(key);
+      const role = (operation.intent as { role: string }).role;
+      assert.deepEqual(db.unresolvedRoleDispatches(operation.runId, role), []);
+      assert.equal(db.operation(key)?.status, "failed");
+      assert.equal((db.operation(key)?.result as { dispatchState?: string }).dispatchState, "answered-invalid");
     } finally { db.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -10,9 +10,9 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { registerHandbackWriter } from "../src/qaHandbackMigration.js";
 import type { BuilderAdapter, BuilderEvent, CompactResult, TurnResult } from "../src/adapters/types.js";
-import { beginQaFinalization, completeQaFinalization, verifyPendingQaFinalizationSource, type QaSessionBoundaryRecovery, type QaSessionBoundaryResult, type QaSessionHandle, type QaStreamState } from "../src/qaReview.js";
+import { beginQaFinalization, completeQaFinalization, verifyPendingQaFinalizationSource, type QaFixRequest, type QaSessionBoundaryRecovery, type QaSessionBoundaryResult, type QaSessionHandle, type QaStreamState } from "../src/qaReview.js";
 import type { ProviderSessionRefV1 } from "rafi-spec";
-import { appendQaRecoveryResource, canonicalizeQaRecoveryRequirements, compareQaRecoveryReviewedState, LegacyQaRecoveryPacketError, loadQaRecoveryPacket, materializeQaRecoveryContext, recoverPendingQaRecoveryPublications, renderQaRecoveryAcknowledgementInstruction, updateQaRecoveryPosition, validateManualQaReport } from "../src/qaRecovery.js";
+import { appendQaRecoveryResource, canonicalizeQaRecoveryRequirements, highestRevisionResource, compareQaRecoveryReviewedState, LegacyQaRecoveryPacketError, loadQaRecoveryPacket, materializeQaRecoveryContext, recoverPendingQaRecoveryPublications, renderQaRecoveryAcknowledgementInstruction, updateQaRecoveryPosition, validateManualQaReport } from "../src/qaRecovery.js";
 import { createDisposableQaSnapshot } from "../src/qaSnapshot.js";
 import { WorkflowDb } from "../src/workflowDb.js";
 import { PermissionPolicy } from "../src/permissions/policy.js";
@@ -655,7 +655,7 @@ test("canonical QA recovery bundle bounds required reads while retaining sealed 
     const historical = loaded.manifest.resources.filter((resource) => resource.path.startsWith("turns/failed-"));
     assert.equal(historical.length, 48);
     assert.ok(historical.every((resource) => resource.requiredForRecovery === false));
-    const bundle = loaded.manifest.resources.filter((resource) => resource.path.startsWith("canonical-recovery-bundle/")).at(-1)!;
+    const bundle = highestRevisionResource(loaded.manifest.resources.filter((resource) => resource.path.startsWith("canonical-recovery-bundle/")), /^canonical-recovery-bundle\/r(\d+)\.json$/)!;
     assert.equal(bundle.requiredForRecovery, true);
     const required = loaded.manifest.resources.filter((resource) => resource.requiredForRecovery);
     assert.ok(required.length < 20, `expected a compact required closure, got ${required.length}`);
@@ -820,9 +820,14 @@ test("a resumed session without an acceptance receipt fails closed without repor
     assert.equal(menuCalls, 0);
     assert.equal(qa.instructions.length, 0, "an unaccepted resumed session cannot receive packet or report work");
     assert.match(result.detail ?? "", /requires a validated fresh-session acceptance receipt/);
-    assert.match(result.detail ?? "", /response failed validation/i);
+    // Rafi refused its own hand-off: say so, and never record it as an empty QA reply.
+    assert.match(result.detail ?? "", /Rafi rejected its own QA hand-off before QA ran/);
+    assert.doesNotMatch(result.detail ?? "", /response failed validation/i);
     const db = new WorkflowDb(dir); const head = db.qaRecoveryHead("resume-no-receipt", "T1"); db.close();
     assert.equal(head?.pendingAction, "operator-menu");
+    const resources = loadQaRecoveryPacket(packet.directory).manifest.resources.map((resource) => resource.path);
+    assert.ok(resources.some((path) => /^validation\/host-rejected-/.test(path)));
+    assert.ok(!resources.some((path) => path.startsWith("qa-responses/")), "no fake QA response is recorded");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1504,4 +1509,129 @@ for (const overLimit of [false,true]) test(`QA review reuses bounded UTF-8 trans
       assert.ok(events.length<=maximum);assert.equal(events.toString().includes('"result"'),false);
     } finally {db.close();}
   } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test("resuming at the operator menu after a failed review on unchanged source reuses that failure", async () => {
+  const dir = repository();
+  try {
+    const ticket = { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] } as const;
+    const base = { ticket: { ...ticket, depends_on: [], acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] }, builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh" as const,
+      maxCycles: 0, recovery: { projectDir: dir, runId: "menu-resume" }, sessionBoundary: unavailableBoundary, continuityManaged: true };
+    // First run: QA fails, the fix budget is used up, and the operator pauses at the menu.
+    const first = new Adapter("first-review", () => validReport);
+    const paused = await runIsolatedQa({ ...base, state: { reviews: 0, modificationViolations: 0 }, createQa: async (cwd) => qaHandle(first, cwd),
+      onNonconvergence: async () => ({ action: "pause" }), fix: async () => assert.fail("no Builder fix before the operator answers") });
+    assert.equal(paused.outcome, "nonconverged");
+    assert.equal(first.instructions.length, 1);
+
+    // Resume with the same source: the saved failure is reused, not reviewed again.
+    const second = new Adapter("must-not-review", () => validReport);
+    const asked: Array<string | undefined> = [];
+    const fixes: QaFixRequest[] = [];
+    const resumed = await runIsolatedQa({ ...base, state: { reviews: 0, modificationViolations: 0 }, createQa: async (cwd) => qaHandle(second, cwd),
+      onNonconvergence: async (context) => { asked.push(context.history.at(-1)?.reportDigest); return { action: "retry" }; },
+      fix: async (request) => { fixes.push(request); return { ok: false, detail: "intentional stop after delivery" }; } });
+    assert.equal(second.instructions.length, 0, "unchanged source is not re-reviewed");
+    assert.equal(asked.length, 1);
+    assert.equal(fixes.length, 1, "retry sends the saved failure to the Builder");
+    assert.equal(fixes[0]!.reportDigest, asked[0]);
+    assert.equal(resumed.outcome, "blocked");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the latest recovery summary is chosen by revision number, so reads past r99 stop rewriting the file", () => {
+  const dir = repository();
+  try {
+    let packet = createQaRecoveryPacket({
+      projectDir: dir, reviewedWorktree: dir, runId: "bundle-past-100", ticketId: "T1", cycle: 1, reviewAttempt: 1,
+      recoveryStage: "operator-menu", resources: { ticket: { value: { id: "T1", acceptance: ["works"] }, purpose: "Current admitted requirements" } },
+    });
+    const append = (count: number, label: string) => {
+      for (let index = 0; index < count; index++) {
+        packet = appendQaRecoveryResource(packet, `turns/${label}-${String(index).padStart(3, "0")}/raw-response.txt`, `response ${label} ${index}`, { purpose: `retry ${label} ${index}`, exact: true });
+      }
+    };
+    append(40, "early");
+    packet = canonicalizeQaRecoveryRequirements(packet);
+    append(70, "late");
+    packet = canonicalizeQaRecoveryRequirements(packet);
+    assert.ok(packet.manifest.revision > 100);
+    const bundles = packet.manifest.resources.filter((resource) => resource.path.startsWith("canonical-recovery-bundle/"));
+    assert.ok(bundles.some((resource) => /\/r\d{2}\.json$/.test(resource.path)) && bundles.some((resource) => /\/r\d{3}\.json$/.test(resource.path)), "bundles exist on both sides of r100");
+    assert.match(bundles.at(-1)!.path, /\/r\d{2}\.json$/, "name order puts the older two-digit bundle last, which is the trap");
+    const latest = highestRevisionResource(bundles, /^canonical-recovery-bundle\/r(\d+)\.json$/)!;
+    assert.equal(latest.requiredForRecovery, true);
+    assert.equal(latest.path, `canonical-recovery-bundle/r${packet.manifest.revision}.json`);
+
+    // A resume loads the packet several times; with nothing new, none of them may write.
+    const revision = packet.manifest.revision;
+    for (let load = 0; load < 3; load++) packet = canonicalizeQaRecoveryRequirements(loadQaRecoveryPacket(packet.directory));
+    assert.equal(packet.manifest.revision, revision);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("highestRevisionResource ignores name order and paths without a revision", () => {
+  const paths = ["canonical-recovery-bundle/r104.json", "canonical-recovery-bundle/r127.json", "canonical-recovery-bundle/r18.json",
+    "canonical-recovery-bundle/r92.json", "canonical-recovery-bundle/notes.json"].map((path) => ({ path }));
+  assert.equal(highestRevisionResource(paths, /^canonical-recovery-bundle\/r(\d+)\.json$/)?.path, "canonical-recovery-bundle/r127.json");
+  assert.equal(highestRevisionResource([{ path: "canonical-recovery-bundle/notes.json" }], /^canonical-recovery-bundle\/r(\d+)\.json$/), undefined);
+});
+
+test("a resume past revision 100 binds the hand-off receipt and QA to the same recovery file", async () => {
+  const dir = repository();
+  try {
+    let packet = createQaRecoveryPacket({
+      projectDir: dir, reviewedWorktree: dir, runId: "resume-past-100", ticketId: "T1", cycle: 1, reviewAttempt: 1,
+      recoveryStage: "operator-menu", resources: { prompt: { value: "original review", purpose: "prompt", exactText: true } },
+    });
+    for (let index = 0; index < 40; index++) packet = appendQaRecoveryResource(packet, `turns/early-${String(index).padStart(3, "0")}/raw-response.txt`, `early ${index}`, { purpose: `retry ${index}`, exact: true });
+    packet = canonicalizeQaRecoveryRequirements(packet);
+    for (let index = 0; index < 70; index++) packet = appendQaRecoveryResource(packet, `turns/late-${String(index).padStart(3, "0")}/raw-response.txt`, `late ${index}`, { purpose: `retry ${index}`, exact: true });
+    packet = canonicalizeQaRecoveryRequirements(packet);
+    assert.ok(packet.manifest.revision > 100);
+    // Resume loads the file once for QA and again when it builds the hand-off receipt.
+    const forQa = canonicalizeQaRecoveryRequirements(loadQaRecoveryPacket(packet.directory));
+    const forReceipt = canonicalizeQaRecoveryRequirements(loadQaRecoveryPacket(packet.directory));
+    assert.equal(forReceipt.manifest.packetDigest, forQa.manifest.packetDigest);
+    const qa = new Adapter("qa-resume-past-100", (instruction, turn) => turn === 0 ? recoveryQaReply(instruction) : validReport);
+    const result = await runIsolatedQa({
+      ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
+      builderWorktree: dir, builderSummary: "exact builder response", qaStrategy: "fresh",
+      recovery: { projectDir: dir, runId: "resume-past-100" },
+      state: { reviews: 0, modificationViolations: 0 }, maxCycles: 0, createQa: async (cwd) => qaHandleForPacket(qa, cwd, forReceipt), sessionBoundary: unavailableBoundary,
+      continuityManaged: true, resumedRecovery: forQa, fix: async () => ({ ok: false }),
+    });
+    assert.doesNotMatch(result.detail ?? "", /rejected its own QA hand-off|mismatched acceptance receipt/);
+    assert.ok(qa.instructions.length > 0, "QA receives the recovery work");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("checking for a pending recovery packet never rewrites it, and keeps the loader's checks", async () => {
+  const { hasPendingQaRecoveryPacket, pendingQaRecoveryPacket } = await import("../src/cli/start.js");
+  const dir = repository();
+  try {
+    // A real failed review that pauses at the operator menu leaves a valid pending packet.
+    const qa = new Adapter("read-only-check", () => validReport);
+    await runIsolatedQa({
+      ticket: { id: "T1", order: 1, title: "QA", area: "test", priority: "P1", size: "S", risk: "Low", depends_on: [], summary: "test", acceptance: ["works"], required_tests: ["test"], likely_files: ["tracked.txt"] },
+      builderWorktree: dir, builderSummary: "implemented", qaStrategy: "fresh", maxCycles: 0, recovery: { projectDir: dir, runId: "read-only-check" },
+      sessionBoundary: unavailableBoundary, continuityManaged: true, state: { reviews: 0, modificationViolations: 0 }, createQa: async (cwd) => qaHandle(qa, cwd),
+      onNonconvergence: async () => ({ action: "pause" }), fix: async () => assert.fail("no Builder fix in this fixture"),
+    });
+    const head = () => { const db = new WorkflowDb(dir); try { return db.qaRecoveryHead("read-only-check", "T1")!; } finally { db.close(); } };
+    // Retry history is what makes a full load rewrite the packet with a new summary.
+    appendQaRecoveryResource(loadQaRecoveryPacket(head().packetPath), "turns/earlier/raw-response.txt", "earlier reply", { purpose: "earlier retry", exact: true });
+    const revision = () => head().revision;
+    const before = revision();
+    assert.equal(hasPendingQaRecoveryPacket(dir, "read-only-check", "T1"), true);
+    assert.equal(hasPendingQaRecoveryPacket(dir, "read-only-check", "T1"), true);
+    assert.equal(revision(), before, "the existence check writes nothing");
+    assert.ok(pendingQaRecoveryPacket(dir, "read-only-check", "T1"), "the full load still finds the packet");
+    assert.ok(revision() > before, "fixture check: the full load does rewrite this packet");
+
+    // Ambiguity is still reported by the check itself, not one step later.
+    createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "two-pending", ticketId: "T1", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", resources: { prompt: { value: "a", purpose: "prompt", exactText: true } } });
+    createQaRecoveryPacket({ projectDir: dir, reviewedWorktree: dir, runId: "two-pending", ticketId: "T2", cycle: 1, reviewAttempt: 1, recoveryStage: "operator-menu", resources: { prompt: { value: "b", purpose: "prompt", exactText: true } } });
+    assert.throws(() => hasPendingQaRecoveryPacket(dir, "two-pending"), /multiple pending QA recovery packets/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
