@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft 0.1 — for review |
+| **Status** | Draft 0.2 — owner decisions recorded (see Decision log) |
 | **Date** | 2026-10-28 |
 | **Owner** | Tyler |
 | **Document type** | PRD (what and why). The follow-on RFC / design doc covers how: protocol, data model, framework choices. |
@@ -11,6 +11,20 @@
 > **How to read this.** Requirements carry stable IDs (`GUI-…`) so that tickets, the RFC and tests can trace to them. **MUST** = required for the phase in which it is listed. **SHOULD** = expected unless justified. **MAY** = optional. Items marked 🔶 are my embellishments or assumptions beyond the original brief; please confirm or strike them. §16 collects open questions. §17 gives the recommended phasing.
 
 ---
+
+## 0. Decision log
+
+| # | Decision | Date | Consequence |
+|---|---|---|---|
+| D1 | GUI is a web app with local and hosted modes; Rafi daemon + API; CLI stays first-class | 2026-10-28 | §7 |
+| D2 | Enterprise tier is specified fully now, built later | 2026-10-28 | §8.13 |
+| D3 | Parallel instances are isolated by git worktree and/or branch | 2026-10-28 | GUI-INS-2 |
+| D4 | **Shared-branch policy is user-customizable** (per project, overridable per instance) rather than one fixed mechanism | 2026-10-28 | GUI-INS-3 |
+| D5 | **Both hosted models are supported**: Rafi-managed runners and customer-owned (self-hosted / BYO) runners, to maximize revenue streams | 2026-10-28 | GUI-REM-1, §8.13 |
+| D6 | **Local-first delivery.** Hosted follows, but the runner/control-plane seams are designed in Phase 0 | 2026-10-28 | §17 |
+| D7 | **Maestro is a new agent type**, separate from Manager. Each instance's Manager additionally acts as that instance's **liaison** to Maestro. Maestro's model is user-selectable | 2026-10-28 | GUI-MAE-1, GUI-MGR-4 |
+| D8 | Support both **cloud and local agent runtimes** to maximize compatibility, including **Ollama** (v2/v3) | 2026-10-28 | §8.15 |
+| D9 | Every instance has a **configuration section** exposing the detailed settings (branches, agents, QA, limits, etc.) | 2026-10-28 | §8.16 |
 
 ## 1. Summary
 
@@ -58,7 +72,7 @@ Relevant facts from the codebase as of this writing (verify before relying on th
 ### 4.2 Non-goals (v1)
 - Replacing the CLI. The CLI stays supported and is a peer client.
 - A full IDE or in-browser code editing. The viewer is read-only plus diff, with "open in editor" hand-offs. 🔶
-- Supporting agent runtimes beyond Claude Code and Codex.
+- Supporting agent runtimes beyond Claude Code and Codex in the first release (they come first; the broader runtime roadmap, including Ollama, is in §8.15).
 - A native mobile app. Responsive web for monitoring and approvals is in scope (§12.5). 🔶
 - Building a new git hosting or code-review product. We integrate with GitHub/GitLab.
 
@@ -108,7 +122,7 @@ Targets are proposals to be calibrated during beta.
 - **GUI-PLAT-6 (SHOULD)** The local daemon may be wrapped in a desktop shell later without changing the web app. 🔶
 
 ### 7.2 Hosted / remote requirements
-- **GUI-REM-1 (MUST)** A runner can be a user's own machine (agent connects outbound to the control plane, no inbound ports) or a managed remote host/container. 🔶
+- **GUI-REM-1 (MUST)** A runner can be a user's own machine (agent connects outbound to the control plane, no inbound ports) or a Rafi-managed remote host/container. **Both models are supported (D5)**: customer-owned/self-hosted runners (including inside a customer VPC) and Rafi-operated managed runners. The runner protocol is identical for both. 🔶
 - **GUI-REM-2 (MUST)** Source code and agent transcripts stay on the runner unless the user/org explicitly enables central storage. The control plane stores only metadata and aggregates by default. 🔶 *(RFC must define exactly what flows where.)*
 - **GUI-REM-3 (MUST)** Provider credentials (Claude / Codex auth, git tokens) are never exposed to the browser. Runners use the owning user's provider auth; enterprise login flows (e.g. org SSO for Claude Code) must keep working. 🔶
 - **GUI-REM-4 (MUST)** All remote transport is TLS and authenticated. Runner ↔ control-plane trust uses revocable, scoped credentials. 🔶
@@ -149,7 +163,7 @@ Targets are proposals to be calibrated during beta.
 
 - **GUI-INS-1 (MUST)** A project can have **multiple concurrent instances**. Each instance has: a user-editable name/color, the source document(s) or goal, its own plan, tickets, git branch or worktree, configuration overrides, and run history.
 - **GUI-INS-2 (MUST)** *Isolation.* Instances must not interfere with each other. Each instance runs in its **own git worktree and/or branch** (per decision). The RFC defines the mechanism, including state/lock separation for `.rafi/` data, ticket stores and the workflow DB, so two instances can never corrupt each other's tickets, plan or build records.
-- **GUI-INS-3 (MUST)** *Shared-branch scenario.* The brief's example has several instances contributing to **a single branch**. The RFC must define a safe policy (e.g. serialized ticket execution with a shared branch lock, per-instance worktrees with automatic rebase/merge into the shared branch at ticket boundaries, or a merge-queue approach) and how conflicts surface to the user. Until resolved, the UI must warn when instances are configured to share a branch. 🔶
+- **GUI-INS-3 (MUST)** *Shared-branch scenario.* The brief's example has several instances contributing to **a single branch**. **The policy is user-customizable (D4)**, set as a project default and overridable per instance, and chosen from a defined menu, for example: (a) *serialize*: only one instance writes to the shared branch at a time, via a lock held at ticket boundaries; (b) *worktree + integrate*: each instance builds in its own worktree and rebases/merges into the shared branch at ticket (or delivery-unit) boundaries; (c) *merge queue*: instances push to a queue that integrates in order with checks; (d) *fail-fast warning*: allow sharing but stop on the first conflict. The RFC defines the exact options, the recommended default, and the guarantees each gives (ordering, conflict handling, who resolves conflicts: agent, Maestro or user). Conflicts always surface as attention items. The UI shows the active policy wherever instances share a branch and warns when the choice is risky. 🔶
 - **GUI-INS-4 (MUST)** *Branch strategy per instance*, selectable at creation and changeable before the first build:
   - **Single branch** for all work;
   - **Stacked PRs** (one branch/PR per ticket or delivery unit, stacked);
@@ -214,10 +228,12 @@ This is the highest-leverage UX element for throughput.
 - **GUI-MGR-1 (MUST)** The **Manager** (today `rafi manager`) is visualized and reachable per instance: its current evidence, findings, QA/build status explanation and recommendations, with a chat surface to talk to it. Structured manager outputs render as cards, not raw JSON.
 - **GUI-MGR-2 (MUST)** Other Rafi capabilities that are agents or advisors (planner, QA, builder, graph/diagnostics where applicable) are each visible in the instance with the §8.3 detail/actions pattern, and are talk-to-able where meaningful.
 - **GUI-MGR-3 (SHOULD)** Manager recommendations that map to actions (e.g. "reset ticket T-12", "resume build") render as one-click buttons that run the same audited action path as manual use.
+- **GUI-MGR-4 (MUST)** *Liaison role (D7).* In addition to its existing duties (evidence, QA/build explanation, recommendations), each instance's Manager is that instance's **liaison to Maestro**: it produces a compact, structured **instance report** (state, progress, blockers, pending decisions, cost, risks, ETA) that Maestro consumes instead of reading raw transcripts, and it answers Maestro's questions about its instance ("why did QA fail on T-9?"). The Manager keeps working when no Maestro is enabled; the liaison function is additive and idle when Maestro is off.
+- **GUI-MGR-5 (MUST)** *Authority boundary.* The Manager is the instance's voice, not a back door. Maestro **commands** go through the action API and policy engine (audited, permissioned), never as chat instructions to a Manager. Manager-to-Maestro messages are for information and recommendations only.
 
 ### 8.8 Maestro (orchestrator)
 
-- **GUI-MAE-1 (MUST)** An **optional** Maestro agent is presented as a panel at the **top of the interface**, with two independent toggles: **on/off** and **expanded/collapsed**. When off, it consumes no resources and no UI beyond its toggle. State persists per user (and per project). Candidate implementation: the Manager role or a dedicated Maestro role/instance; the RFC decides. Name is provisional ("Maestro"); 🔶 alternatives: Conductor, Orchestrator, Coordinator.
+- **GUI-MAE-1 (MUST)** An **optional** Maestro agent is presented as a panel at the **top of the interface**, with two independent toggles: **on/off** and **expanded/collapsed**. When off, it consumes no resources and no UI beyond its toggle. State persists per user (and per project). **Maestro is a new agent type (D7)** with project-wide (cross-instance) responsibilities; it is not the Manager. Its **model and runtime are user-selectable** and independent of the instances it supervises. Name is provisional; see the naming options discussed with the owner (leading candidates: Maestro, Control Tower, Conductor).
 - **GUI-MAE-2 (MUST)** *Creation from natural language.* Given a project and instructions, Maestro creates and configures instances, as in the reference example:
   > "I have these 4 plan documents. For plan 1, use the tickets linked in the document and have me review the plan before implementation. For plan 2, have Rafi make tickets from the plan, auto-approve the plan and immediately build everything in one run. For plans 3 and 4, run grill-me from the document; I'll approve the plan manually, and don't start building yet. Plans 1 and 2 use all medium tickets on a single branch. Plans 3 and 4 use stacked PRs with varying ticket sizes."
   → four instances with the corresponding source, ticket sourcing, approval mode, build mode, ticket size policy and branch strategy.
@@ -255,7 +271,7 @@ The brief asks for "combos of Rafi steps" and possibly new Rafi features for UI 
   - *Grill-me → manual approve → tickets, don't build*
   - *Fix and continue* (diagnose, reset failed ticket, resume build)
   - *Pause everything and summarize*
-  - *Re-plan from changed document* (`plan update` + ticket reconciliation)
+  - *Re-plan from changed document* (re-run planning on the changed document, then reconcile tickets; exact commands to be confirmed against the CLI in the RFC)
   Each recipe shows its steps, which are skippable/editable, and reports progress as one task with expandable substeps.
 - **GUI-META-2 (SHOULD)** User-defined recipes, shareable at project / org level. 🔶
 - **GUI-META-3 (MUST)** *New Rafi runtime features expected to support the GUI* (to be ticketed separately; listed here as requirements discovery):
@@ -297,6 +313,34 @@ Fully specified now, phased later (§17). Requirements below are the baseline; t
 
 - **GUI-COL-1 (SHOULD)** Multiple users may watch the same instance live with presence indicators; exactly one "driver" at a time may send steer messages or control actions by default, with clear takeover.
 - **GUI-COL-2 (SHOULD)** Shareable deep links to an instance, ticket, plan revision, or code location (subject to permissions). Comments on plan sections and tickets for reviewers.
+
+### 8.15 Agent runtimes and models (D8)
+
+- **GUI-RTM-1 (MUST)** Rafi's agent layer is a **runtime-adapter abstraction**. Claude Code and Codex are the first adapters (they exist today). The GUI's model/runtime pickers are driven by adapter-reported capabilities, never hard-coded lists.
+- **GUI-RTM-2 (MUST)** *Cloud and local.* The roadmap supports: Claude Code and Codex (v1); additional cloud providers via API or cloud platforms (Anthropic API, OpenAI API, Bedrock, Vertex AI, Azure OpenAI; 🔶 candidates) and **local / self-hosted models, including Ollama** (v2/v3), with LM Studio, llama.cpp and vLLM-style OpenAI-compatible endpoints as follow-ons. 🔶
+- **GUI-RTM-3 (MUST)** *Capability negotiation.* Each adapter/model reports what it supports: tool use, structured output reliability, context size, session resume, interrupts, side questions, fast mode, cost reporting. Rafi relies heavily on structured outputs and long-running sessions; a model that cannot meet a role's needs is **flagged or blocked for that role** with an explanation, rather than failing mid-build. 🔶
+- **GUI-RTM-4 (SHOULD)** A **role-suitability rating** per model (planner, builder, QA, manager, Maestro) based on compatibility tests, so users can choose a cheap/local model for low-risk roles and a stronger one for planning or QA. 🔶
+- **GUI-RTM-5 (MUST)** Per-role model/runtime assignment at project and instance level (including Maestro), mixing cloud and local freely.
+- **GUI-RTM-6 (SHOULD)** *Fallbacks and routing*: ordered fallback models, rate-limit failover, and an optional "privacy mode" that forbids any cloud model for a project (local-only). 🔶
+- **GUI-RTM-7 (MUST)** Local-model runtimes run on the runner, so hosted mode can use customer-hosted inference without sending code to Rafi's cloud.
+- **GUI-RTM-8 (SHOULD)** A **runtime health/connectivity check** (auth, model availability, GPU/VRAM or quota hints for local) in project setup and in the doctor view. 🔶
+
+### 8.16 Instance configuration section (D9)
+
+- **GUI-CFG-1 (MUST)** Each instance has a collapsible **Configuration** section (and full-pane view) exposing the detailed settings, grouped and searchable:
+  - **Source & planning**: documents, planning mode, approval mode, ticket sourcing, ticket size policy;
+  - **Branches & git**: strategy (single / stacked PRs / per-ticket), base branch, branch name and prefix, worktree location, shared-branch policy (GUI-INS-3), PR creation settings, dirty-work policy, commit/finalization behavior;
+  - **Agents & models**: per-role runtime, model, reasoning level, fast mode (GUI-RTM-5);
+  - **Build behavior**: steps/run-all, QA on/off and preparation depth, builder network and approval permissions, concurrency;
+  - **Limits & budgets**: spend, time, token and retry limits, stall thresholds;
+  - **Observability**: mode, retention;
+  - **Notifications**: instance-level attention rules;
+  - **Maestro**: managed / take-over state, standing policies for this instance.
+- **GUI-CFG-2 (MUST)** *Inheritance made visible.* Each setting shows its **effective value, where it comes from** (org policy → project default → instance override) and whether it is overridden; any override can be reset to its inherited value. Org-policy-locked settings are shown as locked, with the reason.
+- **GUI-CFG-3 (MUST)** *Apply semantics.* Each setting states **when a change takes effect**: immediately, next agent turn, next ticket, next run, or only before first build. Changes to a running instance are previewed and confirmed when they could disrupt it.
+- **GUI-CFG-4 (MUST)** Validation with plain-language errors and warnings for risky combinations (e.g. auto-approve + build-all + network on); a "diff from defaults" view; and **export/import as the declarative instance spec** (Appendix B), so a configuration can be saved as a template, reviewed in git, or handed to Maestro.
+- **GUI-CFG-5 (SHOULD)** Settings changes are versioned per instance (who/what changed which value, when) and appear in the audit trail. 🔶
+- **GUI-CFG-6 (SHOULD)** *Simple vs advanced.* Defaults and a short "essentials" view serve newcomers; "nitty-gritty" settings are one click away but never required (progressive disclosure, §9 principle 6).
 
 ## 9. Information architecture and layout (starting proposal 🔶)
 
@@ -446,10 +490,10 @@ Design deliverables to commission: moodboard and principles; design tokens (colo
 
 ## 16. Open questions
 
-1. **Shared-branch policy** (GUI-INS-3): serialize, per-instance worktree + rebase, or merge queue? Does the user expect truly concurrent building on one branch?
-2. **Maestro implementation:** is it the existing Manager extended, a new role, or a user-selectable instance? Which model/runtime should it run on by default, and who pays for it?
+1. ~~Shared-branch policy~~ **Decided (D4): user-customizable.** Remaining: which options ship in v1, which is the default, and who resolves conflicts under each.
+2. ~~Maestro implementation~~ **Decided (D7): new agent type; Manager is the per-instance liaison; model is user-selectable.** Remaining: default model, and who pays for Maestro's usage in hosted mode.
 3. **Side-question ("btw") reality check:** what does each runtime expose today? Is a forked read-only session acceptable as a fallback?
-4. **Hosted architecture:** managed runners (who operates them?), or only customer-owned runners at first? Is a SaaS control plane planned, or self-hosted enterprise only?
+4. ~~Hosted architecture~~ **Decided (D5/D6): both managed and customer-owned runners; local first.** Remaining: operational model for managed runners (isolation, regions, support) and the SaaS control-plane scope.
 5. **Pricing/packaging:** which features are Free / Pro / Enterprise? Is the dashboard basic tier free?
 6. **Provider auth in hosted mode:** per-user subscription logins on runners vs org API keys; implications for ToS and billing.
 7. **Authoring of source documents in the GUI:** is an in-app Markdown editor for plan docs in scope, or only import?
@@ -472,9 +516,10 @@ Design deliverables to commission: moodboard and principles; design tokens (colo
 | **3 — Parallel** | Multi-instance | Instance isolation; split panes + saved layouts; shortcuts and labels; command palette; recipes; bulk controls; GitHub/GitLab project connect |
 | **4 — Maestro** | Orchestration | Maestro panel, launch-plan confirm flow, operate/report/compare, guardrails, policies, take-over/hand-back |
 | **5 — Insight** | Dashboard | Usage/speed/spend/quality dashboards, history, budgets, export |
-| **6 — Hosted & Enterprise** | Remote + governance | Control plane, runners, SSO, RBAC, policies, audit, org dashboards, collaboration |
+| **6 — Hosted & Enterprise** | Remote + governance | Control plane, managed and customer-owned runners, SSO, RBAC, policies, audit, org dashboards, collaboration |
+| **7 — Runtime breadth** | Compatibility | Additional cloud providers; local models (Ollama first, then OpenAI-compatible local servers); capability negotiation and role-suitability ratings. Adapter abstraction and capability reporting (GUI-RTM-1/3) land earlier, in Phase 1–2 |
 
-Rationale: Phase 1 delivers the largest user value (seeing what is happening) on top of data that mostly exists; Phases 3–4 are the differentiators; Phase 6 needs seams (identity, tenancy, policy) designed in from Phase 0 even though built last. Remote mode is the user's stated target platform, so the Phase 0 RFC must design the runner/control-plane split now, even if local mode ships first. If hosted must come earlier, Phase 6 can be partially pulled forward in parallel with Phases 3–5.
+Rationale: Phase 1 delivers the largest user value (seeing what is happening) on top of data that mostly exists; Phases 3–4 are the differentiators; Phase 6 needs seams (identity, tenancy, policy) designed in from Phase 0 even though built last. **Local-first is decided (D6).** Hosted is still a target (D5), so the Phase 0 RFC must design the runner/control-plane split, identity, tenancy and policy seams now, even though they ship in Phase 6.
 
 ## 18. Out of scope for this document
 Detailed API schemas; database design; visual mockups; exact keyboard map; pricing; implementation tickets. These follow from the RFC and design phases.
@@ -487,7 +532,7 @@ Detailed API schemas; database design; visual mockups; exact keyboard map; prici
 5. Complete the parity matrix (§7.3) against the full CLI command tree.
 
 ## Appendix A — Requirement index by area
-Platform `GUI-PLAT`, Remote `GUI-REM`, Parity `GUI-PAR`, Projects `GUI-PRJ`, Instances `GUI-INS`, Visualization `GUI-VIS`, Run control `GUI-RUN`, Planner `GUI-PLN`, Attention `GUI-ATT`, Manager `GUI-MGR`, Maestro `GUI-MAE`, Layout `GUI-LAY`, Keyboard `GUI-KEY`, Meta/enablement `GUI-META`, Dashboard `GUI-DASH`, Enterprise `GUI-ENT`, Collaboration `GUI-COL`, Platform implications `GUI-PLT`, Non-functional `GUI-NFR`.
+Platform `GUI-PLAT`, Remote `GUI-REM`, Parity `GUI-PAR`, Projects `GUI-PRJ`, Instances `GUI-INS`, Visualization `GUI-VIS`, Run control `GUI-RUN`, Planner `GUI-PLN`, Attention `GUI-ATT`, Manager `GUI-MGR`, Maestro `GUI-MAE`, Layout `GUI-LAY`, Keyboard `GUI-KEY`, Meta/enablement `GUI-META`, Dashboard `GUI-DASH`, Enterprise `GUI-ENT`, Collaboration `GUI-COL`, Runtimes/models `GUI-RTM`, Instance config `GUI-CFG`, Platform implications `GUI-PLT`, Non-functional `GUI-NFR`.
 
 ## Appendix B — Reference scenario as a declarative spec 🔶
 Illustrative shape of the instance spec Maestro (or `rafi up`) would consume for the four-plan example:

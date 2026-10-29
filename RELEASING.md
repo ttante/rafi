@@ -1,55 +1,50 @@
 # Releasing
 
-Use this checklist for every user-visible release.
+## Publish and tag (after the release PR is merged)
 
-## Required checks
+Run from the merged `main`. No install or build step is needed: `ai-foreman` and
+`@rafi-ai/cli` build themselves on publish, and `rafi-spec` / `special-agents`
+publish their existing local `dist` (rebuild them first only if their source
+changed since the last build: `pnpm --filter rafi-spec build && pnpm --filter special-agents build`).
 
-```sh
-pnpm -r build
-pnpm -r test
-pnpm -r typecheck
-```
-
-For a release candidate with authenticated local Claude and Codex runtimes,
-also run the explicit live acceptance journey:
+**Publish, in this order** (dependencies first). Only the scoped CLI needs
+`--access public`; the other three are unscoped and public by default.
 
 ```sh
-pnpm run test:live-interview
+cd /Users/tyler/reps/activeWork/rafi/packages/spec && npm publish
+cd ../special-agents && npm publish
+cd ../ai-foreman && npm publish
+cd ../rafi && npm publish --access public
 ```
 
-It requires Linux `script`, Docker Compose, and both runtime CLIs already
-authenticated. It is intentionally on-demand: it is not hosted CI and does
-not manage credentials.
+Skip any package whose version did not change.
 
-For packages being published, also run npm dry-runs from each package directory:
+**Then tag.** Lightweight tags, named `<package>-v<version>`:
 
 ```sh
-npm publish --dry-run --access public
+cd /Users/tyler/reps/activeWork/rafi && git tag rafi-spec-v<X> && git tag special-agents-v<X> && git tag ai-foreman-v<X> && git tag rafi-cli-v<X> && git push origin rafi-spec-v<X> special-agents-v<X> ai-foreman-v<X> rafi-cli-v<X>
 ```
 
-## Release checklist
+| Package | Directory | Tag prefix |
+|---|---|---|
+| `rafi-spec` | `packages/spec` | `rafi-spec-v` |
+| `special-agents` | `packages/special-agents` | `special-agents-v` |
+| `ai-foreman` | `packages/ai-foreman` | `ai-foreman-v` |
+| `@rafi-ai/cli` | `packages/rafi` | `rafi-cli-v` |
 
-1. Update package versions in the packages being released.
-2. Verify each intended version is not already on npm, for example `npm view @rafi-ai/cli@0.5.0 version`.
-3. Update `CHANGELOG.md` with user-facing changes, migrations, fixes, and known risks.
-4. Confirm package metadata points at `https://github.com/ttante/rafi`.
-5. Run the required checks from the release-candidate working tree.
-6. Publish npm packages from the intended package directories. Publish dependency packages before packages that depend on them. For example, publish `ai-foreman` before `@rafi-ai/cli` when the CLI depends on a new `ai-foreman` version.
-7. Create signed or annotated git tags for released package versions.
-8. Push tags to GitHub.
-9. Create GitHub Releases from the pushed tags and paste the matching changelog entries.
+## Before the release PR
 
-## Tag naming
+1. Bump versions in the packages being released (and `pnpm-lock.yaml`).
+2. Check each version is not already on npm: `npm view @rafi-ai/cli@<version> version`.
+3. Add a `CHANGELOG.md` entry: user-facing changes, migrations, fixes, known risks.
+4. Run the checks:
 
-Use package-scoped tags when package versions differ:
+   ```sh
+   pnpm -r build && pnpm -r typecheck && pnpm -r test
+   ```
 
-```sh
-git tag -a rafi-cli-v0.5.0 -m "@rafi-ai/cli v0.5.0"
-git tag -a ai-foreman-v1.2.0 -m "ai-foreman v1.2.0"
-```
+   With authenticated local Claude and Codex runtimes, a release candidate can
+   also run `pnpm run test:live-interview` (needs Linux `script`, Docker
+   Compose, and both runtime CLIs logged in; on demand, not CI).
 
-If every public package is released together at the same version, a repo-wide tag such as `v0.4.0` is acceptable.
-
-## GitHub Packages
-
-Rafi currently publishes packages to npm. GitHub Packages is not the canonical package registry for this repository unless that publishing target is added later.
+Packages are published to npm only, not GitHub Packages.
