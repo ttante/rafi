@@ -76,7 +76,7 @@ importers:
         specifier: ^1.4.0
         version: 1.5.0
       ai-foreman:
-        specifier: 2.0.1
+        specifier: 2.0.2
         version: link:../ai-foreman
       ajv:
         specifier: ^8.20.0

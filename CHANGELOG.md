@@ -6,6 +6,18 @@ This project follows semantic versioning for published npm packages where practi
 
 ## Unreleased
 
+## @rafi-ai/cli 0.10.2 / ai-foreman 2.0.2 - 2026-10-28
+
+`rafi-spec` and `special-agents` are unchanged (0.9.1).
+
+**Fixes**
+
+- An answer to the QA "what next?" question (retry, pause, waive, Planner) given with `build:decide` was treated as stale on resume and asked again. It is now kept, and it is bound to the QA rejection it answers.
+- Resuming at the "what next?" question after QA rejected the work, with the code unchanged, started a new QA review of the same code. It now reuses that rejection: it asks once (or uses the saved answer), and "retry" sends the rejection report to the Builder.
+- A finished QA turn whose reply was not valid JSON was recorded as an unknown outcome, which blocked every later QA turn until a manual guided recovery. It is now recorded as an invalid answer, so QA retries with a fresh review. Runs already stuck this way are fixed on resume when the saved reply provably fails to parse.
+- Once a QA recovery file passed revision 99, every resume stopped with "QA recovery boundary returned an incomplete or mismatched acceptance receipt" before QA ran. The latest recovery summary was picked by file name ("r92" sorts after "r125"), so every read wrote a new revision and the QA hand-off receipt never matched. The latest is now picked by revision number, checking for a pending recovery file no longer rewrites it, and the receipt and QA use the same copy. Stuck runs recover on the next resume with no manual cleanup.
+- When Rafi rejects its own QA hand-off, it now says so ("Rafi rejected its own QA hand-off before QA ran"), instead of recording an empty QA reply and reporting "QA response failed validation".
+
 ## @rafi-ai/cli 0.10.1 / ai-foreman 2.0.1 / special-agents 0.9.1 / rafi-spec 0.9.1 - 2026-10-26
 
 **Changes**
