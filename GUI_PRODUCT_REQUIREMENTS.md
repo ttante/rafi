@@ -25,6 +25,7 @@
 | D7 | **Maestro is a new agent type**, separate from Manager. Each instance's Manager additionally acts as that instance's **liaison** to Maestro. Maestro's model is user-selectable | 2026-10-28 | GUI-MAE-1, GUI-MGR-4 |
 | D8 | Support both **cloud and local agent runtimes** to maximize compatibility, including **Ollama** (v2/v3) | 2026-10-28 | §8.15 |
 | D9 | Every instance has a **configuration section** exposing the detailed settings (branches, agents, QA, limits, etc.) | 2026-10-28 | §8.16 |
+| D10 | **Questions reach the user wherever they are:** desktop notifications with answer choices, a pop-up modal, and a messenger-style **Questions sidebar** listing every active agent and its open questions. A question can be answered from the sidebar, the modal, a notification, the instance view or the terminal; the first answer wins | 2026-10-31 | GUI-ATT-6 to GUI-ATT-11 |
 
 ## 1. Summary
 
@@ -222,6 +223,14 @@ This is the highest-leverage UX element for throughput.
 - **GUI-ATT-3 (MUST)** Visual cues (badges on panes, tabs, project switcher, browser tab title/favicon) and optional browser/OS/email/Slack notifications, with per-event preferences and quiet hours.
 - **GUI-ATT-4 (SHOULD)** "Next needs me" shortcut that jumps to the oldest/highest-urgency attention item.
 - **GUI-ATT-5 (SHOULD)** Digest summaries of what happened while the user was away.
+- **GUI-ATT-6 (MUST)** *Questions sidebar (D10).* A collapsible section in the left sidebar works like a messenger. It lists every currently active Rafi agent across instances (for example "Instance 2 · Builder · T14"), and shows a badge on each agent with an open question. Opening an agent shows its open questions with their choices, and lets the user answer in place. It also links to that instance's view.
+- **GUI-ATT-7 (MUST)** *Question modal.* A new question pops up a modal with the message (what's blocked, why, what's waiting on it, what Rafi is doing meanwhile) and its choices. The user can answer, or dismiss it to answer later from the sidebar. Modals respect focus: one at a time, with a queue, and never over typing in progress. Users can turn modals off and keep only the badge.
+- **GUI-ATT-8 (MUST)** *Answer anywhere, once.* The same question can be answered from the sidebar, the modal, a desktop notification, the instance view, the terminal or Manager. They all write to the same question record (GUI-PLT-6). The first answer wins, and every other surface updates at once to show "answered in <place>".
+- **GUI-ATT-9 (MUST)** *Desktop notifications with choices.* Sent by the local daemon, not the browser tab, so they arrive when the GUI is closed. Where the OS allows, the notification shows the most likely choices and "More…", which opens the full question. Clicking the notification opens the question in the GUI. Platform support is in `AI_FOREMAN_REWRITE.md`, "Notifications".
+- **GUI-ATT-10 (SHOULD)** *Blocked-ticket questions* use the same choices as the CLI prompt in `AI_FOREMAN_REWRITE.md`, "Blocked tickets: keep going and ask": grant access, fixed it myself, skip for now, instructions, change with Planner, drop, stop. The build keeps going while the question is open.
+- **GUI-ATT-11 (SHOULD)** *Reminders.* An unanswered question re-notifies after a configurable time. The sidebar sorts by age, oldest first.
+- **GUI-ATT-12 (MUST)** *Questions up front.* After tickets are made, the instance shows one list of every question Rafi found by scanning the tickets in scope (permissions, credentials, manual checks, open decisions), with the tickets each one affects. The user answers each now, including "always" where it fits, or marks it "answer later", and the build starts with everything else. Before a build, only questions still unanswered, or new ones from changed tickets, are shown again. See `AI_FOREMAN_REWRITE.md`, "Ask everything up front".
+- **GUI-ATT-13 (MUST)** *Waiting is obvious.* When an instance is waiting on the user, its pane, the instance list and the browser tab title say "Waiting on you since <time>", so the user never mistakes waiting for building.
 
 ### 8.7 Manager and other Rafi roles
 
@@ -362,6 +371,8 @@ Fully specified now, phased later (§17). Requirements below are the baseline; t
 └────────┴──────────────────────────────────────────────────────────────────────┘
 ```
 
+The left sidebar also holds the collapsible **Questions** section (GUI-ATT-6). It lists every active agent with a badge for open questions, and the ⚑ Attention count in the top bar includes them.
+
 Layout principles:
 1. **Glanceable first, detail on demand.** The default pane answers "is it OK, what is it doing, does it need me?" in one look.
 2. **Attention over decoration.** Color and motion are reserved for state changes and things needing the user. Idle things are quiet.
@@ -391,7 +402,7 @@ Layout principles:
 | GUI-PLT-3 | **Command/action API** with idempotency keys, async operations with progress, structured errors, and the same validation as the CLI | Also Maestro's tool surface |
 | GUI-PLT-4 | **Safe-point pause/steer** semantics in the builder/QA/manager loops | Needs investigation in `ai-foreman` |
 | GUI-PLT-5 | **Instance abstraction** with isolated state and worktree/branch management | Today's model is one build per checkout |
-| GUI-PLT-6 | **Pending-decision registry**: every human-input point is a first-class record with type, options, context, urgency, timestamps | Builds on durable waiting records |
+| GUI-PLT-6 | **Pending-decision registry**: every human-input point is a first-class record with type, options, context, urgency, timestamps. Answerable from any surface; the first answer wins (D10) | Builds on durable waiting records; the rewrite's event log provides it (`AI_FOREMAN_REWRITE.md`) |
 | GUI-PLT-7 | **Cost/usage normalization** for Claude and Codex, including subscription vs API billing | |
 | GUI-PLT-8 | **Runner protocol** for remote execution, workspace provisioning, heartbeat, upgrade | |
 | GUI-PLT-9 | **Declarative instance spec** used by UI, API, CLI and Maestro | `rafi up spec.yaml` becomes natural |
@@ -569,3 +580,75 @@ instances:
     ticket_size: varied
     branch: { strategy: stacked-prs }
 ```
+
+
+## Appendix C — Idea backlog (candidate enhancements)
+
+These are proposed enhancements beyond the owner's original brief, gathered 2026-10-28. They are **not yet requirements**: each needs an owner decision to **promote** (becomes a numbered requirement in §8), **defer** (stays here) or **cut**. Everything in this appendix is 🔶 (my proposal).
+
+**Legend.** *Shortlist* = recommended for promotion into the PRD proper. *Phase* refers to §17. *Value* is the main reason to build it. Ideas that depend on an unmade decision say so.
+
+### C.1 Operator experience
+
+| ID | Idea | Description | Value | Phase | Status |
+|---|---|---|---|---|---|
+| GUI-IDEA-01 | **Run replay** | Scrub a past build like a recording: agent activity, tool calls, spans, decisions and attention items on a timeline, with speed control and jump-to-event. Builds on the existing span data and the full-run forensic replay work. | Post-mortems, trust, debugging, onboarding | 5 | **Shortlist** |
+| GUI-IDEA-02 | **Dry-run / what-if** | Before building, estimate cost, duration, parallelism, conflict risk and QA load from the plan and tickets, and compare launch options side by side (e.g. one branch vs stacked PRs, Claude vs Codex). Estimates are labelled as estimates (GUI-DASH-3). | Prevents expensive surprises; guides Maestro's launch plan | 4 | **Shortlist** |
+| GUI-IDEA-03 | **Pre-flight checklist** | A readiness gate before any launch: runtime auth and model availability, runner health, budget headroom, branch conflicts, dirty tree, required policies. Failures link to fixes. Extends the existing readiness/doctor concepts. | Avoids failed or half-started runs | 2 | **Shortlist** |
+| GUI-IDEA-04 | **Recipe marketplace** | Shareable recipes and instance specs (GUI-META-1/2, Appendix B) published to a team or org library, versioned, with ratings and usage counts. | Spreads best practice; reduces setup effort | 6 | Backlog |
+| GUI-IDEA-05 | **Agent black-box recorder / diagnostics bundle** | One click collects the config, events, spans, errors and redacted transcripts of an instance into a bundle for support or a teammate. Secrets are redacted (GUI-NFR security). | Faster support and debugging | 2 | Backlog |
+| GUI-IDEA-06 | **Handoff notes** | When a user leaves or at end of day, the Manager (per instance) or Maestro (project-wide) writes a "state of the world" brief: what happened, what is blocked, what to do first. | Continuity across people and days | 4 | Backlog |
+
+### C.2 Quality and trust
+
+| ID | Idea | Description | Value | Phase | Status |
+|---|---|---|---|---|---|
+| GUI-IDEA-07 | **Approval gates** | Configurable required human sign-off at chosen points (plan approval, risky ticket, before merge or PR), with reviewer groups, quorum and timeouts. Distinct from auto-approve (GUI-PLN-8). | Governance without blocking low-risk work | 3 (basic), 6 (groups) | **Shortlist** |
+| GUI-IDEA-08 | **Risk scoring per ticket / PR** | Score blast radius from touched files, ticket size, QA depth, migrations and security areas. Shown at ticket approval and before merge. | Directs reviewer attention | 5 | Backlog |
+| GUI-IDEA-09 | **Quality scorecards** | Per instance and per project: first-pass QA rate, remediation loops, test deltas, cost per accepted ticket, time waiting on humans. Extends GUI-DASH-1. | Makes quality visible and comparable | 5 | Backlog |
+| GUI-IDEA-10 | **Evidence viewer** | Show QA evidence, test output, command results and any screenshots or artifacts attached to each ticket in one place. | Reviewers can trust results without digging through logs | 2 | Backlog |
+| GUI-IDEA-11 | **Policy-as-code** | A repo-level policy file (e.g. `rafi-policy.yaml`) checked into git and enforced by the policy engine (GUI-PLT-10): allowed models and runtimes, required approvals, network rules, budgets. Maestro and the GUI cannot override it. | Reviewable, versioned governance; works in local and hosted modes | 3 (local), 6 (org) | **Shortlist** |
+
+### C.3 Cost and capacity
+
+| ID | Idea | Description | Value | Phase | Status |
+|---|---|---|---|---|---|
+| GUI-IDEA-12 | **Budget controls** | Hard caps, soft alerts and forecasts at instance, project, team and org level, with chargeback tags. Extends GUI-DASH-4. | Cost predictability | 5 | Backlog |
+| GUI-IDEA-13 | **Smart model routing** | Use cheaper or local models for low-risk roles and escalate to a stronger one on failure or low confidence, with the cost/quality trade-off shown and user override. Depends on GUI-RTM-3/4 (capability ratings). | Cost control without a quality penalty | 7 | **Shortlist** |
+| GUI-IDEA-14 | **Concurrency scheduler and quota pooling** | Pool provider rate limits and concurrency across all instances in a project or org, queue work fairly and show who is waiting for capacity. Extends GUI-INS-10. | Avoids provider throttling at scale | 3–6 | Backlog |
+
+### C.4 Integrations
+
+| ID | Idea | Description | Value | Phase | Status |
+|---|---|---|---|---|---|
+| GUI-IDEA-15 | **Issue-tracker sync** | Two-way sync between Rafi tickets and Jira, Linear and GitHub Issues (status, links, comments). | Fits existing team workflows | 6 | Backlog |
+| GUI-IDEA-16 | **Slack / Teams** | Approve plans and answer questions from chat; per-instance channels; digest posts. | Meets users where they are; faster responses | 6 | Backlog |
+| GUI-IDEA-17 | **Escalation and paging** | PagerDuty/Opsgenie-style alerts when a build is stuck, over budget or failing repeatedly, with on-call routing. | Enterprise operations | 6 | Backlog |
+| GUI-IDEA-18 | **CI/CD hooks** | Trigger or gate Rafi runs from existing pipelines, and report Rafi results back to CI. | Integrates with release processes | 6 | Backlog |
+| GUI-IDEA-19 | **Public API / SDK / webhooks / MCP server** | Stable external API, client SDKs, webhooks for events, and an MCP server so other agents can drive Rafi. Shares the action API (GUI-PLT-3). | Extensibility and ecosystem | 4–6 | Backlog |
+
+### C.5 Enterprise
+
+| ID | Idea | Description | Value | Phase | Status |
+|---|---|---|---|---|---|
+| GUI-IDEA-20 | **SIEM export, legal hold, retention rules** | Stream the audit log (GUI-ENT-4) to SIEM; freeze data under legal hold; retention by data class. | Compliance | 6 | Backlog |
+| GUI-IDEA-21 | **Customer-managed keys and data residency** | Customer-managed encryption keys and region pinning for control-plane data. | Regulated customers | 6 | Backlog |
+| GUI-IDEA-22 | **Break-glass access** | Time-boxed elevated access with required justification, extra audit and automatic expiry. | Secure emergency operations | 6 | Backlog |
+| GUI-IDEA-23 | **Org model allowlists / "no cloud models" mode** | Org policy restricting which runtimes and models may be used, including a local-only mode (GUI-RTM-6). | Data-sensitive customers | 6–7 | Backlog |
+| GUI-IDEA-24 | **SLA dashboards and status page for managed runners** | Uptime, queue time and incident history for Rafi-managed runners. Applies to the managed-runner offering (D5). | Trust for the managed offering | 6 | Backlog |
+| GUI-IDEA-25 | **Admin usage report** | "Who ran what, where, for how much", exportable, by user, team, project and model. Extends GUI-DASH-5 and GUI-ENT-5. | Cost accountability | 6 | Backlog |
+
+### C.6 Delight and focus
+
+| ID | Idea | Description | Value | Phase | Status |
+|---|---|---|---|---|---|
+| GUI-IDEA-26 | **Morning digest** | Summary of what finished, failed or is waiting on you since last visit, delivered in-app and optionally by email or chat. Extends GUI-ATT-5. | Resumes work in seconds after time away | 3 | **Shortlist** |
+| GUI-IDEA-27 | **Focus mode** | Hide everything except the single item that needs you (or one instance), to reduce distraction. Supports the brief's goal of minimizing confusion and distraction. | Lower cognitive load | 3 | Backlog |
+| GUI-IDEA-28 | **Ambient status** | Menu-bar/tab-title indicator, favicon states and optional audio cues for attention items. Extends GUI-ATT-3. | Peripheral awareness without watching the screen | 3 | Backlog |
+| GUI-IDEA-29 | **Time-saved estimate** | A rough, clearly labelled estimate of work done while the user was away. Estimation method must be disclosed; never presented as measured. | Motivation and reporting | 5 | Backlog |
+
+### C.7 Summary and promotion
+
+- **29 ideas** in 6 groups. **7 are shortlisted**: GUI-IDEA-01 (replay), 02 (dry-run), 03 (pre-flight), 07 (approval gates), 11 (policy-as-code), 13 (smart routing), 26 (morning digest).
+- Dependencies worth noting: IDEA-13 needs capability ratings (GUI-RTM-3/4); IDEA-11 and IDEA-23 need the policy engine (GUI-PLT-10); IDEA-02 needs reliable cost estimation (GUI-DASH-3); IDEA-04, 15–25 are hosted/enterprise-leaning.
+- **Next step:** the owner marks each as promote / defer / cut. Promoted ideas move into §8 with requirement IDs and acceptance criteria; the rest stay here.

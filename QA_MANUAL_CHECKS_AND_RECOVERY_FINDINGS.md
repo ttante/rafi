@@ -1,7 +1,9 @@
 # QA manual checks and recovery findings
 
 Found 2026-10-28 while resuming moneyTree build run `25630461-53a6-416b-8a15-92a85299665c` (ticket T001).
-Status: **findings only. No rafi changes have been approved yet.**
+Status:
+- **Section 2 (the three bugs): fixed, shipped in `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2 (2026-10-28).**
+- **Sections 1 and 3, and the loose ends in section 2: folded into the ai-foreman rewrite.** See `AI_FOREMAN_REWRITE.md`, "Work folded into the rewrite". The Planner wording change in section 1 can also be done now on 0.10.x (track D).
 
 Terms used throughout:
 - **QA rejected the work:** the QA review ran to the end and decided the implementation doesn't meet the ticket.
@@ -75,6 +77,8 @@ A full version of this means a new kind of build pause, plus resume, recovery, s
 
 ### Status of the fixes
 
+**Update 2026-10-30:** all three fixes were kept and shipped in 0.10.2 (see `CHANGELOG.md`). The notes below are from 2026-10-28, before release.
+
 - All three fixes are in the working tree and **not committed**.
 - Each has a test that fails without the fix:
   - `test/qaNonconvergenceAnswerSurvivesResume.test.ts`
@@ -85,11 +89,11 @@ A full version of this means a new kind of build pause, plus resume, recovery, s
   - The stuck turn was reclassified, and QA restarted with the same evidence.
   - QA rejected the work (review 14), and the answer "retry" went straight to the Builder.
   - The Builder built the approval relay (`scripts/starnet-consent-relay.js`).
-- **Decide:** keep, revise or revert these changes.
+- **Decide:** keep, revise or revert these changes. (Decided: kept and released in 0.10.2.)
 
 ### Other loose ends
 
-- The Builder's last fix was journaled as `delivery-uncertain`, even though its response and code changes were saved and the hand-off moved to `recheck-required`. This needs a look: `qaFailureDelivery.ts` lines 316 and 463.
+- The Builder's last fix was journaled as `delivery-uncertain`, even though its response and code changes were saved and the hand-off moved to `recheck-required`. This needs a look: `qaFailureDelivery.ts` lines 316 and 463. (The same mislabel caused the T002 stop on 2026-10-29; see item 6 in `MALFORMED_REPLY_AND_BLOCKED_BUILD_IMPROVEMENTS.md`.)
 - Claude answered rafi's "what next?" decision three times without asking the user. Decisions meant for the user should be relayed to them. Running builds in the background hides those prompts from the user, so whoever runs the build needs to surface them.
 
 ## 3. Initiative: simplify QA pause and resume

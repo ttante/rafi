@@ -31,6 +31,9 @@ pnpm-lock.yaml
 # Ticket bookkeeping and captured diagnostic artifacts.
 tickets.yaml
 crash-fix-docs/*audit.json
+old-implemented-plans/crash-fix-docs/*audit.json
 crash-fix-docs/*evidence.json
+old-implemented-plans/crash-fix-docs/*evidence.json
 crash-fix-docs/*terminal-output.txt
-docs/manager-qa-and-resume-validation.json
+old-implemented-plans/crash-fix-docs/*terminal-output.txt
+old-implemented-plans/docs/manager-qa-and-resume-validation.json

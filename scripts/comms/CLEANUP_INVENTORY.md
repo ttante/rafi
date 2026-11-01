@@ -1,6 +1,6 @@
 # Communication migration cleanup inventory
 
-Implementation dispositions, updated 2026-10-24 UTC. This records the working tree, not a release approval. The integrated offline and live gates remain open until the [migration plan](../../STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md) records final results. All changes ship together.
+Implementation dispositions, updated 2026-10-24 UTC. This records the working tree, not a release approval. The integrated offline and live gates remain open until the [migration plan](../../old-implemented-plans/STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md) records final results. All changes ship together.
 
 ## Removed from active result acceptance
 

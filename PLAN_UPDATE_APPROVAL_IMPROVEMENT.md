@@ -1,6 +1,6 @@
 # Plan update approval: future improvement
 
-Status: **to investigate.** Nothing has been changed yet. Raised 2026-10-28 during the moneyTree T001 resume.
+Status: **to investigate; folded into the ai-foreman rewrite.** Nothing has been changed yet. Raised 2026-10-28 during the moneyTree T001 resume. The rewrite builds this into the new engine instead of patching the current one; see `AI_FOREMAN_REWRITE.md`, "Work folded into the rewrite". The questions below go into the rewrite requirements doc.
 
 ## Today's behavior
 

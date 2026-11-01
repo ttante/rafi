@@ -1,6 +1,6 @@
 # Communication migration preflight
 
-Historical preimplementation baseline and current regression entry point for [the migration plan](../../STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md), not production communication adapters. The five steps are baseline, provider experiments, representative contracts, regression fixtures, and cleanup inventory. Production implementation dispositions are now recorded in [the cleanup inventory](CLEANUP_INVENTORY.md); the migration plan holds the current release-gate status. The dated baseline numbers below describe earlier code, not the current candidate.
+Historical preimplementation baseline and current regression entry point for [the migration plan](../../old-implemented-plans/STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md), not production communication adapters. The five steps are baseline, provider experiments, representative contracts, regression fixtures, and cleanup inventory. Production implementation dispositions are now recorded in [the cleanup inventory](CLEANUP_INVENTORY.md); the migration plan holds the current release-gate status. The dated baseline numbers below describe earlier code, not the current candidate.
 
 ## 1. Reproducible baseline
 
