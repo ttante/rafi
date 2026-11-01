@@ -1,6 +1,6 @@
 # Rafi TODO
 
-Work is split into parallel tracks. See "Parallel tracks" in [`AI_FOREMAN_REWRITE_PLANNING_GUIDE.md`](AI_FOREMAN_REWRITE_PLANNING_GUIDE.md). Run no more than 3–4 at once.
+Work is split into parallel tracks. See "Parallel tracks" in [`AI_FOREMAN_REWRITE_PLANNING_GUIDE.md`](AI_FOREMAN_REWRITE_PLANNING_GUIDE.md). Run no more than 3 at once.
 
 ## Track A: ai-foreman rewrite planning (critical path)
 
@@ -26,6 +26,11 @@ Work is split into parallel tracks. See "Parallel tracks" in [`AI_FOREMAN_REWRIT
      - Does QA get the same tags?
      - Fresh sessions for QA too?
      - Tags now, or start with file-pattern rules and on-demand skills?
+   - **Instruction-text fixes, moved from the old track D (decided 2026-11-01: rewrite only, no 0.10.x patch):**
+     - Remove the triple-check lines from QA's instructions (malformed doc item 12).
+     - No quiet substitutes: the builder reports "blocked" instead of swapping in a different stack (malformed doc item 2).
+     - Planner wording for checks only a person can do (QA findings doc, section 1, "A lighter alternative", point 1).
+     - A validate-before-telling instruction for each rafi agent, and removing three contradictions: "ask the user" in unattended builds, a skill that waits for user picks, and tracker rules that disagree with rafi ([`AGENT_INSTRUCTIONS_REVIEW.md`](AGENT_INSTRUCTIONS_REVIEW.md), "When").
 
 ## Track B: scenario test harness
 
@@ -35,13 +40,6 @@ Work is split into parallel tracks. See "Parallel tracks" in [`AI_FOREMAN_REWRIT
 
 6. **Keep building moneyTree on rafi 0.10.x**, locally, through Remote Control. Every failure is a candidate scenario for track B.
 
-## Track D: small fixes to 0.10.x
-
-7. **Remove the triple-check lines from QA's instructions.** Malformed doc item 12.
-8. **No quiet substitutes.** Malformed doc item 2: the builder reports "blocked" instead of swapping in a different stack.
-9. **Planner wording for checks only a person can do.** QA findings doc, section 1, "A lighter alternative", point 1 (prompt change only).
-10. **Agent instruction fixes.** See [`AGENT_INSTRUCTIONS_REVIEW.md`](AGENT_INSTRUCTIONS_REVIEW.md), "Now or in the rewrite": a validate-before-telling instruction for each rafi agent, and removing three contradictions ("ask the user" in unattended builds, a skill that waits for user picks, and tracker rules that disagree with rafi).
-
 ## Later
 
-11. **Rafi GUI.** See [`GUI_PRODUCT_REQUIREMENTS.md`](GUI_PRODUCT_REQUIREMENTS.md). Product requirements draft 0.2, with open questions in §16 and phasing in §17. It's built after the rewrite, and the rewrite covers its engine needs (§11). Answering the §16 open questions can happen any time.
+7. **Rafi GUI.** See [`GUI_PRODUCT_REQUIREMENTS.md`](GUI_PRODUCT_REQUIREMENTS.md). Product requirements draft 0.2, with open questions in §16 and phasing in §17. It's built after the rewrite, and the rewrite covers its engine needs (§11). Answering the §16 open questions can happen any time.

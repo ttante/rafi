@@ -94,21 +94,21 @@ Measured on 2026-10-29: ai-foreman 2.0.2, `@rafi-ai/cli` 0.10.2.
 
 ## Work folded into the rewrite
 
-These docs describe fixes to ai-foreman. The rewrite replaces that code, so they're built into the new engine instead of patched in the old one. Items marked **now** are small enough to also do on 0.10.x (track D in the planning guide). The requirements doc (guide step 1) must cover every item below, and carry each doc's open questions into its own open questions.
+These docs describe fixes to ai-foreman. The rewrite replaces that code, so they're built into the new engine instead of patched in the old one. **Decided 2026-11-01:** none of it is patched on 0.10.x, including the instruction-text items once marked "now"; they're all built in the rewrite. The requirements doc (guide step 1) must cover every item below, and carry each doc's open questions into its own open questions.
 
 **From `MALFORMED_REPLY_AND_BLOCKED_BUILD_IMPROVEMENTS.md`** (moneyTree T002, 2026-10-29):
 - 1: permission check for the whole build, before step 1 (principle 5).
-- 2: no quiet substitutes; the builder reports "blocked" instead of swapping in a different stack. **Now.**
+- 2: no quiet substitutes; the builder reports "blocked" instead of swapping in a different stack.
 - 3: QA can run the full test suite, including local servers and temp files (principle 5).
 - 4–6: one shared malformed-reply handler, one repair try, and the correct label (principles 4 and 6).
 - 7: plain-English stops (principle 7).
 - 8–11: smaller replies: each fact once, no echoed IDs, cite recorded commands, less nesting (principle 6).
-- 12: remove the triple-check lines (principle 12). **Now.**
+- 12: remove the triple-check lines (principle 12).
 
 **From `QA_MANUAL_CHECKS_AND_RECOVERY_FINDINGS.md`** (moneyTree T001, 2026-10-28; its three bugs shipped in 0.10.2):
 - Section 1, checks only a person can do. **Decided 2026-11-01: both.** The lighter alternative is the default; the full choices A, B and C stay available as a per-project or per-ticket setting. The options were:
   - the full choices: A (manual checks stop the build), B (no manual checks), and C (manual checks that don't stop the build);
-  - the lighter alternative: Planner wording plus an operator checklist note (**now**, prompt change only), and an "I verified it myself" answer to "what next?".
+  - the lighter alternative: Planner wording plus an operator checklist note (prompt change only), and an "I verified it myself" answer to "what next?".
 - Section 2, loose ends:
   - The Builder fix mislabeled `delivery-uncertain` (same as malformed item 6).
   - Decisions meant for the user must reach the user, including in background builds. No agent answers them on the user's behalf. See the pending-decision registry below.
@@ -326,7 +326,7 @@ Decided 2026-11-01. Rafi gives each agent only what its ticket needs. Today ever
 - **QA gets the same tags as the builder,** so it reviews against the same rules.
 - **A fresh agent per ticket, for the builder and QA, is the default.** This changes today's `session_strategy` default, `compact`, to `fresh`. The project setup script (principle 15) keeps each fresh start cheap.
 - **Reusing one agent across tickets is an override.** That agent gets the tags of every ticket in scope (`--steps` or `--to-ticket`). They're re-checked before each ticket, because the scope can change mid-build; tags are added, never removed.
-- **Not decided yet:** whether each ticket's likely files also add tags automatically, as a safety net.
+- **File patterns add tags too (decided 2026-11-01).** Each tag can list file patterns (for example `ui`: `**/*.tsx`, `**/*.css`). Rafi adds a tag, without asking an AI, when a ticket's likely files match, and again for QA when the builder's changed files match. Tags are only added, never removed, and every added tag is shown with its reason. Why: the Planner and QA preparation are both AI checks that can miss the same thing; a file match is a fixed rule that can't, and it's how other tools scope rules (Cursor's glob rules).
 - **Scenario tests:**
   - a non-AI ticket gets no AI rules;
   - an unknown tag is rejected;

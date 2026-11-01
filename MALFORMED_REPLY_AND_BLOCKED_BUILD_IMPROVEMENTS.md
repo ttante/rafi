@@ -1,6 +1,6 @@
 # Malformed reply and blocked build: improvements
 
-Status: **proposed, not started.** Most items are folded into the ai-foreman rewrite (`AI_FOREMAN_REWRITE.md`, "Work folded into the rewrite"). Items 2 and 12 are instruction-text changes and can be done now on 0.10.x (track D). See "Now or in the rewrite" below.
+Status: **proposed, not started.** All items are folded into the ai-foreman rewrite (`AI_FOREMAN_REWRITE.md`, "Work folded into the rewrite"). Items 2 and 12 were planned for 0.10.x too; on 2026-11-01 that was dropped, so they're built in the rewrite only.
 Found 2026-10-29 on moneyTree run `1ed6893e-86dd-4d37-bc2e-7393d0d3dd69`, ticket T002.
 
 ## What happened
@@ -47,21 +47,21 @@ Rafi goes through Codex's agent loop, so it doesn't control how the final JSON i
 - Retry with the error.
 - Let the builder write its report in plain text, then make one short, strictly formatted call that turns it into JSON. This needs a direct model call (an API key), which rafi doesn't make today.
 
-## Now or in the rewrite
+## When
 
 The rewrite replaces the code most of these items touch, so building them twice would waste effort and cause merge conflicts.
 
 | Item | When | Why |
 |---|---|---|
 | 1. Permission check for the whole build | Rewrite | New flow before step 1; rewrite principle 5 |
-| 2. No quiet substitutes | **Now** (track D), and keep in the rewrite | Builder instruction text only |
+| 2. No quiet substitutes | Rewrite (was "now" on 0.10.x; dropped 2026-11-01) | Builder instruction text only |
 | 3. QA runs the full test suite | Rewrite | Sandbox and permission model; part of item 1 |
 | 4. Shared malformed-reply handler | Rewrite | Rewrite principle 6 |
 | 5. One automatic repair try | Rewrite | Rewrite principles 4 and 6 |
 | 6. Correct label | Rewrite | `delivery-uncertain` goes away with the QA recovery machinery |
 | 7. Plain-English stops | Rewrite | Rewrite principle 7 |
 | 8–11. Smaller replies | Rewrite | Reply formats are redesigned; rewrite principle 6 |
-| 12. Remove triple-check lines | **Now** (track D), and keep in the rewrite | Instruction text only; rewrite principle 12 |
+| 12. Remove triple-check lines | Rewrite (was "now" on 0.10.x; dropped 2026-11-01) | Instruction text only; rewrite principle 12 |
 
 ## Improvements
 

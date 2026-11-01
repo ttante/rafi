@@ -3,7 +3,7 @@
 Found 2026-10-28 while resuming moneyTree build run `25630461-53a6-416b-8a15-92a85299665c` (ticket T001).
 Status:
 - **Section 2 (the three bugs): fixed, shipped in `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2 (2026-10-28).**
-- **Sections 1 and 3, and the loose ends in section 2: folded into the ai-foreman rewrite.** See `AI_FOREMAN_REWRITE.md`, "Work folded into the rewrite". The Planner wording change in section 1 can also be done now on 0.10.x (track D).
+- **Sections 1 and 3, and the loose ends in section 2: folded into the ai-foreman rewrite.** See `AI_FOREMAN_REWRITE.md`, "Work folded into the rewrite". The Planner wording change in section 1 is built in the rewrite too (a 0.10.x fix was dropped 2026-11-01).
 
 Terms used throughout:
 - **QA rejected the work:** the QA review ran to the end and decided the implementation doesn't meet the ticket.

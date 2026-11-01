@@ -21,18 +21,17 @@ A step-by-step guide to planning and carrying out [`AI_FOREMAN_REWRITE.md`](AI_F
 
 ## Parallel tracks
 
-Up to four tracks can run at the same time, each in its own session and its own branch (worktree). Merge them one at a time.
+Up to three tracks can run at the same time, each in its own session and its own branch (worktree). Merge them one at a time.
 
 | Track | What | Where | Notes |
 |---|---|---|---|
 | A | Rewrite planning: steps 1–9 below | Branch `rewrite/plan` | The critical path, so start it first. The steps within it run in order, never in parallel. |
 | B | Scenario test harness against today's rafi | Its own branch | Start the harness itself early (scripted fake agent, running the real `rafi` command in a temporary project). Write the scenarios after step 5 locks them, then finish step 6. |
 | C | moneyTree builds on rafi 0.10.x | Locally, on the Mac | Check on them from your phone with Remote Control. Every failure is a candidate scenario for track B. |
-| D | Small fixes to 0.10.x | Its own branch | Only the items marked **now** in `AI_FOREMAN_REWRITE.md`, "Work folded into the rewrite". Everything else waits for the rewrite. |
 
 Rules:
-- **No more than 3–4 tracks at once.** Every track ends with you reviewing it. With more, the reviews pile up and your answers to each session suffer.
-- **Don't fix ai-foreman twice.** Any fix to the current engine that isn't marked **now** goes into the rewrite requirements instead.
+- **No more than 3 tracks at once.** Every track ends with you reviewing it. With more, the reviews pile up and your answers to each session suffer.
+- **Don't fix ai-foreman twice.** Fixes to the current engine go into the rewrite requirements instead. (A track D of small 0.10.x fixes was dropped on 2026-11-01; its items are in the rewrite.)
 - **Tracks A and B share files** (`REWRITE_SCENARIOS.md`). Track B only edits it in step 6.
 
 ## Planning

@@ -64,7 +64,6 @@ OpenAI and Claude Code both say contradictions hurt. These are in rafi's instruc
 5. **Measure, don't guess.** Run the scenario harness with the current instructions and with the trimmed ones. Keep a cut only if the pass rate holds. Track instruction characters per turn in the event log.
 6. **Check compiled files for problems.** Claude Code's `/doctor prompt-audit` looks for "instructions written for older models, references to files or commands that don't exist, and files that contradict each other" (memory docs above). Run it on a compiled project during the rewrite.
 
-## Now or in the rewrite
+## When
 
-- **Now (0.10.x, track D):** the validate-before-telling lines for each role (improvement 1), and fixing contradictions 1–3 in the text. These are wording changes in `special-agents` and `renderMarkdown.ts`.
-- **Rewrite:** everything else, since it changes how prompts are assembled (sending once, per-ticket packs, skills on demand, smaller turns, regenerated files, measurement).
+**Decided 2026-11-01: all of it is built in the rewrite.** The validate-before-telling lines for each role (improvement 1) and contradictions 1–3 were planned as 0.10.x wording fixes (in `special-agents` and `renderMarkdown.ts`); that was dropped. Everything else changes how prompts are assembled (sending once, per-ticket packs, skills on demand, smaller turns, regenerated files, measurement).
