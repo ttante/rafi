@@ -71,7 +71,7 @@ Measured on 2026-10-29: ai-foreman 2.0.2, `@rafi-ai/cli` 0.10.2.
 - `build:start-over` and `build:reset` → merged into one `rafi reset` that asks: this build, or everything? It can also reset the plan, in 1.0.
 - **New: `rafi migrate`.** A one-time, one-way conversion of a 0.10.x project to 1.0 formats. The new engine has no backward compatibility; this command is how existing projects, such as moneyTree, move over. Required for 1.0.
 - `build:resume` → folded into `rafi resume`, which needs no recovery mode because the interrupted step is redone (principle 3).
-- `state` → replaced by built-in portability. Rafi's build progress (ticket status, open questions, saved answers and permissions) lives in a small text file committed with the project; a database file isn't committed, because it's binary and conflicts between branches. On another computer you clone, run `rafi resume`, and the build continues.
+- `state` → replaced by built-in portability. Rafi's build progress (ticket status, open questions and saved answers) lives in a small text file committed with the project, rewritten from the database at every safe point; "always allow" permissions stay on each machine; a database file isn't committed, because it's binary and conflicts between branches. On another computer you clone, run `rafi resume`, and the build continues.
 - **Logs can be exported.** `rafi create` asks where build logs go: kept on this computer (the default), or saved in the project so they travel with git. A separate `rafi logs export` writes one file (all runs, or one with `--run <id>`), and `rafi logs import` loads it on another computer for debugging.
 
 **`rafi start` flags, decided 2026-11-01** (45 today, counted from `docs/cli.md`). Settings you choose once live in `rafi-config.yaml`, and flags are one-off overrides. The GUI and Maestro read the same settings (GUI-CFG-1, GUI-PLT-9), and org policies can lock them (GUI-ENT-3).
@@ -272,6 +272,7 @@ Not part of the rewrite, but not blocked by it: GUI-PLT-1 (daemon), 7 (cost norm
 1. **One source of truth.** A single SQLite database holds an append-only event log, recording every event in order. Current state is calculated from it. There are no JSON run files or recovery folders duplicating it.
 2. **A small state machine.**
    - Each ticket is in one of about six states: queued, building, reviewing, fixing, done, blocked.
+   - Builds and projects have their own small sets of states too (build: running, waiting on you, paused, stopping, stopped, finished, failed; project: draft through archived), so the GUI's labels map from them (decided 2026-11-01, `REWRITE_REQUIREMENTS.md` Q-LIFE-1).
    - Transitions live in one pure function, `next(state, event)`, which is tested over every combination.
 3. **Every step can be safely redone.** Each agent turn is keyed by run, ticket and step. After a crash, rerun the step instead of proving what happened. Redoing one agent turn is cheap; stopping the build is expensive.
 4. **Retry by default.** Every error is sorted into one of three groups:
