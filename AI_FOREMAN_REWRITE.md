@@ -350,7 +350,8 @@ Decided 2026-11-01. Rafi is built for AFK builds, so a question in the middle of
   - permissions: internet, local servers, installs, live services;
   - credentials or secrets the ticket needs;
   - decisions the Planner flagged as open;
-  - the plan-update setting, if it isn't saved yet.
+  - the plan-update setting, if it isn't saved yet;
+  - the CI confirmation, when rafi manages git, and test time limits that earlier builds already went over (decided 2026-11-02). A time limit first hit mid-build is asked then, and isn't a gap.
 - **Not in the scan:** checks only a person can do (decided 2026-11-01, step 5 review). QA verifies what it can, and rafi asks the rest when the build reaches that ticket; that question is expected, not a gap. See "Work folded into the rewrite" above, under `QA_MANUAL_CHECKS_AND_RECOVERY_FINDINGS.md` section 1.
 - **How it asks:** one list, all at once. Each item says which tickets need it.
 - **Choices per item:** answer now, including "always" where it fits, or **answer later**.
@@ -480,7 +481,7 @@ Decided 2026-11-01. Agents can use tools such as a browser or a phone when a che
   - **Why:** so you or QA can see exactly what failed without re-running it, and so QA's "passed" cites a screenshot rather than a claim (principle 13).
   - **Where:** with the build logs, so `rafi logs export` includes them.
   - **How long:** a setting with five choices: until the ticket is finished, until the build is finished, the last N builds, N days, or until you delete them. **The default is the last 5 builds.**
-- **Permission:** QA needs access to local servers. The upfront permission check covers it (malformed-reply item 3).
+- **Permission:** QA needs access to local servers for browser checks; tests are run by rafi with the build's grants (decided 2026-11-02). The upfront permission check covers both (malformed-reply item 3).
 
 ### Known tools
 

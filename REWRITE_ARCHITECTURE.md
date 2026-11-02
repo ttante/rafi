@@ -9,7 +9,7 @@ Nothing here reopens a decided item. Where REQ or SCN left a detail to this plan
 
 ## 0. How to read this doc
 
-- Code citations are `path:line`, relative to `packages/` unless the path says otherwise. I checked each one on 2026-11-01 against `feature/rewrite`.
+- Code citations are `path:line`, relative to `packages/` unless the path says otherwise; `node_modules/…` paths are relative to the repo root. I checked each one on 2026-11-01 against `feature/rewrite`.
 - **Unverified** marks something I couldn't check, with what would confirm it.
 - Requirement IDs (CMD-…, FLAG-…, NEW-…, FMT-…) are from REQ. Scenario IDs (S-…), D1–D9 and OQ-1–6 are from SCN. Q-… decisions are REQ 9.0 and 9.1 (9.1 rows are decided as recommended unless 9.0 says otherwise).
 - "Line" budgets count lines of TypeScript, comments included, as `wc -l` does.
@@ -131,7 +131,7 @@ Two rules hold the boundaries:
 | Module | From today | Today | Budget |
 |---|---|---|---|
 | `tickets/` | `ai-foreman/src/tickets/*` except `stateDb.ts` and `events.ts` (ticket status moves to the log, FMT-S2) | 5,086 | 4,200 |
-| `git/` | `ai-foreman/src/branch/*` except `resume.ts`; `runner.ts` (1,181) becomes `build/steps/deliver.ts` plus helpers | 3,186 | 2,400 |
+| `git/` | `ai-foreman/src/branch/*` except `resume.ts`; `runner.ts` (1,181) becomes `build/steps/deliver.ts` plus helpers | 3,023 | 2,400 |
 | `graph/` | `ai-foreman/src/graph/*`, `hostGraphApplicability.ts` (Graphify kept, RW:212) | 2,342 | 2,200 |
 | `sources/` | `ai-foreman/src/sources/sourceRegistry.ts` | 507 | 500 |
 | `planning/` | `rafi/src/plan.ts`, `structuredPlan.ts`, `ticketPlan.ts`, `planningDriver.ts`, `planningRuntime.ts`, `grillAudit.ts`; `ai-foreman/src/ticketPopulation.ts`, `ticketPlanning.ts`, `ticketPopulationPaging.ts` | 3,779 | 2,800 |
@@ -185,6 +185,7 @@ CREATE TABLE events (
   at        TEXT NOT NULL,                     -- ISO time from deps.clock
   actor     TEXT NOT NULL,                     -- user | engine | agent:<role> | manager | maestro | api
   source    TEXT,                              -- terminal | notification | rafi-answer | manager | gui | auto-approve | flag | saved | progress-file
+  origin    TEXT NOT NULL DEFAULT 'local' CHECK (origin IN ('local', 'imported')), -- imported by `rafi logs import`; never folded
   idem_key  TEXT,                              -- idempotency key of the action that wrote it (GUI-PLT-3)
   data      TEXT NOT NULL                      -- JSON, validated against rafi-spec before writing; at most 64 KB
 );
@@ -246,7 +247,8 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 | `plan.reset` | state | `rafi reset`, plan | `to_rev`, `tickets` |
 | `scope.approved` | state | the selected scope is approved (PRM-71) | `fp` (fingerprint of plan revision and material ticket fields), `by` |
 | `tickets.populated` | state | the Ticket Maker's proposal is applied | `plan_rev`, `added`, `retired`, `group` |
-| `tickets.changed` | state | a safe point or a `tickets` command sees edited definitions | `by: user \| planner \| ci`, `items: [{ticket, field}]`, `material` |
+| `tickets.changed` | state | a safe point or a `tickets` command sees edited definitions | `by: user \| planner`, `items: [{ticket, field}]`, `material` |
+| `ticket.added` | state | rafi adds one of its own fix tickets (6.10, 7.10) | `ticket`, `source: ci \| recheck`, `requirements`, `hint` (which ticket probably caused it) |
 | `ticket.status_set` | state | `rafi tickets update`, `complete`, `block`, `unblock` (`tickets cancel` writes `ticket.dropped`) | `status`, `summary`, `validation`, `evidence`, `by` |
 | `ticket.tags_added` | state | the Planner, QA preparation, a file pattern, you, or a scope change adds tags | `tags: [{tag, reason}]` (OUT-19) |
 | `ticket.group_created`, `ticket.risk_waiver_recorded`, `future_work.added`, `future_work.accepted`, `recommendation.recorded`, `recommendation.resolved` | state | the tracker commands that write these today | as today's tracker records (`ai-foreman/src/tickets/stateDb.ts:152-285` has 13 tables; these events replace them) |
@@ -271,7 +273,7 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 | Type | Class | Written when | Fields |
 |---|---|---|---|
 | `ticket.started` | state | the loop picks a ticket | `resume_step` |
-| `step.started` | state | a step begins | `step: prepare \| build \| review \| fix \| deliver`, `attempt` |
+| `step.started` | state | a step begins | `step: prepare \| build \| check \| review \| fix \| deliver`, `attempt` |
 | `step.failed` | state | a step's turn budget runs out, or circling stops it | `category`, `reason` (one line), `circling` |
 | `turn.retry` | state | a turn is scheduled again | `key`, `category`, `attempt`, `delay_ms`, `reason` |
 | `turn.intent` | detail | before a turn is sent (crash boundary 1 follows) | `key`, `role`, `runtime`, `model`, `effort`, `fast`, `session: new \| reused`, `schema`, `instruction_chars` (NEW-MEAS-4), `instruction_digest`, `tools`, `grants`, `redo` |
@@ -290,14 +292,18 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 | `requirements.written` | state | the prepare step writes the requirements file | `path`, `fp`, `depth`, `depth_raised_from` (S-QA-5), `count`, `person_only: [n]` |
 | `requirements.receipt` | detail | a QA review turn starts and ends | `key`, `path`, `fp_supplied`, `fp_observed`, `status: delivered \| missing \| unreadable \| changed`, `read` (NEW-REQ-6) |
 | `builder.reported` | state | a builder reply validates | `kind: done \| blocked \| needs-input`, `summary`, `runs`, `block`, `question` (6.2) |
-| `check.run` | state | rafi finishes running a test command (6.9) | `run` (short number), `ticket`, `command`, `asked_by: builder \| qa \| rafi`, `tree` (git tree id it ran against), `exit_code`, `outcome: passed \| failed \| timed-out \| too-slow \| changed-code`, `duration_ms`, `output` (blob), `changed_tracked` (files a check changed, when any) |
+| `check.run` | state | rafi finishes running a test command (6.9) | `run` (short number), `ticket`, `command`, `asked_by: builder \| qa \| rafi`, `tree` (git tree id it ran against), `exit_code`, `outcome: passed \| failed \| timed-out \| too-slow \| changed-code \| refused`, `tests: [{name, file, outcome}]` (when the runner reports per-test results), `duration_ms`, `output` (blob), `changed_tracked` (files a check changed, when any), `restored` (QA's runs: tracked files put back) |
+| `checks.passed` / `checks.failed` | state | the check step ends (6.9) | `runs`, `reused` (runs not rerun) / `failing: [{req, run}]`, `signature` |
+| `attempt.summary` | state | a builder turn ends | `attempt`, `tree`, `files_read`, `runs` (what circling and reference checks need, kept at every capture level; 5.5) |
 | `facts.snapshot` | state | after each builder turn | `key`, `tree` (git tree id), `base`, `files` (changed files, computed by rafi) |
 | `facts.mismatch` | detail | an agent's claim disagrees with rafi's record | `key`, `claim`, `record` (NEW-FACT-1) |
 | `verdict.recorded` | state | a QA verdict validates | `attempt`, `results: [{req, status, runs, needs, note}]`, `rejected`, `unverified`, `signature`, `circling` |
 | `qa.isolation` | detail | a review starts | `mode: in-place \| copy`, `why`, `files`, `bytes`, `ms: {copy, hash, verify, cleanup}` (NEW-COPY-1) |
 | `fix.granted` | state | "Retry another Builder fix" or Manager `/request-attempt` | `by`, `reason` |
 | `waiver.recorded` | state | "I verified it myself" or "Explicitly waive QA" | `kind`, `note`, `findings`, `fp` (what the waiver covered) |
-| `recheck.requested` / `recheck.recorded` | state | `rafi plan restore` queues a QA re-check of a done ticket / the re-check ends | `ticket`, `revision` / `passed`, `fix_ticket` (NEW-PUA-5) |
+| `recheck.requested` / `recheck.recorded` | state | `rafi plan restore`, or a plan update that changes a done ticket's criteria, queues a QA re-check of that ticket / the re-check ends | `ticket`, `revision` / `passed`, `fix_ticket` (NEW-PUA-5) |
+| `suite.run` | state | rafi's CI step finishes one suite run (6.10) | `unit`, `commit`, `tests: full \| light`, `outcome: passed \| failed \| too-slow`, `failing`, `preexisting`, `flaky`, `reused`, `duration_ms` |
+| `ci.result` | state | a CI point ends (6.10) | `unit`, `outcome: passed \| fixed \| unfixed-merged \| unfixed-pushed`, `fix_ticket`, `still_failing` |
 
 **E. Tickets in a build**
 
@@ -309,6 +315,7 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 | `ticket.dropped` | state | won't do, obsolete or `tickets cancel` | `why` |
 | `ticket.reopened` | state | a stale "I verified it myself" puts a done ticket back in review (S-QA-2 step 3) | `why` |
 | `git.committed`, `git.branch_created`, `git.pushed`, `pr.created`, `pr.merged`, `delivery.done` | state | the deliver step | `sha`, `branch`, `url`, `unit` |
+| `unit.ready`, `unit.merge_waiting`, `unit.delivered`, `unit.failed` | state | a delivery unit's tickets are all done / rafi waits for a PR to auto-merge / the unit is merged, pushed or its PR opened / a git or gh/glab step fails (4.3.2) | `unit`, `until` / `how` / `category: transient \| conflict \| auth \| rejected`, `message` |
 | `scan.gap` | state | a question comes up mid-build that the scan should have found (NEW-ASK-5) | `question`, `kind` |
 
 **F. Questions, answers and grants**
@@ -355,11 +362,12 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 - A ticket's state belongs to the project and carries across runs; a build's state belongs to its run.
 - Reads fold on demand. Folding a few thousand small rows takes milliseconds; a cache of the folded state may be added only after measuring that it's needed (NEW-CAU-2), and it would be rebuildable and never a source of truth.
 - `rafi status`, `rafi stats`, `rafi tickets show`/`queue`, Manager, the progress file and `docs/ticket-progress.md` are all views of the fold (status also reads the lease, for liveness).
-- **Readers never write.** `rafi status` on a crashed build appends nothing and changes no file (S-CRASH-4 step 5).
+- **Readers never write.** `rafi status` on a crashed build appends nothing and changes no file (S-CRASH-4 step 5). When the progress file is newer than the database (a fresh clone), a reader folds it in memory and says the view comes from `.rafi/progress.yaml`; only commands that write import it (3.7).
+- **Imported runs aren't folded.** Events with `origin: imported` (`rafi logs import`) are read only by the `stats` views, so another machine's run never changes local state.
 
 ### 3.7 The progress file snapshot (Q-PORT-1, Q-PORT-2, Q-PORT-4)
 
-`.rafi/progress.yaml`, committed, rewritten at every safe point (4.6) with an atomic write (temp file, then rename, through `deps.fs`):
+`.rafi/progress.yaml`, committed, rewritten at every safe point (4.6) and by every command that changes state outside a build (`rafi answer`, `tickets` commands, `reset`, `populate`, `migrate`), with an atomic write (temp file, then rename, through `deps.fs`):
 
 ```yaml
 # Written by rafi from its database at every safe point. Commit it; don't edit it.
@@ -377,7 +385,8 @@ answers:
 
 - Sorted keys, one entry per line, so git merges cleanly and a conflict is always whole entries (Q-PORT-1).
 - Holds ticket status (the tracker values, 4.2), open questions and saved answers. In-progress tickets also carry `step` and `fixes`, so fix budgets survive a move to another computer. Never holds permissions: "always allow" stays on each machine (Q-PORT-2), and neither does run history (that travels by `rafi logs export`).
-- **Reading it.** At open, when the database is missing (a fresh clone) or a file entry is newer than the database's latest state for that entry, rafi imports the entry as `progress.imported` and prints one line: "Rebuilt build state from .rafi/progress.yaml." (S-PORT-1, S-PORT-2 step 4).
+- **Who commits it.** When rafi manages git, it goes into rafi's next commit on the build's branch. When you manage git, it stays in your working tree for you to commit. Either way it's on rafi's dirty-work skip list, with rafi's own writes to `rafi-config.yaml`, so it never counts as your uncommitted work.
+- **Reading it.** When a command that writes opens the engine and the database is missing (a fresh clone) or a file entry is newer than the database's latest state for that entry, rafi imports the entry as `progress.imported` and prints one line: "Rebuilt build state from .rafi/progress.yaml." (S-PORT-1, S-PORT-2 step 4).
 - **Git conflicts.** If the file contains conflict markers, rafi reads both sides, takes the newer `at` per entry, writes a clean file, and prints which side it chose for each conflicting ticket (Q-PORT-4, S-PORT-2).
 - **Damaged file, healthy database.** Rafi rewrites the file from the database and says so in one line; the build runs (S-ENG-7, S-CRASH-2).
 - The database is the truth on each machine. The file never overrides a newer database entry.
@@ -387,15 +396,18 @@ answers:
 | File | Committed | What it is | Written |
 |---|---|---|---|
 | `.rafi/state.sqlite3` | no | The truth on this machine | Always |
-| `.rafi/progress.yaml` | yes, even with "All Rafi" ignored (FILE-10) | Snapshot of the fold | Every safe point |
+| `.rafi/progress.yaml` | yes, even with "All Rafi" ignored (FILE-10) | Snapshot of the fold | Every safe point and every state-changing command (3.7) |
 | `docs/ticket-progress.md`, `docs/ticket-archive.md` | as today | Views for people; the `LLM_NEXT_QUEUE` heading becomes `Next up` (Q-FMT-2) | After ticket changes |
 | `<docs>/requirements/<ticket>.md` | yes (Q-REQ-2), in the same commit as the ticket's work (S-QA-5) | The requirements file: QA's content, rendered by rafi; rafi stores only its path and fingerprint (NEW-REQ-2) | Prepare step |
 | `<docs>/rafi-plan.json`, `.md`, `<docs>/rafi-plans/*` | yes | The plan (kept format, FMT-P) | Approval, plan changes |
 | `.tickets/tickets.yaml`, `delivery.yaml`, `config.yaml` | yes | Definitions you and the Planner write | Populate, `tickets` commands, plan changes |
-| `rafi-config.yaml` | yes, always (FILE-1) | Settings | `create`, `agents`, `tools add`, auto-approve's plan-update default (D3) |
+| `rafi-config.yaml` | yes, always (FILE-1) | Settings | `create`, `agents`, `tools add`, auto-approve's plan-update default (D3), your answers to the CI confirmation and the time-limit question (6.10, 6.11) |
 | `.rafi/logs/<run>.jsonl` | yes, only when you chose "save logs in the project" | The `rafi logs export` format for that run (Q-PORT-3) | Build end and each stop |
 | `.rafi/recordings/<run>/…` | no (moves under `.rafi/logs/<run>/` when logs are in the project) | QA evidence files (FILE-63) | QA turns |
 | `scripts/rafi-setup.sh` | yes (Q-SET-1) | The project setup script, written by the builder | Builder turns |
+| `.rafi/cache/` | no | Caches tests would otherwise write to your home folder (6.9) | Test runs |
+| `.rafi/background.log` | no | A `--detach` build's output (8.7) | Background builds |
+| `.rafi/migrate-backup/<time>/` | no | Byte-for-byte copies from `rafi migrate`, plus the 0.10.x files it retired (9.3) | `rafi migrate` |
 | `.foreman/worktrees/`, `.foreman/dirty-baselines/`, `.foreman/pr-bodies/` | no | Working files (FILE-49–51) | Delivery, dirty work |
 | `~/.rafi/grants.yaml`, `~/.rafi/policy.yaml`, `~/.rafi/locks/` | n/a (machine) | "Always allow" grants, org-locked settings, device locks | Upfront check, your org, tool runs |
 
@@ -411,12 +423,14 @@ nextTicket(ticket: TicketState, event: StateEvent, ctx: TicketRules): TicketStat
 nextBuild(build: BuildState, event: StateEvent): BuildState
 nextProject(project: ProjectState, event: StateEvent): ProjectState
 decide(view: Folded, live: Liveness): Action        // what the build loop does next (4.5)
+answerEffects(q: Question, choice: Choice, view: Folded): StateEvent[]   // what an answer writes (7.7)
 
-interface TicketRules { qa: boolean; fixes: number; manualChecks: "wait" | "none" | "track" }
+interface TicketRules { qa: boolean; fixes: number; manualChecks: "wait" | "none" | "track"; rafiOwned: boolean }
 ```
 
 - `TicketRules` come from the settings recorded in `build.started`, so a fold gives the same answer after a restart.
 - **Tested over every combination** (NEW-ENG-2). The tables below are also data in `state/transitions.test.ts`; the test builds every (state, event) pair, including the "no change" ones, and checks each against the table. The scenarios check only the states users see (SCN 10, NEW-ENG-2 note).
+- **Answers too.** `answerEffects` turns every blocked kind's options (7.7) into the events they write; the 7.7 tables are its test data, and the test covers every (kind, option) pair.
 - **Invalid pairs.** Before appending, the engine checks the transition; an invalid one is a bug and isn't written. A fold that meets an invalid pair (a damaged or imported log) keeps the state unchanged and reports a violation, which `rafi doctor` shows. The fold never throws, so `rafi status` always works.
 
 ### 4.2 Ticket
@@ -426,14 +440,14 @@ Seven states (principle 2's six, plus `dropped` for won't-do and obsolete ticket
 | State | Steps | Meaning |
 |---|---|---|
 | `queued` | — | Not started, or waiting to restart after a block (`resume_step` remembers where) |
-| `building` | `prepare`, `build`, `deliver` | QA writes the requirements file; the builder works; rafi commits, branches or opens the PR |
+| `building` | `prepare`, `build`, `check`, `deliver` | QA writes the requirements file; the builder works; rafi runs the checks (6.9); rafi commits (and, at the unit's end, merges or opens the PR, 4.3.2) |
 | `reviewing` | `review` | QA reviews against the requirements file |
-| `fixing` | `fix` | The builder fixes QA's findings |
+| `fixing` | `fix`, `check` | The builder fixes QA's findings or failing checks; rafi runs the checks again |
 | `blocked` | — | Waits for an answer; carries `kind`, `reason`, `question`, `resume_step` |
 | `done` | — | Delivered, with its validation record |
 | `dropped` | — | Won't do (`canceled`) or obsolete |
 
-Blocked kinds: `permission`, `install`, `service`, `credential`, `decision`, `other` (the builder's own report, SCN 2.2; `other` also covers a turn budget used up); `held` (held before step 1 by the upfront check); `what-next` (QA didn't converge, or circling); `unverified` (QA couldn't verify something a known tool would let it verify); `confirm` (a person-only check, D4); `build-wide` (NEW-BLK-7); `manual` (`rafi tickets block`). Section 7.7 gives each kind's options.
+Blocked kinds: `permission`, `install`, `service`, `credential`, `decision`, `other` (the builder's own report, SCN 2.2; `other` also covers a turn budget used up); `held` (held before step 1 by the upfront check); `what-next` (QA didn't converge, or circling); `unverified` (QA couldn't verify something a known tool would let it verify); `confirm` (a person-only check, D4); `build-wide` (NEW-BLK-7); `manual` (`rafi tickets block`); `limit` (a test hit its time limit while still running; waits for the limit answer, 6.11); `unfixed` (one of rafi's own fix tickets ran out of fixes: no question is asked and nothing waits on it, 6.10). Section 7.7 gives each kind's options.
 
 | From (state·step) | Event | To | Notes |
 |---|---|---|---|
@@ -442,7 +456,11 @@ Blocked kinds: `permission`, `install`, `service`, `credential`, `decision`, `ot
 | any, except the ticket a live build is working on | `ticket.status_set` | the state its status maps to (below the table) | `rafi tickets update`, `complete` (evidence required, FMT-S4), `block` (`manual`), `unblock` (FLAG-TK-10–13) |
 | `queued`, `blocked` | `ticket.dropped` | `dropped` | dependents get a question (S-BLK-3) |
 | `building·prepare` | `requirements.written` | `building·build` | |
-| `building·build` | `builder.reported` done | `reviewing·review`; with QA off, `building·deliver` | |
+| `building·build` | `builder.reported` done | `building·check` | |
+| `building·check`, `fixing·check` | `checks.passed` | `reviewing·review`; with QA off, `building·deliver` | stale results rerun, fresh ones reused (6.9) |
+| `building·check`, `fixing·check` | `checks.failed`, fixes left, not circling | `fixing·fix` | attempt + 1; the QA turn is skipped (NEW-CHK-3) |
+| `building·check`, `fixing·check` | `checks.failed`, no fixes left or circling | `blocked(what-next)`; `blocked(unfixed)` for a rafi-owned ticket | `resume_step` = fix |
+| `building·check`, `fixing·check` | `ticket.blocked` (`limit`) | `blocked(limit)` | `resume_step` = check (6.11) |
 | `building·build`, `fixing·fix` | `builder.reported` blocked | `blocked` (kind from the reply) | `resume_step` = same step |
 | `building·build`, `fixing·fix` | `builder.reported` needs-input | `blocked(decision)` | your answer goes to the builder with the retry |
 | `building·*`, `reviewing·review`, `fixing·fix` | `step.failed` | `blocked(other)`; `blocked(what-next)` when circling stopped a fix loop | `resume_step` = same step; one-line reason such as "malformed reply 4 times", never "delivery uncertain" (NEW-MAL-3) |
@@ -451,14 +469,17 @@ Blocked kinds: `permission`, `install`, `service`, `credential`, `decision`, `ot
 | `reviewing·review` | same, with person-only checks, `manual_checks: wait` | `blocked(confirm)` | `resume_step` = deliver (D4) |
 | `reviewing·review` | same, `manual_checks: track` | `building·deliver` | the check stays an open question; dependents go on (setting C) |
 | `reviewing·review` | `verdict.recorded` rejected, fixes left, not circling | `fixing·fix` | attempt + 1 |
-| `reviewing·review` | `verdict.recorded` rejected, no fixes left or circling | `blocked(what-next)` | `resume_step` = fix |
+| `reviewing·review` | `verdict.recorded` rejected, no fixes left or circling | `blocked(what-next)`; `blocked(unfixed)` for a rafi-owned ticket | `resume_step` = fix |
 | `reviewing·review` | `verdict.recorded` with an "unable" that a known tool would fix | `blocked(unverified)` | `resume_step` = review (S-TOOL-1) |
-| `fixing·fix` | `builder.reported` done | `reviewing·review` | |
+| `fixing·fix` | `builder.reported` done | `fixing·check` | |
+| `blocked(confirm)` | `ticket.unblocked` with "It doesn't" | `fixing·fix` | your note is a finding; counts against `retries.fixes` (7.7) |
 | `building·deliver` | `delivery.done` | `done` | |
 | `blocked` | `ticket.unblocked` | `queued` | keeps `resume_step`; restarts when the current ticket finishes (NEW-BLK-4) |
 | `done` | `ticket.reopened` | `reviewing·review` | only a stale "I verified it myself" when the ticket is put back in scope (S-QA-2 step 3) |
+| `done` | `recheck.requested`, `recheck.recorded` | no change | the ticket stays done; a failed re-check adds a rafi-owned fix ticket (`ticket.added`, 7.10) |
+| — | `ticket.added` | `queued`, rafi-owned | first in the queue (6.10) |
 | any | `progress.imported` | the imported status (table below) | rebuild on a clone |
-| any | `ticket.tags_added`, `fix.granted`, `waiver.recorded`, `facts.snapshot` | no change | kept in the ticket's context |
+| any | `ticket.tags_added`, `fix.granted`, `waiver.recorded`, `facts.snapshot`, `check.run`, `attempt.summary` | no change | kept in the ticket's context |
 | `done`, `dropped` | anything else | no change | |
 
 An interrupted step has no event of its own: the ticket stays in its state and step, and the loop redoes the step (4.5). A queued ticket whose dependency isn't done is simply not eligible; `decide` reports it as "waiting on T2".
@@ -487,10 +508,12 @@ Seven states (Q-LIFE-1).
 | `waiting` | `build.unwaiting` | `running` | an answer made a ticket eligible |
 | `running`, `waiting` | `build.pause_requested` | same, with `pausing` set | the in-between state GUI-R5 asks for |
 | `running` (pausing), `waiting` (pausing) | `build.paused` | `paused` | at the next safe point; a waiting build pauses at once |
-| `paused` | `build.unpaused` | `running` | |
+| `paused` | `build.unpause_requested` | `paused`, with `unpausing` set | `rafi resume` on a paused build (8.5) |
+| `paused` | `build.unpaused` | `running` | written by the owner |
 | `running`, `waiting`, `paused` | `build.stop_requested` | `stopping` | graceful: the current step finishes; now: the current turn is cancelled |
 | `stopping` | `build.stop_requested` (now) | `stopping`, now | the second `rafi stop` (Q-CMD-6) |
 | `stopping` | `build.stopped` | `stopped` | `cause: stop \| cancel \| ctrl-c` |
+| `waiting`, `paused`, with no live owner | `build.stop_requested` then `build.stopped` | `stopped` | `rafi stop` writes both itself when no process owns the build (AR-22) |
 | `running`, `waiting` | `build.finished` | `finished` | `complete` is false when skipped or deferred questions leave work |
 | `running`, `waiting`, `stopping` | `build.failed` | `failed` | an internal error (5.1) |
 | `running`, `waiting`, `paused` | `build.owner_lost` | `stopped`, cause `crash` | written by the process that takes over |
@@ -513,7 +536,20 @@ Seven states (Q-LIFE-1).
 
 **4.3.1 Liveness.** The owner refreshes `lease.heartbeat_at` every 10 seconds. An owner is alive when `deps.processes.isAlive(owner)` says so: the real check is the same host, the pid running, and its start time matching (today's `ai-foreman/src/processIdentity.ts` reads it from `/proc` on Linux, `:50`, and with `ps -o lstart=` on macOS, `:58`), so a reused pid doesn't count. In-process, the harness marks a fenced instance dead. A live owner whose heartbeat is over 60 seconds old is shown as "not responding since …" (GUI-R11) and can't be taken over until it's gone.
 
-**A build waiting without a terminal** records `build.waiting`, releases its lease (`build.owner_released`, reason `waiting`) and exits with code 2 once nothing is left to build (NEW-BLK-5, Q-OUT-1). It stays `waiting`; `rafi status` says "Waiting on you since 14:05 (T2). Answer with `rafi answer`, then run `rafi resume`."
+**A build waiting without a terminal.** A foreground build with no terminal (a script or CI) records `build.waiting`, releases its lease (`build.owner_released`, reason `waiting`) and exits with code 2 once nothing is left to build (NEW-BLK-5, Q-OUT-1). It stays `waiting`; `rafi status` says "Waiting on you since 14:05 (T2). Answer with `rafi answer`, then run `rafi resume`." **A background build (`--detach`) doesn't exit**: like a terminal build it keeps the lease, keeps waiting and sends reminders, so an answer from a notification continues it (decision 8).
+
+**4.3.2 Delivery units** (FMT-D2, FLAG-ST-37–39, S-BATCH-2). A unit's state is folded from its tickets and the `unit.*` events:
+
+| Unit state | Means | Next |
+|---|---|---|
+| building | some of its tickets aren't done | — |
+| ready | every ticket done (`unit.ready`) | a CI point if `checks.ci_when` puts one here (6.10), then deliver |
+| delivering | rafi merges, pushes or opens the PR | `unit.delivered`, or `unit.merge_waiting` for `auto-merge` |
+| merge-waiting | waits up to `auto_merge_timeout_minutes` on the clock; later units with `dependency_mode: wait` or `stack` wait too | merged: `unit.delivered`; timeout: a unit question, "Keep waiting / Merge it myself, then continue / Skip the units that wait on it" |
+| delivered | done | dependent units become eligible |
+| failed | a git or gh/glab step failed (`unit.failed`) | by category (5.1): `transient` retries with backoff; `conflict` asks "Builder resolves the conflict / Skip this merge (the branch stays pushed) / Stop the build"; `auth` and `rejected` are build-wide questions (PRM-79's shape) |
+
+Only the unit and the units waiting on it wait; other units keep building (NEW-KEEP-2).
 
 ### 4.4 Project
 
@@ -529,6 +565,7 @@ Eight states (Q-LIFE-1).
 | `awaiting-approval` | `plan.rejected` | `planning` | "Give feedback" |
 | `awaiting-approval` | `plan.approved` | `ticketing`; `ready` when the tickets already match (approval carried forward) | |
 | `ticketing` | `tickets.populated` | `ready` | |
+| `draft` | `tickets.populated`, or a ticket added by hand or by `accept-future-work` | `ready` | tickets from Linear, Jira, a URL or `tickets.yaml` with no rafi plan |
 | `ready`, `complete` | `build.started` | `building` | |
 | `building` | `build.finished`, complete, and every ticket `done` or `dropped` | `complete` | |
 | `building` | any other build end (`finished` with work left, `stopped`, `failed`, `waiting` with its owner released) | `ready` | a crash keeps `building` until the takeover |
@@ -561,13 +598,14 @@ The loop is `while (true) { view = fold(log); action = decide(view, live); if (a
 1. A stop was requested: if a step is running, let it finish (graceful) or cancel it (now); then write `build.stopped`.
 2. A pause was requested and this is a safe point: write `build.paused` and hold.
 3. A ticket is `building`, `reviewing` or `fixing` and its current step has no recorded outcome after its last `step.started`: **redo that step.** This is the whole resume rule; it's the same after a crash, a stop-now, a timeout or a power cut.
-4. The scope is reached (`--steps N` tickets done, `--to-ticket` target done, the stacks done): write `build.finished`.
-5. Run any pending re-check (a QA review of a done ticket after a plan restore, 7.10), then start the first eligible ticket in queue order: `queued`, every dependency `done`, not held, not excluded by `--skip`, at its `resume_step` if it has one. A ticket unblocked by an answer is eligible again, so its retry starts as soon as the current ticket finishes (NEW-BLK-4).
-6. Nothing eligible and an open, not deferred, question blocks a ticket in scope: write `build.waiting`. In a terminal, hold and remind; without one, release the lease and exit 2.
-7. Nothing eligible and only deferred questions are left: `build.finished` with `complete: false`; the summary and a notification remind you (S-BLK-2).
-8. Nothing left: `build.finished` with `complete: true`.
+4. A delivery unit is `ready` or `failed` with a retry due, or a CI point is due (6.10): run it. Rafi-owned fix tickets come next, before new tickets; they don't count toward `--steps` and aren't limited by `--to-ticket` (decision 10).
+5. The scope is reached (`--steps N` tickets done, `--to-ticket` target done, the stacks done) and no CI point or rafi-owned ticket is pending: write `build.finished`.
+6. Run any pending re-check (a QA review of a done ticket after a plan restore or a plan update, 7.10), then start the first eligible ticket in queue order: `queued`, every dependency `done`, not held, not excluded by `--skip`, at its `resume_step` if it has one. A ticket unblocked by an answer is eligible again, so its retry starts as soon as the current ticket finishes (NEW-BLK-4).
+7. Nothing eligible and an open, not deferred, question blocks a ticket in scope: write `build.waiting`. In a terminal or a background build, hold and remind; in a foreground build without a terminal, release the lease and exit 2 (4.3).
+8. Nothing eligible and only deferred questions, held tickets or `unfixed` tickets are left: `build.finished` with `complete: false`, listing them; the summary and a notification remind you (S-BLK-2, SCN-4).
+9. Every ticket in scope is `done` or `dropped`: `build.finished` with `complete: true`.
 
-Inside a ticket, the step to run follows from its state: `building·prepare` → prepare (`build/steps/prepare.ts`); `building·build` and `fixing·fix` → a builder turn (`steps/work.ts`); `reviewing·review` → a QA turn (`steps/review.ts`); `building·deliver` → deliver (`steps/deliver.ts`). `--steps N` counts `done` tickets, so blocked and skipped tickets don't use a step (NEW-BLK-6, OUT-7).
+Inside a ticket, the step to run follows from its state: `building·prepare` → prepare (`build/steps/prepare.ts`); `building·build` and `fixing·fix` → a builder turn (`steps/work.ts`); `building·check` and `fixing·check` → rafi runs the checks, no agent (`build/checks.ts`); `reviewing·review` → a QA turn (`steps/review.ts`); `building·deliver` → deliver (`steps/deliver.ts`); a CI point → `build/ci.ts`. `--steps N` counts `done` tickets, so blocked and skipped tickets don't use a step (NEW-BLK-6, OUT-7).
 
 ### 4.6 Safe points
 
@@ -576,7 +614,7 @@ A safe point is the moment after a step's outcome is recorded and before the nex
 1. rewrites the progress file (3.7);
 2. acts on stop and pause requests;
 3. re-reads `.tickets/tickets.yaml`, `delivery.yaml`, `rafi-config.yaml` and the plan, and records changes: material ones follow the plan-update rules (REQ 8.4; 7.10 here), an invalid file becomes a build-wide question (NEW-BLK-7, S-BLK-10);
-4. re-checks a reused agent's tags (NEW-TAG-6);
+4. re-checks a reused agent's tag union (NEW-TAG-6, 10.1);
 5. scans tickets newly in scope and asks only their new questions (NEW-ASK-1).
 
 **Crash boundaries** (SCN 7.7). The engine calls `deps.hooks.crash(name)` and `deps.hooks.pause(name)` at each:
@@ -592,6 +630,7 @@ A safe point is the moment after a step's outcome is recorded and before the nex
 | 7 | during other writes: requirements file, `tickets.yaml`, plan files, `rafi-config.yaml` | the writer |
 | 8 | inside `rafi migrate` and `rafi tickets populate`, between files | `migrate/apply.ts`, `planning/populate.ts` |
 | 9 | after a question is recorded, before it's shown or notified | `ask/questions.ts` |
+| 10 | before and after each test run, and between a CI point's suite run and its outcome | `build/checks.ts`, `build/ci.ts` |
 
 Each boundary is named with its occurrence ("4: recorded, before progress write (T2, review, 2nd)"), so a failing crash run names the exact point (SCN 7.7).
 
@@ -605,6 +644,7 @@ Redoing is safe at every boundary because each step is written to be redone: the
 | Files a ticket may touch (agent permission policy) | Your code outside the ticket | The edit is refused with the file named (S-MAL-4) |
 | Requirements file path and fingerprint | QA reviewing what was written | A warning; affected requirements are "unable to verify"; the build goes on (NEW-REQ-5) |
 | Worktree snapshot after each builder turn (a git tree id from a temporary index seeded from the real one, so only changed files are hashed and `.gitignore` is respected) | The record of what the builder produced; drift during a review | Changed files are computed from it; drift during a review is reported and the review is redone on a copy of the snapshot (Q-COPY-1, S-QA-7) |
+| A check result's tree and the files related to it (6.9) | Reusing a test result only for the code it ran on | The check is rerun, only that one (NEW-CHK-3, NEW-CHK-13) |
 | Saved-answer keys | An answer applying only to what it answered (NEW-QAM-4) | The answer goes stale; the question is asked again (7.6) |
 | Approved scope | Starting without asking while scope is unchanged (NEW-KEEP-1) | "How does this plan look?" (PRM-71) |
 | Locked requirements | Requirements no update may change (NEW-PUA-1) | Rafi asks before touching them |
@@ -627,6 +667,7 @@ Every failure is sorted into one category by one function, `turns/classify.ts` (
 | `timeout` | No provider message for `timeouts.idle_minutes` (default 30, today's default in `adapters/claude.ts:61` and `adapters/codex.ts:42`) | Cancel the turn, wait up to 30 s for the provider to confirm, then end the provider process; retry with backoff, telling the agent the earlier attempt timed out and may have left changes. Long work with activity is never timed out (S-TIME-1) | `retries.turn` |
 | `quota` | A usage limit or rate limit | No tight loop. If the provider reports when it resets and that's within `retries.quota_wait_hours` (default 6), wait until then and retry once, saying so in one line ("Codex usage limit reached; retrying at 19:00. `rafi stop` to stop."). Otherwise a build-wide question: retry now, switch runtime for this build, or stop (S-TIME-2) | One wait per limit |
 | `crash` | Rafi itself died | On `rafi resume`, redo the interrupted step (4.5) | None (not the agent's fault) |
+| `git-transient` | A push or gh/glab call fails on the network or a rate limit | Retry with backoff, as `provider` (4.3.2) | `retries.turn` |
 
 **Permission needed**
 
@@ -639,12 +680,14 @@ Every failure is sorted into one category by one function, `turns/classify.ts` (
 | Category | Examples | Question |
 |---|---|---|
 | `auth` | Not logged in, expired, not authorized | Build-wide: "<runtime> is not ready for <label>. What should Rafi do?" retry / switch / cancel (PRM-79, kept); switching states its scope and that continuity is lost (GUI-R13) |
-| `fixes-exhausted` | QA rejected after `retries.fixes` builder fixes | "QA did not converge for T1. What next?" (PRM-81, with "I verified it myself") |
+| `fixes-exhausted` | QA rejected, or the checks failed, after `retries.fixes` builder fixes | "T1 still doesn't pass after 3 fixes (failing: R2's test; QA: R3). What next?" (PRM-81, with "I verified it myself"). For a rafi-owned fix ticket nothing is asked: it's `unfixed` (6.10) |
 | `circling` | The same failure with no progress (5.5) | The same question, early, saying what repeated |
 | `turn-exhausted` | A turn failed `retries.turn` + 1 times | The ticket is blocked (`other`) with the last error in one line; other tickets go on |
 | builder blocks | `install`, `service`, `credential`, `decision`, `other` | The blocked-ticket question with the options for that kind (7.7) |
 | `person-check` | A person-only check is reached (D4) | Confirm the check (7.8) |
-| `provider-question` | Claude's `AskUserQuestion`, or a builder `needs-input` reply | An open question like any other; recorded as a scan gap (PRM-G6, NEW-ASK-5) |
+| `provider-question` | Claude's `AskUserQuestion`, or a builder `needs-input` reply | The adapter answers `AskUserQuestion` at once with "The user isn't available in this turn. Reply needs-input with this question." The turn ends as `needs-input`, the ticket is `blocked(decision)` and the question is open like any other, so other tickets keep building; your answer goes to the builder's retry. Recorded as a scan gap (PRM-G6, NEW-ASK-5, S-ASK-3) |
+| `delivery` | A merge conflict; a push or PR refused for auth or by the remote | The unit question or build-wide question in 4.3.2 |
+| `limit` | A test still running at its time limit | The time-limit question (6.11) |
 | `integrity` | `tickets.yaml` became invalid mid-build; a plan file is broken | A build-wide question; affected work waits, the rest goes on (NEW-BLK-7) |
 
 **Recorded, not an error**
@@ -683,8 +726,8 @@ A retry never resends the same request. It carries the validation errors, the ti
 
 ### 5.5 Going in circles (NEW-ENG-5, F09)
 
-- **Failure signature** of an attempt: for a QA rejection, the sorted not-satisfied requirement numbers with the outcome of the runs each one cited; for a block, its kind and reason; for a `format` or `content` failure, the error class and the field.
-- **No progress**: the signature equals the previous attempt's, the builder's fix produced no new snapshot (its tree id was already seen on this ticket), and it read no file it hadn't read in an earlier attempt on this ticket (from `turn.tool` events). New files read or a different fix (a new tree) is healthy exploration, not circling.
+- **Failure signature** of an attempt: for a QA rejection, the sorted not-satisfied requirement numbers with the outcome of the runs each one cited; for a check failure, the failing requirement numbers and test names; for a block, its kind and reason; for a `format` or `content` failure, the error class and the field.
+- **No progress**: the signature equals the previous attempt's, the builder's fix produced no new snapshot (its tree id was already seen on this ticket), and it read no file it hadn't read in an earlier attempt on this ticket (from `attempt.summary`, a `state` event, so this works at every capture level). New files read or a different fix (a new tree) is healthy exploration, not circling.
 - **Circling**: `retries.circling_repeats` (default 2) no-progress attempts in a row. It stops retries before the budget runs out and raises the same question the budget would, saying what repeated ("QA found the same problem with R2 three times, and the last two fixes changed nothing").
 - Worked through: in S-QA-3 script A, QA rejects R2 on attempts 1, 2 and 3 with no file change between them, so rafi asks after 2 fixes, before the 3-fix allowance is used. In S-MAL-2's third variant, the same changed resend repeats and the retries stop before `retries.turn`.
 
@@ -692,7 +735,7 @@ A retry never resends the same request. It carries the validation errors, the ti
 
 ```yaml
 retries:
-  fixes: 3              # builder fix attempts per ticket after QA rejects (Q-CFG-3)
+  fixes: 3              # builder fix attempts per ticket after QA rejects or a check fails (Q-CFG-3)
   turn: 3               # retries of one agent turn: Q-CFG-3's 3 provider-error retries, applied to every
                         # reason a turn is redone (provider errors, timeouts, replies still invalid after repair)
   circling_repeats: 2   # no-progress attempts in a row that count as going in circles
@@ -702,6 +745,14 @@ timeouts:
   check_quiet_minutes: 2   # a test run printing nothing this long is hung (6.9)
   check_minutes: 5         # one ticket's targeted test run (6.9)
   suite_minutes: 20        # one full-suite run (6.10)
+checks:
+  ci_tests: full            # full | light | none (6.10)
+  ci_when: end-of-build     # each-ticket | each-pr | end-of-build | light-each-pr-full-end (decision 6)
+  ci_blocks_merge: false    # a suite still failing after the fix ticket doesn't stop the merge
+  test_runner: "npx jest"   # found by rafi create from package.json; run_check accepts it with file or test-name arguments
+  output_paths: [coverage/, test-results/]   # test output that doesn't make results stale (6.9)
+git:
+  managed_by: rafi          # rafi | me (ARCH-6); "me" means branch strategy current and completion none
 ```
 
 - These replace the `autonomy` profiles (`ai-foreman/src/recoveryPolicy.ts:20-33`: fixes 2/3/5, transient retries 0/3/5, format corrections 1/2/3) and `--autonomy` (FLAG-ST-33). `rafi migrate` writes the same limits a project had (S-MIG-1).
@@ -713,7 +764,7 @@ timeouts:
 ### 6.1 Rules (principle 6, NEW-MAL-7, NEW-REF-1..3)
 
 - **One schema per role and step**, defined once in `rafi-spec` as zod. It's emitted as JSON Schema draft-07 for Claude (the Agent SDK validates against draft-07; checked in the SDK docs on 2026-11-01) and as Codex's strict projection, in which every property is required and an absent value is `null` (today's `projectCodexSchema`, `spec/src/structuredOutput.ts`; the reason is in the comment at `spec/src/operationContracts.ts:67-71`).
-- **Flat.** A top-level `kind` only where a reply has more than one shape; at most one level of nested objects; no unions below the top level.
+- **Flat**, for the builder and QA replies: a top-level `kind` only where a reply has more than one shape; at most one level of nested objects; no unions below the top level. The Planner and Ticket Maker keep today's deeper formats (6.5); they're the replies most likely to come back malformed, so their repair and retry rules matter most.
 - **Each fact once**, and **no IDs rafi already has**: no ticket, run, session, hand-off or finding IDs, no continuity section. A reply that adds a field (for example a ticket ID) fails the schema, which is how a binding mismatch is caught (S-MAL-4).
 - **Small numbers for references.** Requirement numbers (`R3` in text, `3` in JSON) and run numbers (`run 4`) are assigned by rafi, per ticket, and checked exactly: a missing, duplicate or out-of-range number, or anything hash-like, is a `content` error. No nearest match (NEW-REF-3).
 - **Nothing rafi records itself**: changed files, command output, exit codes, durations, times.
@@ -850,42 +901,57 @@ Manager answers in plain text; it has no reply schema. Its host commands (`/qa-r
 | 14 QA-related operations (`builder-coverage`, `work-report`, `build-preflight`, `session-initialization`, `qa-recovery-acceptance`, `builder-remediation`, `qa-verdict`, `qa-contract-acceptance`, `qa-contract-segment`, `handoff-acceptance` and 4 preparation steps) | `spec/src/qaOutputContracts.ts:59-64` | 3: builder (6.2), requirements (6.3), verdict (6.4) |
 | The 24-character hash check IDs agents copy | `ai-foreman/src/qaVerificationContract.ts:47` | Small numbers (NEW-REF-1) |
 
-### 6.9 Test runs: rafi runs them and records the results (decision 5, decided)
+### 6.9 Test runs: rafi runs them and records the results (decision 5)
 
 Agents never prove a test passed by saying so. Rafi runs every test command itself and records the result, the way CI does.
 
-- **One tool for tests.** Each builder and QA session gets rafi's `run_check` tool (an MCP tool, 10.3). The agent passes a command; rafi runs it and returns the run number, exit code and output. A test the agent runs in its own shell is never proof; only `check.run` records count.
-- **Where and with what access.** Rafi runs the command in the builder's worktree with the builder's permissions: project files writable, internet, local servers and installs only if granted (7.2). Test output (coverage, build output) is written as usual. Caches that would go to your home folder are pointed at the ignored `.rafi/cache/` (for example `npm_config_cache`). This replaces QA test runs inside QA's read-only sandbox, so no QA copy is needed for tests (NEW-MAL-6).
+- **Two tools.** Each builder and QA session gets rafi's `run_check(command)` and `check_output(run)`. `run_check` runs a test and returns the run number, exit code, the failing tests and a short excerpt; `check_output` returns a run's full output. A test an agent runs in its own shell is never proof; only `check.run` records count.
+- **How agents reach them** (decision 7). Claude gets them in-process (the SDK's `createSdkMcpServer`, `sdk.d.ts:466`). Codex can add an MCP server only as a command it launches or a URL (`codex mcp add --help`, codex-cli 0.164.0); client-side tools exist only in app-server's experimental schema. So the engine serves both tools on a local-only HTTP MCP endpoint (127.0.0.1, a random port, a per-session token), given to the Codex thread as `mcp_servers.rafi.url`. One process, no IPC, stable surface only. M2 checks this first, exactly as it will ship.
+- **What `run_check` accepts.** Only: the requirements file's check commands; the project's test runner (`checks.test_runner`) with file or test-name arguments; and the setup script. Anything else is refused and recorded (`outcome: refused`) with the reason, so it can't be used to run `rafi answer`, `rafi stop` or any other command. Every request also goes through the agent permission policy (7.6, 11.3).
+- **Where and with what access.** Rafi runs the command in the builder's worktree under an operating-system sandbox that matches the build's grants (macOS `sandbox-exec`, Linux bubblewrap; which tool, and whether loopback can be allowed without internet, is checked in M2, **unverified**): project files writable, internet, local servers and installs only if granted (7.2). Test output is written as usual. Caches that would go to your home folder are pointed at the ignored `.rafi/cache/` (for example `npm_config_cache`). No QA copy is made for tests (NEW-MAL-6).
+- **QA's requests.** QA stays read-only. When it asks for a test, rafi runs it the same way, then puts back any tracked file the run changed (from the snapshot) and records `restored`, so QA can't change the code through a test.
+- **The seam** is `deps.checks.run` (8.2): the real one streams a child process's output; the harness's is scripted on the fake clock, so hung and slow tests take no real time (S-CHK-4).
 - **Builder.** It runs the requirements file's checks through `run_check` and fixes failures before it reports `done`.
-- **Before QA.** Rafi looks at the record. Every requirement's check needs a passing run against the builder's final tree. A run made against older code doesn't count; rafi reruns only those checks. If any fails, the ticket goes straight back to the builder and the QA turn is skipped (`fixing·fix`, counted against `retries.fixes`).
-- **QA** stays read-only. It reads the code and the records. If it wants a test that isn't listed, it calls `run_check`, and rafi runs it the same way. Nothing runs twice.
-- **Only relevant tests.** The requirements file lists one targeted command per requirement (6.3, for example `npm test -- push.test.ts`); with the related tests (6.10), nothing else runs during a ticket. Where the test tool supports it, rafi's `run_check` limits a run to tests touching the changed files (`jest --findRelatedTests`, `vitest related`). The full suite runs only at rafi's CI step (6.10).
+- **The check step** (4.2), after every builder turn that reports `done`: every requirement's check needs a passing run that's still fresh. A result is stale when a file it depends on changed since it ran: the files changed since that run's tree (tracked and non-ignored files, minus `checks.output_paths`), matched to tests with the runner's related-files query (`jest --findRelatedTests`, `vitest related`). Without that query, any change makes it stale. Only stale checks rerun. If one fails, the ticket goes straight back to the builder and the QA turn is skipped (`fixing·fix`, counted against `retries.fixes`).
+- **What the builder gets back after a failure** (decision 9). For every failing run: its run number, the command, each failing test's name and file, the error message and the top of the stack, an excerpt of the output, and how to read the rest (`check_output(4)`). The instruction: "Fix the code so these tests pass. Keep the work you've done; don't start over. Rerun them with `run_check`." The same applies to fix turns after QA findings, CI fix tickets and person-only checks that failed.
+- **With QA off** (`--no-qa`; decision 9). There's no requirements file, so the check step runs the ticket's `required_tests` and the tests related to its changed files. A failure goes back to the builder as above.
+- **Only relevant tests.** During a ticket, only the requirements' checks and the related tests run. The full suite runs only at rafi's CI points (6.10).
 - **Time limits** (6.11): a run that prints nothing for `timeouts.check_quiet_minutes` (2) is hung: stopped and recorded `timed-out`, a failure. A run still printing when it reaches `timeouts.check_minutes` (5) is slow, not broken: stopped, recorded `too-slow`, and not counted as a failure.
 - **A check that edits code files.** Rafi compares the tree before and after each run. If tracked files changed (for example a formatter run with `--write`), the run is recorded as `changed-code` with the files named, which counts as a failure, and the builder fixes it.
-- **Also used by:** QA's re-check of a done ticket after `rafi plan restore` (7.10) reads `check.run` records the same way; browser checks (Playwright test files) run through `run_check`; the setup script (`scripts/rafi-setup.sh`) is run by rafi and recorded, so "setup worked" is a record, not the builder's word.
-- **Depends on** Codex accepting rafi's MCP tool in each session (unverified, 10.3). M2 checks this first, since builds need it; the fallback is the `-c mcp_servers` override when the app-server starts.
+- **Also used by:** QA's re-check of a done ticket (7.10) reads `check.run` records the same way; browser checks (Playwright test files) run through `run_check`; the setup script is run by rafi (10.2) and recorded, so "setup worked" is a record, not the builder's word.
 
-### 6.10 The full test suite: rafi's CI step (decision 5)
+### 6.10 The full test suite: rafi's CI points (decisions 5, 6 and 10)
 
-The full suite runs once, at rafi's CI step, never after every ticket. Done tickets are never reopened; problems are fixed forward.
+The full suite runs at rafi's CI points, never as part of a ticket's own checks. Done tickets are never reopened; problems are fixed forward.
 
-- **Per ticket, before it counts as done**: its requirements' checks plus the tests related to its changed files (`jest --findRelatedTests`, `vitest related`, where the tool supports it), all through `run_check` (6.9). Most breakage is caught at the ticket that caused it, while it's still open.
-- **When the CI step exists.** Only when rafi handles git: delivery completion `pr`, `pr-ready`, `auto-merge` or `direct-merge`. With completion `none` you manage git yourself, and rafi runs no suite at all. That includes the "Current branch — Rafi works here; you manage Git" work mode, where rafi makes no branches, commits, pushes or merges (`rafi/src/workMode.ts:3,12`).
-- **The settings.** `checks.ci_tests: full | light | none` in `rafi-config.yaml` (default `full`), and `checks.ci_blocks_merge: true | false` (default `false`: a suite still failing after the fix ticket doesn't stop the merge). `light` runs the tests related to every file the build changed. The upfront check (7.2) confirms it once: "Rafi runs the full test suite before merge. Keep that, or manage full test suite runs yourself?" Auto-approve keeps the default. The GUI shows a "CI testing" dropdown (Full, Light, None), only when rafi handles git, and, when it's Full or Light, a "Failing tests block merge" switch, off by default.
-- **When it runs.** Before rafi merges its branch or opens its PR. Same worktree, the builder's permissions, `timeouts.suite_minutes` (6.11).
-- **Nothing added to your repo.** Rafi never writes CI workflows, required checks or branch protection. It runs its own step and moves on.
+- **Per ticket, before it counts as done**: its requirements' checks plus the tests related to its changed files (6.9). Most breakage is caught at the ticket that caused it, while it's still open.
+- **Who manages git** (ARCH-6). `git.managed_by: rafi | me`, asked first in `rafi create` and `rafi tickets setup:*`: "Who manages git: Rafi or me?" "Me" sets branch strategy `current` and completion `none` and skips every branch, PR, merge and CI question. **Rafi handles git** when `managed_by` is `rafi` and completion is `pr`, `pr-ready`, `auto-merge` or `direct-merge`; only then are there CI points. With `managed_by: me`, or completion `none`, rafi runs no suite (in "Current branch — Rafi works here; you manage Git", rafi makes no branches, commits, pushes or merges, `rafi/src/workMode.ts:3,12`).
+- **The settings** (5.6). `checks.ci_tests: full | light | none` (default `full`); `light` runs the tests related to every file the build changed. `checks.ci_when` (decision 6):
+
+| `ci_when` | CI points |
+|---|---|
+| `each-ticket` | after each ticket's checks and review, before it's delivered |
+| `each-pr` | when a delivery unit is ready, before its merge or PR |
+| `end-of-build` (default) | once, after every ticket in scope is done |
+| `light-each-pr-full-end` | `light` before each unit's merge or PR, plus `full` once at the end |
+
+  `checks.ci_blocks_merge` (default `false`) decides what a suite still failing after the fix ticket does. With it on, merges wait for their CI point, so `end-of-build` holds the build's merges until the end.
+- **Asked once.** The upfront check (7.2) confirms it: "Rafi runs the full test suite before merge. Keep that, or manage full test suite runs yourself?" Auto-approve keeps the default. The GUI shows "CI testing" (Full, Light, None) and "When" dropdowns only when rafi handles git, and, when testing is Full or Light, a "Failing tests block merge" switch, off by default.
+- **What `end-of-build` tests.** The combined result: the base branch after rafi's merges, or, for PR completions, a temporary merge of the build's branches in a throwaway git worktree.
+- **Nothing runs twice** (decision 6). Rafi skips a test whose last passing run is still fresh by 6.9's rule (nothing it depends on changed since), using per-test results when the runner reports them (`jest --json`, `vitest --reporter=json`; otherwise the whole command reruns). Skipped tests are listed as reused in `suite.run`. CI that you run elsewhere, such as GitHub Actions, isn't rafi's to change.
+- **Nothing added to your repo.** Rafi never writes CI workflows, required checks or branch protection.
 - **If it fails:**
-  1. Failing tests that also fail on the build's starting commit were already broken: rafi tells you once and they don't block.
-  2. For the rest, rafi adds a fix ticket at the front of the queue ("Fix 3 failing tests"), with each failing test as a requirement and a note of which ticket probably caused it (a hint for the builder, found by rerunning the failing tests on earlier ticket commits). It's built AFK like any ticket: requirements file, builder, QA. Then the CI step runs again, and on a pass rafi merges.
-  3. If the fix ticket runs out of `retries.fixes`, the build is never stopped by it. With `checks.ci_blocks_merge: false` (the default) rafi merges (or opens the PR) anyway, and tells you which tests still fail (terminal, notification and the end-of-build summary). With `true`, rafi commits and pushes the branch but doesn't merge it, and tells you. Either way the fix ticket stays open, unfinished, with its failing tests, for a later build.
-- **Flaky tests.** A failing test that passes when rerun on the same commit is recorded as flaky, reported, and doesn't block.
+  1. Failing tests that also fail on the build's starting commit were already broken; a failing test that passes when rerun on the same commit is flaky. Both are reported once and don't block. These reruns, and the ones that find which ticket probably caused a failure, run in a throwaway git worktree at that commit, removed afterwards; the builder's worktree isn't touched.
+  2. For the rest, rafi adds a fix ticket at the front of the queue (`ticket.added`, "Fix 3 failing tests"), with each failing test as a requirement, the failing runs' details (6.9), and a hint of which ticket probably caused it. It's built AFK like any ticket. Then the CI point runs again, and on a pass rafi delivers.
+  3. If the fix ticket runs out of `retries.fixes`, or circles, it becomes `blocked(unfixed)`: no question, and the build isn't stopped. With `ci_blocks_merge: false` rafi merges (or opens the PR) anyway and tells you which tests still fail (terminal, notification, end-of-build summary). With `true`, rafi commits and pushes the branch without merging and tells you. The fix ticket stays open for a later build.
+- **Rafi-owned tickets** (decision 10): CI fix tickets and re-check fix tickets (7.10). You're told once (terminal line, notification, summary) and never asked; they aren't plan updates, write no plan revision, and stay out of the scope fingerprint; they don't count toward `--steps` and aren't limited by `--to-ticket`.
 
-Events: `suite.run` (`commit`, `outcome: passed | failed | too-slow`, `failing`, `preexisting`, `flaky`, `duration_ms`), and the fix ticket as `tickets.changed` with `by: ci`.
+Events (3.4): `suite.run`, `ci.result`, `ticket.added`. A CI point is a step: a crash during it redoes it (boundary 10), reusing every result already recorded.
 
 ### 6.11 Slow test suites (decision 5)
 
 - **Spotting one.** Every `check.run` and `suite.run` records its duration. A run still printing output when it reaches its limit is slow, not hung (6.9).
-- **Asking.** Rafi asks once: "Tests here take longer than 5 minutes. Raise the limit to 10?" It suggests double the limit; you can type another number. The answer is saved to `rafi-config.yaml`. Until you answer, only that ticket (or the CI step) waits; the rest keep building.
+- **Asking.** Rafi asks once (question kind `limit`): "Tests here take longer than 5 minutes. Raise the limit to 10?" It suggests double the limit; you can type another number, or keep the limit (the test is then recorded as failing). The answer is saved to `rafi-config.yaml`. Until you answer, only that ticket (`blocked(limit)`) or that CI point waits; the rest keep building. A limit question asked mid-build is expected, not a scan gap.
 - **Auto-approve** answers yes and saves the new limit, like its other answers (7.4).
 - **Next build.** When saved durations already exceed a limit, the upfront check asks there instead (7.2), suggesting 1.5 times the longest recorded run.
 
@@ -901,12 +967,14 @@ Events: `suite.run` (`commit`, `outcome: passed | failed | too-slow`, `failing`,
 
 | Need | Where rafi finds it | Asked as |
 |---|---|---|
-| Internet, local servers, installs, live services | Each ticket's `needs` (written by the Planner and Ticket Maker, 6.5); the `permissions` of each tool a ticket gets through its tags (NEW-TOOL-6); install commands in `scripts/rafi-setup.sh`, found by a fixed list (`npm`/`pnpm`/`yarn`/`bun` install or add, `pip install`, `brew install`, `apt-get install`, `cargo install`, `go install`, `gem install`), which add `installs` and `internet` for every ticket whose agents run the script (Q-SET-1, S-ENG-3) | Allow once / Always allow (this machine) / Don't allow / Answer later |
+| Internet, local servers, installs, live services | Each ticket's `needs` (written by the Planner and Ticket Maker, 6.5); the `permissions` of each tool a ticket gets through its tags (NEW-TOOL-6); install commands in `scripts/rafi-setup.sh`, found by a fixed list (`npm`/`pnpm`/`yarn`/`bun` install or add, `pip install`, `brew install`, `apt-get install`, `cargo install`, `go install`, `gem install`), which add one `installs` and `internet` need for the whole build, because rafi runs the script once per build (10.2, Q-SET-1, S-ENG-3); what the CI points' suite needs (local servers, for example) | Allow once / Always allow (this machine) / Don't allow / Answer later |
 | Credentials | `needs.credentials`: environment variable names. Rafi checks that each is set in `deps.env`, never its value | "I've set it (check again)" / Answer later. Never "type the secret here" (S-BLK-9) |
 | Product decisions | `open_decisions` on a ticket | The Planner's options / Answer later. Auto-approve never answers these (D3) |
 | The plan-update setting | `plan_updates` missing from `rafi-config.yaml` | Change, then tell me / Ask me first; for this project or this build (NEW-PUA-6) |
+| The CI confirmation | Rafi handles git (6.10) and `checks.ci_tests` isn't saved | Keep (full suite, end of build) / Manage full test suite runs myself (6.10) |
+| Known slow tests | Recorded durations from earlier builds already over a limit | Raise to <1.5 times the longest run> / Keep the limit / Answer later (6.11) |
 
-Skipped because already answered: `--allow` grants, "always allow" grants on this machine, saved answers whose keys still match (7.6), settings in the config. **Not scanned**: checks only a person can do; they're asked when the build reaches them (D4, 7.8).
+Skipped because already answered: `--allow` grants, "always allow" grants on this machine, saved answers whose keys still match (7.6), settings in the config. **Not scanned**: checks only a person can do; they're asked when the build reaches them (D4, 7.8). A time limit first hit mid-build is asked then (6.11). With `git.managed_by: me` there's no CI confirmation.
 
 ### 7.3 The one list (NEW-ASK-3)
 
@@ -936,18 +1004,18 @@ rafi: Before the build starts, 6 things need you (20 tickets in scope).
 
 ### 7.5 Without a terminal (OQ-5)
 
-No prompt is shown. Every remaining item, including auto-approve's warned items, becomes an open question with a notification and an entry in `rafi answer`. The tickets that need one are held (`blocked(held)`); everything else builds; the run exits with code 2 once only held tickets remain (Q-OUT-1, S-PERM-2 step 4). `--allow` or a saved "always allow" answers warned items ahead of time.
+No prompt is shown. Every remaining item, including auto-approve's warned items, becomes an open question with a notification and an entry in `rafi answer`. The tickets that need one are held (`blocked(held)`); everything else builds; a foreground run exits with code 2 once only held tickets remain (Q-OUT-1, S-PERM-2 step 4); a background run keeps waiting (4.3, decision 8). `--allow` or a saved "always allow" answers warned items ahead of time.
 
 ### 7.6 The question record (NEW-GUI-5, NEW-NOT-1, PRM-G1)
 
 - **Fields** (`question.opened`): id, short number, kind, tickets, text, options (id and label), recommended option, context, urgency, time, and a saved-answer key.
 - **Short numbers** count up per project and are never reused; `rafi answer` lists them (Q-CMD-2): `rafi answer` lists and asks; `rafi answer <n> <choice number or text>` answers one; an unknown number exits 1 (S-CLI-16).
-- **Kinds:** upfront items (permission, credential, decision, plan-update setting), blocked, what-next, unverified, confirm, plan (scope approval, an ask-first plan update, a locked-requirement change), provider question, runtime (login, usage limit), build-wide, dependent (a dependency was dropped).
+- **Kinds:** upfront items (permission, credential, decision, plan-update setting), blocked, what-next, unverified, confirm, plan (scope approval, an ask-first plan update, a locked-requirement change), provider question, runtime (login, usage limit), build-wide, dependent (a dependency was dropped), limit (a test's time limit, 6.11), CI (the upfront confirmation), delivery (a merge conflict or merge wait, 4.3.2).
 - **First answer wins.** Every surface calls one engine action, `answer(question, answer, source)`. In one `BEGIN IMMEDIATE` transaction it folds the question's state. If it's open, it appends `question.answered` and whatever the answer causes (`ticket.unblocked`, `grant.recorded`, `fix.granted`, …). If it's already answered, it writes nothing and returns who answered and when. SQLite serializes writers, so the first answer wins even across processes (S-NOT-2, S-BLK-8).
 - **Surfaces:** the pinned prompt (in the build's terminal and in any attached `rafi resume`), a desktop notification, `rafi answer`, Manager `/answer-question`, later the GUI. Each watches the log (8.4); when a question closes it updates to "answered in notification" (or wherever it was answered) or closes.
 - **Free text** is stored exactly as typed. Every command rafi prints quotes its arguments with one shell-quoting function, so it works when copied (PRM-G9, S-SCN-6).
 - **No agent answers a question.** The agent permission policy refuses any agent tool request that would run `rafi answer`, `rafi stop` or anything else that writes rafi's state (PRM-G8, S-NOT-1).
-- **Gaps.** A question that comes up mid-build and that the scan should have found is recorded as `scan.gap` (NEW-ASK-5). A person-only check is expected, not a gap.
+- **Gaps.** A question that comes up mid-build and that the scan should have found is recorded as `scan.gap` (NEW-ASK-5). A person-only check and a time-limit question are expected, not gaps.
 
 **Saved-answer keys** (NEW-QAM-4, Q-QAM-3). A key names exactly what an answer answered, and the answer applies only while that's unchanged:
 
@@ -997,7 +1065,10 @@ Saved answers are committed in the progress file; grants aren't (Q-PORT-2).
 |---|---|
 | `what-next` | Retry another Builder fix / I verified it myself (a note is required) / Explicitly waive QA (then PRM-82's confirmation) / Discuss with read-only Planner / Pause at this checkpoint (PRM-81) |
 | `unverified` | Connect `<tool>`, then retry QA / I verified it myself / Continue with R3 unverified / Skip for now |
-| `confirm` | It works (confirm) / It doesn't (your note becomes a QA finding and the builder fixes it) / Skip for now / Drop it |
+| `confirm` | It works (confirm) / It doesn't (your note becomes a finding and the builder fixes it; counts against `retries.fixes`) / Skip for now / Drop it |
+| `limit` | Raise the limit to <suggested> (or type one) / Keep the limit (the test counts as failing) / Answer later (6.11) |
+| `delivery` | A conflict: Builder resolves the conflict / Skip this merge (the branch stays pushed) / Stop the build. A merge wait timed out: Keep waiting / Merge it myself, then continue / Skip the units that wait on it (4.3.2) |
+| `unfixed` | None: nothing is asked; the ticket is listed in the summary for a later build (6.10) |
 | `held` | The upfront item's own choices (7.3) |
 | `build-wide` | Fixed it, retry / Stop the build; plus "Grant access" for a project-wide permission |
 | `dependent` | Drop T5 too / Build T5 anyway / Change T5 with the Planner / Skip for now (S-BLK-3) |
@@ -1021,12 +1092,12 @@ Settings, per project in `rafi-config.yaml` or per ticket (FMT-C16, FMT-T20): `m
 ### 7.10 Plan updates and scope approval (NEW-PUA-1..8, NEW-KEEP-1)
 
 - **Scope approval at start.** Rafi keeps the key of the last approved scope (7.6). Unchanged: the build starts with no plan question. A material change: "How does this plan look?" (Proceed / Give feedback / Cancel, PRM-71); feedback goes to the Planner and rafi asks again (S-START-3).
-- **What counts** (OQ-6, NEW-PUA-3). Changes only to `title` or `summary` are rewording. A plan update is any change to acceptance criteria (with their person-only and locked marks), required tests, dependencies, likely files, tags or order, or adding or removing a ticket. The Planner rewording acceptance text counts, because it changes what QA checks. A change to `needs` or `open_decisions` isn't a plan update; it re-runs the scan for that ticket (7.1).
+- **What counts** (OQ-6, NEW-PUA-3). Only edits by you or the Planner. Tags rafi adds itself (QA preparation, file patterns) and rafi-owned fix tickets aren't plan updates and stay out of the scope fingerprint (decision 10). Changes only to `title` or `summary` are rewording. A plan update is any change to acceptance criteria (with their person-only and locked marks), required tests, dependencies, likely files, tags or order, or adding or removing a ticket. The Planner rewording acceptance text counts, because it changes what QA checks. A change to `needs` or `open_decisions` isn't a plan update; it re-runs the scan for that ticket (7.1).
 - **Where updates come from.** The Planner (the blocked prompt's "Change it with the Planner", "Discuss with read-only Planner"); your edits to `tickets.yaml` or `rafi tickets reorder` and similar during a build, found at the next safe point; `rafi tickets accept-future-work` adding a ticket.
 - **Locked requirements** (NEW-PUA-1). For ticket-level locks, rafi checks deterministically that every locked criterion's text and mark are unchanged. For the project-wide list (`locked_requirements`), a short independent check turn by the QA role (read-only) returns which locked items a proposed change would change, drop or weaken, by number: `{ "touches": [1], "why": "Replaces PostgreSQL with a JSON file." }`. If anything is touched, rafi doesn't apply the change; it asks, naming exactly which locked item would change (S-PLAN-2). The Planner is given the locked list in its standing instructions.
-- **Change, then tell** (the default) or **ask first** (`plan_updates` in the config, or for one build). Applying a change writes a new plan revision under `<docs>/rafi-plans/` (earlier ones are kept, FILE-21), updates `tickets.yaml`, and appends `plan.changed`. Affected tickets get a new requirements file on their next start, and their saved QA results and approvals go stale; unchanged tickets keep theirs (NEW-PUA-7, S-PLAN-1).
+- **Change, then tell** (the default) or **ask first** (`plan_updates` in the config, or for one build). Applying a change writes a new plan revision under `<docs>/rafi-plans/` (earlier ones are kept, FILE-21), updates `tickets.yaml`, and appends `plan.changed`. Affected tickets get a new requirements file on their next start, and their saved QA results and approvals go stale; unchanged tickets keep theirs (NEW-PUA-7, S-PLAN-1). A done ticket whose criteria changed gets a re-check, as after a restore.
 - **You're told** at the moment it happens (one terminal line with what changed and why), in the end-of-build summary, and in the plan-change log, `rafi plan changes`. When you're away (no terminal, or no key pressed in the build's terminal for 10 minutes) a notification goes out too (NEW-PUA-4).
-- **Switching back** (Q-PUA-1, Q-PUA-2): `rafi plan restore <revision>` for the whole plan, or `--ticket <id>` for one ticket. Code is never deleted or reverted. Rafi records `plan.changed` (kind `restore`) and queues a re-check of each affected done ticket: a QA review against the restored requirements that leaves the ticket done; a failure becomes a new fix ticket (NEW-PUA-5, S-PLAN-5). `decide` runs pending re-checks before starting new tickets (rule 5 in 4.5), recorded as `recheck.requested` and `recheck.recorded`.
+- **Switching back** (Q-PUA-1, Q-PUA-2): `rafi plan restore <revision>` for the whole plan, or `--ticket <id>` for one ticket. Code is never deleted or reverted. Rafi records `plan.changed` (kind `restore`) and queues a re-check of each affected done ticket: a QA review against the restored requirements that leaves the ticket done; a failure becomes a rafi-owned fix ticket (`ticket.added`, NEW-PUA-5, S-PLAN-5). `decide` runs pending re-checks before starting new tickets (rule 6 in 4.5), recorded as `recheck.requested` and `recheck.recorded`.
 - Approving a plan update never grants a permission (S-PLAN-3).
 
 ### 7.11 Grants and how they reach agents (NEW-PERM-1..4, NEW-MAL-6)
@@ -1038,6 +1109,7 @@ Settings, per project in `rafi-config.yaml` or per ticket (FMT-C16, FMT-T20): `m
   - Codex: `thread/start`'s `sandbox` and `config.sandbox_workspace_write.network_access`, and each turn's `sandboxPolicy` (`adapters/codex.ts:610-617`, `:270-272`). Builder: `workspaceWrite` on its worktree, network on when internet is granted. QA: `readOnly`, network on when local servers or internet are granted (today's QA grant, `adapters/codex.ts:957`).
   - Claude: `sandbox.network.allowedDomains` and `sandbox.filesystem.allowWrite` (`adapters/claude.ts:90-103`); QA gets a private scratch `TMPDIR` for temp files (`adapters/claude.ts:118-121`).
   - **Unverified:** whether each runtime's sandbox can allow local servers (loopback) without full internet. MALF 3 saw EPERM in QA's sandbox. The M2 live adapter check and S-PERM-3 decide it. If a runtime can't separate them, its capability says so and the upfront item says "Local servers need internet access on Codex" rather than granting more than you chose.
+- **`run_check` runs** under rafi's own sandbox with the same grants (6.9), not the runtime's.
 - **No approvals mid-build.** Today's per-operation sandbox escalation (`--builder-approvals`, PRM-74) folds into the upfront check. A runtime's approval request (Codex `item/commandExecution/requestApproval` and `item/fileChange/requestApproval`, `adapters/codex.ts:975-976`; Claude's `canUseTool`, `adapters/claude.ts:470`) is answered by the agent permission policy from the grants: allowed when its need was granted, otherwise denied with a message telling the agent to report `blocked(permission)`, so it explains the restriction instead of failing quietly (SCN-7).
 
 ## 8. How `rafi` calls the engine
@@ -1072,6 +1144,8 @@ interface Deps {
   fs: Fs;                                        // read, writeAtomic, append, rename, remove, mkdir, stat, list (async)
   git(args: string[], o: { cwd: string; env?: Env; input?: string }): Promise<ExecResult>;
   exec(cmd: string, args: string[], o: ExecOptions): Promise<ExecResult>;   // gh, glab, readiness, prerequisites, notifiers
+  checks: { run(cmd: string, args: string[], o: { cwd: string; env: Env; sandbox: Grants; onOutput(chunk: string): void; signal: AbortSignal }): Promise<CheckResult> };   // test runs (6.9)
+  serve(o: { host: "127.0.0.1"; handler: McpHandler }): Promise<{ url: string; close(): Promise<void> }>;   // rafi's local MCP endpoint (6.9)
   spawnBackground(argv: string[], o: { cwd: string; log: string }): { pid: number };   // --detach only (8.7)
   db: { open(path: string): Db };
   processes: { self(): Owner; isAlive(owner: Owner): Promise<boolean> };
@@ -1091,6 +1165,8 @@ interface Deps {
 | `notifier` | Platform backends (10.4) | Records each notification; can answer one; modes for buttons, none, `alerter` missing or broken (SCN 7.5) |
 | `terminal` | `process.stdin`/`stdout`/`stderr`, SIGINT | A 120×24 screen model with title and pinned lines, or plain pipes (SCN 7.6) |
 | `fs`, `git`, `exec`, `db` | Node and better-sqlite3 | Wrapped by the write fence: after a `HarnessCrash`, every write, git command and database write from that instance throws; storage faults are injected here (SCN 7.7) |
+| `checks.run` | A sandboxed child process, output streamed | Scripted per test on the fake clock: pass, fail, hang, slow, flaky, writes, edits (F-TESTS) |
+| `serve` | A local HTTP server on a random port | An in-memory endpoint the fake Codex calls |
 | `processes` | pid + start time on this host (4.3.1) | A fenced instance is dead |
 | `hooks` | No-ops | `crash.at(k)`, `pause.at(k)` (SCN 7.7) |
 | `machine.stateDir` | `~/.rafi` | A temp directory per "computer" (S-PORT-1) |
@@ -1126,14 +1202,14 @@ engine.tickets.*, engine.plan.*, engine.tools.*, engine.stats.*, engine.manager.
 - **Plain-English lines** (principle 7). `ui/lines.ts` builds every stop and block message from typed data: what happened, why, what waits, what rafi is doing now, and the exact command to continue. Nothing prints raw JSON.
 - **Activity** (OUT-8, SCN-14). Failed exploratory reads (Claude `Read`, `Glob`, `Grep`, `LS` not finding a path) fold into one quiet line per turn; a real failure still shows. Errors, timeouts, cancellations and unknown outcomes have distinct labels; duplicate result events show once; `TIME_ELAPSED` shows as an unknown duration.
 - **Cost and compaction** (OUT-12, OUT-13). Session cost is labelled measured or estimated. The compaction notice shows the requested threshold and the setting rafi verified with the provider as separate values, and says compaction happened only when the provider reported it.
-- **End-of-build summary** (OUT-18, NEW-MEAS-3): tickets done and left, cost and time, how long rafi waited on you, plan changes, skipped questions still open, and person-only checks still unconfirmed under setting C with the tickets built on them.
+- **End-of-build summary** (OUT-18, NEW-MEAS-3): tickets done and left, cost and time, how long rafi waited on you, plan changes, skipped questions still open, person-only checks still unconfirmed under setting C with the tickets built on them, and from the CI points: tests still failing, already broken or flaky, and `unfixed` fix tickets.
 
 ### 8.5 Attach, resume, stop, Ctrl+C and pause
 
 - **`rafi resume` with a live owner** attaches: it shows live progress and the open questions, can answer them, and doesn't start a second build (S-CRASH-4 step 1). On a paused build it asks "Continue the paused build?" (auto-approve continues) and writes `build.unpause_requested`.
 - **`rafi resume` with no live owner** takes over: it claims the lease (atomically, only if the old owner is dead), writes `build.owner_lost` if the old owner never released, then `build.resumed`, asks only unanswered and new upfront questions, and continues the loop, which redoes the interrupted step (4.5). It never asks for a recovery mode (S-CRASH-1).
 - **Picking.** With no `--run`, `rafi resume` lists unfinished builds and saved interviews, newest first, and asks only which one (PRM-90, PRM-92); with auto-approve and no terminal it takes the most recent (FLAG-RS-12). `--run <prefix>`, `--ticket <id>` and one-off `--agent`/`--model` are kept (FLAG-RS-2, -4, -11); `--id`/`--discard` resume or discard an interview (FLAG-RS-3). Planning sessions that `rafi plan:doctor` found today are in the same list (CMD-5).
-- **`rafi stop`**, from any shell, writes `build.stop_requested` (graceful) and prints "Stopping after the current step. Run `rafi stop` again or press Ctrl+C to stop now." A second one writes `now` (Q-CMD-6). The owner sees it through `deps.logChanged`.
+- **`rafi stop`**, from any shell, writes `build.stop_requested` (graceful) and prints "Stopping after the current step. Run `rafi stop` again or press Ctrl+C to stop now." A second one writes `now` (Q-CMD-6). The owner sees it through `deps.logChanged`. When no process owns the build (a foreground run that exited with code 2), `rafi stop` writes `build.stopped` itself.
 - **Ctrl+C** in the build's terminal writes `build.stop_requested` (now, `ctrl-c`): rafi cancels the current turn, waits for the provider to take the cancel and exit (OUT-14), records `turn.cancelled` with the evidence so far, writes `build.stopped` and exits 130. A second Ctrl+C exits at once and ends the provider processes.
 - **Pause** is a Manager control for now (Q-CMD-6): `/pause <run> <ticket>` writes `build.pause_requested`; the build shows "Pausing…" and holds at the next safe point (GUI-R5).
 - **One live build per checkout.** `rafi start` while a build is live offers to attach instead; `rafi reset` refuses (FLAG-RE-3).
@@ -1147,10 +1223,10 @@ engine.tickets.*, engine.plan.*, engine.tools.*, engine.stats.*, engine.manager.
 ### 8.7 `--detach` (D5)
 
 1. In a terminal, the parent runs the upfront check first, so you answer now.
-2. It calls `deps.spawnBackground` with your own arguments minus `--detach` (for example `rafi start . --steps 1`), in a new session so closing the terminal doesn't stop it, with stdin closed and output to `.rafi/background.log` (ignored by git).
+2. It writes `build.started` and the run's grants and answers, then calls `deps.spawnBackground` with the ordinary command `rafi resume --run <id>`, in a new session so closing the terminal doesn't stop it, with stdin closed and output to `.rafi/background.log` (ignored by git).
 3. It waits up to 15 seconds for the child's `build.owner_acquired` to appear in the log, prints "rafi: build r7 started in the background. Follow it with `rafi status` or `rafi resume`." and returns 0 (Q-OUT-1). If the child exits first, it prints the child's first error line and returns 1.
 
-No hidden flags, no hand-off variables (ENV-5), no IPC. The child is an ordinary build without a terminal: its questions become open questions with notifications (7.5), and `rafi status` and `rafi resume` follow it by reading the log (S-START-5 step 4, S-NOT-1 step 3).
+No hidden flags, no hand-off variables (ENV-5), no IPC: "Allow once" grants belong to the run the parent created, so the child sees them. The child is an ordinary build without a terminal: its questions become open questions with notifications (7.5), it keeps waiting instead of exiting (decision 8), and `rafi status` and `rafi resume` follow it by reading the log (S-START-5 step 4, S-NOT-1 step 3).
 
 ### 8.8 Exit codes (OUT-40–42, Q-OUT-1)
 
@@ -1158,7 +1234,7 @@ No hidden flags, no hand-off variables (ENV-5), no IPC. The child is an ordinary
 |---|---|
 | 0 | Success; a cancelled prompt; "stop and deny" in the auto-approve warning; `rafi stop` (the request); `--detach` after launch |
 | 1 | Errors, including unknown commands, options and setting keys |
-| 2 | A build without a terminal left waiting on you, with nothing else to build |
+| 2 | A foreground build without a terminal left waiting on you, with nothing else to build (a background build keeps waiting) |
 | 130 | A build stopped with Ctrl+C (the code today's resume launcher gives a child ended by SIGINT, `rafi/src/resumeLauncher.ts:50`) |
 
 A foreground build in a terminal never exits while it waits (NEW-BLK-5).
@@ -1193,7 +1269,7 @@ A read-only view of the fold and the lease (it never writes, 3.6). It shows:
 
 - **The 1.0 marker** is a new top-level key in `rafi-config.yaml`: `format_version: 1`. `rafi create` (new engine) and `rafi migrate` write it.
 - **The old engine refuses a 1.0 project** (D6). Today's config schema rejects unknown keys (`additionalProperties: false`, `spec/src/schemas.ts:414-418`), so the old engine would fail with a schema error instead of the decided message. The check therefore runs in the launcher before the old layer loads: if the project (the command's project argument or `-p`, else the nearest `rafi-config.yaml` from the current folder) has `format_version: 1`, it prints "This project uses 1.0 formats; set RAFI_ENGINE=next." and exits 1, writing nothing (S-ENG-5 step 2). The old engine's own code isn't touched.
-- **The new engine refuses a 0.10.x project** (no marker, or `foreman.yaml`, or `.tickets/ticket-state.sqlite`): one line, "This project uses 0.10.x formats. Run `rafi migrate` first.", exit 1, nothing written (S-MIG-2 step 1). If the 0.10.x project also has an unfinished build, the line names the run and gives the 0.10.x commands, run without `RAFI_ENGINE`, to finish it (`rafi resume`) or drop it (`rafi build:reset`) (S-ENG-5 step 4, OQ-1). `rafi migrate`, `--help`, `--version` and `doctor` work on either.
+- **The new engine refuses a 0.10.x project** (no `format_version: 1` marker; the marker alone decides): one line, "This project uses 0.10.x formats. Run `rafi migrate` first.", exit 1, nothing written (S-MIG-2 step 1). If the 0.10.x project also has an unfinished build, the line names the run and gives the 0.10.x commands, run without `RAFI_ENGINE`, to finish it (`rafi resume`) or drop it (`rafi build:reset`) (S-ENG-5 step 4, OQ-1). `rafi migrate`, `--help`, `--version` and `doctor` work on either.
 - **Pre-0.10 forms** (`project.yaml`, the `qa_preparation: { mode }` object) aren't supported: `rafi migrate` names them as unsupported and changes nothing (Q-CFG-2, S-MIG-2 step 2).
 
 ### 9.3 `rafi migrate` (CMD-37, Q-CFG-2)
@@ -1205,7 +1281,7 @@ A read-only view of the fold and the lease (it never writes, 3.6). It shows:
 | From (0.10.x) | To (1.0) |
 |---|---|
 | `tickets.build.pr_ready: true`, `delivery_units[].pr_ready` (config, `.tickets/delivery.yaml`, every plan revision) | `completion: pr-ready` (Q-CFG-1) |
-| The `autonomy` block: `profile` and `rules` (`recoveryPolicy.ts:20-44`) | `retries` with the same effective limits: the QA fix allowance (`qa.nonconvergence`, or the profile's) becomes `fixes`, the transient retries (`runtime.transient`, or the profile's) become `turn`; `supervisor` and `continue_independent_tickets` (now always on, RW:208) are dropped (Q-CFG-3) |
+| The `autonomy` block: `profile` and `rules` (`recoveryPolicy.ts:20-44`) | `retries` with the same effective limits: the QA fix allowance (`qa.nonconvergence`, or the profile's) becomes `fixes`, `turn` becomes the larger of the transient retries (`runtime.transient`, or the profile's) and the format corrections (`protocolCorrections`), so a `supervised` project (0 transient retries) still retries a malformed reply, and the preview shows it; `supervisor` and `continue_independent_tickets` (now always on, RW:208) are dropped (Q-CFG-3) |
 | `foreman.yaml`: `permissions`, `notifications`, `qa.enabled`, `observability` | `agent_permissions`, `notifications`, `harness.qa`, `logs.capture`; rafi says where each went (Q-CFG-4) |
 | `qa_preparation`, `qa_preparation_shadow`, `qa_preparation_wall_time_ms` | Removed: the requirements file is always written (Q-REQ-1) |
 | `agent_defaults` session strategies equal to 0.10.x's default (`compact` for builder, QA, ticket-maker) | Shown in the preview as moving to the 1.0 default, `fresh`, with an option to keep `compact` (FMT-C7, Q-CFG-5) |
@@ -1216,7 +1292,8 @@ A read-only view of the fold and the lease (it never writes, 3.6). It shows:
 | Plan revisions (`<docs>/rafi-plans/*`) | Converted in place, once, so the engine reads only 1.0 formats; the originals are in the backup. This is the only time rafi rewrites a revision (FILE-21) |
 
 - **Crash-safe and re-runnable.** It writes the backup first, then each converted file atomically, and writes `format_version: 1` into `rafi-config.yaml` last. A crash before that last write leaves a project the new engine still calls 0.10.x; running `rafi migrate` again redoes the conversion from the backup's originals. A second run on a migrated project reports nothing to change and exits 0 (S-MIG-1 step 2).
-- **Leaves alone** 0.10.x's local files (`.rafi/recovery.sqlite3`, `.foreman/runs`, the recovery folders): they're ignored by git and no longer read; the preview says so, and `rafi uninstall` can remove them.
+- **Retires** `.tickets/ticket-state.sqlite` and `foreman.yaml` into the backup once converted.
+- **Leaves alone** 0.10.x's other local files (`.rafi/recovery.sqlite3`, `.foreman/runs`, the recovery folders): they're ignored by git and no longer read; the preview says so, and `rafi uninstall` can remove them.
 
 ### 9.4 The switch and the deletion
 
@@ -1237,10 +1314,11 @@ Guide step 11: `rafi migrate` moneyTree (keep a copy), build T002 onward with `R
 | A file pattern on the ticket's `likely_files` | Before the builder starts, with no AI call | "src/App.tsx matches **/*.tsx" |
 | A file pattern on the builder's changed files | Before QA reviews | "builder changed src/Panel.tsx (matches **/*.tsx)" (S-TAG-4) |
 | You | Editing `tickets.yaml` | "set by you" |
-| A reused agent's scope | Before each ticket, the union of every ticket in scope (NEW-TAG-6) | "reused agent: T4 entered the scope" |
 
-- **What tags pick.** Every rule pack, skill and tool entry carries `tags:` (`always` for the small core). Today packs switch on for the whole project from `condition: always | cloud | frontend` (`special-agents/content/rules/packs.index.yaml`) and the role manifests' `conditionalPacks` keyed by `ai` and `frontend` (`special-agents/content/agents/builder.yaml`), so every ticket gets the AI and accessibility packs (AIR item 2). In 1.0 a pack reaches a ticket's agents only when one of its tags matches. `flags.*` stay as keys (FMT-C3) and still drive `create`'s offers and the stack template; they no longer switch packs on.
+- **What tags pick.** Every rule pack, skill and tool entry carries `tags:` (`always` for the small core). Today packs switch on for the whole project from `condition: always | cloud | frontend | ai` (`special-agents/content/rules/packs.index.yaml`) and the role manifests' `conditionalPacks` keyed by `ai` and `frontend` (`special-agents/content/agents/builder.yaml`), so every ticket gets the AI and accessibility packs (AIR item 2). In 1.0 a pack reaches a ticket's agents only when one of its tags matches. `flags.*` stay as keys (FMT-C3) and still drive `create`'s offers and the stack template; they no longer switch packs on.
 - **QA gets the builder's tags**, plus any added from the builder's changed files (NEW-TAG-3).
+- **A reused agent** (the override) gets the union of the tags of every ticket in its scope, recorded on its session, not as `ticket.tags_added` on each ticket (NEW-TAG-6).
+- Tags rafi adds aren't plan updates (7.10).
 
 ### 10.2 Instruction assembly per ticket (principle 13, NEW-INS-1..9)
 
@@ -1253,6 +1331,8 @@ Guide step 11: `rafi migrate` moneyTree (keep a copy), build T002 onward with `R
 5. The runtime contract: network on or off, what's writable, and "if something you need is missing, report `blocked`; don't swap in a different stack or tool" (NEW-MAL-5, SCN-7).
 6. The reply format (section 6).
 
+**The setup script** (NEW-SET-1, Q-SET-1). Rafi runs `scripts/rafi-setup.sh` itself through `deps.checks.run`, once per build before the first agent turn and again after a builder turn changes it; agents don't run it. Services it starts run detached with their process ID and port recorded; rafi stops them at the end of the build, and a takeover after a crash stops the dead owner's.
+
 Runtimes load root files themselves: Claude loads `CLAUDE.md` when `settingSources` includes `project` (the builder's sessions do, `adapters/claude.ts:88`), and Codex loads `AGENTS.md`. `rafi compile` writes only the small core into those files (FMT-O2), and rafi doesn't append the core again where the runtime already loads it; QA's Claude sessions load only user settings, so rafi gives QA the core itself. Each pack reaches a session once (NEW-INS-2, S-CTX-1).
 
 **Per-turn messages** carry only what's new:
@@ -1260,9 +1340,9 @@ Runtimes load root files themselves: Claude loads `CLAUDE.md` when `settingSourc
 | Turn | Carries |
 |---|---|
 | Prepare (QA) | The ticket: title, summary, numbered acceptance criteria and their person-only and locked marks; the depth |
-| Build | The ticket and its numbered criteria; the requirements file's path, never its text (NEW-REQ-2); a one-line status of each dependency, never the queue (NEW-INS-4); answers you gave for this ticket and any note from "Give the builder instructions"; "Run `scripts/rafi-setup.sh` first" (NEW-SET-1); on a redo, that an earlier attempt may have left changes |
+| Build | The ticket and its numbered criteria; the requirements file's path, never its text (NEW-REQ-2); a one-line status of each dependency, never the queue (NEW-INS-4); answers you gave for this ticket and any note from "Give the builder instructions"; that rafi ran `scripts/rafi-setup.sh` and its run number (NEW-SET-1); on a redo, that an earlier attempt may have left changes |
 | Review (QA) | The requirements file's path and fingerprint, and a warning if it changed or is missing (NEW-REQ-5); the changed files from rafi's snapshot; rafi's recorded runs (number, command, outcome, exit code or "no exit code", duration); on a re-review, only what changed since: files, new runs, prior findings (NEW-REQ-7) |
-| Fix | The requirements QA found not satisfied, with QA's notes and run numbers |
+| Fix | What failed: QA's not-satisfied requirements with its notes and run numbers, or the failing check runs with their failing tests, errors and output excerpts (6.9); "Keep the work you've done; don't start over" |
 | Any of the above | Guidance you queued through Manager (`/guide-builder`, `/guide-qa`, `/guide-both`), delivered at the next turn of that role (FLAG-MG-5) |
 | Repair | The parser's error and the byte (5.3) |
 
@@ -1290,7 +1370,7 @@ tools:
 
 - **Built in:** Playwright. **Fully supported:** mobile-mcp. `rafi create` offers Playwright for a frontend and mobile-mcp for a mobile app (PRM-22). `rafi tools add <name>` knows `playwright`, `mobile-mcp`, `appium`, `maestro`, `ios-sim-push`, `apns-push` and `fcm-push` (NEW-TOOL-10, S-TOOL-5).
 - **`rafi tools add`** writes the entry, runs the tool's prerequisite checks through `deps.exec` (for example Xcode command line tools, Android platform tools, Node 20+, Java 17+), explains anything missing, writes the boilerplate (a starter Playwright config using the per-build port; `payload.apns` with a simulator send script; APNs sandbox and FCM send scripts that read keys from the environment, never from committed files; device-check steps in the setup notes, NEW-TOOL-4), records `tool.added`, and re-tags the remaining tickets (NEW-TOOL-7).
-- **In sessions.** MCP tools go into each session's configuration: Claude's `mcpServers` query option, and for Codex the session's MCP configuration. **Unverified:** whether app-server accepts MCP servers per thread rather than only from Codex's own config; M2 checks it first, because `run_check` needs it (6.9), and the fallback is a `-c mcp_servers.<name>=…` override when the app-server starts, as today's `-c` overrides do (`adapters/codex.ts:164-169`). The Playwright MCP server starts with `--isolated` for each agent, so no profile is shared (NEW-TOOL-8).
+- **In sessions.** MCP tools go into each session's configuration: Claude's `mcpServers` query option, and for Codex the session's MCP configuration. **Unverified:** whether app-server accepts MCP servers per thread rather than only from Codex's own config; M2 checks it first, because `run_check` needs it (6.9, decision 7), and the fallback is a `-c mcp_servers.<name>.url=…` override when the app-server starts, as today's `-c` overrides do (`adapters/codex.ts:164-169`). The Playwright MCP server starts with `--isolated` for each agent, so no profile is shared (NEW-TOOL-8).
 - **Telling agents.** A QA retry after "unable to verify" names the tool and the requirement: "You now have `playwright` (browser). Use it to verify R3: the file appears in the panel." Later tickets get the tool through their tags (NEW-TOOL-7, S-TOOL-1, S-TOOL-2).
 - **Parallel builds.** Each build gets its own app port from a machine-wide registry (`~/.rafi/locks/ports/`), given to agents as `RAFI_APP_PORT` and used by the starter Playwright config (S-TOOL-3). A physical phone is locked to one build at a time (`~/.rafi/locks/devices/<serial>`, owned by the build's lease, freed when its ticket finishes or its owner is gone; S-TOOL-4). "Show the browser" is a per-build setting, `--set tools.playwright.show_browser=true`, which starts that build's Playwright headed.
 - **Recordings** (NEW-TOOL-5, FMT-C20): one screenshot per checked requirement; for a failed check also a video and a Playwright trace (`retain-on-failure`). `recordings.save: failures | all`; `recordings.keep` is `ticket`, `build`, `{ builds: N }` (default 5), `{ days: N }` or `forever`. Files go to `.rafi/recordings/<run>/<ticket>/R<n>-<kind>.<ext>` (or under the project logs) and are listed as `recording.saved`; retention removes the files and records `recording.removed`, so they stay listed (S-TOOL-6). Recordings are the one exception to "never deleted automatically" (Q-STATS-2).
@@ -1379,7 +1459,7 @@ type AgentEvent =
   | { kind: "tool"; run: ToolRun }                 // exit_code is null when the runtime gives none
   | { kind: "usage"; input: number; output: number; cost?: number; measured: boolean }
   | { kind: "permission"; request: PermissionRequest; decide(d: Decision): void }   // goes to the agent permission policy
-  | { kind: "question"; text: string; choices: string[]; answer(a: string): void }  // AskUserQuestion
+  | { kind: "question"; text: string; choices: string[] }   // AskUserQuestion: answered at once with "reply needs-input" (5.1)
   // terminal events:
   | { kind: "reply"; text: string; structured?: unknown }
   | { kind: "error"; code: "transient" | "quota" | "auth" | "configuration" | "session-gone" | "unknown"; resetAt?: string; message: string }
@@ -1401,7 +1481,7 @@ type AgentEvent =
 2. Drive it with the installed SDK's `query()`, `pathToClaudeCodeExecutable` set to the fake, using streaming input, `outputFormat`, `canUseTool`, a `SessionStart` hook, an interrupt and an abort.
 3. **Pass** when `structured_output` arrives, the hook and `canUseTool` fire, and interrupt and abort end the fake without an SDK error. The fake then joins the process set as D9 decided, scripted from the same scenario files as the in-process fake.
 4. If the SDK refuses the fake when starting it, start it through `spawnClaudeCodeProcess` with the executable path taken from config, as SCN 7.3 says (never a hidden test flag), and repeat step 2.
-5. If the protocol itself can't be faked, stop and ask: decision 3.
+5. If the protocol itself can't be faked: decision 3. The process set's Claude rows use the in-process fake plus the live suite, D9 is amended, and no test-only code goes into the adapter.
 
 ## 12. What's deleted, and what's kept
 
@@ -1480,8 +1560,8 @@ REQ and SCN left these to the architecture plan. This is what I set; each is eas
 | Hostile-environment limits (S-ENG-7) | SCN's starting values: resident memory under 500 MB, at most 10 MB of activity stored per turn with a cut marker, `rafi status` answering within 2 seconds during a flood | 3.4 |
 | How the fake matches turns without reading prompts (SCN 7.3) | `TurnRequest.meta` travels next to the wire message through the transport seam | 11.6 |
 | The 1.0 format marker | `format_version: 1` in `rafi-config.yaml` | 9.2 |
-| New `rafi-config.yaml` keys (FMT-C12–C22, Q-CFG-1, Q-CFG-4) | `format_version`, `retries`, `timeouts`, `approvals.mode` (`manual` or `auto`), `plan_updates` (`change-then-tell` or `ask-first`), `manual_checks` (`wait`, `none`, `track`), `locked_requirements`, `tags`, `tools`, `notifications`, `logs.location` (`machine` or `project`), `logs.capture` (`none`, `normal`, `detailed`), `recordings.save`, `recordings.keep`, `agent_permissions` (from `foreman.yaml`), `tickets.build.max_branch_depth`, `tickets.build.keep_worktrees`; `tickets.build.pr_ready` is removed | 5.6, 7, 8.6, 10 |
-| New ticket fields (FMT-T17–T20, NEW-ASK-2) | `tags`, `needs` (`internet`, `local_servers`, `installs`, `services`, `credentials`), `open_decisions`, `person_only` and `locked` (acceptance-criterion numbers), `manual_checks`. Acceptance criteria stay a list of strings (`ai-foreman/src/tickets/ticketSchema.ts:74`) | 6.5, 7.2 |
+| New `rafi-config.yaml` keys (FMT-C12–C25, Q-CFG-1, Q-CFG-4) | `format_version`, `retries`, `timeouts`, `checks` (`ci_tests`, `ci_when`, `ci_blocks_merge`, `test_runner`, `output_paths`), `git.managed_by`, `approvals.mode` (`manual` or `auto`), `plan_updates` (`change-then-tell` or `ask-first`), `manual_checks` (`wait`, `none`, `track`), `locked_requirements`, `tags`, `tools`, `notifications`, `logs.location` (`machine` or `project`), `logs.capture` (`none`, `normal`, `detailed`), `recordings.save`, `recordings.keep`, `agent_permissions` (from `foreman.yaml`), `tickets.build.max_branch_depth`, `tickets.build.keep_worktrees`; `tickets.build.pr_ready` is removed | 5.6, 7, 8.6, 10 |
+| New ticket fields (FMT-T17–T20, NEW-ASK-2) | `tags`, `needs` (`internet`, `local_servers`, `installs`, `services`, `credentials`), `open_decisions`, `person_only` and `locked` (acceptance-criterion numbers), `manual_checks`. Acceptance criteria stay a list of strings (`ai-foreman/src/tickets/ticketSchema.ts:75`) | 6.5, 7.2 |
 | Database, background-log and machine-state locations | `.rafi/state.sqlite3`, `.rafi/background.log`, `~/.rafi/` | 3.1, 8.7, 8.2 |
 | The turn-retry setting's name and scope (Q-CFG-3, Q-MAL-1) | `retries.turn: 3`, covering provider errors, timeouts and replies still invalid after the repair try | 5.6 |
 | Circling threshold (NEW-ENG-5) | `retries.circling_repeats: 2` | 5.5 |
@@ -1491,7 +1571,7 @@ REQ and SCN left these to the architecture plan. This is what I set; each is eas
 | "Away" for plan-change notifications (NEW-PUA-4) | No terminal, or no key pressed in the build's terminal for 10 minutes | 7.10 |
 | Blocked-ticket options per kind (S-BLK-9) | SCN's table, except that a `permission` block also offers "I fixed it myself" (RW's example), plus rafi's own kinds | 7.7 |
 | Where tests run (NEW-MAL-6, decision 5) | Rafi runs them through `run_check` with the builder's permissions and records each run; QA stays read-only | 6.9 |
-| The full suite and slow suites (decision 5) | Once, at rafi's CI step, only when rafi handles git (`checks.ci_tests`, default `full`); a failure adds a fix ticket, done tickets are never reopened, and if the fix fails rafi merges anyway and tells you unless `checks.ci_blocks_merge` is on; limits of 2 minutes quiet, 5 minutes per ticket run, 20 per suite run, raised by asking | 6.10, 6.11 |
+| The full suite and slow suites (decisions 5, 6) | At rafi's CI points, only when rafi handles git (`git.managed_by`, `checks.ci_tests`, `checks.ci_when`, default once at the end of the build); fresh results reused; a failure adds a rafi-owned fix ticket, done tickets are never reopened, and if the fix fails rafi merges anyway and tells you unless `checks.ci_blocks_merge` is on; limits of 2 minutes quiet, 5 minutes per ticket run, 20 per suite run, raised by asking | 6.10, 6.11 |
 | Unverifiable requirements | Ask only when a known, unconfigured tool would let QA verify; otherwise record them as unverified and go on | 6.4 |
 | Who checks project-wide locked requirements | A short, read-only QA check turn; ticket-level locks are checked by text | 7.10 |
 | Code limits ("files under about 500 lines, lines short") | 500 lines per file, 100 per function, 120 characters per line, enforced by `scripts/check-rules.mjs` | 2.4 |
@@ -1503,7 +1583,7 @@ REQ and SCN left these to the architecture plan. This is what I set; each is eas
 
 - **Test-first** (D8, guide step 10). Write the milestone's scenarios, see them fail, build, see them pass. There's no baseline against 0.10.2.
 - **The gate** is the fast suite: every scenario active so far, the transition tests, the log tests and `scripts/check-rules.mjs`, in under 60 seconds on 4 workers (SCN 7.10). Every earlier milestone's scenarios keep passing.
-- **The ledger** (SCN 7.9). From M1, all 119 scenarios are registered with their `covers` lists and their milestone. One not yet active reports "not run (pending Mn)". The ledger fails if a requirement ID is in no registered scenario and isn't on SCN's not-testable list.
+- **The ledger** (SCN 7.9). From M1, all 121 scenarios are registered with their `covers` lists and their milestone. One not yet active reports "not run (pending Mn)". The ledger fails if a requirement ID is in no registered scenario and isn't on SCN's not-testable list.
 - **Partial scenarios.** A scenario may declare steps that need a later milestone; those steps report "not run (pending Mn)". Each scenario passes in full at exactly one milestone, listed under "Must pass".
 - **Crashes.** From M4, crash-at-every-boundary and pause-at-every-safe-point run on S-CRASH-1's fixture, and each later milestone's new boundaries (git in M5, questions in M6, migrate and populate in M9) join the enumeration as they land. S-CLI-2 step 4 runs after every scenario from M1 on.
 - **The old engine stays the default** throughout.
@@ -1520,8 +1600,8 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 
 ### M2. Agents, replies and one-ticket builds
 
-- **Builds:** first, the check that Codex app-server accepts rafi's `run_check` MCP tool per session (6.9); `run_check` and `check.run` records, rerunning only stale checks, the time limits (6.11); complete adapters (capabilities, grant mapping, usage, permission requests, `AskUserQuestion` pass-through, the compaction setting); the reply schemas (6.2–6.4) in rafi-spec; the turn runner (classification, the repair try, retries with backoff, idle timeout, cancel); facts (run records, snapshots, changed files, mismatches); the loop for tickets in sequence with `--steps N` (prepare, build, review that passes, deliver on the current branch with completion `none`); the progress-file write; first versions of `rafi status`, `rafi stats show`, `rafi stats export` and `rafi tickets show`; activity rows and plain-English lines; `--agent`, `--model`, `--effort`, `--fast`; a fresh session per ticket; settings with their sources.
-- **Must pass:** S-START-1, S-START-4, S-MAL-1, S-MAL-5, S-TIME-1, S-TIME-2, S-SCN-1, S-SCN-14, S-ENG-4, S-ENG-5, S-CHK-1.
+- **Builds:** first, the check that a Codex thread reaches rafi's local MCP endpoint (decision 7) and which OS sandbox `run_check` uses (6.9); `run_check` and `check.run` records, rerunning only stale checks, the time limits (6.11); complete adapters (capabilities, grant mapping, usage, permission requests, `AskUserQuestion` pass-through, the compaction setting); the reply schemas (6.2–6.4) in rafi-spec; the turn runner (classification, the repair try, retries with backoff, idle timeout, cancel); facts (run records, snapshots, changed files, mismatches); the loop for tickets in sequence with `--steps N` (prepare, build, review that passes, deliver on the current branch with completion `none`); the progress-file write; first versions of `rafi status`, `rafi stats show`, `rafi stats export` and `rafi tickets show`; activity rows and plain-English lines; `--agent`, `--model`, `--effort`, `--fast`; a fresh session per ticket; settings with their sources. The check step, `run_check`'s allowlist and QA restore, `check_output` and the failure details sent to the builder, `--no-qa`'s tests (6.9); `AskUserQuestion` answered at once (5.1).
+- **Must pass:** S-START-1, S-START-4, S-MAL-1, S-MAL-5, S-TIME-1, S-TIME-2, S-SCN-1, S-SCN-14, S-ENG-4, S-ENG-5, S-CHK-1, S-CHK-9, S-CHK-10.
 - **Partial:** S-MAL-2 (variant 1), S-MAL-4 (the builder runs), S-CLI-12 (prefixes, colors and exit codes of builds).
 - **Also:** an opt-in live adapter check, by hand, on real Codex and Claude, for H01's conformance list: one small structured turn each, a cancel, a resumed session, usage, a refused tool request, Claude's compaction setting (Q-ADP-1), and local servers without internet (7.11).
 
@@ -1534,30 +1614,30 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 ### M4. Stop, crash and resume
 
 - **Builds:** the lease and liveness, the derived "crashed" status, takeover and redo, attach; `rafi stop` (graceful and now) and Ctrl+C; pause and unpause, with Manager's thin host commands `/pause`, `/request-attempt` and `/answer-question`; the `rafi resume` picker (builds and saved interviews) and interview pruning; `rafi reset` (this build, everything); torn progress-file writes and storage faults; `--detach`; the crash and pause enumerations.
-- **Must pass:** S-QA-4, S-CRASH-1, S-CRASH-2, S-CRASH-3, S-CRASH-4, S-SCN-3, S-SCN-12, S-CLI-13.
-- **Partial:** S-CRASH-5 (every safe point without a plan update or a question), S-START-5 (step 4, process set), S-ENG-7 (start, Ctrl+C and resume cycles; file handles; process set).
+- **Must pass:** S-QA-4, S-CRASH-1, S-CRASH-3, S-CRASH-4, S-SCN-3, S-SCN-12, S-CLI-13.
+- **Partial:** S-CRASH-5 (every safe point without a plan update or a question), S-START-5 (step 4, process set), S-ENG-7 (start, Ctrl+C and resume cycles; file handles; process set), S-CRASH-2 (all but the git faults).
 - **Also:** a sample of S-CRASH-1 with a real SIGKILL in the process set, on both fake executables (D9).
 
 ### M5. Batches, delivery, tags and agent settings
 
-- **Builds:** the scope flags (`--to-ticket`, `--ticket`, `--skip`, `--stacks`) and the interactive "Build tickets or complete delivery stacks?" with its up-to-a-ticket choice; scope approval (unchanged scope starts; a material change asks; "Give feedback" arrives in M8); delivery units (branch modes, completion modes, stacks, PRs through the fake `gh` and `glab`); dirty work; the dependency and readiness prompts (PRM-76–78); `docs/ticket-progress.md` with its `Next up` heading; the `rafi tickets` subcommands on the log, except `populate` and `plan`; tags (the fixed list, file patterns, reasons, QA's tags); packs, skills and tools chosen by tags, with tools passed into sessions; the reused-agent override and its compaction threshold; `rafi agents`; `--set`; org-locked settings; the config-only start flags; reading the progress file on a clone, rebuilding from it and merging its git conflicts. Rafi's CI step (6.10): `checks.ci_tests`, flaky and already-broken tests, the fix ticket, `checks.ci_blocks_merge`, and never adding CI files.
-- **Must pass:** S-START-2, S-START-5, S-BATCH-1, S-BATCH-2, S-BATCH-3, S-SCN-2, S-SCN-9, S-PORT-2, S-TAG-1, S-TAG-3, S-TAG-4, S-TAG-5, S-CLI-8, S-CHK-6.
-- **Partial:** S-START-3 (steps 1, 2 and 4), S-CLI-3 (all but the `uninstall:cleanup` check), S-CLI-4 (every subcommand except `populate`), S-CLI-14 (this build and everything), S-CLI-19 (the config keys in builds), S-CHK-8 (no suite runs).
+- **Builds:** the scope flags (`--to-ticket`, `--ticket`, `--skip`, `--stacks`) and the interactive "Build tickets or complete delivery stacks?" with its up-to-a-ticket choice; scope approval (unchanged scope starts; a material change asks; "Give feedback" arrives in M8); delivery units (branch modes, completion modes, stacks, PRs through the fake `gh` and `glab`); dirty work; the dependency and readiness prompts (PRM-76–78); `docs/ticket-progress.md` with its `Next up` heading; the `rafi tickets` subcommands on the log, except `populate` and `plan`; tags (the fixed list, file patterns, reasons, QA's tags); packs, skills and tools chosen by tags, with tools passed into sessions; the reused-agent override and its compaction threshold; `rafi agents`; `--set`; org-locked settings; the config-only start flags; reading the progress file on a clone, rebuilding from it and merging its git conflicts. Rafi's CI step (6.10): `checks.ci_tests`, flaky and already-broken tests, the fix ticket, `checks.ci_blocks_merge`, and never adding CI files. Delivery units and their states, merge waits, the git error categories and the delivery question (4.3.2); `git.managed_by` (ARCH-6); `checks.ci_when` and reusing fresh results (6.10); rafi-owned tickets (decision 10).
+- **Must pass:** S-START-2, S-BATCH-1, S-BATCH-2, S-BATCH-3, S-SCN-2, S-SCN-9, S-PORT-2, S-TAG-1, S-TAG-3, S-TAG-4, S-TAG-5, S-CLI-8, S-CHK-6, S-CRASH-2.
+- **Partial:** S-START-3 (steps 1, 2 and 4), S-CLI-3 (all but the `uninstall:cleanup` check), S-CLI-4 (every subcommand except `populate`), S-CLI-14 (this build and everything), S-CLI-19 (the config keys in builds), S-CHK-8 (no suite runs), S-START-5 (all but step 5).
 
 ### M6. Questions and blocked tickets
 
-- **Builds:** the full question record (open, answer, defer, close; short numbers; first answer wins across processes; every surface watching the log); `rafi answer`; pinned prompts, oldest first; the terminal title and status line; the blocked-ticket prompt with each kind's options and effects, including grants from the prompt; waiting, and exit 2 without a terminal; the engine notifier with sends, updates, closes and reminders (platform backends come in M7); checks only a person can do (D4); `AskUserQuestion` and scan gaps; build-wide problems; questions about the dependents of a dropped ticket.
+- **Builds:** the full question record (open, answer, defer, close; short numbers; first answer wins across processes; every surface watching the log); `rafi answer`; pinned prompts, oldest first; the terminal title and status line; the blocked-ticket prompt with each kind's options and effects, including grants from the prompt; waiting, and exit 2 without a terminal; the engine notifier with sends, updates, closes and reminders (platform backends come in M7); checks only a person can do (D4); `AskUserQuestion` and scan gaps; build-wide problems; questions about the dependents of a dropped ticket. `answerEffects` and its test (4.1); the `limit` question and `blocked(limit)` (6.11); background builds keep waiting (decision 8).
 - **Must pass:** S-BLK-1, S-BLK-2, S-BLK-3, S-BLK-4, S-BLK-5, S-BLK-6, S-BLK-7, S-BLK-8, S-BLK-10, S-MAL-2, S-ASK-3, S-ASK-4, S-SCN-4, S-SCN-5, S-SCN-6, S-SCN-8, S-CLI-15, S-NOT-2.
 - **Partial:** S-QA-6 (steps 1, 2, 4 and 5), S-BLK-9 (every option except "Change it with the Planner").
 
 ### M7. Upfront check, permissions and notifications
 
 - **Builds:** the scan (ticket needs, tools' permissions, the setup script's installs, credentials, decisions, the plan-update setting); the one list with "answer later"; grants (once, always on this machine, don't allow); `--allow`; auto-approve's warning and D3; the no-terminal behavior (OQ-5); each runtime's mapping of local servers and internet, checked live (7.11); notifier platforms (`alerter`, `osascript`, `notify-send --action`, WSL), choices with "More…", preferences and reminder timing; the project setup script, written by the builder, run first by every fresh agent, and recorded. The CI confirmation and the slow-test question, up front and mid-build (6.10, 6.11).
-- **Must pass:** S-PERM-1, S-PERM-2, S-PERM-3, S-ASK-2, S-SCN-7, S-NOT-1, S-NOT-3, S-NOT-4, S-ENG-3, S-CLI-16, S-CHK-4, S-CHK-5, S-CHK-7.
+- **Must pass:** S-PERM-1, S-PERM-2, S-PERM-3, S-ASK-2, S-SCN-7, S-NOT-1, S-NOT-3, S-NOT-4, S-ENG-3, S-CLI-16, S-CHK-4, S-CHK-5, S-CHK-7, S-START-5.
 
 ### M8. Plan updates
 
-- **Builds:** what counts as a plan update (OQ-6); change-then-tell and ask-first; locked requirements (the text check and QA's lock check); new plan revisions; rewriting and staleness for affected tickets only; telling you (terminal, notification when away, summary); `rafi plan changes` and `rafi plan restore` with re-checks; the Planner's change turn (from the blocked prompt and from "Discuss with read-only Planner"); "Give feedback" on the scope question; plan reset in `rafi reset`; pause at plan-update safe points.
+- **Builds:** what counts as a plan update (OQ-6); change-then-tell and ask-first; locked requirements (the text check and QA's lock check); new plan revisions; rewriting and staleness for affected tickets only; telling you (terminal, notification when away, summary); `rafi plan changes` and `rafi plan restore` with re-checks; the Planner's change turn (from the blocked prompt and from "Discuss with read-only Planner"); "Give feedback" on the scope question; plan reset in `rafi reset`; pause at plan-update safe points. Re-checks after a plan update that changes a done ticket (7.10).
 - **Must pass:** S-START-3, S-QA-2, S-CRASH-5, S-PLAN-1, S-PLAN-2, S-PLAN-3, S-PLAN-4, S-PLAN-5, S-BLK-9, S-CLI-14, S-CHK-3.
 
 ### M9. Planning commands, migrate, portability, history and Manager
@@ -1569,22 +1649,22 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 
 - **Builds:** role text rewritten to principle 13 and tagged content (NEW-INS-*); `rafi compile` writing the small core with version lines; `rafi tools add` with prerequisite checks and boilerplate; per-build ports, device locks, recordings and retention; the Codex per-thread MCP check (10.3); `rafi create` (every prompt, including log location, the Playwright and mobile-mcp offers and `alerter`), `compile`, `doctor`, `uninstall`, `uninstall:restore`, `uninstall:cleanup`, `graph`, `sources`, `discover`, `qa-rehearse-rollback`; output conventions and the launcher under Node 18; the hostile-environment set; the event-stream checks; the live suite (D7) and the two-builds-at-once load check.
 - **Must pass:** S-CTX-1, S-TOOL-1, S-TOOL-2, S-TOOL-3, S-TOOL-4, S-TOOL-5, S-TOOL-6, S-PORT-3, S-CLI-3, S-CLI-6, S-CLI-7, S-CLI-9, S-CLI-10, S-CLI-11, S-CLI-12, S-CLI-19, S-ENG-2, S-ENG-6, S-ENG-7, S-CHK-8.
-- **Done when** all 119 scenarios pass in their modes; the fast suite runs in under a minute, the process set in minutes and the live suite in under an hour per provider (RW "Success criteria"); the core is under 10,000 lines; then dogfooding starts (guide step 11).
+- **Done when** all 121 scenarios pass in their modes; the fast suite runs in under a minute, the process set in minutes and the live suite in under an hour per provider (RW "Success criteria"); the core is under 10,000 lines; then dogfooding starts (guide step 11).
 
 ### 14.2 Count
 
 | Milestone | Scenarios that pass in full | Running total |
 |---|---|---|
 | M1 | 2 | 2 |
-| M2 | 11 | 13 |
-| M3 | 5 | 18 |
-| M4 | 8 | 26 |
-| M5 | 14 | 40 |
-| M6 | 18 | 58 |
-| M7 | 13 | 71 |
-| M8 | 11 | 82 |
-| M9 | 17 | 99 |
-| M10 | 20 | 119 |
+| M2 | 13 | 15 |
+| M3 | 5 | 20 |
+| M4 | 7 | 27 |
+| M5 | 14 | 41 |
+| M6 | 18 | 59 |
+| M7 | 14 | 73 |
+| M8 | 11 | 84 |
+| M9 | 17 | 101 |
+| M10 | 20 | 121 |
 
 ## 15. Decisions (all decided 2026-11-02)
 
@@ -1592,4 +1672,12 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 2. **Codex app-server.** Kept for 1.0, behind one transport file, using only its stable surface; `rafi doctor` and the live suite check the Codex version (11.4).
 3. **If M1 finds the SDK can't drive a fake `claude`.** The process set's Claude rows use the in-process fake plus the live suite; D9 is amended; no test-only code goes into the adapter.
 4. **Claude authentication.** Fine as is: rafi runs your installed, unmodified `claude` with your own login, which Anthropic's terms allow (11.5).
-5. **Tests.** Rafi runs and records every test through `run_check`; QA stays read-only; only targeted tests run per ticket; each ticket also runs the tests related to its changes; the full suite runs once at rafi's CI step, only when rafi handles git, and a failure adds a fix ticket instead of reopening done ones; if the fix fails, rafi merges anyway and tells you, unless `checks.ci_blocks_merge` is on (default off); slow suites raise their limit by asking (6.9–6.11).
+5. **Tests.** Rafi runs and records every test through `run_check`; QA stays read-only; only targeted tests run per ticket; each ticket also runs the tests related to its changes; the full suite runs at rafi's CI points (`checks.ci_when`, decision 6), only when rafi handles git, and a failure adds a fix ticket instead of reopening done ones; if the fix fails, rafi merges anyway and tells you, unless `checks.ci_blocks_merge` is on (default off); slow suites raise their limit by asking (6.9–6.11).
+
+Decided in the step 8 review (2026-11-02):
+
+6. **How often CI runs** (REQ ARCH-7) is a setting, `checks.ci_when`: each ticket, each PR or merge, once at the end of the build (the default), or light before each PR plus full at the end. CI never reruns a test whose last passing run is still fresh (6.9, 6.10).
+7. **How Codex reaches `run_check`** (REQ ARCH-9): the engine serves it on a local-only HTTP MCP endpoint with a per-session token; Claude gets it in-process. No IPC and no experimental Codex API (6.9).
+8. **Background builds keep waiting** (REQ ARCH-8) instead of exiting with code 2, so notification answers keep working. Exit code 2 stays for foreground builds without a terminal (4.3).
+9. **With QA off** (REQ ARCH-10), the check step runs the ticket's required tests and related tests. Every failure, there or anywhere, goes back to the builder with all its details (failing tests, errors, output excerpts, the full output by run number) and "keep your work; don't start over" (6.9).
+10. **Rafi-owned fix tickets** (REQ ARCH-11; from CI or a re-check): you're told once and never asked; they aren't plan updates and don't count toward `--steps` (6.10).
