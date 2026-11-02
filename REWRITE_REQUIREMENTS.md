@@ -38,8 +38,8 @@ Every item names its source. Short forms:
 | `QAMC §n` | Section n in `QA_MANUAL_CHECKS_AND_RECOVERY_FINDINGS.md`. |
 | `PUA §n` | Section n in `PLAN_UPDATE_APPROVAL_IMPROVEMENT.md`. |
 | `AIR` | `AGENT_INSTRUCTIONS_REVIEW.md`. |
-| `old/…` | A doc in the sibling archive folder `../old-implemented-plans/`. |
-| `harness/…` | A doc in `../rafi-2/rafi-plan-docs/` (the harness plan; `no-longer-relevant-plans/` doesn't exist on this machine, this is the copy I found). |
+| `old/…` | An archived plan doc, no longer in the repo. |
+| `harness/…` | The archived harness plan (`rafi-harness-requirements.md`), no longer in the repo. |
 
 ### 1.3 Where the docs and the code disagree
 
@@ -770,7 +770,7 @@ All open questions in the source doc were decided 2026-11-01 (`RW:127-132`).
 | NEW-PUA-7 | QA always reviews against the plan in force. Saved approvals and QA results go stale exactly when the requirements they covered change | `RW:126`; `PUA` "How this fits with QA" |
 | NEW-PUA-8 | The source doc flags this area as risky (plan approval binding, resume, saved decisions) and asks for a full "resume from every state" test table before building. Covered by NEW-QAM-5 | `PUA` "Risk" |
 
-### 8.5 From `old-implemented-plans/STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md`
+### 8.5 From `old/STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md`
 
 Shipped in 0.10.0–0.10.1 except this part.
 

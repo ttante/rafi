@@ -78,7 +78,7 @@ Session: the strongest model, high reasoning.
 
 > Read `REWRITE_REQUIREMENTS.md` and `AI_FOREMAN_REWRITE.md`. Write `REWRITE_SCENARIOS.md`, covering:
 > - The whole-build scenarios the new engine must pass, each with setup, steps and expected result. Include: start, QA fail then fix then pass, blocked ticket, upfront permission prompt (once/always/no), malformed reply then repair, timeout then retry, crash at every step then resume, multi-ticket batch, plan update. Also include every case in "Past bugs to turn into scenario tests", and the scenario tests listed under "Ask everything up front", "Blocked tickets: keep going and ask", "Notifications" and "Test tools", in `AI_FOREMAN_REWRITE.md`.
-> - The design for a scripted fake-agent harness that runs them through the real `rafi` command, in seconds. Use Part 1 (E01–E18) of `no-longer-relevant-plans/rafi-plan-docs/rafi-harness-requirements.md` as input.
+> - The design for a scripted fake-agent harness that runs them through the real `rafi` command, in seconds. Use Part 1 (E01–E18) of `../rafi-2/rafi-plan-docs/rafi-harness-requirements.md` as input (summarized in `REWRITE_REQUIREMENTS.md` section 8.16).
 >
 > Don't implement yet.
 
@@ -112,7 +112,7 @@ Session: the strongest model, extra-high reasoning.
 > - how `rafi` commands call the engine;
 > - the engine switch;
 > - what's deleted;
-> - whether the native Codex and Claude modes (structured output, sessions, event streams) can replace parts of rafi's adapters (harness plan H01–H02 in `no-longer-relevant-plans/rafi-plan-docs/rafi-harness-requirements.md`).
+> - whether the native Codex and Claude modes (structured output, sessions, event streams) can replace parts of rafi's adapters (harness plan H01–H02, `REWRITE_REQUIREMENTS.md` section 8.16).
 >
 > Then list milestones, each mapped to the scenarios it must pass. Follow the design principles in `AI_FOREMAN_REWRITE.md`. List the decisions you need from me.
 

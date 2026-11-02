@@ -1,7 +1,7 @@
 # ai-foreman rewrite
 
 Status: **proposed.** Written 2026-10-29 after moneyTree's 18th stopped build.
-Related: `MALFORMED_REPLY_AND_BLOCKED_BUILD_IMPROVEMENTS.md`, `QA_MANUAL_CHECKS_AND_RECOVERY_FINDINGS.md`, `PLAN_UPDATE_APPROVAL_IMPROVEMENT.md`, `GUI_PRODUCT_REQUIREMENTS.md`, `old-implemented-plans/STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md`, `AGENT_INSTRUCTIONS_REVIEW.md`. The work these docs describe is folded into the rewrite; see "Work folded into the rewrite" below.
+Related: `MALFORMED_REPLY_AND_BLOCKED_BUILD_IMPROVEMENTS.md`, `QA_MANUAL_CHECKS_AND_RECOVERY_FINDINGS.md`, `PLAN_UPDATE_APPROVAL_IMPROVEMENT.md`, `GUI_PRODUCT_REQUIREMENTS.md`, `AGENT_INSTRUCTIONS_REVIEW.md`. The work these docs describe is folded into the rewrite; see "Work folded into the rewrite" below.
 
 ## Why
 
@@ -132,7 +132,7 @@ These docs describe fixes to ai-foreman. The rewrite replaces that code, so they
   - **Switching back to a backup plan:** keep the code, re-run QA against the restored plan, and turn anything that fails into a fix ticket. Code is never deleted automatically.
   - **Backups:** all previous plans are kept; they're small text files.
 
-**From `old-implemented-plans/STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md`** (shipped in 0.10.0–0.10.1, except this part):
+**From `STRUCTURED_PROVIDER_OUTPUT_MIGRATION_PLAN.md`** (shipped in 0.10.0–0.10.1, except this part):
 - One shared, bounded format-repair policy for every operation (same as malformed items 4–5).
 - Keep the raw reply and validation errors when parsing or repair fails.
 - A repaired reply can't change the content without that being detected.
@@ -140,7 +140,7 @@ These docs describe fixes to ai-foreman. The rewrite replaces that code, so they
 
 ### From the older plan docs (2026-10-07 to 10-22)
 
-Harvested 2026-10-30. The docs are now in `old-implemented-plans/`; `old-implemented-plans/README.md` says what happened to each one. Only what's still needed is listed here.
+Harvested 2026-10-30. Only what's still needed is listed here.
 
 **QA reviews against one requirements file** (`QA_REQUIREMENT_REVIEW_AND_COST_CONTROL_REQUIREMENTS.md`, `SEVEN_SIMPLIFICATION_PROPOSALS_*.md`):
 - Before building, a Markdown requirements file is written for each ticket: requirement IDs, acceptance criteria, what's in and out of scope, the commands to run with expected results, and known risks.
@@ -196,7 +196,7 @@ Harvested 2026-10-30. The docs are now in `old-implemented-plans/`; `old-impleme
 
 ### From the `docs/` plans and `rafi-plan-docs/` (2026-10-07 to 10-25)
 
-Harvested 2026-10-31. The implemented ones are in `old-implemented-plans/docs/`; the harness plan is in `no-longer-relevant-plans/rafi-plan-docs/`. Both folders have a `README.md` that says what happened to each doc.
+Harvested 2026-10-31. Only what's still needed is listed here.
 
 **Product decisions you already made** (`build-stall-repair-plan.md`); the new engine must keep them:
 - **Start automatically when the approved scope is unchanged.** `rafi start . --steps 10` reuses the approval of the selected plan and tickets, and only asks about material changes.

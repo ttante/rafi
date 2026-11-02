@@ -2,8 +2,6 @@
 
 Prepared 2026-10-12. This is a reusable, agent-executable playbook for testing Rafi against a real repository while preserving the repository under test. Use it for a quick friction sweep, a named bug investigation, a release regression, or a longer build soak.
 
-For the current seven-issue effort, use the companion [reliability investigation and remediation plan](../old-implemented-plans/docs/rafi-reliability-investigation-and-remediation-plan.md).
-
 ## Copy-paste kickoff
 
 Replace the bracketed values and give this to an agent from a workspace containing the Rafi source checkout and the target repository:
