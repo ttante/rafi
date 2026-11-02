@@ -107,9 +107,14 @@ These docs describe fixes to ai-foreman. The rewrite replaces that code, so they
 - 12: remove the triple-check lines (principle 12).
 
 **From `QA_MANUAL_CHECKS_AND_RECOVERY_FINDINGS.md`** (moneyTree T001, 2026-10-28; its three bugs shipped in 0.10.2):
-- Section 1, checks only a person can do. **Decided 2026-11-01: both.** The lighter alternative is the default; the full choices A, B and C stay available as a per-project or per-ticket setting. The options were:
-  - the full choices: A (manual checks stop the build), B (no manual checks), and C (manual checks that don't stop the build);
-  - the lighter alternative: Planner wording plus an operator checklist note (prompt change only), and an "I verified it myself" answer to "what next?".
+- Section 1, checks only a person can do. **Decided 2026-11-01 (step 5 review, D4 in `REWRITE_REQUIREMENTS.md` 9.0; replaces the earlier "both", with the lighter alternative as the default):**
+  - Permissions are still asked up front.
+  - QA first verifies everything it can itself, with Playwright or a headless browser (mobile-mcp for mobile), including partial checks (for example, that clicking the button does something).
+  - Only what truly needs a person is asked, when the build reaches it (pinned terminal prompt and notification), not in the upfront list.
+  - That ticket and the tickets that depend on it wait for the answer; everything else keeps building. When you confirm, it's done. "I verified it myself" stays on "what next?", and goes stale when the covered code changes.
+  - The Planner still avoids writing criteria QA can't verify, and marks person-only checks on the ticket.
+  - B (no manual checks) and C (don't wait; track as open questions) stay as optional per-project or per-ticket settings; this behavior is the default and replaces A.
+  - The options were: the full choices A (manual checks stop the build), B (no manual checks) and C (manual checks that don't stop the build); and the lighter alternative: Planner wording plus an operator checklist note (prompt change only), and an "I verified it myself" answer to "what next?".
 - Section 2, loose ends:
   - The Builder fix mislabeled `delivery-uncertain` (same as malformed item 6).
   - Decisions meant for the user must reach the user, including in background builds. No agent answers them on the user's behalf. See the pending-decision registry below.
@@ -217,7 +222,7 @@ The archived specs for these features:
 - **Terminal colors** (`terminal-color-requirements-plan.md`): a shared color policy, with no color codes in non-terminal output.
 - **Recovery commands:** `rafi plan:doctor`, `build:reset`, and building on top of uncommitted work (`rafi-reliability-implementation-results.md`, `docs/reliability-workflows.md`).
 
-**More past bugs to turn into scenario tests** (for guide step 4). Most are fixed in the current engine. O-E2E-005 and O-E2E-004 aren't confirmed fixed, so check them against today's rafi in guide step 6:
+**More past bugs to turn into scenario tests** (for guide step 4). Most are fixed in the current engine. O-E2E-005 and O-E2E-004 aren't confirmed fixed; the new engine is held to their scenarios either way, and checking them by hand on 0.10.2 is optional (`REWRITE_SCENARIOS.md` section 9; the baseline was dropped 2026-11-01):
 - `--steps N` must not stop early. A branch run once stopped after the first delivery unit, and `tickets queue` then said "No remaining tickets" (`rafi-online-e2e-findings-2026-10-13.md`, O-E2E-005).
 - Ticket states written by the planner are validated before they're applied (O-E2E-001).
 - A non-interactive plan never opens interactive prompts (O-E2E-006).
@@ -228,7 +233,7 @@ The archived specs for these features:
 **Adapter issue to note:** Codex context usage was once calculated from total tokens used across the session, which triggered compactions that weren't needed (`build-stall-investigation.md`). The adapters are kept, so the requirements should confirm this is fixed.
 
 **The harness improvement plan** (`rafi-plan-docs/`, 2026-10-10; never carried out). It was a 47-step program to harden the current engine, so the rewrite supersedes it as a plan. Two parts are still useful input:
-- **Part 1, tests and measurement (E01–E18):** a fake provider and event simulator, crash testing of saved state, a suite per historical bug, a corpus of representative work, and a fair experiment runner. Use it when designing the scenario harness (guide steps 4–6).
+- **Part 1, tests and measurement (E01–E18):** a fake provider and event simulator, crash testing of saved state, a suite per historical bug, a corpus of representative work, and a fair experiment runner. Use it when designing the scenario harness (guide steps 4–5; the harness itself is built in milestone 1, guide step 10).
 - **Parts 3 and 4, outside practices and ideas (H01–H14, F01–F12). Decided 2026-11-01:**
   - **In the rewrite:**
     - F09, spotting an agent going in circles (principle 4);
@@ -344,9 +349,9 @@ Decided 2026-11-01. Rafi is built for AFK builds, so a question in the middle of
 - **What it scans:** every ticket in scope (`--steps`, `--to-ticket`, or all) for anything that will need you:
   - permissions: internet, local servers, installs, live services;
   - credentials or secrets the ticket needs;
-  - checks only a person can do;
   - decisions the Planner flagged as open;
   - the plan-update setting, if it isn't saved yet.
+- **Not in the scan:** checks only a person can do (decided 2026-11-01, step 5 review). QA verifies what it can, and rafi asks the rest when the build reaches that ticket; that question is expected, not a gap. See "Work folded into the rewrite" above, under `QA_MANUAL_CHECKS_AND_RECOVERY_FINDINGS.md` section 1.
 - **How it asks:** one list, all at once. Each item says which tickets need it.
 - **Choices per item:** answer now, including "always" where it fits, or **answer later**.
 - **Answer later:** the question is saved, the tickets that need it wait, and the build starts with everything else. Rafi reminds you through notifications, and the question stays in the open-questions list.
@@ -504,7 +509,7 @@ Rafi knows these tools and can set them up. Details were checked 2026-11-01; the
 
 ## Process
 
-The goal is a smooth rewrite **and** a rafi that works the same for the user afterwards.
+The goal is a smooth rewrite **and** a rafi that works the way `REWRITE_REQUIREMENTS.md` says: what it marks **keep** works the same, and the rest changes as decided. There's no backward compatibility; existing projects move over once with `rafi migrate`.
 
 For a step-by-step version with a prompt for each step, see [`AI_FOREMAN_REWRITE_PLANNING_GUIDE.md`](AI_FOREMAN_REWRITE_PLANNING_GUIDE.md).
 
@@ -514,8 +519,9 @@ For a step-by-step version with a prompt for each step, see [`AI_FOREMAN_REWRITE
    - Source it from the CLI help, the docs and `GUI_PRODUCT_REQUIREMENTS.md`.
    - Include every item in "Work folded into the rewrite" and "What the GUI needs from the engine".
    - This is the contract for the rewrite.
-3. **Build the behavior test suite against the current rafi first.**
-   - Black-box scenario tests that drive the `rafi` command with a scripted fake agent:
+3. **Write the behavior scenarios; no baseline against the current rafi** (decided 2026-11-01, D8 in `REWRITE_SCENARIOS.md` 11.2).
+   - There is no test run against today's rafi (0.10.2). No backward compatibility is needed, and `REWRITE_REQUIREMENTS.md` already records every user-visible behavior from the code.
+   - Black-box scenario tests that drive the `rafi` command, written down in `REWRITE_SCENARIOS.md`. The fast suite uses a scripted fake agent under the real adapters throughout, including every fault scenario (QA rejects, malformed replies, hangs, provider errors, crashes, blocks, tool failures, `AskUserQuestion`; D1). A small opt-in live suite runs on real Claude and Codex before each release (D7). The scenarios:
      - start a build;
      - QA fail, fix, pass;
      - blocked ticket;
@@ -523,7 +529,7 @@ For a step-by-step version with a prompt for each step, see [`AI_FOREMAN_REWRITE
      - crash and resume;
      - multi-ticket batch;
      - plan updates.
-   - Record which scenarios work today; the failures are the bugs to beat.
+   - The harness is built as the first piece of the new engine (milestone 1), and each scenario is written test-first against the new engine: write the test, see it fail, build, see it pass.
    - The new core must pass every scenario before it replaces the old one.
 4. **Plan the architecture.**
    - Write a plan from this doc and the requirements doc: modules, event log schema, state machine, error categories, agent reply formats, and a milestone list.
@@ -562,5 +568,5 @@ Always review in a fresh session that hasn't seen the implementation conversatio
 - A multi-ticket moneyTree build finishes without a person, except for upfront permission prompts and real product decisions.
 - No stop happens because of a malformed reply, a timeout, or a crash.
 - Every stop says, in one line, why, and how to continue.
-- The full test suite runs in under 1 minute, including crash-at-every-step scenarios.
+- The fast test suite (scripted fake agent, in-process) runs in under 1 minute, including crash-at-every-step scenarios. The small process set takes minutes, and the opt-in live suite on real Claude and Codex takes under an hour per provider (`REWRITE_SCENARIOS.md` 7.10).
 - The core is under 10,000 lines, files are under about 500 lines, and there's one source of truth.

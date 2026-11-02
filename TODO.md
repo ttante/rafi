@@ -32,13 +32,13 @@ Work is split into parallel tracks. See "Parallel tracks" in [`AI_FOREMAN_REWRIT
      - Planner wording for checks only a person can do (QA findings doc, section 1, "A lighter alternative", point 1).
      - A validate-before-telling instruction for each rafi agent, and removing three contradictions: "ask the user" in unattended builds, a skill that waits for user picks, and tracker rules that disagree with rafi ([`AGENT_INSTRUCTIONS_REVIEW.md`](AGENT_INSTRUCTIONS_REVIEW.md), "When").
 
-## Track B: scenario test harness
+## Track B: scenario test harness (dropped as a separate track, 2026-11-01)
 
-5. **Harness against today's rafi.** Guide steps 4–6. The harness itself can start early; the scenarios follow once `REWRITE_SCENARIOS.md` is reviewed.
+5. **No harness run against today's rafi.** Guide step 6 is dropped: no backward compatibility is needed, and `REWRITE_REQUIREMENTS.md` already records every user-visible behavior. The scenarios are written (guide steps 4–5, done). The harness is built as the first piece of the new engine, in milestone 1 (guide step 10), and each scenario is written test-first against the new engine (`REWRITE_SCENARIOS.md` D8). Optional: check O-E2E-005 and O-E2E-004 by hand on 0.10.2 (`REWRITE_SCENARIOS.md` section 9).
 
 ## Track C: moneyTree builds
 
-6. **Keep building moneyTree on rafi 0.10.x**, locally, through Remote Control. Every failure is a candidate scenario for track B.
+6. **Keep building moneyTree on rafi 0.10.x**, locally, through Remote Control. Every failure is a candidate scenario for `REWRITE_SCENARIOS.md`.
 
 ## Later
 

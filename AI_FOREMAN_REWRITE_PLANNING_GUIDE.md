@@ -26,13 +26,13 @@ Up to three tracks can run at the same time, each in its own session and its own
 | Track | What | Where | Notes |
 |---|---|---|---|
 | A | Rewrite planning: steps 1–9 below | Branch `rewrite/plan` | The critical path, so start it first. The steps within it run in order, never in parallel. |
-| B | Scenario test harness against today's rafi | Its own branch | Start the harness itself early (scripted fake agent, running the real `rafi` command in a temporary project). Write the scenarios after step 5 locks them, then finish step 6. |
-| C | moneyTree builds on rafi 0.10.x | Locally, on the Mac | Check on them from your phone with Remote Control. Every failure is a candidate scenario for track B. |
+| B | Scenario test harness: **dropped as a separate track** (2026-11-01) | — | There's no run against today's rafi (step 6 is dropped). The harness (scripted fake agent, running the real `rafi` command in a temporary project) is built as the first piece of the new engine, in milestone 1 (step 10), and the scenarios are written test-first against the new engine. |
+| C | moneyTree builds on rafi 0.10.x | Locally, on the Mac | Check on them from your phone with Remote Control. Every failure is a candidate scenario for `REWRITE_SCENARIOS.md`. |
 
 Rules:
 - **No more than 3 tracks at once.** Every track ends with you reviewing it. With more, the reviews pile up and your answers to each session suffer.
 - **Don't fix ai-foreman twice.** Fixes to the current engine go into the rewrite requirements instead. (A track D of small 0.10.x fixes was dropped on 2026-11-01; its items are in the rewrite.)
-- **Tracks A and B share files** (`REWRITE_SCENARIOS.md`). Track B only edits it in step 6.
+- **Only track A edits `REWRITE_SCENARIOS.md`.** (Track B, which was to edit it in step 6, was dropped on 2026-11-01.)
 
 ## Planning
 
@@ -90,13 +90,9 @@ Session: Codex, high reasoning, fresh.
 
 Apply the fixes in a new Claude session, as in step 3.
 
-### Step 6: Build the harness and run it against today's rafi
+### Step 6: Dropped (2026-11-01)
 
-Session: the strongest model, medium–high reasoning. This is where track B finishes. If the harness was started early, build on it.
-
-> Implement the harness and scenarios in `REWRITE_SCENARIOS.md`. Run them against the current rafi, and record pass/fail per scenario in the doc. Don't fix rafi bugs; just record them.
-
-This is the baseline: the scenarios that fail today are the bugs the rewrite must beat.
+Was "Build the harness and run it against today's rafi". Dropped because no backward compatibility is needed and `REWRITE_REQUIREMENTS.md` already records every user-visible behavior from the code; the harness is built in milestone 1 (step 10) and the scenarios are written test-first against the new engine (`REWRITE_SCENARIOS.md` D8).
 
 ### Step 7: Architecture plan
 
@@ -114,7 +110,7 @@ Session: the strongest model, extra-high reasoning.
 > - what's deleted;
 > - whether the native Codex and Claude modes (structured output, sessions, event streams) can replace parts of rafi's adapters (harness plan H01–H02, `REWRITE_REQUIREMENTS.md` section 8.16).
 >
-> Then list milestones, each mapped to the scenarios it must pass. Follow the design principles in `AI_FOREMAN_REWRITE.md`. List the decisions you need from me.
+> Then list milestones, each mapped to the scenarios it must pass. Milestone 1 includes the scenario harness (`REWRITE_SCENARIOS.md` section 7). Follow the design principles in `AI_FOREMAN_REWRITE.md`. List the decisions you need from me.
 
 ### Step 8: Architecture reviews
 
@@ -143,7 +139,7 @@ Repeat for each milestone in `REWRITE_ARCHITECTURE.md`. Use a fresh session for 
 1. **Plan.** The strongest model, high reasoning:
    > Write the implementation plan for milestone N in `REWRITE_ARCHITECTURE.md`.
 2. **Audit.** A fresh session audits that plan against the codebase and the locked docs. Update the plan with the findings.
-3. **Implement.** A fresh session implements it. The milestone's scenarios must pass.
+3. **Implement.** A fresh session implements it, test-first: write the milestone's scenarios, see them fail, build, see them pass. Milestone 1 builds the harness itself (`REWRITE_SCENARIOS.md` section 7) along with the event log and state machine.
 4. **Review.** A fresh session, ideally Codex, reviews the code. Fix the findings.
 5. **Merge** to the rewrite branch.
 

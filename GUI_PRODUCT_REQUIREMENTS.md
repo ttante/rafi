@@ -512,7 +512,7 @@ Design deliverables to commission: moodboard and principles; design tokens (colo
 9. **Bring-your-own editor links:** which editors must be first-class beyond VS Code and Codex?
 10. **Offline/local-only guarantee:** must local mode work with no network beyond the providers?
 11. **Naming:** "Maestro" vs "Conductor" vs "Orchestrator"; and product name for the GUI.
-12. **Target scale:** realistic max instances per project/user/org to design against. **Partly decided (2026-11-01, rewrite):** design and test for 20 at once per project and 100 per user; these aren't caps. Organization target still open.
+12. **Target scale:** realistic max instances per project/user/org to design against. **Decided (2026-11-01, rewrite):** no scale targets and no limits. Testing covers 2 builds at once.
 13. **Telemetry:** acceptable defaults for product analytics.
 14. **Mobile:** is a monitor-and-approve phone experience a v1 or v2 need?
 15. **Migration:** how do existing `.rafi/` projects and in-flight builds migrate into the daemon model? **Decided (2026-11-01, rewrite):** in-flight builds finish on 0.10.x; existing projects convert once with `rafi migrate` to 1.0 formats, which the daemon reads.

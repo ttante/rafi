@@ -4,6 +4,7 @@ Found 2026-10-28 while resuming moneyTree build run `25630461-53a6-416b-8a15-92a
 Status:
 - **Section 2 (the three bugs): fixed, shipped in `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2 (2026-10-28).**
 - **Sections 1 and 3, and the loose ends in section 2: folded into the ai-foreman rewrite.** See `AI_FOREMAN_REWRITE.md`, "Work folded into the rewrite". The Planner wording change in section 1 is built in the rewrite too (a 0.10.x fix was dropped 2026-11-01).
+- **Section 1 decided 2026-11-01** (step 5 review, D4): neither choice A nor the lighter alternative is the default. QA verifies everything it can (headless browser, mobile-mcp), and only true person-only checks are asked when the build reaches the ticket, which waits with its dependents while the rest builds. B and C stay as optional settings. See `REWRITE_REQUIREMENTS.md` section 9.0 (D4) and NEW-QAM-1.
 
 Terms used throughout:
 - **QA rejected the work:** the QA review ran to the end and decided the implementation doesn't meet the ticket.
