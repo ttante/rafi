@@ -64,11 +64,12 @@ Measured on 2026-10-29: ai-foreman 2.0.2, `@rafi-ai/cli` 0.10.2.
 
 **Decided 2026-11-01:**
 - `build:attach` → folded into `rafi resume`, which attaches to a running build or resumes a stopped one.
-- `build:stop` → kept, renamed `rafi stop`.
+- `build:stop` → kept, renamed `rafi stop`. It stops at the next safe point and says so; a second `rafi stop` or Ctrl+C stops immediately.
 - `handoffs` → dropped. Hand-offs between agents become internal events in the log.
 - `audit` → replaced by `rafi stats show`, because run history ships in 1.0 (decided 2026-11-01).
 - `build:decide` → replaced by `rafi answer`, which answers any open question.
-- `build:start-over` and `build:reset` → merged into one `rafi reset` that asks: this build, or everything?
+- `build:start-over` and `build:reset` → merged into one `rafi reset` that asks: this build, or everything? It can also reset the plan, in 1.0.
+- **New: `rafi migrate`.** A one-time, one-way conversion of a 0.10.x project to 1.0 formats. The new engine has no backward compatibility; this command is how existing projects, such as moneyTree, move over. Required for 1.0.
 - `build:resume` → folded into `rafi resume`, which needs no recovery mode because the interrupted step is redone (principle 3).
 - `state` → replaced by built-in portability. Rafi's build progress (ticket status, open questions, saved answers and permissions) lives in a small text file committed with the project; a database file isn't committed, because it's binary and conflicts between branches. On another computer you clone, run `rafi resume`, and the build continues.
 - **Logs can be exported.** `rafi create` asks where build logs go: kept on this computer (the default), or saved in the project so they travel with git. A separate `rafi logs export` writes one file (all runs, or one with `--run <id>`), and `rafi logs import` loads it on another computer for debugging.
@@ -292,7 +293,7 @@ Not part of the rewrite, but not blocked by it: GUI-PLT-1 (daemon), 7 (cost norm
    - One shared handler for malformed replies, with one repair try.
    - Optionally, the builder reports in plain text and one short, strict extraction call turns it into JSON (this needs a direct model call).
 7. **Plain-English stops.** Every stop says, in one line, what happened, why, and the exact command to continue. Never raw JSON.
-8. **No compatibility layers before 1.0.** Database changes are made with ordinary migrations, not version-guard triggers. Old code paths are deleted, not kept.
+8. **No compatibility layers before 1.0.** Database changes are made with ordinary migrations, not version-guard triggers. Old code paths are deleted, not kept. The new engine reads only 1.0 formats; a one-time `rafi migrate` converts 0.10.x projects, and formats older than 0.10 aren't supported.
 9. **One process, small modules.** The `rafi` command calls ai-foreman as a library, in the same process: no CLI-on-CLI, no hidden flags. Files stay under about 500 lines, and lines stay short.
 10. **Fingerprint checks only where they protect your code**, for example never overwriting your own uncommitted changes. Not on rafi's internal hand-offs.
 11. **Tests that play out whole builds.**
@@ -312,6 +313,7 @@ Not part of the rewrite, but not blocked by it: GUI-PLT-1 (daemon), 7 (cost norm
     - Approval modes from the GUI doc (GUI-INS-6, GUI-PLN-8): manual, or auto-approve, per project or per instance.
     - A coordinator can set them for you, for example Maestro told "build this plan automatically, approve everything" (GUI-MAE-4).
     - `--yes` and auto-approve answer every question that has a safe default. What's left are things only you can do, such as installing software or giving a password.
+    - Auto-approve can grant permissions, but internet access, installs and live services always get a warning, once, in the upfront check: continue, always allow (this machine only), stop and deny, deny but build the rest, or show which tickets need it.
 15. **A project setup script** (harness plan H12). The project keeps one setup script, written and kept current by the builder, that installs dependencies, starts the needed services and runs the tests. Every fresh agent runs it first instead of rediscovering the project. Anthropic's prompting guide recommends this for work across fresh context windows (an `init.sh`).
 16. **A fallback when a model lacks a feature** (harness plan F11). Each adapter reports what its model can do: structured replies, exit codes, session resume, images. When a feature is missing, rafi uses a known fallback instead of failing or asking for something the agent can't see. For example, Claude's tool events have no numeric exit code, so rafi relies on its own recorded command result.
 
@@ -536,8 +538,8 @@ For a step-by-step version with a prompt for each step, see [`AI_FOREMAN_REWRITE
    5. The upfront permission check, plain-English stops, blocked-ticket prompts and notifications.
    6. Crash and resume: redo the step.
    7. Multi-ticket batches, plan updates, `tickets` and `manager` integration.
-7. **In-progress builds.** Don't migrate runs that are already in progress: they finish on the old engine (0.10.x). The new engine starts fresh runs and reads the existing tickets, plans and config unchanged.
-8. **Dogfood.** Build moneyTree T002 onwards on the new engine, with the old engine still available as a fallback. Fix what breaks, and add each failure as a scenario test.
+7. **In-progress builds and existing projects.** Don't migrate runs that are already in progress: they finish on the old engine (0.10.x). The new engine reads only 1.0 formats, so an existing project is converted once with `rafi migrate` (decided 2026-11-01; required for 1.0). The new engine then starts fresh runs from the converted tickets, plans and config.
+8. **Dogfood.** Run `rafi migrate` on moneyTree, then build T002 onwards on the new engine, with the old engine still available as a fallback. Fix what breaks, and add each failure as a scenario test.
 9. **Switch the default.**
    - After a run of clean builds, make the new engine the default.
    - Keep the old one for one release, then delete it along with its database, triggers and state folders.
