@@ -148,8 +148,7 @@ The old engine stays the default the whole time.
 ### Step 11: Dogfood and switch
 
 1. Convert moneyTree with `rafi migrate` (keep a copy first), then run T002 onward on the new engine (`RAFI_ENGINE=next`). Every failure becomes a new scenario.
-2. After several clean builds, make the new engine the default and release it as `@rafi-ai/cli` 1.0 / ai-foreman 3.0.
-3. One release later, delete the old engine.
+2. After several clean builds, release the new engine as `@rafi-ai/cli` 1.0 / ai-foreman 3.0, and delete the old engine in the same release. No backup engine is kept.
 
 ## Rough time
 

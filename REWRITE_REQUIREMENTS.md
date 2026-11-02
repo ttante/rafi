@@ -1,6 +1,6 @@
 # Rewrite requirements
 
-Status: **reviewed** (guide step 2, 2026-11-01): all open questions decided (section 9.0). Independent review (step 3) and the scenario review (step 5) are applied. Next: the architecture plan (guide step 7). Updated 2026-11-01 with the step 5 scenario review's decisions D2–D6, a correction to PRM-G2 and OUT-42, and D8, dropping the 0.10.2 baseline (section 9.0). Written 2026-11-01 against `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2, branch `feature/rewrite` at `f40f417`.
+Status: **reviewed** (guide step 2, 2026-11-01): all open questions decided (section 9.0). Independent review (step 3) and the scenario review (step 5) are applied. Next: the architecture plan (guide step 7). Updated 2026-11-01 with the step 5 scenario review's decisions D2–D6, a correction to PRM-G2 and OUT-42, and D8, dropping the 0.10.2 baseline (section 9.0). Written 2026-11-01 against `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2, branch `feature/rewrite` at `f40f417`. Updated 2026-11-02 with the architecture decisions (9.0, ARCH-1–5) and the new tests and CI section (8.24).
 Related: `AI_FOREMAN_REWRITE.md` (the why and the decisions), `AI_FOREMAN_REWRITE_PLANNING_GUIDE.md` (step 1 asks for this doc), `GUI_PRODUCT_REQUIREMENTS.md`.
 
 This is the contract for the rewrite. It lists every user-visible behavior of rafi today and says whether the new engine keeps it, changes it, or drops it. Section 8 adds the new behavior the rewrite must build. Section 9 lists the open questions.
@@ -348,7 +348,7 @@ All **keep** (decided command), in today's order, unless marked.
 | PRM-8 | "A `docs/` path already exists. Where should Rafi put its starter docs?"; "Custom Rafi docs folder:" | | **keep** | `index.ts:697,709` |
 | PRM-9 | "Where should future source snapshots be stored?" | local / tracked | **keep** | `index.ts:304,326` |
 | PRM-10 | "Do you have requirements, existing plans, or backlog documents that should inform planning…?"; "Files, folders, URLs, or globs with supporting context:" | | **keep** | `index.ts:313,321` |
-| PRM-11 | "Default ticket work mode:" | Current branch / Batch branch / Branch per ticket (default) | **keep** | `index.ts:336-345`; `rafi/src/workMode.ts:20` |
+| PRM-11 | "Default ticket work mode:" | Current branch / Batch branch / Branch per ticket (default) | **change → asked first as "Who manages git?": "Rafi" (then Batch branch / Branch per ticket, default Branch per ticket, as today) or "Me — Rafi works on the current branch". Picking "Me" skips every branch, PR, merge and CI question (PRM-52, completion, `checks.*`)** (decided 2026-11-02, ARCH-6) | `index.ts:336-345`; `rafi/src/workMode.ts:20` |
 | PRM-12 | Session strategy defaults ("Use these compact/fresh defaults?", then per role) | | **keep**; defaults shown change to `fresh` for builder and QA (decided `RW:327`) | `rafi/src/agents.ts:68-78` |
 | PRM-13 | "Add Rafi files to .gitignore?" (default No); "Which Rafi files should be ignored?" | Local junk (logs, cache, recovery, local ticket DB) / All Rafi | **change → the list follows the new files (section 4); `rafi-config.yaml` and the committed progress file are never ignored** (follows `RW:73`; step 3 review) | `index.ts:354-368` |
 | PRM-14 | Graphify: "Accept setup with Graphify enabled under this policy?" (default Yes) after printing the policy | | **keep** (decided `RW:206`) | `index.ts:409-411` |
@@ -383,7 +383,7 @@ All **keep** (decided commands).
 
 ### 3.4 Ticket setup and population prompts
 
-All **keep** (decided `tickets` command).
+All **keep** (decided `tickets` command), except that PRM-52 is skipped when you manage git (ARCH-6).
 
 | ID | Prompt | Source |
 |---|---|---|
@@ -609,6 +609,8 @@ The format and compile output are **kept** (decided `RW:57`). Required keys toda
 | FMT-C20 | *(new)* Recordings | What's saved (failures only by default, or everything) and how long (5 choices; default last 5 builds) | **new** (decided `RW:469-474`) | `RW §Parallel builds` |
 | FMT-C21 | *(new)* Saved permissions ("always allow") | Saved for the project, **on this machine only**; not committed. On a new machine they're shown in the upfront check | **new** (decided principle 5; Q-PORT-2) | `RW:286`; `RW:73` |
 | FMT-C22 | *(new)* Approval mode | Manual or auto-approve, per project or per instance | **new** (decided principle 14; GUI-INS-6, GUI-PLN-8) | `RW:311-312` |
+| FMT-C23 | *(new)* `checks.ci_tests` (`full`, `light`, `none`; default `full`) and `checks.ci_blocks_merge` (default `false`) | Rafi's CI step (NEW-CHK-8, NEW-CHK-10) | **new** (decided 2026-11-02, ARCH-5) | `REWRITE_ARCHITECTURE.md` 6.10 |
+| FMT-C24 | *(new)* `timeouts.check_quiet_minutes` (2), `timeouts.check_minutes` (5), `timeouts.suite_minutes` (20) | Test time limits (NEW-CHK-6) | **new** (decided 2026-11-02, ARCH-5) | `REWRITE_ARCHITECTURE.md` 6.11 |
 
 ### 5.6 Compile output
 
@@ -696,6 +698,7 @@ The GUI is built after the rewrite (`RW §What the GUI needs from the engine`). 
 | GUI-R23 | GUI-DASH-1, GUI-DASH-3: dashboards for duration, spend, quality, throughput; measured vs estimated cost always distinguished | Event log records measured values and marks estimates | **new** | GUI-DASH-1, 3 |
 | GUI-R24 | §12.4: secrets redacted in streamed output and logs; agent output never rendered as trusted HTML | Same rule as today's Manager rendering (FLAG-MG-10) and OUT-9 | **keep** | GUI §12.4 |
 | GUI-R25 | GUI-INS-2, GUI-INS-3: instances isolated by worktree/branch; shared-branch policy chosen per project | Design for it (GUI-PLT-5); don't build it yet | **new** (decided `RW:262`) | GUI-INS-2, 3 |
+| GUI-R26 | GUI-RUN-7: "CI testing" dropdown and "Failing tests block merge" switch, shown only when rafi handles git | The engine exposes `checks.ci_tests` and `checks.ci_blocks_merge` and whether rafi handles git (NEW-CHK-8, NEW-CHK-12) | **new** (decided 2026-11-02, ARCH-5) | GUI-RUN-7 |
 
 ## 8. New behavior
 
@@ -733,7 +736,7 @@ Found on moneyTree T002, 2026-10-29. None of it is patched on 0.10.x (decided `R
 | NEW-MAL-3 | 6 | A malformed reply is reported as malformed, never as `delivery-uncertain`. Same fix for the Builder-fix mislabel in `QAMC §2` | `MALF 6`; `QAMC §2` "Other loose ends" |
 | NEW-MAL-4 | 7 | When the builder is blocked, show its one-line reason (for example "Blocked: needs internet to install PostgreSQL/Drizzle"), never raw JSON. See OUT-6 | `MALF 7`; principle 7 |
 | NEW-MAL-5 | 2 | No quiet substitutes: when the builder can't meet the required stack, it reports "blocked" instead of swapping in something else (it used a JSON file instead of PostgreSQL) | `MALF 2` |
-| NEW-MAL-6 | 3 | QA can run the full test suite, including local servers (loopback) and temp-file writes. Five StarNet tests failed with EPERM in QA's sandbox. This is part of the upfront permission check | `MALF 3`; principle 5 |
+| NEW-MAL-6 | 3 | Tests never fail because of QA's sandbox. Five StarNet tests failed with EPERM in QA's sandbox. **Changed 2026-11-02 (ARCH-5):** rafi runs every test itself, with the builder's permissions, including local servers (loopback) and temp-file writes (NEW-CHK-1, NEW-CHK-2); QA stays read-only and reads rafi's record. Local servers and internet are part of the upfront permission check | `MALF 3`; principle 5 |
 | NEW-MAL-7 | 8–11 | Smaller replies: each fact once (rafi builds coverage and continuity notes from the findings; drop the duplicate summary and reason fields); no echoed IDs (`handoff_id`, `finding_key`); the builder cites rafi's recorded commands ("test run #3") instead of retyping output; flatter shapes like the ticket-population wire format in `spec/src/operationContracts.ts` | `MALF 8–11`; principle 6 |
 | NEW-MAL-8 | 12 | Remove the triple-check lines: `foreman.ts` `buildQaInstruction` ("Triple-check your work", "Triple-check.") and the QA hand-off text in `qaReview.ts` ("Be very thorough… Triple check your work…"). Keep "Do not rubber-stamp your own work. Be skeptical." | `MALF 12`; principle 12 |
 | NEW-MAL-9 | Direction | Optionally, the builder reports in plain text and one short, strict extraction call turns it into JSON. This needs a direct model call (an API key), which rafi doesn't make today (Q-MAL-2) | `MALF` "Direction"; principle 6 |
@@ -1021,9 +1024,28 @@ Decided 2026-11-01 (`RW §Test tools`).
 | NEW-TOOL-10 | Known tools rafi can set up or explain: Playwright, mobile-mcp, Appium, Maestro (mobile.dev; name clashes with the GUI's Maestro, GUI open question 11), iOS Simulator push (`xcrun simctl push`), real push via APNs sandbox or FCM. The setup check confirms details on your machine | `RW:477-488` |
 | NEW-TOOL-11 | Scenario tests: QA "unable to verify", then a tool is connected and QA retries with it; a later ticket gets the tool through its tags; two builds use Playwright at once without collisions; a device locked by one build | `RW:496-500` |
 
+### 8.24 Tests and CI
+
+Decided 2026-11-02 in the architecture review (ARCH-5; `REWRITE_ARCHITECTURE.md` 6.9–6.11). Agents never prove a test passed by saying so; rafi runs and records every test, the way CI does.
+
+| ID | Requirement | Source |
+|---|---|---|
+| NEW-CHK-1 | Rafi runs every test command itself, through a `run_check` tool it gives each builder and QA session. It records the command, exit code, output, duration and the exact code it tested (git tree). A test an agent runs in its own shell is never proof; only rafi's record counts | ARCH-5 |
+| NEW-CHK-2 | Tests run in the builder's worktree with the builder's permissions: project files writable; internet, local servers and installs only if granted. Caches that would go to the home folder are pointed at the ignored `.rafi/cache/`. QA stays read-only. No QA copy is made for tests | ARCH-5; NEW-MAL-6 |
+| NEW-CHK-3 | The builder runs its checks through `run_check` and fixes failures before it reports done. Before QA, every requirement's check needs a passing run against the builder's final code; results made against older code are rerun, and only those. If one fails, the ticket goes straight back to the builder and the QA turn is skipped (counts against `retries.fixes`) | ARCH-5 |
+| NEW-CHK-4 | During a ticket only relevant tests run: each requirement's check command, plus the tests related to the ticket's changed files where the test tool supports it (`jest --findRelatedTests`, `vitest related`) | ARCH-5 |
+| NEW-CHK-5 | QA can ask for a test that isn't listed through `run_check`; rafi runs and records it the same way. The same record is used by QA's re-check after `rafi plan restore`, browser tests (Playwright test files) and the setup script, so "setup worked" is a record, not the builder's word | ARCH-5 |
+| NEW-CHK-6 | Time limits. A run printing nothing for 2 minutes is hung: stopped and counted as a failure. A run still printing at its limit (5 minutes for a ticket's tests, 20 for the full suite) is slow, not broken: stopped, not counted as a failure, and rafi asks once to raise the limit (it suggests double; or 1.5 times the longest recorded run when the upfront check already knows). The answer is saved to `rafi-config.yaml`; auto-approve says yes. Until it's answered only that ticket, or the CI step, waits; the rest keep building | ARCH-5 |
+| NEW-CHK-7 | A test run that changes tracked files (for example a formatter run with `--write`) is a failure that names the files; the builder fixes it | ARCH-5 |
+| NEW-CHK-8 | Rafi's CI step runs the full suite (`checks.ci_tests: full`, the default), the tests related to every file the build changed (`light`) or nothing (`none`). It exists only when rafi handles git (completion `pr`, `pr-ready`, `auto-merge` or `direct-merge`) and runs before rafi merges its branch or opens its PR. With completion `none` you manage git yourself, and rafi runs no suite. The upfront check confirms it once: "Rafi runs the full test suite before merge. Keep that, or manage full test suite runs yourself?" Auto-approve keeps the default | ARCH-5 |
+| NEW-CHK-9 | When the CI step fails: tests that also fail on the build's starting commit were already broken and flaky tests (pass when rerun on the same commit) are reported once and don't block. For the rest, rafi adds a fix ticket at the front of the queue with each failing test as a requirement and a hint of which ticket probably caused it, builds it AFK like any ticket, then runs the CI step again. Done tickets are never reopened | ARCH-5 |
+| NEW-CHK-10 | A failing suite never stops the build. If the fix ticket runs out of fixes: with `checks.ci_blocks_merge: false` (the default) rafi merges (or opens the PR) anyway and tells you which tests still fail (terminal, notification, end-of-build summary); with `true` it commits and pushes the branch without merging and tells you. The fix ticket stays open for a later build | ARCH-5 |
+| NEW-CHK-11 | Rafi never adds CI workflows, required checks or branch protection to your repo | ARCH-5 |
+| NEW-CHK-12 | The GUI shows a "CI testing" dropdown (Full, Light, None) only when rafi handles git, and, when it's Full or Light, a "Failing tests block merge" switch, off by default (GUI-RUN-7) | ARCH-5 |
+
 ## 9. Open questions
 
-### 9.0 Decided in review (2026-11-01)
+### 9.0 Decided in review (2026-11-01; architecture decisions ARCH-1–5, 2026-11-02)
 
 | ID | Decision |
 |---|---|
@@ -1047,6 +1069,13 @@ Decided 2026-11-01 (`RW §Test tools`).
 | D6 | (Step 5 review.) The old engine refuses a 1.0-format project with "This project uses 1.0 formats; set RAFI_ENGINE=next." Updates ENV-6 and NEW-ENG-10. |
 | D8 | (User, 2026-11-01; `REWRITE_SCENARIOS.md` 11.2.) **No baseline against today's rafi (0.10.2).** No backward compatibility is needed, and this doc already records every user-visible behavior from the code. Guide step 6 is dropped. The fake-agent harness is built as the first piece of the new engine (milestone 1), and scenarios are written test-first against the new engine: write the test, see it fail, build, see it pass (NEW-ENG-9). SCN-9 and SCN-14 (O-E2E-005, O-E2E-004) can optionally be checked by hand on 0.10.2. The live suite is new-engine only: one simple ticket, a 3-ticket batch, a blocked permission, kill then resume, per provider, plus a few other live checks, on tiny tickets, run before a release. Updates NEW-HAR-1, SCN-9, SCN-14 and the 9.1 note. |
 | Step 5 correction | PRM-G2 and OUT-42 said 0.10.2 exits with code 2 on a build question "with or without a terminal". The code asks in place in a terminal and exits 2 only without one (`ai-foreman/src/humanDecision.ts:35,87`; `ai-foreman/src/foreman.ts:801-834`; `ai-foreman/src/cli/start.ts:2706,2986`; `ai-foreman/src/supervisedStart.ts:132`). Both rows are corrected; the decided change (no exit while waiting, NEW-BLK-5) is unchanged. |
+
+| ARCH-1 | (Architecture review, 2026-11-02.) No old engine is kept after the switch. `RAFI_ENGINE` exists only while the rewrite is built side by side; at the switch the old engine is deleted in the same release (`@rafi-ai/cli` 1.0 / `ai-foreman` 3.0). Anyone who needs the old one installs the previous version (`npm install -g @rafi-ai/cli@0.10.2`). Updates NEW-ENG-10. |
+| ARCH-2 | (Architecture review.) Codex's app-server stays for 1.0, behind one transport file, though OpenAI calls it experimental: it's the only Codex mode with approvals, interrupt and usage. |
+| ARCH-3 | (Architecture review.) If a fake `claude` executable can't be made to work (D9), the process set tests Claude with the in-process fake plus the live suite; no test-only code goes into the adapter. |
+| ARCH-4 | (Architecture review.) Claude login needs no change: rafi runs your installed, unmodified `claude` with your own login, which Anthropic's terms allow. |
+| ARCH-5 | (Architecture review.) Tests and CI: section 8.24 (NEW-CHK-1–12, FMT-C23, FMT-C24). Updates NEW-MAL-6. |
+| ARCH-6 | (User, 2026-11-02.) The interview asks "Who manages git: Rafi or me?" first (PRM-11). Today ticket setup asks base branch, branch prefix, branch strategy and PR title format whatever the work mode (`ai-foreman/src/cli/tickets.ts:817-830`). In 1.0, picking "me" skips every branch, PR, merge and CI question, in `rafi create` and in `rafi tickets setup:*`. |
 
 **Every other question in 9.1 is decided as recommended** (accepted 2026-11-01). Where a row in 9.1 and this table differ, this table wins.
 

@@ -1,19 +1,19 @@
 # Rewrite scenarios
 
-Status: **reviewed** (guide step 5 review applied, 2026-11-01; decisions D1–D8 in section 11). The baseline against 0.10.2 is dropped (D8, 2026-11-01). Next: the architecture plan (guide step 7). The harness is built as the first piece of the new engine, in milestone 1 (guide step 10), and the scenarios are written test-first against it.
+Status: **reviewed** (guide step 5 review applied, 2026-11-01; decisions D1–D8 in section 11). The baseline against 0.10.2 is dropped (D8, 2026-11-01). Next: the architecture plan (guide step 7). The harness is built as the first piece of the new engine, in milestone 1 (guide step 10), and the scenarios are written test-first against it. Updated 2026-11-02: tests and CI scenarios S-CHK-1–8 (5.6), from the architecture decisions (`REWRITE_REQUIREMENTS.md` 8.24).
 Written against `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2 on branch `feature/rewrite`.
 Inputs: `REWRITE_REQUIREMENTS.md` (status reviewed; section 9.0 wins over older rows), `AI_FOREMAN_REWRITE.md`, and Part 1 (E01–E18) of `../rafi-2/rafi-plan-docs/rafi-harness-requirements.md`.
 
 This doc lists the whole-build scenarios the new engine must pass, the design of the fake-agent harness that runs them through the real `rafi` command, and a table that maps every requirement in `REWRITE_REQUIREMENTS.md` sections 2–8 to a scenario. Nothing here is implemented yet.
 
-In numbers: 111 scenarios (41 whole-build, 14 past-bug, 30 from the decided sections, 26 command and engine-wide); 594 of the 606 requirement IDs covered and 12 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
+In numbers: 119 scenarios (41 whole-build, 14 past-bug, 38 from the decided sections, 26 command and engine-wide); 609 of the 621 requirement IDs covered and 12 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
 
 | Section | Contents |
 |---|---|
 | 1–2 | How to read a scenario; fixtures, fake-agent scripts, step notation |
 | 3 | Whole-build scenarios: start, QA loop, blocked ticket, permissions, malformed replies, timeouts, crash and resume, batches, plan updates, `rafi migrate`, portability |
 | 4 | Past bugs (SCN-1–14) |
-| 5 | Tags, ask up front, blocked tickets, notifications, test tools |
+| 5 | Tags, ask up front, blocked tickets, notifications, test tools, tests and CI |
 | 6 | Command, output and engine-wide scenarios |
 | 7 | Harness design |
 | 8 | Harness plan E01–E18: meets, defers, drops |
@@ -63,6 +63,7 @@ F-ONE and F-CHAIN save the plan-update setting as change-then-tell (the default)
 | F-HUGE | A repo with no commit yet, and a variant with one commit and an ignored folder of 20,000 small files | SCN-1 |
 | F-DIRTY | F-CHAIN with uncommitted edits to a tracked file and an untracked folder | Dirty work, reset, SCN-2 |
 | F-ODDPATH | F-ONE at a path containing a space, a single quote, a `$` and a non-ASCII letter (today's tests already use spaces and `ü`: `rafi/test/resumePackaged.test.mjs:21`, `rafi/test/resumePty.test.ts:47`) | SCN-6, printed commands |
+| F-TESTS | Three tickets `T1`–`T3` in one shared delivery unit with completion `direct-merge` to a local bare remote. A fake test runner, `fake-test` (supports `--findRelatedTests`), whose per-test outcome per commit the scenario sets: `pass`, `fail`, `hang`, `slow(8m)`, `flaky`, `writes(coverage/)`, `writes-home-cache`, `edits(<tracked file>)`. Each requirement's check is `fake-test <file>` | Tests and CI (5.6) |
 
 Fixtures are versioned with the harness. A fixture never points at a real project such as moneyTree (harness E06, E16).
 
@@ -107,6 +108,8 @@ Behaviors a rule can ask for:
 | `toolfail(n, harmless)` | Emits `n` failed exploratory reads before succeeding (SCN-14) |
 | `ref(check 7)`, `ref(dup)`, `ref(hash)` | Cites a check by short number, twice, or by a long hash-like ID |
 | `edit(path)`, `setup-script` | Writes a file, or writes the project setup script |
+| `run_check(cmd)` | Runs a test through rafi's `run_check` tool; rafi runs it and records the result (`REWRITE_REQUIREMENTS.md` NEW-CHK-1) |
+| `shell-test(cmd, claim: pass)` | Runs a test in its own shell and claims it passed, without `run_check` |
 | `shell(cmd)` | Asks to run a shell command through the adapter's tool-permission request (section 7.2), as a real agent asks before running a tool; the fake records whether rafi allowed or refused it |
 | `inject("ignore previous instructions…")` | Puts instruction-like text in tool output or a repo file |
 
@@ -1009,6 +1012,98 @@ The base case is S-BLK-1 in section 3.3.
   - In every case, `rafi stats show` still lists each removed recording, marked as removed and why; no other event-log record is removed.
   - Recordings sit with the build logs, and `rafi logs export` includes the ones still kept.
 
+### 5.6 Tests and CI (`REWRITE_REQUIREMENTS.md` 8.24, decided 2026-11-02)
+
+#### S-CHK-1 — Rafi records tests; an agent's claim doesn't count
+- **Covers:** NEW-CHK-1, NEW-CHK-2, NEW-MAL-6
+- **Setup:** F-TESTS. `T1`'s check `fake-test t1.test` fails, writes `coverage/` and writes to the home npm cache. Script A: `builder T1#1: shell-test("fake-test t1.test", claim: pass)`, then reports done. Script B: `builder T1#1: run_check("fake-test t1.test")`.
+- **Steps:** `rafi start . --ticket T1 --steps 1` with each script.
+- **Expected:**
+  - Script A: the claimed pass isn't used. Rafi runs the check itself, records the failure (command, exit code, output, duration, the git tree tested), and sends the ticket back to the builder; no QA turn starts.
+  - Script B: the run is recorded with `asked_by: builder`; the builder's turn gets the run number, exit code and output.
+  - The test's writes succeed: `coverage/` is written in the worktree, and the cache write lands in `.rafi/cache/`, which is ignored by git. No EPERM.
+  - QA's session is read-only (the fake's transcript shows its sandbox settings) and no QA copy is made.
+
+#### S-CHK-2 — Stale results are rerun; a failing check skips QA
+- **Covers:** NEW-CHK-3
+- **Setup:** F-TESTS. `T1` has checks for `R1` and `R2`. Script: `builder T1#1: run_check(R1), run_check(R2), edit(src/r2.js)`, then done. In variant B, `R2`'s check fails on the edited code.
+- **Steps:** `rafi start . --ticket T1 --steps 1`.
+- **Expected:**
+  - Before QA, rafi reruns only `R2`'s check (its result was made against older code); `R1`'s isn't rerun.
+  - Variant A: the rerun passes and QA starts with both records.
+  - Variant B: the rerun fails; the ticket goes back to the builder (`fixing`) with the failing record, no QA turn runs, and the fix counts against `retries.fixes`.
+
+#### S-CHK-3 — Only relevant tests run; every test goes through the record
+- **Covers:** NEW-CHK-4, NEW-CHK-5
+- **Setup:** F-TESTS with ten test files. `T1` changes `src/a.js`; two test files are related to it. Script: `qa T1#1: run_check("fake-test e2e/a.spec")` (a browser test not in the requirements file); `builder T1#1: setup-script`.
+- **Steps:**
+  1. `rafi start . --ticket T1 --steps 1`.
+  2. `rafi plan restore <earlier revision> --ticket T1`, then `rafi start . --ticket T1 --steps 1`.
+- **Expected:**
+  - Only `T1`'s requirement checks and the two related test files run (`fake-test --findRelatedTests src/a.js`); the other test files never run.
+  - QA's extra test is recorded with `asked_by: qa`; the setup script's run is recorded like a test.
+  - Step 2: QA's re-check reads the recorded runs the same way.
+
+#### S-CHK-4 — Hung, slow and code-changing tests
+- **Covers:** NEW-CHK-6, NEW-CHK-7, FMT-C24
+- **Setup:** F-TESTS. `T1`'s check hangs (no output); `T2`'s check is `slow(8m)`, printing output all along; `T3`'s check `edits(src/index.js)`.
+- **Steps:**
+  1. In a terminal: `rafi start . --steps 3`; answer "answer later" to the time-limit question.
+  2. `rafi answer` the time-limit question with the suggested value.
+  3. Repeat step 1 from a fresh fixture with `--auto-approve`.
+  4. Start a new build on the project from step 3 with `T2`'s test still at 8 minutes and the limit set back to 5 in `rafi-config.yaml`.
+- **Expected:**
+  - `T1`: stopped after 2 minutes on the fake clock with no output, recorded as timed out, and counted as a failure.
+  - `T2`: stopped at 5 minutes, recorded as too slow, **not** a failure. Rafi asks once: "Tests here take longer than 5 minutes. Raise the limit to 10?" While it's unanswered only `T2` waits; `T1` and `T3` keep going.
+  - `T3`: the run is a failure naming `src/index.js`; the builder gets it to fix.
+  - Step 2: the answer is saved as `timeouts.check_minutes: 10` and `T2` is retried.
+  - Step 3: auto-approve answers yes and saves the limit; nothing waits.
+  - Step 4: the upfront check asks about the limit before step 1, suggesting 12 minutes (1.5 times the longest recorded run).
+
+#### S-CHK-5 — The CI step passes, and is confirmed up front
+- **Covers:** NEW-CHK-8, NEW-CHK-11, FMT-C23
+- **Setup:** F-TESTS, all tests passing, `checks.ci_tests` unset.
+- **Steps:**
+  1. In a terminal: `rafi start . --steps 3`; at the upfront check, keep the default.
+  2. Repeat with `checks.ci_tests: light`, then `none`.
+  3. Repeat step 1 from a fresh fixture with `--auto-approve`.
+- **Expected:**
+  - The upfront check asks once: "Rafi runs the full test suite before merge. Keep that, or manage full test suite runs yourself?" The answer is saved.
+  - The full suite runs once, after the last ticket and before the merge, never after each ticket. Then rafi merges.
+  - `light` runs only the tests related to files the build changed; `none` runs no suite.
+  - Step 3: auto-approve keeps `full` without asking.
+  - Rafi adds no CI workflow, required check or branch protection: the repo has no new `.github/` or `.gitlab-ci.yml` files, and no branch-protection call reaches the fake `gh`.
+
+#### S-CHK-6 — CI fails, and a fix ticket fixes it
+- **Covers:** NEW-CHK-9
+- **Setup:** F-TESTS. `T2`'s commit breaks `suite/x.test`. `suite/y.test` already fails on the starting commit. `suite/z.test` is `flaky`. The fix ticket's builder turn makes `suite/x.test` pass.
+- **Steps:** `rafi start . --steps 3`.
+- **Expected:**
+  - The suite fails on `x`, `y` and `z`. `z` passes on a rerun at the same commit: reported as flaky, not blocking. `y` also fails on the starting commit: reported once as already broken, not blocking.
+  - Rafi adds a fix ticket at the front of the queue with `suite/x.test` as its requirement and a note that `T2` probably caused it. It's built like any ticket (requirements file, builder, QA).
+  - `T1`–`T3` stay done; none is reopened.
+  - The suite runs again, passes apart from `y`, and rafi merges.
+
+#### S-CHK-7 — The fix doesn't work: merge anyway, or push only
+- **Covers:** NEW-CHK-10, FMT-C23
+- **Setup:** S-CHK-6, but every fix attempt leaves `suite/x.test` failing.
+- **Steps:**
+  1. `rafi start . --steps 3` with `checks.ci_blocks_merge` unset (default `false`).
+  2. Repeat with `checks.ci_blocks_merge: true`.
+- **Expected:**
+  - After the fix ticket uses up `retries.fixes`, the build isn't stopped.
+  - Step 1: rafi merges anyway and says `suite/x.test` still fails, in the terminal, a notification and the end-of-build summary.
+  - Step 2: the branch is committed and pushed to the remote but not merged, and rafi says so.
+  - Either way the fix ticket stays open, unfinished, with its failing test.
+
+#### S-CHK-8 — You manage git: no suite, and no CI settings shown
+- **Covers:** NEW-CHK-8, NEW-CHK-12, GUI-R26
+- **Setup:** F-TESTS with completion `none`.
+- **Steps:** `rafi start . --steps 3`; then read the build's settings from the event stream (S-ENG-2).
+- **Expected:**
+  - No full suite runs and the upfront check doesn't ask about it; each ticket's own and related tests still run.
+  - The build's settings say rafi doesn't handle git, so the GUI shows neither the "CI testing" dropdown nor the "Failing tests block merge" switch. With completion `direct-merge`, both settings are present, the switch only when `ci_tests` is `full` or `light`.
+
 ## 6. Command, output and engine-wide scenarios
 
 The whole-build scenarios above don't touch every command and flag. These shorter scenarios run through the same harness and fill the gaps, so every kept, changed and dropped item has a check. Commands the rewrite doesn't touch (`graph`, `sources`, `discover`, `uninstall`, `compile`) also keep their existing package tests (`rafi/test/graphSetup.test.ts`, `discovery.test.ts`, `uninstallNative.test.ts`, `uninstallRecovery.test.ts`, `compile.test.ts`); the scenarios here only smoke-test them through the real command.
@@ -1044,6 +1139,7 @@ The whole-build scenarios above don't touch every command and flag. These shorte
 - **Steps:** Run every subcommand in section 2.4 of the requirements with each listed flag, in a terminal where it prompts and without one where `-y`/`--defaults` applies: `setup:init` / `setup:update` (local, Linear, Jira and URL sources against fakes; `--completion pr-ready`), `init` (defaults 500 / 20000 / UTC), `populate` (with `--proposal-file`, `--authorize-retire`, `--waive-risk-notes`), `show` (one, `--all`, `--json`, `--output` twice), `waive-risk-notes`, `repair --risk-notes --apply`, `groups list --json`, `groups repair`, `reset` (each scope, group, `--deleted-tickets restore`), `update`, `complete` (with and without evidence), `block`, `unblock`, `cancel` (without `--summary`), `discover`, `accept-future-work`, `review` (accept, dismiss, defer, and the `-all` forms), `render`, `validate`, `queue --limit`, `archive --older-than-days`.
 - **Expected, per subcommand:**
   - `setup:init`, `setup:update`: in a terminal, PRM-50–54 appear in order with their listed choices; with `-y --defaults`, none appears. The chosen sources, population mode, agent preference, branch strategy, prefix, completion (including `pr-ready`), provider and auto-merge settings are written to `rafi-config.yaml` under `tickets.*` (FMT-C8). `setup:update` with a source flag replaces the saved sources rather than adding to them. The Linear, Jira and URL fakes each receive one request.
+  - With the project's work mode set to "Me — Rafi works on the current branch", `setup:init` and `setup:update` skip PRM-52 and every completion and CI question (ARCH-6).
   - `init`: creates `.tickets/` with `config.yaml` holding `implementation_limit: 500`, `view_limit: 20000` and `timezone: UTC` (FMT-K1), the schema file (FILE-25), and the rules and progress docs.
   - `populate`: writes the proposal under `.rafi/ticket-population-proposals/` (FILE-32), asks PRM-55 before applying, and applies it. `--proposal-file` applies a frozen proposal unchanged. `-y` without `--authorize-retire` doesn't retire a ticket; with `--authorize-retire T7` only `T7` is retired. `--waive-risk-notes T3` records a waiver with `--waiver-reason` and actor `operator`. New tickets carry tags.
   - `show`: one ticket and `--all` both print the readable record (definition, state, blockers, validation history, events, delivery context; OUT-4). `--json` returns the versioned envelope with the full record, including unknown ticket fields (`documentation`, `rollback`, `notes`, `external_refs`, `source_refs`, `supersedes`, and a made-up `x_custom`; FMT-T12–15, OUT-30). `--output out/a/b.json` twice creates `out/a/` and leaves two pretty-printed blocks in the file.
@@ -1075,6 +1171,7 @@ The whole-build scenarios above don't touch every command and flag. These shorte
 - **Steps:** In a terminal, answer every prompt in section 3.2 of the requirements. Then `--defaults`, `--defaults --runtime codex`, `--no-graph`, `--force`, `--docs-root`, `--root-file-mode` each value, `--grill-me`. The dirty repo without a terminal, with and without `--dirty-work preserve`. Make the fake runtime fail during a file update.
 - **Expected:**
   - Prompts appear in the listed order with the listed choices; "Prepare QA requirements before Builder work?" doesn't appear.
+  - "Who manages git?" comes first among the git questions (ARCH-6). Picking "Me" skips every branch, PR, merge and CI question; picking "Rafi" asks them.
   - The new questions appear: where build logs go; Playwright for the frontend, mobile-mcp for the mobile app; on macOS, installing `alerter` (Q-NOT-2).
   - `--defaults` answers the new questions too.
   - Graphify is on unless `--no-graph`, with the policy shown first.
@@ -1442,9 +1539,9 @@ The baseline against 0.10.2 is dropped (D8). Two past bugs were never confirmed 
 
 ## 10. Coverage
 
-Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (606 IDs), with the scenarios that check it. It was generated from the **Covers** lines above; once the harness exists (milestone 1, guide step 10), the coverage ledger (7.9) regenerates it from the scenario files.
+Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (621 IDs), with the scenarios that check it. It was generated from the **Covers** lines above; once the harness exists (milestone 1, guide step 10), the coverage ledger (7.9) regenerates it from the scenario files.
 
-- 594 IDs are covered by at least one scenario.
+- 609 IDs are covered by at least one scenario.
 - 12 are marked **not scenario-testable**, each with its reason: NEW-ENG-8, NEW-MAL-9, NEW-CAU-2, NEW-GUI-7, NEW-ADP-1, NEW-HAR-1, NEW-HAR-2, NEW-HAR-3, NEW-HAR-4, NEW-INS-6, NEW-INS-8, GUI-R2.
 - A few covered IDs are only partly scenario-testable; the Note column says which part is checked elsewhere.
 - "Drop" items are covered by S-CLI-2, which checks they're gone.
@@ -1860,6 +1957,8 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (606 IDs), with
 | FMT-C20 | S-TOOL-6 |  |
 | FMT-C21 | S-PERM-1, S-PORT-1 |  |
 | FMT-C22 | S-PERM-2 |  |
+| FMT-C23 | S-CHK-5, S-CHK-7 |  |
+| FMT-C24 | S-CHK-4 |  |
 | FMT-O1 | S-CLI-7 |  |
 | FMT-O2 | S-TAG-1, S-CTX-1 |  |
 
@@ -1926,6 +2025,7 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (606 IDs), with
 | GUI-R23 | S-ENG-1 |  |
 | GUI-R24 | S-CLI-12, S-ENG-7 |  |
 | GUI-R25 | S-ENG-6 | Design only in 1.0; clones stand in. |
+| GUI-R26 | S-CHK-8 | The GUI itself is built later; the scenario checks the settings it reads. |
 
 ### 8. New behavior
 
@@ -1950,7 +2050,7 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (606 IDs), with
 | NEW-MAL-3 | S-MAL-2 |  |
 | NEW-MAL-4 | S-BLK-1, S-CLI-15 |  |
 | NEW-MAL-5 | S-CTX-1 | Instruction content only; whether a model obeys is live. |
-| NEW-MAL-6 | S-PERM-3 |  |
+| NEW-MAL-6 | S-PERM-3, S-CHK-1 |  |
 | NEW-MAL-7 | S-MAL-4 |  |
 | NEW-MAL-8 | S-CTX-1 |  |
 | NEW-MAL-9 | **not scenario-testable** | Not in 1.0 (Q-MAL-2 decided as recommended: revisit after NEW-MAL-7 if the malformed rate stays high). |
@@ -2094,6 +2194,18 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (606 IDs), with
 | NEW-TOOL-9 | S-PERM-3 |  |
 | NEW-TOOL-10 | S-TOOL-5 |  |
 | NEW-TOOL-11 | S-TOOL-1, S-TOOL-2, S-TOOL-3, S-TOOL-4 |  |
+| NEW-CHK-1 | S-CHK-1 |  |
+| NEW-CHK-2 | S-CHK-1 |  |
+| NEW-CHK-3 | S-CHK-2 |  |
+| NEW-CHK-4 | S-CHK-3 |  |
+| NEW-CHK-5 | S-CHK-3 |  |
+| NEW-CHK-6 | S-CHK-4 |  |
+| NEW-CHK-7 | S-CHK-4 |  |
+| NEW-CHK-8 | S-CHK-5, S-CHK-8 |  |
+| NEW-CHK-9 | S-CHK-6 |  |
+| NEW-CHK-10 | S-CHK-7 |  |
+| NEW-CHK-11 | S-CHK-5 |  |
+| NEW-CHK-12 | S-CHK-8 |  |
 
 ## 11. Decisions
 

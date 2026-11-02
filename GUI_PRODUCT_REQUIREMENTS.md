@@ -201,6 +201,7 @@ Targets are proposals to be calibrated during beta.
 - **GUI-RUN-4 (MUST)** Build options exposed with sensible defaults and plain-language help: steps / run-everything, QA on/off, `--builder-network` and approvals (explicit, scoped, never implied by "yes to all"), dirty-work policy, agent choices.
 - **GUI-RUN-5 (MUST)** Recovery flows (resume after crash, QA recovery, start-over, reset, doctor) are guided: the UI shows detected state, available options, and the consequence of each before acting.
 - **GUI-RUN-6 (SHOULD)** Scheduled or deferred starts ("start when instance 1 finishes", "start at 22:00"). 🔶
+- **GUI-RUN-7 (MUST)** A **CI testing** dropdown (Full, Light, None; default Full), shown only when rafi handles git (completion is PR, PR-ready, auto-merge or direct merge, not None). When it's Full or Light, a **Failing tests block merge** switch, off by default: when off, a suite still failing after rafi's fix ticket is merged anyway and the user is told which tests fail. Rafi never adds CI workflows, required checks or branch protection to the repo. (Decided 2026-11-02; `REWRITE_REQUIREMENTS.md` NEW-CHK-8–12.)
 
 ### 8.5 Planner view (per instance)
 

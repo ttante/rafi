@@ -100,7 +100,7 @@ These docs describe fixes to ai-foreman. The rewrite replaces that code, so they
 **From `MALFORMED_REPLY_AND_BLOCKED_BUILD_IMPROVEMENTS.md`** (moneyTree T002, 2026-10-29):
 - 1: permission check for the whole build, before step 1 (principle 5).
 - 2: no quiet substitutes; the builder reports "blocked" instead of swapping in a different stack.
-- 3: QA can run the full test suite, including local servers and temp files (principle 5).
+- 3: tests never fail because of QA's sandbox. **Changed 2026-11-02:** rafi runs and records every test itself, with the builder's permissions (local servers and temp files included); QA stays read-only and reads the record. The full suite runs only at rafi's CI step, when rafi handles git; a failure adds a fix ticket and, by default, never blocks the merge (`REWRITE_REQUIREMENTS.md` 8.24).
 - 4–6: one shared malformed-reply handler, one repair try, and the correct label (principles 4 and 6).
 - 7: plain-English stops (principle 7).
 - 8–11: smaller replies: each fact once, no echoed IDs, cite recorded commands, less nesting (principle 6).
@@ -547,10 +547,9 @@ For a step-by-step version with a prompt for each step, see [`AI_FOREMAN_REWRITE
    7. Multi-ticket batches, plan updates, `tickets` and `manager` integration.
 7. **In-progress builds and existing projects.** Don't migrate runs that are already in progress: they finish on the old engine (0.10.x). The new engine reads only 1.0 formats, so an existing project is converted once with `rafi migrate` (decided 2026-11-01; required for 1.0). The new engine then starts fresh runs from the converted tickets, plans and config.
 8. **Dogfood.** Run `rafi migrate` on moneyTree, then build T002 onwards on the new engine, with the old engine still available as a fallback. Fix what breaks, and add each failure as a scenario test.
-9. **Switch the default.**
-   - After a run of clean builds, make the new engine the default.
-   - Keep the old one for one release, then delete it along with its database, triggers and state folders.
-   - Release as `@rafi-ai/cli` 1.0 / ai-foreman 3.0.
+9. **Switch.**
+   - After a run of clean builds, release the new engine as `@rafi-ai/cli` 1.0 / ai-foreman 3.0.
+   - Delete the old engine in the same release, along with its database, triggers and state folders. No backup engine is kept; anyone who needs it installs the previous version (decided 2026-11-02).
 
 ## Models
 
