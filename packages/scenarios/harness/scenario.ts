@@ -1,9 +1,13 @@
 // The scenario() API of SCN 7.9. Each scenario runs as a node:test test; steps that need a later milestone
 // report "not run (pending Mn)"; the after-each checks of S-CLI-2 step 4 run after every scenario.
+import { mkdirSync } from "node:fs";
+import path from "node:path";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { registry } from "../checks/registry.js";
 import { fChain } from "../fixtures/f-chain.js";
+import { fHuge } from "../fixtures/f-huge.js";
+import { fTestsLocal } from "../fixtures/f-tests.js";
 import { fOne, fOneLegacy } from "../fixtures/f-one.js";
 import { copyLegacy } from "../fixtures/legacy.js";
 import { git, tempRoot } from "../fixtures/common.js";
@@ -12,7 +16,8 @@ import { newComputer, rafiRunner, type Rafi, type RafiResult } from "./rafi.js";
 import type { Computer } from "./deps.js";
 
 export type Mode = "next" | "next-process";
-export type FixtureName = "F-ONE" | "F-ONE-0.10" | "F-CHAIN" | "F-LEGACY" | "F-LEGACY-RUNNING" | "none";
+export type FixtureName = "F-ONE" | "F-ONE-0.10" | "F-CHAIN" | "F-LEGACY" | "F-LEGACY-RUNNING" | "F-TESTS-LOCAL"
+  | "F-TESTS-JEST" | "F-HUGE-NO-COMMIT" | "F-HUGE-IGNORED" | "none";
 
 export interface ScenarioContext {
   readonly rafi: Rafi;
@@ -44,6 +49,10 @@ function build(name: FixtureName, root: string): string {
     case "F-ONE": return fOne(root);
     case "F-ONE-0.10": return fOneLegacy(root);
     case "F-CHAIN": return fChain(root);
+    case "F-TESTS-LOCAL": return fTestsLocal(root);
+    case "F-TESTS-JEST": return fTestsLocal(root, {}, "npx jest");
+    case "F-HUGE-NO-COMMIT": return fHuge(root, "no-commit");
+    case "F-HUGE-IGNORED": return fHuge(root, "ignored");
     case "F-LEGACY": return copyLegacy("F-LEGACY", root);
     case "F-LEGACY-RUNNING": return copyLegacy("F-LEGACY-RUNNING", root);
     case "none": return tempRoot("rafi-noproject-");
@@ -54,8 +63,11 @@ function context(def: ScenarioDef, t: TestContext) {
   const root = tempRoot();
   const computer = newComputer(root);
   const projects: string[] = [];
+  let extra = 0;
   const add = (name: FixtureName) => {
-    const dir = build(name, root);
+    const base = extra++ === 0 ? root : path.join(root, `extra-${extra}`);
+    mkdirSync(base, { recursive: true });
+    const dir = build(name, base);
     if (!LEGACY.has(name)) projects.push(dir);
     return dir;
   };
@@ -75,7 +87,7 @@ function context(def: ScenarioDef, t: TestContext) {
 export function scenarioProblems(computer: Computer, projects: readonly string[],
   results: readonly RafiResult[]): string[] {
   return afterEachChecks({ projects, outputs: results.map((r) => r.output), transcripts: computer.sentToAgents,
-    childEnvs: computer.childEnvs });
+    childEnvs: computer.childEnvs, canaries: computer.canaries, agentEnvs: computer.agentEnvs });
 }
 
 export function scenario(def: ScenarioDef): void {

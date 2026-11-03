@@ -2,12 +2,26 @@
 // canUseTool routed to a permission event, interrupt and abort. `meta` rides under a Symbol key the SDK
 // can't serialize (plan choice C11). Completed in M2.
 import type { ClaudeQuery, Deps } from "../../deps/types.js";
+import { claudeCapabilities } from "../capabilities.js";
 import { EventQueue } from "../queue.js";
 import type { Agent, AgentEvent, Decision, TurnRequest } from "../types.js";
-import { mapMessage, type ClaudeTurnState } from "./events.js";
+import { mapMessage, newClaudeState, type ClaudeTurnState } from "./events.js";
 import { queryOptions, type ClaudeOptions } from "./options.js";
 
 export const META = Symbol.for("rafi.turn-meta");
+export const ASK_REFUSAL = "The user isn't available in this turn. Reply needs-input with this question.";
+
+/** AskUserQuestion's first question, as text and choices (ARCH 5.1 "provider-question"). */
+function askedQuestion(input: Record<string, unknown>): { text: string; choices: string[] } {
+  const first = ((input.questions as Record<string, unknown>[] | undefined) ?? [])[0] ?? {};
+  const options = (first.options as { label?: string }[] | undefined) ?? [];
+  return { text: String(first.question ?? input.question ?? ""), choices: options.map((o) => String(o.label ?? "")) };
+}
+
+/** Claude Code's tool for the structured reply (`outputFormat`). */
+const REPLY_TOOL = "StructuredOutput";
+
+type Gate = { allow: boolean; message: string };
 
 interface Session {
   readonly input: EventQueue<unknown>;
@@ -17,23 +31,43 @@ interface Session {
 }
 
 export function claudeAgent(o: ClaudeOptions & { deps: Pick<Deps, "agents"> }): Agent & { sessionId(): string | null } {
-  const state: ClaudeTurnState = { sessionId: o.resume ?? null, tools: new Map() };
+  const state: ClaudeTurnState = newClaudeState(o.resume ?? null);
   let session: Session | null = null;
   let current: EventQueue<AgentEvent> | null = null;
   let repair = false;
-  const canUseTool = (tool: string, input: Record<string, unknown>) => new Promise((resolve) => {
-    const decide = (d: Decision) => resolve(d === "allow" && !repair ? { behavior: "allow", updatedInput: input }
-      : { behavior: "deny", message: repair ? "No tools during a repair." : "Refused by rafi's permission policy." });
+  /**
+   * The one gate for every tool use, from canUseTool and from the PreToolUse hook, which Claude Code runs even for
+   * tools it would allow itself (reads, a project's allow rules): AskUserQuestion is answered at once; the rest
+   * goes to rafi's permission policy (threat-model 10.7, threat 29). The reply tool is rafi's own channel.
+   */
+  const gate = (tool: string, input: Record<string, unknown>) => new Promise<Gate>((resolve) => {
+    if (tool === REPLY_TOOL) return resolve({ allow: true, message: "the reply" });
+    const decide = (d: Decision) => resolve(d === "allow" && !repair ? { allow: true, message: "allowed by rafi" }
+      : { allow: false, message: repair ? "No tools during a repair." : "Refused by rafi's permission policy." });
     if (!current) return decide("deny");
+    if (tool === "AskUserQuestion") {
+      current.push({ kind: "question", ...askedQuestion(input) });
+      return resolve({ allow: false, message: ASK_REFUSAL });
+    }
     current.push({ kind: "permission", decide, request: { tool,
       command: typeof input.command === "string" ? input.command : null,
       path: typeof input.file_path === "string" ? input.file_path : null, reason: null } });
   });
+  const canUseTool = async (tool: string, input: Record<string, unknown>) => {
+    const g = await gate(tool, input);
+    return g.allow ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: g.message };
+  };
+  const preToolUse = async (hook: Record<string, unknown>) => {
+    if (hook.hook_event_name !== "PreToolUse") return {};
+    const g = await gate(String(hook.tool_name ?? ""), (hook.tool_input ?? {}) as Record<string, unknown>);
+    return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: g.allow ? "allow" : "deny",
+      permissionDecisionReason: g.message } };
+  };
   const start = (first: TurnRequest): Session => {
     const input = new EventQueue<unknown>();
     const abort = new AbortController();
     const query = o.deps.agents.claudeQuery({ prompt: input, options: queryOptions(o, first,
-      { canUseTool, abortController: abort }) });
+      { canUseTool, abortController: abort, hooks: { PreToolUse: [{ hooks: [preToolUse] }] } }) });
     return { input, query, abort, iterator: query[Symbol.asyncIterator]() };
   };
   const pump = async (s: Session, queue: EventQueue<AgentEvent>, signal: AbortSignal) => {
@@ -58,8 +92,7 @@ export function claudeAgent(o: ClaudeOptions & { deps: Pick<Deps, "agents"> }): 
   return {
     runtime: "claude",
     sessionId: () => state.sessionId,
-    capabilities: () => ({ structuredReplies: true, exitCodes: false, resume: true, images: true,
-      enforceableGrants: true, compaction: true }),
+    capabilities: () => claudeCapabilities(o.structured !== false),
     turn(request, signal) {
       const queue = new EventQueue<AgentEvent>();
       current = queue;
@@ -71,6 +104,18 @@ export function claudeAgent(o: ClaudeOptions & { deps: Pick<Deps, "agents"> }): 
         session_id: state.sessionId ?? "", [META]: request.meta });
       void pump(s, queue, signal).finally(() => signal.removeEventListener("abort", onAbort));
       return queue;
+    },
+    async models() {
+      const input = new EventQueue<unknown>();
+      const q = o.deps.agents.claudeQuery({ prompt: input, options: { cwd: o.cwd,
+        ...(o.executable ? { pathToClaudeCodeExecutable: o.executable } : {}) } }) as
+        ReturnType<ClaudeQuery> & { supportedModels?(): Promise<{ value?: string }[]> };
+      try {
+        const list = ((await q.supportedModels?.()) ?? []).map((m) => m.value ?? "").filter(Boolean);
+        return list.length ? list : null;
+      } finally {
+        input.end();
+      }
     },
     async close() {
       session?.input.end();

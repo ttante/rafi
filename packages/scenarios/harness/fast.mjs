@@ -1,6 +1,7 @@
 // The fast suite (SCN 7.10): every active scenario, the transition and log tests, the engine and harness tests,
-// and scripts/check-rules.mjs, as isolated jobs on RAFI_TEST_CONCURRENCY workers (default 4). Prints totals
-// and the slowest files; fails on any failure or over 60 s of wall time. Modeled on ai-foreman's test-offline.mjs.
+// and scripts/check-rules.mjs, as isolated jobs on RAFI_TEST_CONCURRENCY workers (default 4); `*.real.test.ts`
+// files spawn real processes and belong to the process set. Prints totals and the slowest files; fails on any
+// failure or over 60 s of wall time. Modeled on ai-foreman's test-offline.mjs.
 //   node packages/scenarios/harness/fast.mjs [--list] [file filter]
 import { spawn } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
@@ -11,7 +12,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const BUDGET_MS = 60_000;
 const workers = Math.max(1, Number(process.env.RAFI_TEST_CONCURRENCY ?? 4));
 const ROOTS = [
-  ["packages/engine/test", /\.test\.ts$/], ["packages/spec/test/v1", /\.test\.ts$/],
+  ["packages/engine/test", /(?<!\.real)\.test\.ts$/], ["packages/spec/test/v1", /\.test\.ts$/],
   ["packages/scenarios/test", /\.test\.ts$/], ["packages/scenarios/scenarios", /\.scenario\.ts$/],
   ["scripts", /^check-rules\.test\.mjs$/],
 ];

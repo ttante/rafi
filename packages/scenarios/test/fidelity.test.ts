@@ -4,7 +4,7 @@
 // schema, activity, a tool event, usage, a permission request, and a cancel; `meta` never reaches the wire.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { claudeAgent, codexAgent, type AgentEvent, type TurnRequest } from "@rafi-ai/engine/agents";
 import { realCodex } from "@rafi-ai/engine/deps/real";
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
@@ -25,11 +25,24 @@ const turns: Behavior[] = [
 ];
 const unavailable = (() => { throw new Error("unused"); }) as never;
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** How many turns a fake executable has logged as started. */
+const loggedTurns = (log: string) => () =>
+  (existsSync(log) ? readFileSync(log, "utf8").match(/"op":"turn"/g)?.length ?? 0 : 0);
+
+/** Aborts once the fake has seen the new turn: polled, so a slow machine can't send the abort before the turn. */
+async function abortOnceStarted(controller: AbortController, turnsSeen: () => number) {
+  const before = turnsSeen();
+  for (let waited = 0; turnsSeen() === before && waited < 30_000; waited += 10) await sleep(10);
+  await sleep(50);
+  controller.abort();
+}
+
 async function collect(agent: { turn(r: TurnRequest, s: AbortSignal): AsyncIterable<AgentEvent> }, attempt: number,
-  cancel = false) {
+  cancelOnceStarted?: () => number) {
   const controller = new AbortController();
   const events: unknown[] = [];
-  if (cancel) setTimeout(() => controller.abort(), 150);
+  if (cancelOnceStarted) void abortOnceStarted(controller, cancelOnceStarted);
   for await (const event of agent.turn(request(attempt), controller.signal)) {
     if (event.kind === "permission") {
       events.push({ kind: "permission", request: event.request });
@@ -60,8 +73,10 @@ test("Codex: the in-process stream and the executable give the same events under
     assert.deepEqual(a, b);
     assert.deepEqual(kinds(a), ["activity", "permission", "tool", "usage", "reply"]);
     assert.deepEqual((a.at(-1) as { structured: unknown }).structured, { kind: "done", summary: "ok" });
-    assert.deepEqual(await collect(inProcess, 2, true), [{ kind: "cancelled", confirmed: true }]);
-    assert.deepEqual(await collect(exe, 2, true), [{ kind: "cancelled", confirmed: true }]);
+    assert.deepEqual(await collect(inProcess, 2, () => fake.record.metas.length),
+      [{ kind: "cancelled", confirmed: true }]);
+    assert.deepEqual(await collect(exe, 2, loggedTurns(shims.logs.codex)),
+      [{ kind: "cancelled", confirmed: true }]);
     assert.equal(fake.record.metas.length >= 2, true, "the in-process fake read meta beside the message");
     assert.doesNotMatch(JSON.stringify(fake.record.wire), /T1:build|"meta"/, "meta never reaches the wire");
     const log = readFileSync(shims.logs.codex, "utf8");
@@ -86,8 +101,8 @@ test("Claude: the in-process query and the claude executable give the same event
     assert.deepEqual(a, b);
     assert.deepEqual(kinds(a), ["activity", "permission", "tool", "usage", "reply"]);
     assert.deepEqual((a.at(-1) as { structured: unknown }).structured, { kind: "done", summary: "ok" });
-    const cancelledHere = await collect(inProcess, 2, true);
-    assert.deepEqual(cancelledHere, await collect(exe, 2, true));
+    const cancelledHere = await collect(inProcess, 2, () => record.metas.length);
+    assert.deepEqual(cancelledHere, await collect(exe, 2, loggedTurns(shims.logs.claude)));
     assert.deepEqual(cancelledHere.at(-1), { kind: "cancelled", confirmed: true });
     assert.equal(record.metas.filter(Boolean).length, 2, "the in-process fake read meta from the Symbol key");
     assert.doesNotMatch(JSON.stringify(record.wire), /T1:build|"meta"/, "meta never reaches the wire");

@@ -30,10 +30,14 @@ export interface TurnRequest {
 
 export interface ToolRun {
   readonly tool: string;
+  /** The provider's id for this call (OUT-8: each completion names its call id). */
+  readonly callId: string | null;
   readonly command: string | null;
   readonly outcome: "completed" | "failed" | "timed-out" | "cancelled" | "unknown";
   readonly exitCode: number | null;
   readonly durationMs: number | null;
+  /** The provider's error text for a failed call, for classifying harmless reads (C56). */
+  readonly error: string | null;
 }
 
 export interface PermissionRequest {
@@ -41,19 +45,24 @@ export interface PermissionRequest {
   readonly command: string | null;
   readonly path: string | null;
   readonly reason: string | null;
+  /** The runtime asks to act beyond its sandbox (a Codex approval under `on-request`, C85); no grant covers it. */
+  readonly escalation?: true;
 }
 
 export type Decision = "allow" | "deny";
 
 export type AgentEvent =
-  | { kind: "activity"; text: string }
+  /** `compaction`: the provider reported that it compacted the context (ARCH 11.2, OUT-13); never inferred. */
+  | { kind: "activity"; text: string; compaction?: true }
   | { kind: "tool"; run: ToolRun }
-  | { kind: "usage"; input: number; output: number; cost?: number; measured: boolean }
+  /** `window`: the model's context window, when the provider reports it (Codex's `modelContextWindow`). */
+  | { kind: "usage"; input: number; output: number; cost?: number; measured: boolean; last?: { total: number };
+      window?: number }
   | { kind: "permission"; request: PermissionRequest; decide(d: Decision): void }
   | { kind: "question"; text: string; choices: string[] }
-  | { kind: "reply"; text: string; structured?: unknown }
+  | { kind: "reply"; text: string; structured?: unknown; finals?: number }
   | { kind: "error"; code: "transient" | "quota" | "auth" | "configuration" | "session-gone" | "unknown";
-      resetAt?: string; message: string }
+      resetAt?: string; message: string; detail?: string }
   | { kind: "exit"; code: number | null }
   | { kind: "idle-timeout" }
   | { kind: "cancelled"; confirmed: boolean };
@@ -67,11 +76,15 @@ export interface Capabilities {
   readonly images: boolean;
   readonly enforceableGrants: boolean;
   readonly compaction: boolean;
+  /** The runtime's sandbox can allow local servers without full internet (M2 plan 1.3). */
+  readonly localServersWithoutInternet: boolean;
 }
 
 export interface Agent {
   readonly runtime: "codex" | "claude";
   capabilities(): Capabilities;
   turn(request: TurnRequest, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  /** The provider's model list (C52), or null when it gives none. */
+  models?(): Promise<string[] | null>;
   close(): Promise<void>;
 }

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { registry } from "../checks/registry.js";
 import { snapshot } from "../checks/snapshot.js";
 import { scenario } from "../harness/scenario.js";
+import { on } from "../fakes/script/behaviors.js";
+import { happyPath } from "../fakes/script/roles.mjs";
 
 const covers = (id: string) => registry.find((r) => r.id === id)!.covers;
 
@@ -13,7 +15,7 @@ const covers = (id: string) => registry.find((r) => r.id === id)!.covers;
 const TOP_LEVEL = [
   "create", "compile", "plan", "tickets", "start", "resume", "agents", "manager", "uninstall", "uninstall:restore",
   "uninstall:cleanup", "status", "doctor", "graph", "sources", "discover", "qa-rehearse-rollback", "answer", "stop",
-  "reset", "stats", "logs", "tools", "migrate", "help",
+  "reset", "stats", "logs", "tools", "migrate", "secrets", "help",
 ];
 const TICKETS = [
   "setup:init", "setup:update", "init", "populate", "show", "waive-risk-notes", "repair", "groups", "reset", "update",
@@ -71,6 +73,14 @@ scenario({
       assert.deepEqual(stats, ["show", "timeline", "export", "delete"]);
       assert.ok(!stats.includes("compare") && !stats.includes("replay"));
     });
+    await step("rafi secrets isn't built yet (M7) and exits 1, every subcommand too", async () => {
+      for (const line of ["secrets", "secrets set STRIPE_KEY", "secrets list", "secrets check",
+        "secrets remove STRIPE_KEY", "secrets use acme"]) {
+        const r = await rafi(line);
+        assert.equal(r.code, 1, `${line}: ${r.output}`);
+        assert.match(r.output, /not built yet|isn't built yet|isn't in the new engine yet/i, line);
+      }
+    });
     await step("nothing was written", () => assert.deepEqual(snapshot(project), before));
   },
 });
@@ -109,7 +119,7 @@ const pkg = (name: string) => JSON.parse(readFileSync(path.join(repo, "packages"
 
 scenario({
   id: "S-CLI-2", covers: covers("S-CLI-2"), modes: ["next"], fixture: "F-ONE",
-  async run({ rafi, step, project, clean }) {
+  async run({ rafi, step, project, clean, fixture }) {
     const before = snapshot(project);
     const refused = async (line: string, names: RegExp | null) => {
       const r = await rafi(line);
@@ -130,12 +140,15 @@ scenario({
       }
     });
     await step("2: -y and --yes still work as aliases for --auto-approve", async () => {
-      for (const line of ["start . --steps 1 -y", "start . --steps 1 --yes", "resume --yes",
-        "start . --steps 1 --auto-approve"]) {
-        const r = await rafi(line);
+      // M2 plan item 16: `start` is built, so its -y forms run a build (each on a fresh F-ONE copy); resume is M4.
+      for (const line of ["start . --steps 1 -y", "start . --steps 1 --yes", "start . --steps 1 --auto-approve"]) {
+        const r = await rafi(line, { cwd: fixture("F-ONE") });
         assert.doesNotMatch(r.output, /unknown option/, line);
-        assert.match(r.err, /isn't in the new engine yet \(milestone M[24]\)/, line);
+        assert.equal(r.code, 0, `${line}: ${r.output}`);
       }
+      const r = await rafi("resume --yes");
+      assert.doesNotMatch(r.output, /unknown option/);
+      assert.match(r.err, /isn't in the new engine yet \(milestone M4\)/);
     });
     await step("1-2: nothing was written", () => {
       clean();
@@ -146,5 +159,56 @@ scenario({
       assert.equal(pkg("engine").bin, undefined);
     });
     // Step 4 (S-CLI-2's after-each checks) runs after every scenario, this one included (harness/scenario.ts).
+  },
+});
+
+const ESC = "\u001b";
+const LABEL = new RegExp(`${ESC}\\[\\d+m(builder|qa) *${ESC}\\[0m`, "g");
+
+scenario({
+  id: "S-CLI-12", covers: registry.find((r) => r.id === "S-CLI-12")!.covers, modes: ["next"], fixture: "F-ONE",
+  async run({ rafi, step, pending, fixture, computer }) {
+    const cases: [string, boolean, Record<string, string>, boolean][] = [
+      ["a terminal", true, {}, true], ["a pipe", false, {}, false],
+      ["NO_COLOR= (empty)", true, { NO_COLOR: "" }, false],
+      ["NO_COLOR=1", true, { NO_COLOR: "1" }, false], ["TERM=dumb", true, { TERM: "dumb" }, false],
+      ["FORCE_COLOR=0", true, { FORCE_COLOR: "0" }, false],
+      ["FORCE_COLOR=1 on a pipe", false, { FORCE_COLOR: "1" }, true]];
+    for (const [name, tty, env, color] of cases) {
+      await step(`a short build on ${name}: ${color ? "color on the labels only" : "no color at all"}`, async () => {
+        const dir = fixture("F-ONE");
+        const r = await rafi("start . --steps 1", { cwd: dir, tty, env });
+        assert.equal(r.code, 0, r.output);
+        const labels = r.raw.match(LABEL) ?? [];
+        if (color) assert.ok(labels.length > 0, "labels are colored");
+        else assert.equal(labels.length, 0);
+        assert.ok(!r.raw.replace(LABEL, "").replace(/\u001b\][^\u0007]*\u0007/g, "").includes(ESC), "only labels");
+        const exported = await rafi("stats export", { cwd: dir, tty, env });
+        assert.ok(!exported.raw.includes(ESC), "machine-readable output never has ANSI codes");
+      });
+    }
+    await step("every message prefix is rafi:; a bad option exits 1, a build exits 0", async () => {
+      const r = await rafi("start . --steps 0");
+      assert.equal(r.code, 1);
+      assert.match(r.err, /^rafi: /);
+      assert.ok(r.err.trim().split("\n").every((l) => l.startsWith("rafi: ")));
+    });
+    await step("a secret-looking token and control characters in agent text are redacted and escaped", async () => {
+      const dir = fixture("F-ONE");
+      computer.script.rules.push(on("builder T1#1", (meta, c) => {
+        const base = happyPath(meta, c) as { steps: unknown[] };
+        return { ...base, steps: [{ activity: `token sk-ant-api03-abcdefghijklmnop1234 ${ESC}]0;owned${String
+          .fromCharCode(7)} ${ESC}[2J done` }, ...base.steps] } as never;
+      }));
+      const r = await rafi("start . --steps 1", { cwd: dir, tty: true });
+      assert.equal(r.code, 0, r.output);
+      assert.doesNotMatch(r.raw, /abcdefghijklmnop1234/);
+      assert.doesNotMatch(r.raw, /\u001b\]0;owned|\u001b\[2J/);
+      assert.match(r.out, /\\u001b\[2J/);
+      const exported = (await rafi("stats export", { cwd: dir })).out;
+      assert.doesNotMatch(exported, /abcdefghijklmnop1234/);
+    });
+    await pending("exit 2 for a non-terminal build left waiting", "M6");
+    await pending("Node 18 and RAFI_SKIP_RUNTIME_PREFLIGHT=1 (process set)", "M10");
   },
 });

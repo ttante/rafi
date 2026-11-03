@@ -121,6 +121,8 @@ export interface Machine {
 export interface Random {
   id(): string;
   jitter(): number;
+  /** 32 random bytes as hex, for session tokens (C39). */
+  secret?(): string;
 }
 
 export interface CodexSpawn {
@@ -130,24 +132,87 @@ export interface CodexSpawn {
   env: Env;
 }
 
+/** A need a grant covers (Q-FLAG-2, ARCH 7.11). */
+export type Need = "internet" | "local-servers" | "installs" | "services";
+
+export interface Grants {
+  readonly needs: readonly Need[];
+}
+
 export interface CheckRun {
   cwd: string;
   env: Env;
+  /** The build's grants (ARCH 8.2); the prefix below enforces them where the machine has a sandbox. */
+  grants: Grants;
+  /** The sandbox argv prefix from build/sandbox.ts (C40); empty when the no-sandbox warning was accepted. */
   sandbox: readonly string[];
   onOutput(chunk: string): void;
   signal: AbortSignal;
 }
 
+export interface CheckResult {
+  readonly code: number | null;
+  readonly signal: string | null;
+  /** The run was ended through `signal` (a time limit or a cancel). */
+  readonly aborted: boolean;
+  readonly durationMs: number;
+  readonly output: string;
+}
+
+export type SandboxTool = "sandbox-exec" | "bwrap";
+export type SandboxInfo = { available: true; tool: SandboxTool } | { available: false; missing: string };
+/** What the machine has for a test sandbox; build/sandbox.ts turns it into a SandboxInfo. */
+export type SandboxFacts =
+  | { platform: "darwin"; sandboxExec: boolean }
+  | { platform: NodeJS.Platform; bwrap: string | null; bwrapWorks: boolean };
+
+/** One HTTP request to rafi's local MCP endpoint, as deps.serve hands it to the handler (C37). */
+export interface McpRequest {
+  readonly method: string;
+  readonly path: string;
+  readonly headers: Readonly<Record<string, string | undefined>>;
+  readonly body: string;
+  /** The peer's address, as the socket reports it. */
+  readonly remote: string;
+  /** The port the server listens on (for the Host check). */
+  readonly port: number;
+}
+
+export interface McpResponse {
+  readonly status: number;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: string;
+}
+
+export type McpHandler = (request: McpRequest) => Promise<McpResponse>;
+
+/** One of rafi's tools for an in-process Claude session (C38). */
+export interface InProcessTool {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Record<string, unknown>;
+  call(args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
+}
+
 export interface Deps {
-  agents: { codex(o: CodexSpawn): JsonRpcStream; claudeQuery: ClaudeQuery };
+  agents: {
+    codex(o: CodexSpawn): JsonRpcStream;
+    claudeQuery: ClaudeQuery;
+    /** rafi's tools as an SDK MCP server for one Claude session (real: createSdkMcpServer). */
+    claudeTools?(name: string, tools: readonly InProcessTool[]): Promise<unknown>;
+  };
   clock: Clock;
   notifier: Notifier;
   terminal: Terminal;
   fs: Fs;
   git(args: string[], o: ExecOptions): Promise<ExecResult>;
   exec(cmd: string, args: string[], o: ExecOptions): Promise<ExecResult>;
-  checks: { run(cmd: string, args: string[], o: CheckRun): Promise<ExecResult> };
-  serve(o: { host: "127.0.0.1"; handler: unknown }): Promise<{ url: string; close(): Promise<void> }>;
+  checks: {
+    run(cmd: string, args: string[], o: CheckRun): Promise<CheckResult>;
+    /** What this machine has for a test sandbox (6.9); build/sandbox.ts decides if it's usable. */
+    sandbox(): Promise<SandboxFacts>;
+  };
+  serve(o: { host: "127.0.0.1"; handler: McpHandler }): Promise<{ url: string; close(): Promise<void> }>;
   spawnBackground(argv: string[], o: { cwd: string; log: string }): { pid: number };
   db: { open(path: string, o?: { readonly?: boolean }): Db };
   processes: Processes;

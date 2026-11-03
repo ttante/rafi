@@ -6,14 +6,14 @@ Inputs: `REWRITE_REQUIREMENTS.md` (status reviewed; section 9.0 wins over older 
 
 This doc lists the whole-build scenarios the new engine must pass, the design of the fake-agent harness that runs them through the real `rafi` command, and a table that maps every requirement in `REWRITE_REQUIREMENTS.md` sections 2–8 to a scenario. Nothing here is implemented yet.
 
-In numbers: 121 scenarios (41 whole-build, 14 past-bug, 40 from the decided sections, 26 command and engine-wide); 622 of the 638 requirement IDs covered and 16 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
+In numbers: 126 scenarios (41 whole-build, 14 past-bug, 45 from the decided sections, 26 command and engine-wide); 640 of the 656 requirement IDs covered and 16 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
 
 | Section | Contents |
 |---|---|
 | 1–2 | How to read a scenario; fixtures, fake-agent scripts, step notation |
 | 3 | Whole-build scenarios: start, QA loop, blocked ticket, permissions, malformed replies, timeouts, crash and resume, batches, plan updates, `rafi migrate`, portability |
 | 4 | Past bugs (SCN-1–14) |
-| 5 | Tags, ask up front, blocked tickets, notifications, test tools, tests and CI |
+| 5 | Tags, ask up front, blocked tickets, notifications, test tools, tests and CI, secrets and presets |
 | 6 | Command, output and engine-wide scenarios |
 | 7 | Harness design |
 | 8 | Harness plan E01–E18: meets, defers, drops |
@@ -1119,7 +1119,7 @@ The base case is S-BLK-1 in section 3.3.
 - **Steps:** `rafi start . --ticket T1 --steps 1`.
 - **Expected:**
   - `rafi answer 1 1` and `curl` are refused and recorded as `refused`, with the reason given to the agent; no question is answered.
-  - `npx jest t1.test` (the configured runner with a file argument) runs. A test that tries the network is denied by the sandbox.
+  - `npx jest t1.test` (the configured runner with a file argument) runs. A test that tries the network is denied by the sandbox (on a machine that has one; S-CHK-11 covers one that doesn't).
   - QA's run is recorded, `src/index.js` is put back afterwards (`restored`), and QA's review sees the builder's code unchanged.
   - The Codex session reaches the tools through rafi's local endpoint; the Claude session in-process.
 
@@ -1132,6 +1132,88 @@ The base case is S-BLK-1 in section 3.3.
   - The failure sends `T1` back to the builder. Its fix message names both failing tests with their files, errors and output excerpts, gives the run number and `check_output` for the full output, and says to keep the work and not start over.
   - The fix passes the check and `T1` is delivered.
 
+#### S-CHK-11 — No sandbox on this machine
+- **Covers:** NEW-SEC-4
+- **Setup:** F-TESTS-LOCAL on a machine where rafi can't start a sandbox for tests (the scripted checks runner reports the sandbox missing: "bubblewrap isn't installed"). Nothing about it saved in `~/.rafi/grants.yaml`; `checks.run_without_sandbox` unset. Script: `builder T1#1: run_check("fake-test t1.test")`, `run_check("curl https://example.com")`.
+- **Steps:**
+  1. In a terminal: `rafi start . --ticket T1 --steps 1`; at the warning, cancel.
+  2. Repeat step 1, and choose to run tests without a sandbox.
+  3. Start another build on the project from step 2, in a terminal.
+  4. Revoke the acceptance the way an "always allow" grant is revoked (remove it from `~/.rafi/grants.yaml`); start a build without a terminal.
+  5. Repeat step 4 with `checks.run_without_sandbox: true` in `rafi-config.yaml`.
+  6. `rafi start . --ticket T1 --steps 1 -y`, once in a terminal and once without one, each time from a fresh fixture with nothing saved.
+- **Expected:**
+  - Step 1: the warning comes before any agent turn, names what's missing, and says plainly that tests can then reach the internet and write outside the project. Cancelling exits 0 (a cancelled prompt, OUT-40); no agent turn and no test run.
+  - Step 2: the build runs. Each `check.run` records `sandbox: none`; `curl` is still refused by `run_check`'s allowlist and recorded `refused`. No internet or local-servers grant is recorded. The acceptance is saved for this project in `~/.rafi/grants.yaml` and in no tracked file.
+  - Step 3: no warning is asked; the tests run with `sandbox: none`.
+  - Step 4: the build stops before any agent turn, exit 1, with one line naming `checks.run_without_sandbox`; no question is left open.
+  - Step 5: the setting accepts the warning; the build runs with `sandbox: none`.
+  - Step 6: `-y` accepts the warning both times, and the acceptance is saved as in step 2.
+  - On a machine that has a sandbox, no warning appears and runs record `sandbox: os` (S-CHK-9).
+
+### 5.7 Secrets and presets (`REWRITE_REQUIREMENTS.md` 8.25, decided 2026-11-03)
+
+Canaries are unique values the harness puts in the shell environment or the in-memory secret store, so a test can grep every output for them and their base64, base64url, hex and URL-encoded forms.
+
+#### S-SEC-1 — Agents never see a secret
+- **Covers:** NEW-SEC-5, NEW-SEC-10, FMT-C30, FMT-C31
+- **Setup:** F-TESTS-LOCAL. The shell environment holds a canary `RAFI_CANARY_TOKEN`, a canary `STRIPE_KEY`, fake `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` logins, and `PROJECT_FLAG=1`; `agents.env: [PROJECT_FLAG]`. From M7 the store also holds a canary `DB_URL`, with `checks.secrets: [DB_URL]`. Script: `builder T1#1: run_check("fake-test t1.test")`. Run once with each fake runtime.
+- **Steps:**
+  1. `rafi start . --ticket T1 --steps 1`.
+  2. With `isolation.home: guarded`, a `~/.aws/credentials` file in the fake home, the builder's shell reading it and a test reading it: repeat step 1.
+  3. Repeat step 1 with `isolation.home: empty`.
+  4. With `isolation.workspace: separate` in `rafi-config.yaml`: `rafi start . --steps 1`.
+- **Expected:**
+  - Step 1: each runtime's environment (Claude's `env`, the Codex app-server's `env`) holds the base set, that runtime's login variables and `PROJECT_FLAG`, and no canary and no store secret. Each runtime's shells get the same set minus the runtime's API key (Codex's `shell_environment_policy` in the thread config; Claude's `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`), from the milestone that confirms each setting. The test run gets `DB_URL` (S-SEC-2 covers tests).
+  - Step 2: the agent's read of the guarded path is denied (Claude's `denyRead`; Codex's profile `deny`), and so is the test's (rafi's sandbox).
+  - Step 3: tests and agents get `HOME` at `.rafi/home/`; the real home is unreadable except the runtimes' login folders.
+  - Step 4: the key is rejected the way `workflows:` is (FMT-C26): exit 1 before any agent turn, nothing written.
+
+#### S-SEC-2 — Tests get only what they declared
+- **Covers:** NEW-SEC-6, NEW-SEC-8, FMT-C28
+- **Setup:** F-TESTS-LOCAL. The shell environment holds a canary `RAFI_CANARY_TOKEN` (not declared), `DATABASE_URL=postgres://localhost/test` and a canary `API_SECRET`; `checks.env: [DATABASE_URL, API_SECRET, UNSET_NAME]`, with `UNSET_NAME` not set. Script: `builder T1#1: run_check("fake-test t1.test")`, where the test prints `API_SECRET`'s value raw, as base64 and as hex, and fails once; the fix passes. Run once with each fake runtime.
+- **Steps:** `rafi start . --ticket T1 --steps 1`; `rafi stats export`.
+- **Expected:**
+  - Every test run (the builder's `run_check`, the check step, the related-tests query) gets the base set, the cache variables, `DATABASE_URL` and `API_SECRET`, and not `RAFI_CANARY_TOKEN`.
+  - Each `check.run` records `env_missing: [UNSET_NAME]`.
+  - `API_SECRET`'s value, raw, base64 and hex, is redacted in what the builder gets back (`run_check`, `check_output`, the fix message) and in the stored output.
+  - No canary, raw or encoded, is in any event, blob, terminal output, agent transcript or the `stats export` file.
+
+#### S-SEC-3 — `rafi secrets`
+- **Covers:** CMD-38, NEW-SEC-6, NEW-SEC-7, NEW-SEC-12, FMT-C29
+- **Setup:** F-TESTS-LOCAL with a second ticket `T2`; `T1` has `needs.credentials: [STRIPE_KEY]`; an empty in-memory store. Script: both tickets' builders `run_check` their tests.
+- **Steps:**
+  1. In a terminal, `rafi secrets set STRIPE_KEY`, typing a canary at the hidden prompt. Then `rafi secrets set STRIPE_KEY <value>` (a value on the command line) and `rafi secrets set ANTHROPIC_API_KEY --stdin`.
+  2. `rafi secrets list`; `rafi secrets check`.
+  3. `rafi secrets remove STRIPE_KEY`; in a terminal, `rafi start . --steps 2`. At the credential item, run `rafi secrets set STRIPE_KEY --stdin` from a second shell, then choose "I've added it (check again)".
+  4. `rafi secrets use acme`; `rafi secrets list`.
+- **Expected:**
+  - Step 1: the typed value isn't echoed; it's stored under the service `rafi`, account `default/STRIPE_KEY`; `~/.rafi/secrets.yaml` holds the name only. The command-line value exits 1 and stores nothing. The provider key exits 1: "Log in with `claude`; rafi doesn't store provider credentials".
+  - Step 2: `list` shows names, where each is used and when it was set, never a value; `check` says, for each declared name, whether it's found and where.
+  - Step 3: the upfront item reads "STRIPE_KEY isn't set. Add it with `rafi secrets set STRIPE_KEY`" and has no way to type the value; after "check again" the build starts. `T1`'s runs get `STRIPE_KEY` and record `secrets: [STRIPE_KEY]`; `T2`'s runs and both agents' environments don't get it.
+  - Step 4: the project is bound to the `acme` profile in `~/.rafi/secrets.yaml`, and `list` shows that profile's names.
+  - Throughout: the canary isn't in any event, blob, notification, terminal output, export or argv. Each `engine.secrets` action's record keeps the name, the profile and who did it, never the value.
+
+#### S-SEC-4 — Security presets
+- **Covers:** NEW-SEC-4, NEW-SEC-9, NEW-SEC-11, FMT-C27, FMT-C32, FMT-C33, FMT-C34
+- **Setup:** F-TESTS-LOCAL with no `security.preset`; `T1` has `needs: [internet]`; `checks.secrets: [STRIPE_KEY]`, with a canary `STRIPE_KEY` in the store. Script: `builder T1#1: run_check("fake-test t1.test")`.
+- **Steps:**
+  1. In a terminal, `rafi start . --ticket T1 --steps 1`; answer the preset item "Everyday".
+  2. On a fresh copy with no preset: `rafi start . --ticket T1 --steps 1 -y`.
+  3. With `security.preset: sensitive` and `plan_updates: change-then-tell`: `rafi doctor`, then `rafi start . --ticket T1 --steps 1 --set security.preset=greenfield`.
+  4. With `sensitive`: `rafi start . --ticket T1 --steps 1 --auto-approve`.
+  5. With `sensitive` on a machine without a sandbox (as S-CHK-11) and `checks.run_without_sandbox: true`: `rafi start . --ticket T1 --steps 1`.
+  6. With `sensitive`, in a terminal: `rafi start . --ticket T1 --steps 1`, allowing every item.
+  7. With the org policy locking `security.preset: sensitive`: `rafi start . --ticket T1 --steps 1 --set security.preset=standard`.
+- **Expected:**
+  - Step 1: the preset is asked once in the upfront list ("New and disposable / Everyday / Sensitive"), and the answer is saved to `rafi-config.yaml`.
+  - Step 2: auto-approve fills in `standard`, saved and recorded as chosen by auto-approve; the upfront list has one line: "T1's tests get STRIPE_KEY and internet".
+  - Step 3: `rafi doctor` and `build.started` show each key with its source: `plan_updates` from the project, the other preset keys from `preset:sensitive`. The upfront list says the build uses `greenfield` (`--set`) while the project says `sensitive`.
+  - Step 4: refused for this project, exit 1, naming the preset; nothing runs.
+  - Step 5: the build doesn't start; there's no "run without a sandbox" choice, and `checks.run_without_sandbox` doesn't override `checks.sandbox: required`.
+  - Step 6: grant items offer "Allow once" only; an item asks before `T1`'s tests get `STRIPE_KEY` and internet, with "Allow once" only. The builder's own `run_check` calls get no `STRIPE_KEY` and their results say so; the check step's runs get it.
+  - Step 7: the `--set` is refused with the reason (locked by policy).
+
 ## 6. Command, output and engine-wide scenarios
 
 The whole-build scenarios above don't touch every command and flag. These shorter scenarios run through the same harness and fill the gaps, so every kept, changed and dropped item has a check. Commands the rewrite doesn't touch (`graph`, `sources`, `discover`, `uninstall`, `compile`) also keep their existing package tests (`rafi/test/graphSetup.test.ts`, `discovery.test.ts`, `uninstallNative.test.ts`, `uninstallRecovery.test.ts`, `compile.test.ts`); the scenarios here only smoke-test them through the real command.
@@ -1139,9 +1221,9 @@ The whole-build scenarios above don't touch every command and flag. These shorte
 ### 6.1 The command line
 
 #### S-CLI-1 — The command list
-- **Covers:** CMD-1, CMD-2, CMD-3, CMD-4, CMD-6, CMD-7, CMD-8, CMD-16, CMD-18, CMD-20, CMD-21, CMD-22, CMD-23, CMD-24, CMD-25, CMD-26, CMD-27, CMD-28, CMD-29, CMD-30, CMD-31, CMD-32, CMD-33, CMD-34, CMD-35, CMD-37
+- **Covers:** CMD-1, CMD-2, CMD-3, CMD-4, CMD-6, CMD-7, CMD-8, CMD-16, CMD-18, CMD-20, CMD-21, CMD-22, CMD-23, CMD-24, CMD-25, CMD-26, CMD-27, CMD-28, CMD-29, CMD-30, CMD-31, CMD-32, CMD-33, CMD-34, CMD-35, CMD-37, CMD-38
 - **Steps:** `rafi --version`; `rafi -V`; `rafi --help`; `rafi help <command>` and `rafi <command> --help` for every command.
-- **Expected:** The version prints. Help lists every kept command and the new ones (`answer`, `stop`, `reset`, `stats`, `logs`, `tools`, `migrate`), each with its own help. `rafi stats --help` lists `show`, `timeline`, `export` and `delete`, and not `compare` or `replay` (Q-STATS-1).
+- **Expected:** The version prints. Help lists every kept command and the new ones (`answer`, `stop`, `reset`, `stats`, `logs`, `tools`, `migrate`, `secrets`), each with its own help. Until M7, `rafi secrets` says it isn't built yet and exits 1. `rafi stats --help` lists `show`, `timeline`, `export` and `delete`, and not `compare` or `replay` (Q-STATS-1).
 
 #### S-CLI-2 — Dropped and merged commands, flags and files are gone
 - **Covers:** CMD-5, CMD-9, CMD-10, CMD-11, CMD-12, CMD-13, CMD-14, CMD-15, CMD-17, CMD-19, CMD-36, FLAG-PL-10, FLAG-TK-3, FLAG-TK-23, FLAG-MG-4, FLAG-ST-17, FLAG-ST-18, FLAG-ST-19, FLAG-ST-20, FLAG-ST-21, FLAG-ST-22, FLAG-ST-23, FLAG-ST-35, FLAG-ST-36, FLAG-ST-37, FLAG-ST-38, FLAG-ST-39, FLAG-ST-40, FLAG-ST-41, FLAG-ST-42, FLAG-ST-43, FLAG-ST-44, FLAG-ST-45, FLAG-ST-46, FLAG-RS-5, FLAG-ST-24, FLAG-ST-25, FLAG-ST-26, FLAG-ST-27, FLAG-ST-28, FLAG-ST-29, FLAG-ST-30, FLAG-ST-31, FLAG-ST-32, FLAG-ST-33, FLAG-ST-34, FLAG-RS-6, FLAG-RS-9, FLAG-RS-10, PRM-80, PRM-84, PRM-93, PRM-94, PRM-95, PRM-96, PRM-97, PRM-98, PRM-99, PRM-101, FILE-44, FILE-45, FILE-47, FILE-48, ENV-5
@@ -1331,7 +1413,7 @@ The whole-build scenarios above don't touch every command and flag. These shorte
 
 #### S-ENG-4 — Fallback when a model lacks a feature
 - **Covers:** NEW-CAP-1, NEW-REF-2, NEW-ADP-4, GUI-R22
-- **Setup:** F-ONE with Claude. The fake Claude (the injected `query`, 7.3) sends tool events that carry no exit code and its model reports no structured replies. A builder model configured that lacks a capability the role needs.
+- **Setup:** F-ONE with Claude. The fake Claude (the injected `query`, 7.3) sends tool events that carry no exit code, and a builder model the provider doesn't list is configured. A builder model configured that lacks a capability the role needs.
 - **Steps:** `rafi start . --steps 1`.
 - **Expected:** Before the build, the incapable model is flagged. During it, no requirement or instruction asks Claude for an exit code; rafi records "completed" separately from an exit code and uses its own command record. The structured-reply fallback is used and recorded.
 - **Live set (section 7.10), for NEW-ADP-4:** the in-process fake sits under the real Claude adapter as an injected SDK `query` and starts no executable, so the path check can't run in the fast suite. In the live set, with real Claude and a logging `claude` shim later on `PATH`: the build runs, the shim's log stays empty, and the process list during the turn shows the absolute path that passed readiness.
@@ -1567,9 +1649,9 @@ The baseline against 0.10.2 is dropped (D8). Two past bugs were never confirmed 
 
 ## 10. Coverage
 
-Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (638 IDs), with the scenarios that check it. It was generated from the **Covers** lines above; once the harness exists (milestone 1, guide step 10), the coverage ledger (7.9) regenerates it from the scenario files.
+Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (656 IDs), with the scenarios that check it. It was generated from the **Covers** lines above; once the harness exists (milestone 1, guide step 10), the coverage ledger (7.9) regenerates it from the scenario files.
 
-- 622 IDs are covered by at least one scenario.
+- 640 IDs are covered by at least one scenario.
 - 16 are marked **not scenario-testable**, each with its reason: NEW-ENG-8, NEW-MAL-9, NEW-CAU-2, NEW-GUI-7, NEW-ADP-1, NEW-HAR-1, NEW-HAR-2, NEW-HAR-3, NEW-HAR-4, NEW-INS-6, NEW-INS-8, GUI-R2, NEW-SEC-1, NEW-SEC-2, NEW-SEC-3, NEW-WF-4.
 - A few covered IDs are only partly scenario-testable; the Note column says which part is checked elsewhere.
 - "Drop" items are covered by S-CLI-2, which checks they're gone.
@@ -1614,6 +1696,7 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (638 IDs), with
 | CMD-34 | S-PORT-3, S-CLI-1 |  |
 | CMD-35 | S-TOOL-5, S-CLI-1 |  |
 | CMD-37 | S-MIG-1, S-MIG-2, S-CLI-1 |  |
+| CMD-38 | S-SEC-3, S-CLI-1 |  |
 | CMD-36 | S-CLI-2 |  |
 | FLAG-CR-1 | S-CLI-6 |  |
 | FLAG-CR-2 | S-CLI-13 |  |
@@ -1990,6 +2073,14 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (638 IDs), with
 | FMT-C24 | S-CHK-4 |  |
 | FMT-C25 | S-CHK-8 |  |
 | FMT-C26 | S-CLI-19 |  |
+| FMT-C27 | S-SEC-4 |  |
+| FMT-C28 | S-SEC-2 |  |
+| FMT-C29 | S-SEC-3 |  |
+| FMT-C30 | S-SEC-1 |  |
+| FMT-C31 | S-SEC-1 |  |
+| FMT-C32 | S-SEC-4 |  |
+| FMT-C33 | S-SEC-4 |  |
+| FMT-C34 | S-SEC-4 |  |
 | FMT-O1 | S-CLI-7 |  |
 | FMT-O2 | S-TAG-1, S-CTX-1 |  |
 
@@ -2251,6 +2342,15 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (638 IDs), with
 | NEW-WF-4 | **not scenario-testable** | Load checks and data-built transition tests run in the fast suite, not by playing out a build. |
 | NEW-WF-5 | S-CLI-19 |  |
 | NEW-SEC-3 | **not scenario-testable** | Code rules checked by `scripts/check-rules.mjs` and the fast suite run on Windows, not by playing out a build. |
+| NEW-SEC-4 | S-CHK-11, S-SEC-4 |  |
+| NEW-SEC-5 | S-SEC-1 |  |
+| NEW-SEC-6 | S-SEC-2, S-SEC-3 |  |
+| NEW-SEC-7 | S-SEC-3 |  |
+| NEW-SEC-8 | S-SEC-2 |  |
+| NEW-SEC-9 | S-SEC-4 |  |
+| NEW-SEC-10 | S-SEC-1 |  |
+| NEW-SEC-11 | S-SEC-4 |  |
+| NEW-SEC-12 | S-SEC-3 | Per-tenant isolation in hosted rafi is design only in 1.0; the scenario checks the seam and write-only values. |
 
 ## 11. Decisions
 

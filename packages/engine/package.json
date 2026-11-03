@@ -6,17 +6,43 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
-    ".": { "source": "./src/index.ts", "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./deps/real": { "source": "./src/deps/real/index.ts", "types": "./dist/deps/real/index.d.ts", "default": "./dist/deps/real/index.js" },
-    "./agents": { "source": "./src/agents/index.ts", "types": "./dist/agents/index.d.ts", "default": "./dist/agents/index.js" }
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./deps/real": {
+      "source": "./src/deps/real/index.ts",
+      "types": "./dist/deps/real/index.d.ts",
+      "default": "./dist/deps/real/index.js"
+    },
+    "./agents": {
+      "source": "./src/agents/index.ts",
+      "types": "./dist/agents/index.d.ts",
+      "default": "./dist/agents/index.js"
+    },
+    "./tools": {
+      "source": "./src/tools/index.ts",
+      "types": "./dist/tools/index.d.ts",
+      "default": "./dist/tools/index.js"
+    },
+    "./build": {
+      "source": "./src/build/index.ts",
+      "types": "./dist/build/index.d.ts",
+      "default": "./dist/build/index.js"
+    }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node --conditions=source --import tsx --test 'test/**/*.test.ts'"
   },
-  "engines": { "node": "24.x" },
+  "engines": {
+    "node": "24.x"
+  },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
     "rafi-spec": "workspace:*",

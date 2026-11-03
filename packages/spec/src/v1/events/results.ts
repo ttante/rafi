@@ -28,7 +28,9 @@ export const resultEvents: readonly EventDef[] = [
     outcome: checkOutcome,
     tests: z.array(z.object({ name: z.string(), file: nullableText, outcome: z.string() }).strict()),
     duration_ms: z.number().nonnegative(), output: digest.nullable(), changed_tracked: z.array(z.string()),
-    restored: z.array(z.string()),
+    restored: z.array(z.string()), refused: z.string().nullable(), sandbox: z.enum(["os", "none"]),
+    /** Declared `checks.env` names not set, and (from M7) the secrets this run got: names only (ARCH 3.4, C82). */
+    env_missing: z.array(z.string()).optional(), secrets: z.array(z.string()).optional(),
   }),
   def("checks.passed", "state", "ticket", { runs: runNumbers, reused: runNumbers }),
   def("checks.failed", "state", "ticket", {

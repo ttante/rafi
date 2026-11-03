@@ -44,6 +44,10 @@ export class CodexTransport {
     });
   }
 
+  notify(method: string, params: Params = {}): void {
+    if (!this.closed) this.stream.write({ method, params });
+  }
+
   respond(id: number | string, result: unknown): void {
     if (!this.closed) this.stream.write({ id, result });
   }

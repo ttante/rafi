@@ -1,7 +1,7 @@
 // Real agent transports: `codex app-server` over stdio, and the Agent SDK's query() loaded on first use.
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import type { ClaudeQuery, CodexSpawn, JsonRpcStream } from "../types.js";
+import type { ClaudeQuery, CodexSpawn, InProcessTool, JsonRpcStream } from "../types.js";
 
 export function realCodex(o: CodexSpawn): JsonRpcStream {
   const child = spawn(o.executable, o.args, { cwd: o.cwd, env: { ...o.env }, shell: false, windowsHide: true,
@@ -49,3 +49,17 @@ export const realClaudeQuery: ClaudeQuery = (params) => {
     },
   };
 };
+
+/** C38: rafi's tools as the SDK's in-process MCP server; inputs are the tools' simple string/integer fields. */
+export async function realClaudeTools(name: string, tools: readonly InProcessTool[]): Promise<unknown> {
+  const sdk = await import("@anthropic-ai/claude-agent-sdk");
+  const { z } = await import("zod");
+  const shape = (schema: Record<string, unknown>) => Object.fromEntries(Object.entries(
+    (schema.properties ?? {}) as Record<string, { type?: string }>).map(([key, p]) =>
+    [key, p.type === "integer" ? z.number().int() : z.string()]));
+  return sdk.createSdkMcpServer({ name, version: "1.0.0", tools: tools.map((t) => sdk.tool(t.name, t.description,
+    shape(t.inputSchema), async (args: Record<string, unknown>) => {
+      const out = await t.call(args);
+      return { content: [{ type: "text" as const, text: out.text }], isError: out.isError };
+    })) });
+}

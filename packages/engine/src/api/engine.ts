@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Deps } from "../deps/types.js";
 import { append, type AppendResult } from "../log/append.js";
 import { openLog, type Log } from "../log/db.js";
+import { getBlob, putBlob } from "../log/blobs.js";
 import { redactor } from "../log/redact.js";
 import { readEvents } from "../log/read.js";
 import type { NewEvent, StoredEvent } from "../log/types.js";
@@ -18,6 +19,15 @@ export interface Engine {
   events(q?: { from?: number; run?: string }): AsyncIterable<StoredEvent>;
   fold(definitions?: readonly TicketDefinition[]): Folded;
   append(events: readonly NewEvent[], o?: { idemKey?: string }): Promise<AppendResult>;
+  /** Stores a redacted blob; returns its digest. */
+  blob(text: string, o?: { sensitive?: boolean }): Promise<string>;
+  readBlob(digest: string): string | null;
+  /** Registers a secret with the one redactor: a session token (C39), or a declared value (C81, NEW-SEC-8). */
+  secret(token: string, name?: string): void;
+  /** The one redactor, with the session tokens it has learned (C39). */
+  redact(text: string): string;
+  readonly projectDir: string;
+  readonly deps: Deps;
   close(): void;
 }
 
@@ -43,8 +53,9 @@ export async function openEngine(o: { projectDir: string; deps: Deps }): Promise
   await deps.fs.mkdir(path.join(o.projectDir, ".rafi"));
   const log = await openLog(deps, path.join(o.projectDir, STATE_DB));
   const ctx: FoldContext = { workflows: builtInWorkflows };
+  const redact = redactor(deps.env);
   const appendCtx = {
-    log, redact: redactor(deps.env), now: () => deps.clock.now(), newId: () => deps.random.id(),
+    log, redact, now: () => deps.clock.now(), newId: () => deps.random.id(),
     checkTransition: transitionCheck(log, ctx),
   };
   return {
@@ -57,6 +68,12 @@ export async function openEngine(o: { projectDir: string; deps: Deps }): Promise
       return { ...folded, violations: [...read.violations, ...folded.violations] };
     },
     append: (events, opts) => append(appendCtx, events, opts),
+    blob: async (text, opts) => (await putBlob(log, redact, text, { sensitive: Boolean(opts?.sensitive) })).digest,
+    readBlob: (digest) => getBlob(log, digest)?.data ?? null,
+    secret: (token, name = "RAFI_SESSION_TOKEN") => redact.add(name, token),
+    redact: (text) => redact.text(text),
+    projectDir: o.projectDir,
+    deps,
     close: () => log.close(),
   };
 }

@@ -30,3 +30,15 @@ jobs:
         run: node packages/scenarios/harness/fast.mjs
         env:
           RAFI_TEST_CONCURRENCY: "4"
+      - name: Install bubblewrap (sandbox for test runs, M2 plan 1.2)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Sandbox probes (M2 plan 1.2, 1.3)
+        if: runner.os != 'Windows'
+        run: node --conditions=source --import tsx --test packages/engine/test/deps/sandbox.real.test.ts
+      - name: Install codex-cli 0.164.0 (threat 30 profile probe, M2 plan 11 C90)
+        if: runner.os != 'Windows'
+        run: npm install -g @openai/codex@0.164.0
+      - name: Codex builder permission profile probe (M2 plan 11.4 A11; Linux enforcement unverified until this runs)
+        if: runner.os != 'Windows'
+        run: node --conditions=source --import tsx --test packages/engine/test/deps/codex-profile.real.test.ts

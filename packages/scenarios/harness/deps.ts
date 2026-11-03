@@ -7,6 +7,9 @@ import { openRealDb, realExec, realFs, realGit } from "@rafi-ai/engine/deps/real
 import type { FakeClock } from "../fakes/clock.js";
 import type { FakeNotifier } from "../fakes/notifier.js";
 import type { FakeTerminal } from "../fakes/terminal.js";
+import { scriptedChecks, type CheckLogEntry, type FakeTest } from "../fakes/checks.js";
+import { defaultAgents, type ScriptState } from "./agents.js";
+import type { MemoryServe } from "../fakes/serve.js";
 import { Fence } from "./fence.js";
 import { hookControl, type HookControl } from "./hooks.js";
 
@@ -22,8 +25,23 @@ export interface Computer {
   readonly agents?: { codex?(o: CodexSpawn): JsonRpcStream; claudeQuery?: ClaudeQuery };
   /** The environment of every process rafi started on this computer (S-CLI-2 step 4's ENV-5 check). */
   readonly childEnvs: Env[];
+  /** Each agent runtime's environment, tagged by runtime (Claude's `env` option, the Codex app-server's spawn). */
+  readonly agentEnvs: { kind: "codex" | "claude"; env: Env; readOnly?: boolean }[];
+  /** The platform rafi sees (`deps.machine.platform`); "win32" simulates Windows' environment rules. */
+  readonly platform?: NodeJS.Platform;
+  /** C89: canary values by variable name; the after-each check greps for each and its encodings when set. */
+  readonly canaries: Record<string, string>;
   /** Every message rafi sent an agent, as JSON: the transcript S-CLI-2 step 4 checks for dropped prompts. */
   readonly sentToAgents: string[];
+  /** The scripted test runs (fakes/checks.ts): per-test outcomes, the sandbox setting, and every run's argv. */
+  readonly checks: { tests: Record<string, FakeTest>; sandbox: "available" | "missing"; log: CheckLogEntry[];
+    listing?: "hang" };
+  /** The in-memory MCP endpoints (fakes/serve.ts). */
+  readonly serve: MemoryServe;
+  /** The "home folder" of this computer (the parent of stateDir). */
+  readonly home: string;
+  /** The fake agents' script rules (first match wins, else the role happy path) and their transcript. */
+  readonly script: ScriptState;
 }
 
 export interface Instance {
@@ -40,26 +58,34 @@ const unavailable = (what: string) => (): never => {
 /** Wraps the agent transports so each start records its env and each message rafi sends is kept. */
 function recordedAgents(computer: Computer): Deps["agents"] {
   const sent = (message: unknown) => { computer.sentToAgents.push(JSON.stringify(message) ?? ""); };
-  const codex = computer.agents?.codex;
-  const query = computer.agents?.claudeQuery;
+  const fakeClock = computer.clock.forInstance("fake-agents");
+  const defaults = defaultAgents(computer.script, computer.serve, (ms) => fakeClock.sleep(ms, "agent"));
+  const codex = computer.agents?.codex ?? defaults.codex;
+  const query = computer.agents?.claudeQuery ?? defaults.claudeQuery;
   return {
     codex: codex ? (o) => {
       computer.childEnvs.push(o.env);
+      computer.agentEnvs.push({ kind: "codex", env: o.env });
       const stream = codex(o);
       return { ...stream, write: (message, meta) => { sent(message); stream.write(message, meta); },
         onMessage: (fn) => stream.onMessage(fn), onClose: (fn) => stream.onClose(fn), close: () => stream.close() };
     } : unavailable("codex"),
     claudeQuery: query ? (params) => {
       computer.childEnvs.push((params.options.env as Env | undefined) ?? computer.env);
+      const write = (params.options.sandbox as { filesystem?: { allowWrite?: string[] } } | undefined)?.filesystem;
+      computer.agentEnvs.push({ kind: "claude", env: (params.options.env as Env | undefined) ?? computer.env,
+        readOnly: (write?.allowWrite ?? []).length === 0 });
       const prompt = (async function* () {
         for await (const message of params.prompt) { sent(message); yield message; }
       })();
       return query({ ...params, prompt });
     } : (unavailable("claude") as unknown as ClaudeQuery),
+    claudeTools: async (name, tools) => defaults.claudeTools(name, tools as never),
   };
 }
 
-export function harnessDeps(computer: Computer, terminal: FakeTerminal, o: { cwd: string; instance: string }) {
+export function harnessDeps(computer: Computer, terminal: FakeTerminal,
+  o: { cwd: string; instance: string; env?: Record<string, string> }) {
   const fence = new Fence();
   const clock = computer.clock;
   const id = o.instance;
@@ -72,6 +98,7 @@ export function harnessDeps(computer: Computer, terminal: FakeTerminal, o: { cwd
   const random = {
     id: () => `id-${String(++computer.ids.next).padStart(6, "0")}`,
     jitter: () => 0,
+    secret: () => `tok${String(++computer.ids.next).padStart(6, "0")}${"0".repeat(55)}`,
   };
   const fs = fence.fs(realFs(random));
   const tracked = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) =>
@@ -95,8 +122,10 @@ export function harnessDeps(computer: Computer, terminal: FakeTerminal, o: { cwd
       computer.childEnvs.push(opts.env ?? computer.env);
       return realExec(cmd, args, opts);
     }),
-    checks: { run: unavailable("checks.run") },
-    serve: unavailable("serve"),
+    checks: scriptedChecks({ clock: clock.forInstance(id), home: computer.home, log: computer.checks.log,
+      get tests() { return computer.checks.tests; }, get sandbox() { return computer.checks.sandbox; },
+      get listing() { return computer.checks.listing; } }),
+    serve: (opts) => computer.serve.serve(opts),
     spawnBackground: unavailable("spawnBackground"),
     db: { open: (file, opts) => fence.db(openRealDb(file, opts)) },
     processes: {
@@ -104,8 +133,8 @@ export function harnessDeps(computer: Computer, terminal: FakeTerminal, o: { cwd
       isAlive: async (owner) => computer.alive.has(owner.instance),
     },
     hooks: hooks.hooks,
-    machine: { stateDir: computer.stateDir, host: computer.host, platform: process.platform },
-    env: computer.env,
+    machine: { stateDir: computer.stateDir, host: computer.host, platform: computer.platform ?? process.platform },
+    env: o.env ? Object.freeze({ ...computer.env, ...o.env }) : computer.env,
     cwd: o.cwd,
     random,
     logChanged: () => () => undefined,

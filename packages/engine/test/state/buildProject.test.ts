@@ -194,6 +194,20 @@ test("every (state, event) pair of the project matches ARCH 4.4", () => {
   assert.equal(open.state, "ready", "complete needs every ticket done or dropped");
 });
 
+test("ARCH 4.4's P19 row: — (no project yet) + project.created plus tickets.changed (added) → ready", () => {
+  const none: ProjectState = { state: "none", before: null };
+  const created = nextProject(none, { type: "project.created", data: projectVariants.created![1] },
+    { allTicketsClosed: false });
+  const added = nextProject(created, { type: "tickets.changed", data: projectVariants["ticket added"]![1] },
+    { allTicketsClosed: false });
+  assert.deepEqual([created.state, added.state], ["draft", "ready"]);
+  const edited = nextProject(created, { type: "tickets.changed", data: projectVariants["ticket edited"]![1] },
+    { allTicketsClosed: false });
+  assert.equal(edited.state, "draft", "only added tickets make it ready");
+  assert.equal(nextProject(added, { type: "build.started", data: buildVariants.started![1] },
+    { allTicketsClosed: false }).state, "building", "and a build can start");
+});
+
 test("project pairs cover the registry: every project event has a variant, every other event passes through", () => {
   const covered = new Set(Object.values(projectVariants).map(([t]) => t));
   const types = [...eventRegistry.keys()];

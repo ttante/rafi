@@ -1,6 +1,9 @@
-// The fake clock (SCN 7.4, plan choice C18). Starts 2026-11-01T14:00:00Z. Jumps to the next timeout, backoff
-// or agent timer only when the engine is idle: no deps call in flight and two setImmediate turns with no new
-// work. Never jumps to a reminder (or a heartbeat or poll) on its own; a step calls advance(d) for those.
+// The fake clock (SCN 7.4, plan choices C18, C49). Starts 2026-11-01T14:00:00Z. Jumps to the next timeout,
+// backoff or agent timer only when the engine is idle: no deps call in flight and two setImmediate turns with no
+// new work; on the way it fires every earlier timer except reminders (heartbeats, polls, …) in order, so M1's
+// "never to a reminder" still holds (M2 plan item 27 says every timer; reminders are M6). Never jumps to a
+// reminder (or a heartbeat or poll) on its own; a step calls advance(d) for those. whenTimer(kind, fn) runs a
+// scenario step when a timer of that kind is armed, before the clock moves to it.
 import type { Cancel, Clock, TimerKind } from "@rafi-ai/engine";
 
 export const CLOCK_START = Date.parse("2026-11-01T14:00:00Z");
@@ -22,6 +25,7 @@ export class FakeClock {
   private work = 0;
   private checking = false;
   private readonly dead = new Set<string>();
+  private readonly hooks: { kind: TimerKind; fn: () => Promise<void> | void }[] = [];
 
   now(): Date {
     return new Date(this.nowMs);
@@ -46,6 +50,11 @@ export class FakeClock {
     const timer: Timer = { id: ++this.nextId, at: this.nowMs + Math.max(0, ms), kind, owner, fn };
     this.timers.push(timer);
     this.work += 1;
+    const hook = this.hooks.findIndex((h) => h.kind === kind);
+    if (hook >= 0) {
+      const { fn } = this.hooks.splice(hook, 1)[0]!;
+      void this.track(async () => { await fn(); });
+    }
     this.scheduleCheck();
     return () => { this.timers = this.timers.filter((t) => t.id !== timer.id); };
   }
@@ -79,12 +88,27 @@ export class FakeClock {
     this.timers = this.timers.filter((t) => t.owner !== owner);
   }
 
+  /** Runs fn (once) when the next timer of this kind is armed; the clock holds still until fn finishes. */
+  whenTimer(kind: TimerKind, fn: () => Promise<void> | void): void {
+    this.hooks.push({ kind, fn });
+  }
+
   pending(): readonly { kind: TimerKind; at: string }[] {
     return this.sorted().map((t) => ({ kind: t.kind, at: new Date(t.at).toISOString() }));
   }
 
   private sorted(): Timer[] {
     return [...this.timers].sort((a, b) => a.at - b.at || a.id - b.id);
+  }
+
+  /** Fires every non-reminder timer due before `target` (timers they arm included), in order, then target. */
+  private fireUpTo(target: Timer): void {
+    for (;;) {
+      const next = this.sorted().find((t) => (t.at < target.at && t.kind !== "reminder") || t.id === target.id);
+      if (!next) return;
+      this.fire(next);
+      if (next.id === target.id) return;
+    }
   }
 
   private fire(timer: Timer): void {
@@ -103,7 +127,7 @@ export class FakeClock {
       if (this.work !== seen) return this.scheduleCheck();
       const next = this.sorted().find((t) => AUTO.has(t.kind));
       if (next) {
-        this.fire(next);
+        this.fireUpTo(next);
         this.scheduleCheck();
       }
     }));

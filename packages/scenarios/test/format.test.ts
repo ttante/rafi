@@ -52,7 +52,8 @@ for (const [name, edit, message] of CASES) {
 
 test("a valid 1.0 project passes the format check and reaches the command", async () => {
   const { rafi } = project(() => undefined);
-  const r = await rafi("start . --steps 1");
+  // `start` is built in M2, so `resume` (M4) stands in for "a command that isn't built yet".
+  const r = await rafi("resume");
   assert.match(r.err, /isn't in the new engine yet/);
 });
 

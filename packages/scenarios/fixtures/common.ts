@@ -1,9 +1,9 @@
 // Shared fixture setup (SCN 2.1): a temp git repo with one commit, a fixed author, TZ=UTC; 1.0 file writers.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 
 export const GIT_ENV = Object.freeze({
   GIT_AUTHOR_NAME: "Rafi Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test",
@@ -44,6 +44,8 @@ export interface FixtureTicket {
   tags?: string[];
   size?: string;
   risk?: string;
+  required_tests?: string[];
+  likely_files?: string[];
 }
 
 export function ticketsYaml(tickets: readonly FixtureTicket[]): string {
@@ -51,7 +53,8 @@ export function ticketsYaml(tickets: readonly FixtureTicket[]): string {
     tickets: tickets.map((t, index) => ({
       id: t.id, order: index + 1, title: t.title, area: "app", summary: t.title, priority: "P1",
       size: t.size ?? "S", risk: t.risk ?? "Low", depends_on: t.depends_on ?? [], tags: t.tags ?? ["backend"],
-      acceptance: [`${t.title} works.`], required_tests: ["npm test"], likely_files: [`src/${t.id}.txt`],
+      acceptance: [`${t.title} works.`], required_tests: t.required_tests ?? ["npm test"],
+      likely_files: t.likely_files ?? [`src/${t.id}.txt`],
       rollback: null, needs: { internet: null, local_servers: null, installs: [], services: [], credentials: [] },
       open_decisions: [], person_only: [], locked: [],
     })),
@@ -71,4 +74,13 @@ export function projectFiles(tickets: readonly FixtureTicket[], extra: Record<st
     ".tickets/delivery.yaml": stringify(delivery),
     "package.json": JSON.stringify({ name: "fixture", private: true, scripts: { test: "node -e 0" } }, null, 2),
   };
+}
+
+/** Merges `extra` into a project's rafi-config.yaml (one level deep) and commits. */
+export function configure(project: string, extra: Record<string, Record<string, unknown>>): void {
+  const file = path.join(project, "rafi-config.yaml");
+  const config = parse(readFileSync(file, "utf8")) as Record<string, Record<string, unknown>>;
+  for (const [key, value] of Object.entries(extra)) config[key] = { ...(config[key] ?? {}), ...value };
+  writeFileSync(file, stringify(config));
+  git(project, ["commit", "-qam", "configure"]);
 }

@@ -5,6 +5,7 @@ import { Command, CommanderError, Option } from "commander";
 import { loadConfig, unfinishedLegacyBuild, type Deps } from "@rafi-ai/engine";
 import { droppedRefusal } from "./commands/dropped.js";
 import type { CommandSpec } from "./commands/spec.js";
+import { actions } from "./commands/actions.js";
 import { commands } from "./commands/table.js";
 import { findProject, NEW_ENGINE_REFUSAL, readFormat, type FormatFs } from "./format.js";
 import { legacyRunLine, line, notBuiltLine } from "./ui/lines.js";
@@ -27,10 +28,17 @@ function formatFs(deps: Deps): FormatFs {
   };
 }
 
-async function checkProject(spec: CommandSpec, path: string, args: unknown[], argv: string[], deps: Deps) {
+type Checked = { refusal: string } | { project: string | null };
+
+async function checkProject(spec: CommandSpec, args: unknown[], argv: string[], deps: Deps): Promise<Checked> {
   const fs = formatFs(deps);
   const projectArg = spec.projectArg === undefined ? undefined : (args[spec.projectArg] as string | undefined);
   const project = await findProject(argv, deps.cwd, fs, projectArg);
+  const refusal = await refuseProject(spec, project, fs, deps);
+  return refusal ? { refusal } : { project };
+}
+
+async function refuseProject(spec: CommandSpec, project: string | null, fs: FormatFs, deps: Deps) {
   if (spec.noProject || spec.anyFormat) return null;
   if (!project) return line("No rafi project here (no rafi-config.yaml). Run `rafi create <project>` first.");
   const format = await readFormat(project, fs);
@@ -44,7 +52,6 @@ async function checkProject(spec: CommandSpec, path: string, args: unknown[], ar
   }
   const config = await loadConfig(deps.fs, project);
   if (!config.ok) return line(config.message);
-  void path;
   return null;
 }
 
@@ -66,10 +73,16 @@ function build(parent: Command, spec: CommandSpec, deps: Deps, argv: string[], o
   if (spec.subcommands?.length) command.helpCommand(true);
   if (spec.subcommands?.length && !spec.milestone) return;
   command.action(async (...actionArgs: unknown[]) => {
-    const refusal = await checkProject(spec, name, actionArgs, argv, deps);
-    if (refusal) {
-      deps.terminal.error(refusal);
+    const checked = await checkProject(spec, actionArgs, argv, deps);
+    if ("refusal" in checked) {
+      deps.terminal.error(checked.refusal);
       outcome.code = 1;
+      return;
+    }
+    const action = actions[name];
+    if (action && checked.project) {
+      outcome.code = await action({ deps, project: checked.project, args: actionArgs.slice(0, -2),
+        opts: command.opts(), argv });
       return;
     }
     deps.terminal.error(notBuiltLine(name, spec.milestone ?? "M10"));

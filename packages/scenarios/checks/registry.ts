@@ -211,10 +211,20 @@ export const registry: readonly Registered[] = Object.freeze([
     "NEW-CHK-14", "NEW-CHK-18"] },
   { id: "S-CHK-10", milestone: "M2", title: "QA off, and what the builder gets after a failure", covers: [
     "NEW-CHK-15", "NEW-CHK-16"] },
+  { id: "S-CHK-11", milestone: "M2", title: "No sandbox on this machine", covers: [
+    "NEW-SEC-4"] },
+  { id: "S-SEC-1", milestone: "M7", title: "Agents never see a secret", covers: [
+    "NEW-SEC-5", "NEW-SEC-10", "FMT-C30", "FMT-C31"] },
+  { id: "S-SEC-2", milestone: "M2", title: "Tests get only what they declared", covers: [
+    "NEW-SEC-6", "NEW-SEC-8", "FMT-C28"] },
+  { id: "S-SEC-3", milestone: "M7", title: "`rafi secrets`", covers: [
+    "CMD-38", "NEW-SEC-6", "NEW-SEC-7", "NEW-SEC-12", "FMT-C29"] },
+  { id: "S-SEC-4", milestone: "M7", title: "Security presets", covers: [
+    "NEW-SEC-4", "NEW-SEC-9", "NEW-SEC-11", "FMT-C27", "FMT-C32", "FMT-C33", "FMT-C34"] },
   { id: "S-CLI-1", milestone: "M1", title: "The command list", covers: [
     "CMD-1", "CMD-2", "CMD-3", "CMD-4", "CMD-6", "CMD-7", "CMD-8", "CMD-16", "CMD-18", "CMD-20", "CMD-21",
     "CMD-22", "CMD-23", "CMD-24", "CMD-25", "CMD-26", "CMD-27", "CMD-28", "CMD-29", "CMD-30", "CMD-31", "CMD-32",
-    "CMD-33", "CMD-34", "CMD-35", "CMD-37"] },
+    "CMD-33", "CMD-34", "CMD-35", "CMD-37", "CMD-38"] },
   { id: "S-CLI-2", milestone: "M1", title: "Dropped and merged commands, flags and files are gone", covers: [
     "CMD-5", "CMD-9", "CMD-10", "CMD-11", "CMD-12", "CMD-13", "CMD-14", "CMD-15", "CMD-17", "CMD-19", "CMD-36",
     "FLAG-PL-10", "FLAG-TK-3", "FLAG-TK-23", "FLAG-MG-4", "FLAG-ST-17", "FLAG-ST-18", "FLAG-ST-19", "FLAG-ST-20",

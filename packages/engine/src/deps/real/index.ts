@@ -1,14 +1,16 @@
-// The M1 real deps set. Seams nothing in M1 calls throw "not available until M<n>".
-import { randomUUID } from "node:crypto";
+// The real deps set. Seams nothing in M1 calls throw "not available until M<n>".
+import { randomBytes, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { Deps } from "../types.js";
-import { realClaudeQuery, realCodex } from "./agents.js";
+import { realClaudeQuery, realClaudeTools, realCodex } from "./agents.js";
+import { realChecks } from "./checks.js";
 import { realClock } from "./clock.js";
 import { openRealDb } from "./db.js";
 import { realExec, realGit } from "./exec.js";
 import { realFs } from "./fs.js";
 import { realProcesses } from "./processes.js";
+import { realServe } from "./serve.js";
 import { realTerminal } from "./terminal.js";
 
 function later(name: string, milestone: string): never {
@@ -16,9 +18,10 @@ function later(name: string, milestone: string): never {
 }
 
 export function realDeps(): Deps {
-  const random = { id: () => randomUUID(), jitter: () => Math.random() * 2 - 1 };
+  const random = { id: () => randomUUID(), jitter: () => Math.random() * 2 - 1,
+    secret: () => randomBytes(32).toString("hex") };
   return {
-    agents: { codex: realCodex, claudeQuery: realClaudeQuery },
+    agents: { codex: realCodex, claudeQuery: realClaudeQuery, claudeTools: realClaudeTools },
     clock: realClock(),
     notifier: {
       send: () => later("notifications", "M6"), update: () => later("notifications", "M6"),
@@ -28,8 +31,8 @@ export function realDeps(): Deps {
     fs: realFs(random),
     git: realGit,
     exec: realExec,
-    checks: { run: () => later("run_check", "M2") },
-    serve: () => later("the local MCP endpoint", "M2"),
+    checks: realChecks(),
+    serve: realServe,
     spawnBackground: () => later("--detach", "M4"),
     db: { open: openRealDb },
     processes: realProcesses(random.id()),
@@ -42,4 +45,5 @@ export function realDeps(): Deps {
   };
 }
 
-export { openRealDb, realClock, realExec, realFs, realGit, realProcesses, realTerminal, realCodex };
+export { openRealDb, realChecks, realClock, realExec, realFs, realGit, realProcesses, realServe, realTerminal,
+  realCodex };

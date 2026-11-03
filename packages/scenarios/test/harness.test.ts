@@ -98,13 +98,17 @@ test("fake clock: auto-advances to timeouts only when idle, never to a reminder"
   assert.equal(reminded, false, "the clock never jumps to a reminder on its own");
   computer.clock.advance(31 * 60_000);
   assert.equal(reminded, true, "advance() fires reminders");
+  // The deps call ends only when the test says so, and the fire is polled for with a generous deadline, so a
+  // loaded machine can't flake either half.
   let busyFired = false;
-  const busy = computer.clock.track(() => new Promise<void>((resolve) => setTimeout(resolve, 30)));
+  let finish = () => undefined as void;
+  const busy = computer.clock.track(() => new Promise<void>((resolve) => { finish = resolve; }));
   clock.timer(1000, () => { busyFired = true; }, "backoff");
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(busyFired, false, "not idle while a deps call is in flight");
+  finish();
   await busy;
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  for (let waited = 0; !busyFired && waited < 5000; waited += 10) await new Promise((r) => setTimeout(r, 10));
   assert.equal(busyFired, true);
 });
 

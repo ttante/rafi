@@ -23,6 +23,23 @@ const planCommand: Readonly<CommandSpec> = {
   ],
 };
 
+/** CMD-38 (ARCH 7.12): names and values in the OS secret store, never a value on argv. Not built until M7 (C88). */
+const secretsCommand: Readonly<CommandSpec> = {
+  name: "secrets", noProject: true, milestone: "M7", summary: "Manage secret names and values for tests",
+  subcommands: [
+    { name: "set", args: "<name>", noProject: true, milestone: "M7",
+      summary: "Store a secret's value (hidden input; never on the command line)",
+      options: [o("--profile <name>", "the profile to store it in"), o("--stdin", "read the value from stdin"),
+        o("--from-env <name>", "take the value from this environment variable")] },
+    { name: "list", noProject: true, milestone: "M7", summary: "List secret names, where each is used and when set" },
+    { name: "check", noProject: true, milestone: "M7", summary: "Check that each declared name is found, and where",
+      options: [projectOption] },
+    { name: "remove", args: "<name>", noProject: true, milestone: "M7", summary: "Remove a secret" },
+    { name: "use", args: "<profile>", noProject: true, milestone: "M7", summary: "Bind this project to a profile",
+      options: [projectOption] },
+  ],
+};
+
 const startCommand: Readonly<CommandSpec> = {
   name: "start", args: "<project>", projectArg: 0, milestone: "M2",
   summary: "Build tickets: prepare, build, check, review and deliver each one",
@@ -169,4 +186,5 @@ export const commands: readonly CommandSpec[] = [
       options: [projectOption] }] },
   { name: "migrate", args: "[project]", projectArg: 0, anyFormat: true, milestone: "M9",
     summary: "Convert a 0.10.x project to the 1.0 formats, once", options: [...autoApprove] },
+  secretsCommand,
 ];

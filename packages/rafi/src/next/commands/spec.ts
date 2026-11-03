@@ -1,5 +1,5 @@
 // The shape of a command definition, and the shared option sets (plan 5.1; REQ section 2).
-export type Milestone = "M2" | "M4" | "M5" | "M6" | "M8" | "M9" | "M10";
+export type Milestone = "M2" | "M4" | "M5" | "M6" | "M7" | "M8" | "M9" | "M10";
 
 export interface OptionSpec {
   readonly flags: string;

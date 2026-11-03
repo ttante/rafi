@@ -3,21 +3,60 @@
 // happy paths and verdict behaviors register in M2 and M3.
 import { parseRule, splitArgs, unquote, type Selector } from "./parse.js";
 
+/** One action inside a turn, run in order before the reply (SCN 2.2's M2 behaviors). */
+export interface Step {
+  readonly activity?: string;
+  readonly edit?: string;
+  readonly content?: string;
+  readonly shell?: string;
+  readonly runCheck?: string;
+  readonly checkOutput?: number;
+  /** Claude: n failed exploratory reads (SCN-14). */
+  readonly toolFail?: number;
+  /** Claude: the S-SCN-14 set of tool outcomes. */
+  readonly toolShapes?: boolean;
+  /** Claude: a Read tool use (Claude Code allows reads without asking canUseTool). */
+  readonly read?: string;
+  readonly ask?: { question: string; options: string[] };
+  /** Waits on the fake clock (in-process fakes; real time in the executables). */
+  readonly wait?: number;
+  /** Codex: print the bearer token from the thread config (a hostile agent, ARCH 1.2 "the token leaks"). */
+  readonly echoToken?: boolean;
+  /** Codex: the provider compacts the thread's context (a contextCompaction item). */
+  readonly compact?: boolean;
+  /** Codex: the model asks to run this command outside the sandbox (an approval with additionalPermissions). */
+  readonly escalate?: string;
+  /** Codex: the model asks for more permissions (item/permissions/requestApproval). */
+  readonly permissionsRequest?: boolean;
+}
+
 export interface Behavior {
+  readonly steps?: readonly Step[];
+  readonly errorCode?: "transient" | "quota" | "auth";
+  readonly resetAt?: string;
+  readonly twoFinals?: unknown;
+  /** Claude: end the turn with this result subtype (e.g. error_max_structured_output_retries). */
+  readonly resultSubtype?: string;
   readonly reply?: unknown;
   /** Raw reply text instead of the JSON of `reply` (malformed replies). */
   readonly raw?: string;
   readonly activity?: string;
+  /** A command the agent asks approval for (on Codex, an escalation out of the sandbox). */
   readonly bash?: string;
   readonly hang?: boolean;
   readonly error?: string;
   readonly crash?: boolean;
   readonly usage?: { inputTokens: number; outputTokens: number };
+  /** Codex: the model context window its token usage reports (`modelContextWindow`). */
+  readonly contextWindow?: number;
 }
+
+/** A behavior, or one built from the turn (to extend the role's happy path). */
+export type BehaviorOf = Behavior | ((meta: MetaLike, ctx: TurnContext) => Behavior);
 
 export interface Rule {
   readonly selector: Selector;
-  readonly behavior: Behavior;
+  readonly behavior: BehaviorOf;
 }
 
 export interface MetaLike {
@@ -32,7 +71,8 @@ function malformed(kind: string): Behavior {
   if (kind === "not-json") return { raw: "I finished the work." };
   if (kind === "truncated") return { raw: json.slice(0, Math.floor(json.length / 2)) };
   const at = /^trailing@(\d+)$/.exec(kind);
-  if (at) return { raw: `${json}${" ".repeat(Math.max(0, Number(at[1]) - json.length))} trailing text` };
+  // The trailing text starts exactly at byte N, as moneyTree T002's "trailing content at byte 4412".
+  if (at) return { raw: `${json}${" ".repeat(Math.max(0, Number(at[1]) - json.length))}trailing text` };
   throw new Error(`fake script: unknown malformed(${kind})`);
 }
 
@@ -62,15 +102,22 @@ function matches(selector: Selector, meta: MetaLike): boolean {
     (selector.attempt === undefined || selector.attempt === meta.attempt);
 }
 
+export interface TurnContext {
+  readonly cwd: string;
+  readonly message: string;
+}
+
 /** The in-process matcher: the first unused rule whose selector matches the turn's meta. */
-export function scriptEngine(rules: readonly Rule[], happy: (meta: MetaLike) => Behavior = () => ({ reply: {} })) {
-  const used = new Set<number>();
+export function scriptEngine(rules: readonly Rule[],
+  happy: (meta: MetaLike, ctx: TurnContext) => Behavior = () => ({ reply: {} })) {
+  const used = new Set<Rule>();
   return {
-    next(meta: MetaLike): Behavior {
-      const index = rules.findIndex((r, i) => !used.has(i) && matches(r.selector, meta));
-      if (index < 0) return happy(meta);
-      used.add(index);
-      return rules[index]!.behavior;
+    next(meta: MetaLike, ctx: TurnContext = { cwd: ".", message: "" }): Behavior {
+      const index = rules.findIndex((r) => !used.has(r) && matches(r.selector, meta));
+      if (index < 0) return happy(meta, ctx);
+      used.add(rules[index]!);
+      const b = rules[index]!.behavior;
+      return typeof b === "function" ? b(meta, ctx) : b;
     },
   };
 }

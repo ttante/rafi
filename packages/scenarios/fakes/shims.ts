@@ -36,14 +36,15 @@ function executable(bin: string, name: string, entryFile: string): string {
   return file;
 }
 
-export function writeShims(dir: string, script: { codex: Behavior[]; claude: Behavior[] }): Shims {
+export function writeShims(dir: string, script: { codex: Behavior[]; claude: Behavior[] },
+  o: { ps?: boolean } = {}): Shims {
   const bin = path.join(dir, "bin");
   mkdirSync(bin, { recursive: true });
   const logs = { codex: path.join(dir, "codex.log.jsonl"), claude: path.join(dir, "claude.log.jsonl") };
   const codexScript = path.join(dir, "codex.script.json");
   const claudeScript = path.join(dir, "claude.script.json");
   const codexRules = script.codex.map((behavior) => ({ behavior }));
-  writeFileSync(codexScript, JSON.stringify({ log: logs.codex, rules: codexRules }));
+  writeFileSync(codexScript, JSON.stringify({ log: logs.codex, rules: codexRules, ps: Boolean(o.ps) }));
   writeFileSync(claudeScript, JSON.stringify({ log: logs.claude, rules: script.claude.map(claudeRule) }));
   const codexEntry = entry(bin, "codex", codexScript);
   const claudeEntry = entry(bin, "claude", claudeScript);

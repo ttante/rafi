@@ -1,7 +1,9 @@
 // S-CLI-2 step 4, run after every scenario: no ARCH 12.7 path appears in the project, no dropped prompt is
-// shown, and no ENV-5 variable is set on any process rafi starts.
+// shown, and no ENV-5 variable is set on any process rafi starts. With canaries (C89), none of them, raw or
+// encoded, is in a project file (the event log and blobs too), the terminal, the transcript or an agent's env.
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { canaryProblems } from "./canaries.js";
 
 /** ARCH 12.7 (REWRITE_ARCHITECTURE.md:1581), verbatim. `<timestamp>.jsonl` is checked by pattern. */
 export const FORBIDDEN_PATHS: readonly string[] = Object.freeze([
@@ -36,6 +38,8 @@ export interface AfterEachInput {
   readonly transcripts?: readonly string[];
   /** The environment of every process rafi started (the harness deps record it). */
   readonly childEnvs: readonly Readonly<Record<string, string | undefined>>[];
+  readonly canaries?: Readonly<Record<string, string>>;
+  readonly agentEnvs?: readonly { kind: string; env: Readonly<Record<string, string | undefined>> }[];
 }
 
 function supervisorLogs(project: string): string[] {
@@ -73,6 +77,11 @@ export function afterEachChecks(input: AfterEachInput): string[] {
     for (const name of Object.keys(env)) {
       if (ENV5.some((pattern) => pattern.test(name))) problems.push(`${name} set on a process rafi started`);
     }
+  }
+  if (input.canaries && Object.keys(input.canaries).length) {
+    problems.push(...canaryProblems({ canaries: input.canaries, projects: input.projects, agentEnvs:
+      input.agentEnvs ?? [], texts: [...input.outputs.map((text) => ({ where: "the terminal", text })),
+      ...(input.transcripts ?? []).map((text) => ({ where: "an agent's message", text }))] }));
   }
   return problems;
 }

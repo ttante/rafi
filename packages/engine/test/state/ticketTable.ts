@@ -85,7 +85,8 @@ function builder(kind: string) {
 }
 function checkRun() {
   return { run: 1, ticket: "T1", command: "npm test", asked_by: "builder", tree: "t", exit_code: 0,
-    outcome: "passed", tests: [], duration_ms: 1, output: null, changed_tracked: [], restored: [] };
+    outcome: "passed", tests: [], duration_ms: 1, output: null, changed_tracked: [], restored: [], refused: null,
+    sandbox: "os" };
 }
 function blocked(kind: string) {
   return { kind, reason: "r", question: null, waits: [] };

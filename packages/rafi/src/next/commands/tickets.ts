@@ -20,7 +20,7 @@ const setupOptions: readonly OptionSpec[] = [
 ];
 
 const sub = (name: string, args: string | undefined, summary: string, options: readonly OptionSpec[],
-  milestone: "M5" | "M9" = "M5"): CommandSpec => ({ name, args, summary, options, milestone });
+  milestone: "M2" | "M5" | "M9" = "M5"): CommandSpec => ({ name, args, summary, options, milestone });
 
 export const ticketsCommand: Readonly<CommandSpec> = {
   name: "tickets", summary: "Manage the ticket tracker",
@@ -37,7 +37,7 @@ export const ticketsCommand: Readonly<CommandSpec> = {
       o("--waiver-reason <text>", "why"), o("--waiver-actor <name>", "who", "operator"), o("-y, --yes", "don't ask")],
     "M9"),
     sub("show", "[ticketId]", "Show full ticket records", [p, o("--all", "every ticket"), o("--json", "print JSON"),
-      o("--output <file>", "append to a file")]),
+      o("--output <file>", "append to a file")], "M2"),
     sub("waive-risk-notes", undefined, "Waive missing rollback plans for risky tickets", [
       o("--tickets <ids...>", "the tickets"), o("--reason <text>", "why"), p, actor]),
     sub("repair", undefined, "Ticket Maker repairs published ticket metadata", [o("--risk-notes", "risk notes"),

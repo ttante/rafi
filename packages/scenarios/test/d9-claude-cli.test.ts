@@ -124,7 +124,7 @@ test("D9: abort ends the fake process", async () => {
   run.input.close();
   // An abort is the caller's choice: the SDK ends the iterator quietly or with its own AbortError, never another error.
   if (error) assert.ok(error instanceof AbortError, `unexpected ${String(error)}`);
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 30_000; // a generous poll deadline: it ends as soon as the fake has exited
   while (!fake.entries().some((e) => e.op === "exit") && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

@@ -1,4 +1,5 @@
-// The process set (SCN 7.10): runs process/*.process.ts against the built launcher. `pnpm test:process`
+// The process set (SCN 7.10): runs process/*.process.ts against the built launcher, and the engine's
+// real-deps tests (engine/test/deps/*.real.test.ts: the sandbox probes, M2 plan 1.2). `pnpm test:process`
 // builds @rafi-ai/cli and its workspace dependencies first.
 import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
@@ -7,7 +8,11 @@ import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dir = path.join(here, "..", "process");
-const files = readdirSync(dir).filter((f) => f.endsWith(".process.ts")).map((f) => path.join(dir, f));
+const realDir = path.join(here, "..", "..", "engine", "test", "deps");
+const files = [
+  ...readdirSync(dir).filter((f) => f.endsWith(".process.ts")).map((f) => path.join(dir, f)),
+  ...readdirSync(realDir).filter((f) => f.endsWith(".real.test.ts")).map((f) => path.join(realDir, f)),
+];
 const started = performance.now();
 const result = spawnSync(process.execPath, ["--conditions=source", "--import", "tsx", "--test", ...files],
   { stdio: "inherit", env: { ...process.env, TZ: "UTC" } });

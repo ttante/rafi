@@ -3,6 +3,8 @@ import { runCli } from "@rafi-ai/cli/next";
 import { FakeClock } from "../fakes/clock.js";
 import { FakeNotifier } from "../fakes/notifier.js";
 import { fakeTerminal, stripAnsi } from "../fakes/terminal.js";
+import { memoryServe } from "../fakes/serve.js";
+import path from "node:path";
 import { defaultHost, harnessDeps, stateDirFor, type Computer } from "./deps.js";
 
 export interface RafiResult {
@@ -51,17 +53,24 @@ export function newComputer(root: string, name = "a", env: Record<string, string
   return {
     clock: new FakeClock(), notifier: new FakeNotifier(), stateDir: stateDirFor(root, name), host: defaultHost(),
     env: Object.freeze({ TZ: "UTC", ...env }), ids: { next: 0 }, alive: new Set(),
-    childEnvs: [], sentToAgents: [],
+    childEnvs: [], agentEnvs: [], canaries: {}, sentToAgents: [],
+    checks: { tests: {}, sandbox: "available", log: [] }, serve: memoryServe(),
+    home: path.dirname(stateDirFor(root, name)), script: { rules: [], transcript: [] },
   };
 }
 
-export type Rafi = (line: string, o?: { tty?: boolean; cwd?: string }) => Promise<RafiResult>;
+/** `input`: lines typed into the terminal, answered by prompts in order. */
+export interface RafiOptions { tty?: boolean; cwd?: string; input?: readonly string[]; env?: Record<string, string> }
+export type Rafi = ((line: string, o?: RafiOptions) => Promise<RafiResult>) &
+  { start(line: string, o?: RafiOptions): { done(): Promise<RafiResult> } };
 
 export function rafiRunner(computer: Computer, cwd: string, results: RafiResult[] = []): Rafi {
   let instances = 0;
-  return async (line, o = {}) => {
+  const run = async (line: string, o: RafiOptions = {}) => {
     const terminal = fakeTerminal({ tty: Boolean(o.tty) });
-    const instance = harnessDeps(computer, terminal, { cwd: o.cwd ?? cwd, instance: `inst-${++instances}` });
+    for (const typed of o.input ?? []) terminal.send(`${typed}\n`);
+    const instance = harnessDeps(computer, terminal,
+      { cwd: o.cwd ?? cwd, instance: `inst-${++instances}`, env: o.env });
     const argv = splitArgs(line);
     const code = await runCli(argv, instance.deps);
     instance.fence.closeAll();
@@ -73,4 +82,10 @@ export function rafiRunner(computer: Computer, cwd: string, results: RafiResult[
     results.push(result);
     return result;
   };
+  /** Starts a command without waiting; another rafi() call in the same "computer" can run meanwhile. */
+  const start = (line: string, o: RafiOptions = {}) => {
+    const pending = run(line, o);
+    return { done: () => pending };
+  };
+  return Object.assign(run, { start });
 }

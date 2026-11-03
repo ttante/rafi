@@ -2,6 +2,14 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 
 export interface TranscriptEntry {
+  readonly runtime?: "codex" | "claude";
+  readonly model?: string | null;
+  readonly effort?: string | null;
+  readonly fast?: boolean;
+  readonly writable?: boolean;
+  readonly network?: boolean;
+  readonly repair?: boolean;
+  readonly tools?: readonly string[];
   readonly role: string;
   readonly ticket: string | null;
   readonly step: string | null;
@@ -35,4 +43,9 @@ export function countPerSession(entries: readonly TranscriptEntry[], text: strin
 /** The turns in order, as "builder T3#1" labels, for order assertions. */
 export function turnOrder(entries: readonly TranscriptEntry[]): string[] {
   return entries.map((e) => `${e.role} ${e.ticket ?? "-"}#${e.attempt ?? 0}`);
+}
+
+/** "role@step" labels in order, repair turns marked, for order assertions. */
+export function steps(entries: readonly TranscriptEntry[]): string[] {
+  return entries.map((e) => `${e.role}@${e.step ?? "-"}${e.repair ? "(repair)" : ""}`);
 }
