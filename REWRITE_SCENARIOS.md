@@ -1,6 +1,6 @@
 # Rewrite scenarios
 
-Status: **reviewed** (guide step 5 review applied, 2026-11-01; decisions D1–D8 in section 11). The baseline against 0.10.2 is dropped (D8, 2026-11-01). Next: the architecture plan (guide step 7). The harness is built as the first piece of the new engine, in milestone 1 (guide step 10), and the scenarios are written test-first against it. Updated 2026-11-02: tests and CI scenarios S-CHK-1–10 (5.6), from the architecture decisions (`REWRITE_REQUIREMENTS.md` 8.24), and the step 8 architecture review's fixes.
+Status: **locked** (guide step 9, 2026-11-02). Reviewed and decided; changes now need the user's approval. Build handoff: `REWRITE_BUILD_HANDOFF.md`.
 Written against `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2 on branch `feature/rewrite`.
 Inputs: `REWRITE_REQUIREMENTS.md` (status reviewed; section 9.0 wins over older rows), `AI_FOREMAN_REWRITE.md`, and Part 1 (E01–E18) of `../rafi-2/rafi-plan-docs/rafi-harness-requirements.md`.
 

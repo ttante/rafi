@@ -1,6 +1,6 @@
 # Rewrite architecture
 
-Status: **draft** (guide step 7, written 2026-11-01). Next: two independent reviews (guide step 8), then revise and lock (step 9).
+Status: **locked** (guide step 9, 2026-11-02). Reviewed and decided; changes now need the user's approval. Build handoff: `REWRITE_BUILD_HANDOFF.md`.
 Inputs: `AI_FOREMAN_REWRITE.md` (RW), `REWRITE_REQUIREMENTS.md` (REQ; section 9.0 wins over older rows), `REWRITE_SCENARIOS.md` (SCN; section 11 decisions are final), Part 3 of `../rafi-2/rafi-plan-docs/rafi-harness-requirements.md` (H01–H02), and today's code on `feature/rewrite` (ai-foreman 2.0.2, `@rafi-ai/cli` 0.10.2).
 
 This doc says how the new engine is built: its modules and size budgets, the event log, the three state machines, errors and retries, agent replies, the upfront check and the question record, how `rafi` calls the engine, the engine switch and `rafi migrate`, tags, tools and notifications, what native Codex and Claude features replace, and what's deleted. It ends with the milestones, each mapped to the scenarios it must pass, and the few decisions I need from you.

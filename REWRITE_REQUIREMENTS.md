@@ -1,6 +1,6 @@
 # Rewrite requirements
 
-Status: **reviewed** (guide step 2, 2026-11-01): all open questions decided (section 9.0). Independent review (step 3) and the scenario review (step 5) are applied. Next: the architecture plan (guide step 7). Updated 2026-11-01 with the step 5 scenario review's decisions D2–D6, a correction to PRM-G2 and OUT-42, and D8, dropping the 0.10.2 baseline (section 9.0). Written 2026-11-01 against `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2, branch `feature/rewrite` at `f40f417`. Updated 2026-11-02 with the architecture decisions (9.0, ARCH-1–12), the tests and CI section (8.24) and the step 8 architecture review's fixes.
+Status: **locked** (guide step 9, 2026-11-02). Reviewed and decided; changes now need the user's approval. Build handoff: `REWRITE_BUILD_HANDOFF.md`.
 Related: `AI_FOREMAN_REWRITE.md` (the why and the decisions), `AI_FOREMAN_REWRITE_PLANNING_GUIDE.md` (step 1 asks for this doc), `GUI_PRODUCT_REQUIREMENTS.md`.
 
 This is the contract for the rewrite. It lists every user-visible behavior of rafi today and says whether the new engine keeps it, changes it, or drops it. Section 8 adds the new behavior the rewrite must build. Section 9 lists the open questions.
