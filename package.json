@@ -31,11 +31,17 @@
     "docs:generate": "tsx packages/rafi/scripts/generate-cli-docs.ts",
     "docs:check": "tsx packages/rafi/scripts/generate-cli-docs.ts --check",
     "canary:structured-handoffs": "node --import tsx scripts/live/structured-handoffs.ts",
-    "check:comms-inventory": "node scripts/comms/node24-policy.mjs && tsc -p tsconfig.comms.json && node --import tsx scripts/comms/registry-baseline.mts && node --import tsx scripts/comms/manifest-parity.mts"
+    "check:comms-inventory": "node scripts/comms/node24-policy.mjs && tsc -p tsconfig.comms.json && node --import tsx scripts/comms/registry-baseline.mts && node --import tsx scripts/comms/manifest-parity.mts",
+    "test:fast": "node packages/scenarios/harness/fast.mjs",
+    "test:process": "pnpm -r --filter \"@rafi-ai/cli...\" build && node packages/scenarios/harness/process-suite.mjs",
+    "check:rules": "node scripts/check-rules.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
       "better-sqlite3"
     ]
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
   }
 }

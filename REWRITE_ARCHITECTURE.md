@@ -178,7 +178,7 @@ One script, `scripts/check-rules.mjs`, uses the TypeScript compiler API and fail
 - `engine` imports `ai-foreman`, or `state/` imports anything but types (the state functions stay pure);
 - **Windows-safe** (for later Windows support): paths built with Node's `path`, never joined with `/` by hand; no shell strings (commands are spawned with argument arrays); no bash-only commands inside rafi itself (the project's `scripts/rafi-setup.sh` is the one exception).
 
-Dependencies point one way: CLI → `api/` → `build/`, `ask/`, `plan/`, `tools/`, `stats/`, `manager/` → `turns/`, `facts/`, `instructions/`, `agents/` → `state/`, `log/` → `deps/`.
+Dependencies point one way: CLI → `api/` → `build/`, `ask/`, `plan/`, `tools/`, `stats/`, `manager/` → `turns/`, `facts/`, `instructions/`, `agents/` → `state/`, `workflow/`, `log/` → `deps/`.
 
 ## 3. The event log
 
@@ -257,7 +257,8 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 | Type | Class | Written when | Fields |
 |---|---|---|---|
 | `project.created` | state | `rafi create` writes the config | `app_name`, `rafi_version` |
-| `project.migrated` | state | `rafi migrate` finishes | `from: "0.10.x"`, `files`, `kept`, `dropped` |
+| `project.migrated` | state | `rafi migrate` finishes | `from: "0.10.x"`, `files`, `kept`, `dropped`, `state: ready \| ticketing \| draft` (the project state it lands in, 4.4) |
+| `project.archived` / `project.unarchived` | state | GUI only; no 1.0 command writes them (4.4) | none (empty payload) |
 | `plan.started` | state | the Planner starts | `mode: new \| revise`, `interview_id` |
 | `plan.proposed` | state | a plan validates | `plan_id`, `revision`, `digest`, `path` |
 | `plan.approved` | state | you approve, auto-approve approves, or an approval is carried forward | `plan_id`, `revision`, `digest`, `by: user \| auto-approve \| carried` |
@@ -313,7 +314,7 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 | `requirements.receipt` | detail | a QA review turn starts and ends | `key`, `path`, `fp_supplied`, `fp_observed`, `status: delivered \| missing \| unreadable \| changed`, `read` (NEW-REQ-6) |
 | `builder.reported` | state | a builder reply validates | `kind: done \| blocked \| needs-input`, `summary`, `runs`, `block`, `question` (6.2) |
 | `check.run` | state | rafi finishes running a test command (6.9) | `run` (short number), `ticket`, `command`, `asked_by: builder \| qa \| rafi`, `tree` (git tree id it ran against), `exit_code`, `outcome: passed \| failed \| timed-out \| too-slow \| changed-code \| refused`, `tests: [{name, file, outcome}]` (when the runner reports per-test results), `duration_ms`, `output` (blob), `changed_tracked` (files a check changed, when any), `restored` (QA's runs: tracked files put back) |
-| `checks.passed` / `checks.failed` | state | the check step ends (6.9) | `runs`, `reused` (runs not rerun) / `failing: [{req, run}]`, `signature` |
+| `checks.passed` / `checks.failed` | state | the check step ends (6.9) | `runs`, `reused` (runs not rerun) / `failing: [{req, run}]`, `signature`, `circling` |
 | `attempt.summary` | state | a builder turn ends | `attempt`, `tree`, `files_read`, `runs` (what circling and reference checks need, kept at every capture level; 5.5) |
 | `facts.snapshot` | state | after each builder turn | `key`, `tree` (git tree id), `base`, `files` (changed files, computed by rafi) |
 | `facts.mismatch` | detail | an agent's claim disagrees with rafi's record | `key`, `claim`, `record` (NEW-FACT-1) |
@@ -331,10 +332,10 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 |---|---|---|---|
 | `ticket.blocked` | state | a ticket can't go on | `kind` (4.2), `reason` (one line, the builder's own words when it gave them), `question`, `waits` |
 | `ticket.unblocked` | state | an answer clears the block | `resume_step`, `by` |
-| `ticket.done` | state | delivery finishes | `validation: {result, runs, unverified}` |
 | `ticket.dropped` | state | won't do, obsolete or `tickets cancel` | `why` |
 | `ticket.reopened` | state | a stale "I verified it myself" puts a done ticket back in review (S-QA-2 step 3) | `why` |
-| `git.committed`, `git.branch_created`, `git.pushed`, `pr.created`, `pr.merged`, `delivery.done` | state | the deliver step | `sha`, `branch`, `url`, `unit` |
+| `git.committed`, `git.branch_created`, `git.pushed`, `pr.created`, `pr.merged` | state | the deliver step | `sha`, `branch`, `url`, `unit` |
+| `delivery.done` | state | delivery finishes | `unit`, `validation: {result, runs, unverified}` |
 | `unit.ready`, `unit.merge_waiting`, `unit.delivered`, `unit.failed` | state | a delivery unit's tickets are all done / rafi waits for a PR to auto-merge / the unit is merged, pushed or its PR opened / a git or gh/glab step fails (4.3.2) | `unit`, `until` / `how` / `category: transient \| conflict \| auth \| rejected`, `message` |
 | `scan.gap` | state | a question comes up mid-build that the scan should have found (NEW-ASK-5) | `question`, `kind` |
 
@@ -445,10 +446,10 @@ nextProject(project: ProjectState, event: StateEvent): ProjectState
 decide(view: Folded, live: Liveness): Action        // what the build loop does next (4.5)
 answerEffects(q: Question, choice: Choice, view: Folded): StateEvent[]   // what an answer writes (7.7)
 
-interface TicketRules { qa: boolean; fixes: number; manualChecks: "wait" | "none" | "track"; rafiOwned: boolean }
+interface TicketRules { qa: boolean; fixes: number; manualChecks: "wait" | "none" | "track"; rafiOwned: boolean; workflow: Workflow }   // workflow: the build's pinned workflow (4.8)
 ```
 
-- `TicketRules` come from the settings recorded in `build.started`, so a fold gives the same answer after a restart.
+- `TicketRules` come from the settings and workflow recorded in `build.started`, so a fold gives the same answer after a restart.
 - **Tested over every combination** (NEW-ENG-2). The tables below are also data in `state/transitions.test.ts`; the test builds every (state, event) pair, including the "no change" ones, and checks each against the table. The scenarios check only the states users see (SCN 10, NEW-ENG-2 note).
 - **Answers too.** `answerEffects` turns every blocked kind's options (7.7) into the events they write; the 7.7 tables are its test data, and the test covers every (kind, option) pair.
 - **Invalid pairs.** Before appending, the engine checks the transition; an invalid one is a bug and isn't written. A fold that meets an invalid pair (a damaged or imported log) keeps the state unchanged and reports a violation, which `rafi doctor` shows. The fold never throws, so `rafi status` always works.
@@ -1049,7 +1050,7 @@ No prompt is shown. Every remaining item, including auto-approve's warned items,
 - **Kinds:** upfront items (permission, credential, decision, plan-update setting), blocked, what-next, unverified, confirm, plan (scope approval, an ask-first plan update, a locked-requirement change), provider question, runtime (login, usage limit), build-wide, dependent (a dependency was dropped), limit (a test's time limit, 6.11), CI (the upfront confirmation), delivery (a merge conflict or merge wait, 4.3.2).
 - **First answer wins.** Every surface calls one engine action, `answer(question, answer, source)`. In one `BEGIN IMMEDIATE` transaction it folds the question's state. If it's open, it appends `question.answered` and whatever the answer causes (`ticket.unblocked`, `grant.recorded`, `fix.granted`, …). If it's already answered, it writes nothing and returns who answered and when. SQLite serializes writers, so the first answer wins even across processes (S-NOT-2, S-BLK-8).
 - **Surfaces:** the pinned prompt (in the build's terminal and in any attached `rafi resume`), a desktop notification, `rafi answer`, Manager `/answer-question`, later the GUI. Each watches the log (8.4); when a question closes it updates to "answered in notification" (or wherever it was answered) or closes.
-- **Free text** is stored exactly as typed. Every command rafi prints quotes its arguments with one shell-quoting function, so it works when copied (PRM-G9, S-SCN-6).
+- **Free text** is stored exactly as typed, except that redaction on write (3.3) applies to typed answers too. Every command rafi prints quotes its arguments with one shell-quoting function, so it works when copied (PRM-G9, S-SCN-6).
 - **No agent answers a question.** The agent permission policy refuses any agent tool request that would run `rafi answer`, `rafi stop` or anything else that writes rafi's state (PRM-G8, S-NOT-1).
 - **Gaps.** A question that comes up mid-build and that the scan should have found is recorded as `scan.gap` (NEW-ASK-5). A person-only check and a time-limit question are expected, not gaps.
 
@@ -1631,7 +1632,7 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 ### M1. Foundations and the harness
 
 - **First:** the D9 check (11.7), half a day.
-- **Builds:** `packages/engine` with `deps` and its real implementations; `scripts/check-rules.mjs`; the log (tables, append, cursor reads, lease, blobs, migrations); the three transition functions, the fold, `decide` and the label maps; `runCli` with the whole command surface and help text (commands not built yet say so and exit 1); dropped and merged commands and flags exiting 1 with their replacement; the engine switch, D6's refusal and format detection both ways (9.2); a thin pair of adapters over `deps` transports (session, one turn with a schema, events, cancel), completed in M2; `packages/scenarios` with the F-ONE and F-CHAIN builders, the script engine with in-process Codex and Claude fakes, the Codex fake executable (from `rafi/test/fixtures/e2e-codex-faults.cjs`), the fake `claude` if the check passes, the fake clock, notifier and terminal, the crash and pause hooks for the named boundaries (4.6) with the write fence, the invariant checker, the transcript and the coverage ledger. The built-in workflow and role registry as data, the load checks, and transition tests built from the workflow (4.8); the reserved `workflows:` key and ticket `workflow` field rejected.
+- **Builds:** `packages/engine` with `deps` and its real implementations; `scripts/check-rules.mjs`; the log (tables, append, cursor reads, lease, blobs, migrations); the three transition functions, the fold, `decide` and the label maps; `runCli` with the whole command surface and help text (commands not built yet say so and exit 1); dropped and merged commands and flags exiting 1 with their replacement; the engine switch, D6's refusal and format detection both ways (9.2); a thin pair of adapters over `deps` transports (session, one turn with a schema, events, cancel), completed in M2; `packages/scenarios` with the F-ONE and F-CHAIN builders, the frozen F-LEGACY and its unfinished-build variant, the script engine with in-process Codex and Claude fakes, the Codex fake executable (from `rafi/test/fixtures/e2e-codex-faults.cjs`), the fake `claude` if the check passes, the fake clock, notifier and terminal, the crash and pause hooks for the named boundaries (4.6) with the write fence, the invariant checker, the transcript and the coverage ledger. The built-in workflow and role registry as data, the load checks, and transition tests built from the workflow (4.8); the reserved `workflows:` key and ticket `workflow` field rejected.
 - **Security:** secret redaction on every write; the write fence; validation on read; imported events never folded; `scripts/check-rules.mjs` and the fast suite on Windows.
 - **Must pass:** S-CLI-1, S-CLI-2.
 - **Partial:** S-ENG-5 (steps 1, 2 and 4, process set), S-MIG-2 (step 1).

@@ -10,6 +10,7 @@ A new engine for rafi 1.0, built beside today's one and switched on with `RAFI_E
 
 ## Read first, in this order
 
+0. `/Users/tyler/reps/activeWork/rafi-process/RAFI_COMPASS.md`: how the user thinks about rafi. When the docs don't answer something, decide the way it points.
 1. `REWRITE_ARCHITECTURE.md`, the build plan. Read all of it once. Then keep these open:
    - 1.2: the security model;
    - 2: packages, modules, size budgets and code rules;

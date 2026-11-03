@@ -1,0 +1,35 @@
+{
+  "name": "@rafi-ai/engine",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The rafi 1.0 engine (published as ai-foreman@3.0.0 at the switch).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": { "source": "./src/index.ts", "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./deps/real": { "source": "./src/deps/real/index.ts", "types": "./dist/deps/real/index.d.ts", "default": "./dist/deps/real/index.js" },
+    "./agents": { "source": "./src/agents/index.ts", "types": "./dist/agents/index.d.ts", "default": "./dist/agents/index.js" }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --conditions=source --import tsx --test 'test/**/*.test.ts'"
+  },
+  "engines": { "node": "24.x" },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "rafi-spec": "workspace:*",
+    "yaml": "^2.5.1",
+    "zod": "4.4.3"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.148"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

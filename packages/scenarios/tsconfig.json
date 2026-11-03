@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "customConditions": [
+      "source"
+    ],
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": [
+    "harness/**/*.ts",
+    "fakes/**/*.ts",
+    "fixtures/**/*.ts",
+    "checks/**/*.ts",
+    "scenarios/**/*.ts",
+    "test/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "fixtures/legacy/F-*"
+  ]
+}

@@ -21,6 +21,16 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./next": {
+      "source": "./src/next/cli.ts",
+      "types": "./dist/next/cli.d.ts",
+      "default": "./dist/next/cli.js"
+    },
+    "./next/format": {
+      "source": "./src/next/format.ts",
+      "types": "./dist/next/format.d.ts",
+      "default": "./dist/next/format.js"
     }
   },
   "files": [
@@ -42,6 +52,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.4.0",
+    "@rafi-ai/engine": "workspace:*",
     "ai-foreman": "2.0.2",
     "ajv": "^8.20.0",
     "commander": "^12.1.0",

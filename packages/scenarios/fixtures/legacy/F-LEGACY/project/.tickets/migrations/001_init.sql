@@ -1,0 +1,2 @@
+-- Auto-applied by foreman tickets init via the StateDb class.
+-- See src/tickets/stateDb.ts for the full SQL schema.

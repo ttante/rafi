@@ -19,6 +19,11 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./v1": {
+      "source": "./src/v1/index.ts",
+      "types": "./dist/v1/index.d.ts",
+      "default": "./dist/v1/index.js"
     }
   },
   "files": [

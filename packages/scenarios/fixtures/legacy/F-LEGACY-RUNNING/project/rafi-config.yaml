@@ -1,0 +1,187 @@
+appName: legacy-fixture
+timezone: UTC
+stack:
+  frontend: React with TypeScript
+  backend: Python and Node.js
+  database: PostgreSQL
+  cloud: AWS
+  packageManager: pnpm
+flags:
+  hasFrontend: true
+  usesAI: true
+  runsInCloud: true
+harness:
+  targets:
+    - codex
+  qa: true
+qa_preparation: false
+agent_files:
+  mode: overwrite
+  codex: ./AGENTS.md
+  claude: ./CLAUDE.md
+docs:
+  root: docs
+agent_defaults:
+  version: 1
+  revision: 0
+  roles:
+    builder:
+      session_strategy: compact
+      display_session_cost: false
+      auto_compact_threshold_percent: 65
+      compact_maximum: 10
+    qa:
+      session_strategy: compact
+      display_session_cost: false
+      auto_compact_threshold_percent: 65
+      compact_maximum: 10
+    ticket-maker:
+      session_strategy: compact
+      display_session_cost: false
+    planner:
+      session_strategy: fresh
+      display_session_cost: false
+    uninstaller:
+      session_strategy: fresh
+      display_session_cost: false
+    manager:
+      session_strategy: fresh
+      display_session_cost: false
+    discovery:
+      session_strategy: fresh
+      display_session_cost: false
+autonomy:
+  profile: balanced
+  continue_independent_tickets: true
+  rules:
+    qa.nonconvergence:
+      action: retry_builder
+      max_attempts: 3
+    runtime.transient:
+      action: retry
+      max_attempts: 3
+    plan.material_change:
+      action: human_required
+  supervisor:
+    enabled: true
+    max_worker_restarts_per_checkpoint: 3
+    max_worker_restarts_per_run: 10
+agents:
+  builder:
+    artifact_source: rafi
+    claude: ./.claude/agents/builder.md
+    codex: ./.codex/agents/builder.toml
+  qa:
+    artifact_source: rafi
+    claude: ./.claude/agents/qa.md
+    codex: ./.codex/agents/qa.toml
+  planner:
+    artifact_source: rafi
+    claude: ./.claude/agents/planner.md
+    codex: ./.codex/agents/planner.toml
+  ticket-maker:
+    artifact_source: rafi
+    claude: ./.claude/agents/ticket-maker.md
+    codex: ./.codex/agents/ticket-maker.toml
+  uninstaller:
+    artifact_source: rafi
+    claude: ./.claude/agents/uninstaller.md
+    codex: ./.codex/agents/uninstaller.toml
+  manager:
+    artifact_source: rafi
+    claude: ./.claude/agents/manager.md
+    codex: ./.codex/agents/manager.toml
+  discovery:
+    artifact_source: rafi
+    claude: ./.claude/agents/discovery.md
+    codex: ./.codex/agents/discovery.toml
+skills:
+  rafi-graph:
+    artifact_source: rafi
+    claude: ./.claude/skills/rafi-graph/SKILL.md
+    codex: ./.agents/skills/rafi-graph/SKILL.md
+  better-sqlite3-rebuild:
+    artifact_source: rafi
+    claude: ./.claude/skills/better-sqlite3-rebuild/SKILL.md
+    codex: ./.agents/skills/better-sqlite3-rebuild/SKILL.md
+  grill-me:
+    artifact_source: rafi
+    claude: ./.claude/skills/grill-me/SKILL.md
+    codex: ./.agents/skills/grill-me/SKILL.md
+  handoff:
+    artifact_source: rafi
+    claude: ./.claude/skills/handoff/SKILL.md
+    codex: ./.agents/skills/handoff/SKILL.md
+  implementor:
+    artifact_source: rafi
+    claude: ./.claude/skills/implementor/SKILL.md
+    codex: ./.agents/skills/implementor/SKILL.md
+  improve-codebase-architecture:
+    artifact_source: rafi
+    claude: ./.claude/skills/improve-codebase-architecture/SKILL.md
+    codex: ./.agents/skills/improve-codebase-architecture/SKILL.md
+  prd-to-issues:
+    artifact_source: rafi
+    claude: ./.claude/skills/prd-to-issues/SKILL.md
+    codex: ./.agents/skills/prd-to-issues/SKILL.md
+  tdd:
+    artifact_source: rafi
+    claude: ./.claude/skills/tdd/SKILL.md
+    codex: ./.agents/skills/tdd/SKILL.md
+  write-a-prd:
+    artifact_source: rafi
+    claude: ./.claude/skills/write-a-prd/SKILL.md
+    codex: ./.agents/skills/write-a-prd/SKILL.md
+tickets:
+  limits:
+    implementation: 500
+    view: 20000
+  populate:
+    mode: approved_plan
+    source_handling: saved
+    agent_preference: configured
+    import_cap: 500
+    comment_limit: 10
+    enrichment: recommendations
+    recommend_split_for_xl: true
+  build:
+    branch_strategy: branch-per-ticket
+    completion: none
+    provider: auto
+    pr_ready: false
+    merge_method: squash
+    cleanup: true
+    auto_merge_wait: false
+    auto_merge_timeout_minutes: null
+    base_branch: main
+    branch_prefix: feature
+    branch_policy:
+      mode: global
+      global_strategy: branch-per-ticket
+      by_size:
+        XS: shared
+        S: shared
+        M: per-ticket
+        L: per-ticket
+        XL: per-ticket
+    review:
+      title_style: ticket-title
+      title_template: null
+      description_sections:
+        - Summary
+        - Linked ticket
+        - Changes made
+        - Tests and validation performed
+        - Risks or rollback notes
+        - Checklist
+    validation_checklist:
+      - Acceptance criteria satisfied
+      - Required tests pass
+      - Configured project checks pass
+      - Documentation updated when needed
+      - Database and deployment changes reviewed when present
+      - Validation evidence attached
+sources:
+  version: 1
+  snapshot_storage: local
+  entries: []

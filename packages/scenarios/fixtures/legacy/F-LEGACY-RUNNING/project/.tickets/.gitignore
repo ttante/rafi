@@ -1,0 +1,5 @@
+imports/
+ticket-state.sqlite
+ticket-state.sqlite-shm
+ticket-state.sqlite-wal
+backups/

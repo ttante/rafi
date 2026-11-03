@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rafi.dev/schemas/handoff-request-v1.json",
+  "title": "Rafi staged handoff request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "reason", "decisions", "constraints", "discoveries",
+    "completed_actions", "evidence", "failures", "blockers", "open_work",
+    "next_action", "role_state"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "decisions": { "$ref": "#/$defs/stringList" },
+    "constraints": { "$ref": "#/$defs/stringList" },
+    "discoveries": { "$ref": "#/$defs/stringList" },
+    "completed_actions": { "$ref": "#/$defs/stringList" },
+    "evidence": { "$ref": "#/$defs/stringList" },
+    "failures": { "$ref": "#/$defs/stringList" },
+    "blockers": { "$ref": "#/$defs/stringList" },
+    "open_work": { "$ref": "#/$defs/stringList" },
+    "next_action": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "role_state": { "type": "object" }
+  },
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4000 }
+    }
+  }
+}

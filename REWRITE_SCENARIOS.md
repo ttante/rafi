@@ -6,7 +6,7 @@ Inputs: `REWRITE_REQUIREMENTS.md` (status reviewed; section 9.0 wins over older 
 
 This doc lists the whole-build scenarios the new engine must pass, the design of the fake-agent harness that runs them through the real `rafi` command, and a table that maps every requirement in `REWRITE_REQUIREMENTS.md` sections 2–8 to a scenario. Nothing here is implemented yet.
 
-In numbers: 121 scenarios (41 whole-build, 14 past-bug, 40 from the decided sections, 26 command and engine-wide); 623 of the 638 requirement IDs covered and 15 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
+In numbers: 121 scenarios (41 whole-build, 14 past-bug, 40 from the decided sections, 26 command and engine-wide); 622 of the 638 requirement IDs covered and 16 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
 
 | Section | Contents |
 |---|---|
@@ -1144,10 +1144,10 @@ The whole-build scenarios above don't touch every command and flag. These shorte
 - **Expected:** The version prints. Help lists every kept command and the new ones (`answer`, `stop`, `reset`, `stats`, `logs`, `tools`, `migrate`), each with its own help. `rafi stats --help` lists `show`, `timeline`, `export` and `delete`, and not `compare` or `replay` (Q-STATS-1).
 
 #### S-CLI-2 — Dropped and merged commands, flags and files are gone
-- **Covers:** CMD-5, CMD-9, CMD-10, CMD-11, CMD-12, CMD-13, CMD-14, CMD-15, CMD-17, CMD-19, CMD-36, FLAG-PL-10, FLAG-TK-3, FLAG-TK-23, FLAG-MG-4, FLAG-ST-17, FLAG-ST-18, FLAG-ST-19, FLAG-ST-20, FLAG-ST-21, FLAG-ST-22, FLAG-ST-23, FLAG-ST-35, FLAG-ST-36, FLAG-ST-37, FLAG-ST-38, FLAG-ST-39, FLAG-ST-40, FLAG-ST-41, FLAG-ST-42, FLAG-ST-43, FLAG-ST-44, FLAG-ST-45, FLAG-ST-46, FLAG-RS-5, FLAG-RS-8, FLAG-ST-24, FLAG-ST-25, FLAG-ST-26, FLAG-ST-27, FLAG-ST-28, FLAG-ST-29, FLAG-ST-30, FLAG-ST-31, FLAG-ST-32, FLAG-ST-33, FLAG-ST-34, FLAG-RS-6, FLAG-RS-9, FLAG-RS-10, PRM-80, PRM-84, PRM-93, PRM-94, PRM-95, PRM-96, PRM-97, PRM-98, PRM-99, PRM-101, FILE-44, FILE-45, FILE-47, FILE-48, ENV-5
+- **Covers:** CMD-5, CMD-9, CMD-10, CMD-11, CMD-12, CMD-13, CMD-14, CMD-15, CMD-17, CMD-19, CMD-36, FLAG-PL-10, FLAG-TK-3, FLAG-TK-23, FLAG-MG-4, FLAG-ST-17, FLAG-ST-18, FLAG-ST-19, FLAG-ST-20, FLAG-ST-21, FLAG-ST-22, FLAG-ST-23, FLAG-ST-35, FLAG-ST-36, FLAG-ST-37, FLAG-ST-38, FLAG-ST-39, FLAG-ST-40, FLAG-ST-41, FLAG-ST-42, FLAG-ST-43, FLAG-ST-44, FLAG-ST-45, FLAG-ST-46, FLAG-RS-5, FLAG-ST-24, FLAG-ST-25, FLAG-ST-26, FLAG-ST-27, FLAG-ST-28, FLAG-ST-29, FLAG-ST-30, FLAG-ST-31, FLAG-ST-32, FLAG-ST-33, FLAG-ST-34, FLAG-RS-6, FLAG-RS-9, FLAG-RS-10, PRM-80, PRM-84, PRM-93, PRM-94, PRM-95, PRM-96, PRM-97, PRM-98, PRM-99, PRM-101, FILE-44, FILE-45, FILE-47, FILE-48, ENV-5
 - **Steps:**
   1. Run each dropped or merged command (`plan:doctor`, `build:attach`, `build:decide`, `build:stop`, `build:resume`, `build:start-over`, `build:reset`, `handoffs`, `state`, `audit`, `tickets import`) and each dropped flag on its command.
-  2. Run `rafi start . --steps 1` once with each old `start` form that was merged or moved to config: `--builder-network`; `--qa-network`; `--builder-approvals`; `--create-pr`; `--no-create-pr`; `--pr-ready`; `--merge-method squash`; `--provider github`; `--auto-merge-wait`; `--no-auto-merge-wait`; `--auto-merge-timeout-minutes 5`; `--branch-prefix x/`; `--max-branch-depth 3`; `--keep-worktrees`; `--show-session-cost`; `--hide-session-cost`; `--audit-logging trace`; `--auto-compact-threshold 80`. Then `rafi resume --yes`, `rafi resume --builder-network`, `rafi resume --qa-network` and `rafi resume --builder-approvals`.
+  2. Run `rafi start . --steps 1` once with each old `start` form that was merged or moved to config: `--builder-network`; `--qa-network`; `--builder-approvals`; `--create-pr`; `--no-create-pr`; `--pr-ready`; `--merge-method squash`; `--provider github`; `--auto-merge-wait`; `--no-auto-merge-wait`; `--auto-merge-timeout-minutes 5`; `--branch-prefix x/`; `--max-branch-depth 3`; `--keep-worktrees`; `--show-session-cost`; `--hide-session-cost`; `--audit-logging trace`; `--auto-compact-threshold 80`. Then `rafi resume --builder-network`, `rafi resume --qa-network` and `rafi resume --builder-approvals`.
   3. Check that no `ai-foreman` binary is installed by the package.
   4. After every other scenario in the suite: check the project and the transcripts.
 - **Expected:**
@@ -1501,7 +1501,7 @@ scenario({
 });
 ```
 
-**The coverage ledger** (harness E01). A test reads every requirement ID from `REWRITE_REQUIREMENTS.md` sections 2–8 and fails if an ID is in no scenario's `covers` and isn't in the "not scenario-testable" list in section 10. It also regenerates the coverage table, so this doc and the code can't drift apart.
+**The coverage ledger** (harness E01). A test reads every requirement ID from `REWRITE_REQUIREMENTS.md` sections 2–8 and fails if an ID is in no scenario's `covers` and isn't in the "not scenario-testable" list in section 10. It also checks the table against section 10 and fails on drift, so this doc and the code can't drift apart.
 
 ### 7.10 Suites and speed
 
@@ -1569,8 +1569,8 @@ The baseline against 0.10.2 is dropped (D8). Two past bugs were never confirmed 
 
 Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (638 IDs), with the scenarios that check it. It was generated from the **Covers** lines above; once the harness exists (milestone 1, guide step 10), the coverage ledger (7.9) regenerates it from the scenario files.
 
-- 623 IDs are covered by at least one scenario.
-- 15 are marked **not scenario-testable**, each with its reason: NEW-ENG-8, NEW-MAL-9, NEW-CAU-2, NEW-GUI-7, NEW-ADP-1, NEW-HAR-1, NEW-HAR-2, NEW-HAR-3, NEW-HAR-4, NEW-INS-6, NEW-INS-8, GUI-R2, NEW-SEC-2, NEW-SEC-3, NEW-WF-4.
+- 622 IDs are covered by at least one scenario.
+- 16 are marked **not scenario-testable**, each with its reason: NEW-ENG-8, NEW-MAL-9, NEW-CAU-2, NEW-GUI-7, NEW-ADP-1, NEW-HAR-1, NEW-HAR-2, NEW-HAR-3, NEW-HAR-4, NEW-INS-6, NEW-INS-8, GUI-R2, NEW-SEC-1, NEW-SEC-2, NEW-SEC-3, NEW-WF-4.
 - A few covered IDs are only partly scenario-testable; the Note column says which part is checked elsewhere.
 - "Drop" items are covered by S-CLI-2, which checks they're gone.
 
@@ -1732,7 +1732,7 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (638 IDs), with
 | FLAG-RS-5 | S-PERM-3, S-CLI-2 |  |
 | FLAG-RS-6 | S-CLI-2 |  |
 | FLAG-RS-7 | S-CRASH-4 |  |
-| FLAG-RS-8 | S-CLI-2, S-CLI-3 |  |
+| FLAG-RS-8 | S-CLI-3 |  |
 | FLAG-RS-9 | S-PLAN-3, S-CLI-2 |  |
 | FLAG-RS-10 | S-CLI-2 |  |
 | FLAG-RS-11 | S-CRASH-4 |  |
@@ -2239,11 +2239,11 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (638 IDs), with
 | NEW-CHK-12 | S-CHK-8 |  |
 | NEW-CHK-13 | S-CHK-5 |  |
 | NEW-CHK-14 | S-CHK-9 |  |
-| NEW-CHK-15 | S-CHK-6, S-CHK-10 |  |
+| NEW-CHK-15 | S-CHK-10 |  |
 | NEW-CHK-16 | S-CHK-10 |  |
 | NEW-CHK-17 | S-CHK-6 |  |
 | NEW-CHK-18 | S-CHK-9 |  |
-| NEW-SEC-1 | S-CHK-9, S-NOT-1, S-TOOL-5, S-ENG-7 | The full list of threats is reviewed at each milestone (architecture 1.2). |
+| NEW-SEC-1 | **not scenario-testable** | A per-milestone threat review (architecture 1.2), not a test. |
 | NEW-SEC-2 | **not scenario-testable** | A process rule: security checks in each milestone and a review before release. |
 | NEW-WF-1 | S-START-1 |  |
 | NEW-WF-2 | S-START-4 |  |

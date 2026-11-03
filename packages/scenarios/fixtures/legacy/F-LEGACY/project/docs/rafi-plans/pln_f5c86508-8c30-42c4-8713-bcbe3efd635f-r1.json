@@ -1,0 +1,75 @@
+{
+  "acceptance_criteria": [
+    "The feature works."
+  ],
+  "assumptions": [],
+  "content_digest": "bce5c0b510198f446529c495d11deaf9defc472bdfac3cb46f21abd28cdaf658",
+  "delivery_units": [
+    {
+      "branch_mode": "per-ticket",
+      "cleanup": false,
+      "completion": "none",
+      "dependency_mode": "combine",
+      "depends_on": [],
+      "id": "feature",
+      "merge_method": "squash",
+      "pr_ready": false,
+      "provider": "local",
+      "slice_refs": [
+        "slc_2170a7ac-3400-4156-90e9-75e3595fae38"
+      ]
+    }
+  ],
+  "implementation_changes": [
+    "Add the feature behind an existing module boundary."
+  ],
+  "plan_id": "pln_f5c86508-8c30-42c4-8713-bcbe3efd635f",
+  "qa_preparation_policy": {
+    "mode": "legacy",
+    "policyVersion": "qa-preparation-v1",
+    "wallTimeMs": [
+      600000,
+      1200000,
+      2400000,
+      3600000,
+      5400000
+    ]
+  },
+  "revision": 1,
+  "slices": [
+    {
+      "acceptance": [
+        "The feature works."
+      ],
+      "depends_on": [],
+      "likely_files": [
+        "src/feature.ts"
+      ],
+      "qa_preparation": {
+        "decisionId": "scripted-depth",
+        "level": 2,
+        "minimumLevel": 2,
+        "minimumReasons": [],
+        "plannerIdentity": "scripted-planner",
+        "plannerOperationId": "scripted-planner",
+        "policyVersion": "qa-preparation-v1",
+        "rationale": "Ordinary bounded fixture change",
+        "riskFactors": [],
+        "timestamp": "2026-01-01T00:00:00Z",
+        "version": 1
+      },
+      "required_tests": [
+        "Run the focused feature test."
+      ],
+      "slice_ref": "slc_2170a7ac-3400-4156-90e9-75e3595fae38",
+      "summary": "Implement the requested feature.",
+      "title": "Add feature"
+    }
+  ],
+  "stacks": [],
+  "summary": "Add a small safe feature.",
+  "test_plan": [
+    "Run the focused feature test."
+  ],
+  "version": 1
+}

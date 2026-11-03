@@ -1,0 +1,607 @@
+{
+  "version": 2,
+  "createdAt": "2026-11-03T02:10:05.877Z",
+  "updatedAt": "2026-11-03T02:10:15.762Z",
+  "repository": {
+    "rootIdentity": "5cba935a007fff5413500a4403aad54d0814e9dc324956c6d2b2fa7d34461e56",
+    "preInstallHead": "e70d5a76b40a997adf8800696ec948d6381578d5",
+    "initialBranch": "main",
+    "dirtyChoice": "clean",
+    "baselineComplete": true
+  },
+  "files": [
+    {
+      "path": ".agents/skills/better-sqlite3-rebuild/SKILL.md",
+      "sha256": "9b3ade0591c9b5141376a7f7aa3e4852e825e9f05653bddfe58ac673faf75e4d",
+      "mode": "generated",
+      "origin": "compile:skill:better-sqlite3-rebuild",
+      "category": "skills",
+      "installedSha256": "9b3ade0591c9b5141376a7f7aa3e4852e825e9f05653bddfe58ac673faf75e4d",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.072Z"
+    },
+    {
+      "path": ".agents/skills/grill-me/SKILL.md",
+      "sha256": "705b1ba8cce7a7fbb3c28fef4a718c5c89ad635f2832c1c14090e56c9c25dccd",
+      "mode": "generated",
+      "origin": "compile:skill:grill-me",
+      "category": "skills",
+      "installedSha256": "705b1ba8cce7a7fbb3c28fef4a718c5c89ad635f2832c1c14090e56c9c25dccd",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.077Z"
+    },
+    {
+      "path": ".agents/skills/handoff/SKILL.md",
+      "sha256": "f6e6ca6025bbb3c43cfa7550f7088e5c7982affdc90c3f5b6c1ce5751c3e4628",
+      "mode": "generated",
+      "origin": "compile:skill:handoff",
+      "category": "skills",
+      "installedSha256": "f6e6ca6025bbb3c43cfa7550f7088e5c7982affdc90c3f5b6c1ce5751c3e4628",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.083Z"
+    },
+    {
+      "path": ".agents/skills/implementor/SKILL.md",
+      "sha256": "492c44dd90535b12107a3832e7d5ecdd33195426a0d4bf4cf60596eaf6955a99",
+      "mode": "generated",
+      "origin": "compile:skill:implementor",
+      "category": "skills",
+      "installedSha256": "492c44dd90535b12107a3832e7d5ecdd33195426a0d4bf4cf60596eaf6955a99",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.089Z"
+    },
+    {
+      "path": ".agents/skills/improve-codebase-architecture/SKILL.md",
+      "sha256": "fad0c4195c5215a0b55acfa4ec08141a1a62ad7e9a2010bac44e0e823e81c8a4",
+      "mode": "generated",
+      "origin": "compile:skill:improve-codebase-architecture",
+      "category": "skills",
+      "installedSha256": "fad0c4195c5215a0b55acfa4ec08141a1a62ad7e9a2010bac44e0e823e81c8a4",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.096Z"
+    },
+    {
+      "path": ".agents/skills/prd-to-issues/SKILL.md",
+      "sha256": "2d78b4e975eebcf425828294e5cd2cc2dd1bcd1fa30f77ab21fec46a8733c002",
+      "mode": "generated",
+      "origin": "compile:skill:prd-to-issues",
+      "category": "skills",
+      "installedSha256": "2d78b4e975eebcf425828294e5cd2cc2dd1bcd1fa30f77ab21fec46a8733c002",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.102Z"
+    },
+    {
+      "path": ".agents/skills/rafi-graph/SKILL.md",
+      "sha256": "566a44cf0bf9652ffab6db95aec17229af209baca13e6b7b122439ab6ab73439",
+      "mode": "generated",
+      "origin": "compile:skill:rafi-graph",
+      "category": "skills",
+      "installedSha256": "566a44cf0bf9652ffab6db95aec17229af209baca13e6b7b122439ab6ab73439",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.067Z"
+    },
+    {
+      "path": ".agents/skills/tdd/SKILL.md",
+      "sha256": "366f283a46d178ebad03e0094fd0c200a9fe6e7540e22ba30a4f8e61a166e711",
+      "mode": "generated",
+      "origin": "compile:skill:tdd",
+      "category": "skills",
+      "installedSha256": "366f283a46d178ebad03e0094fd0c200a9fe6e7540e22ba30a4f8e61a166e711",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.109Z"
+    },
+    {
+      "path": ".agents/skills/write-a-prd/SKILL.md",
+      "sha256": "99b3e0e5deba3078d31f298bc9b691a261d676ec4c208d0c03acf0ca087407ad",
+      "mode": "generated",
+      "origin": "compile:skill:write-a-prd",
+      "category": "skills",
+      "installedSha256": "99b3e0e5deba3078d31f298bc9b691a261d676ec4c208d0c03acf0ca087407ad",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.116Z"
+    },
+    {
+      "path": ".codex/agents/builder.toml",
+      "sha256": "6ef32c91279c1fb18bb9060d9bdbcab612adfaaac7b43361e62afb34af0485f7",
+      "mode": "generated",
+      "origin": "compile:agent:builder",
+      "category": "agents",
+      "installedSha256": "6ef32c91279c1fb18bb9060d9bdbcab612adfaaac7b43361e62afb34af0485f7",
+      "lastRafiWriteAt": "2026-11-03T02:10:05.993Z"
+    },
+    {
+      "path": ".codex/agents/discovery.toml",
+      "sha256": "8206b138ba8fc6315cd7e89587337da82c9abb010148b8f0c775c7f71f0ce7e2",
+      "mode": "generated",
+      "origin": "compile:agent:discovery",
+      "category": "agents",
+      "installedSha256": "8206b138ba8fc6315cd7e89587337da82c9abb010148b8f0c775c7f71f0ce7e2",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.050Z"
+    },
+    {
+      "path": ".codex/agents/manager.toml",
+      "sha256": "1ed2ea742bc9d15e74f2e823df0fd44221a72f630cf855e9bafb3041e60214c7",
+      "mode": "generated",
+      "origin": "compile:agent:manager",
+      "category": "agents",
+      "installedSha256": "1ed2ea742bc9d15e74f2e823df0fd44221a72f630cf855e9bafb3041e60214c7",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.036Z"
+    },
+    {
+      "path": ".codex/agents/planner.toml",
+      "sha256": "422b560940d25679b0c91e4085e79ca2b554d48a101339762ccfc4f29eb81a06",
+      "mode": "generated",
+      "origin": "compile:agent:planner",
+      "category": "agents",
+      "installedSha256": "422b560940d25679b0c91e4085e79ca2b554d48a101339762ccfc4f29eb81a06",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.003Z"
+    },
+    {
+      "path": ".codex/agents/qa.toml",
+      "sha256": "31e342b561eb24c393cd423e4654c1d466f6f80c856d3edcd603cd01043a4fe0",
+      "mode": "generated",
+      "origin": "compile:agent:qa",
+      "category": "agents",
+      "installedSha256": "31e342b561eb24c393cd423e4654c1d466f6f80c856d3edcd603cd01043a4fe0",
+      "lastRafiWriteAt": "2026-11-03T02:10:05.997Z"
+    },
+    {
+      "path": ".codex/agents/ticket-maker.toml",
+      "sha256": "07235f5df558365a55a4ef99f3c57700bda4a400fdea3a23686f9b3a8fc36294",
+      "mode": "generated",
+      "origin": "compile:agent:ticket-maker",
+      "category": "agents",
+      "installedSha256": "07235f5df558365a55a4ef99f3c57700bda4a400fdea3a23686f9b3a8fc36294",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.013Z"
+    },
+    {
+      "path": ".codex/agents/uninstaller.toml",
+      "sha256": "71d2712b24b0c5075ba6a8efbc68564e53bf0c6c87394b23a5154a35ba0a3650",
+      "mode": "generated",
+      "origin": "compile:agent:uninstaller",
+      "category": "agents",
+      "installedSha256": "71d2712b24b0c5075ba6a8efbc68564e53bf0c6c87394b23a5154a35ba0a3650",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.024Z"
+    },
+    {
+      "path": ".rafi/compiled/builder/meta.json",
+      "sha256": "ba1ab465835a58a31d08df954a542783261bc2104de31a229d09b5a6edaf6dff",
+      "mode": "generated",
+      "origin": "compile:bundle:builder",
+      "category": "runtime-state",
+      "installedSha256": "ba1ab465835a58a31d08df954a542783261bc2104de31a229d09b5a6edaf6dff",
+      "lastRafiWriteAt": "2026-11-03T02:10:05.996Z"
+    },
+    {
+      "path": ".rafi/compiled/builder/system.md",
+      "sha256": "3a4c21e11ca44a295ebc0d839aed53979e2c9a68ba8e2c8e45ddeb6ae3d33ce5",
+      "mode": "generated",
+      "origin": "compile:bundle:builder",
+      "category": "runtime-state",
+      "installedSha256": "3a4c21e11ca44a295ebc0d839aed53979e2c9a68ba8e2c8e45ddeb6ae3d33ce5",
+      "lastRafiWriteAt": "2026-11-03T02:10:05.994Z"
+    },
+    {
+      "path": ".rafi/compiled/discovery/meta.json",
+      "sha256": "4bc536270161d29829d34656eb9f58ff90703c8145f642782bb33cc9bd322d54",
+      "mode": "generated",
+      "origin": "compile:bundle:discovery",
+      "category": "runtime-state",
+      "installedSha256": "4bc536270161d29829d34656eb9f58ff90703c8145f642782bb33cc9bd322d54",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.060Z"
+    },
+    {
+      "path": ".rafi/compiled/discovery/system.md",
+      "sha256": "58ff6da8ece323c32c0d0973f9739fb81427a8652eba5e5464696beac3bda252",
+      "mode": "generated",
+      "origin": "compile:bundle:discovery",
+      "category": "runtime-state",
+      "installedSha256": "58ff6da8ece323c32c0d0973f9739fb81427a8652eba5e5464696beac3bda252",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.055Z"
+    },
+    {
+      "path": ".rafi/compiled/manager/meta.json",
+      "sha256": "4bc536270161d29829d34656eb9f58ff90703c8145f642782bb33cc9bd322d54",
+      "mode": "generated",
+      "origin": "compile:bundle:manager",
+      "category": "runtime-state",
+      "installedSha256": "4bc536270161d29829d34656eb9f58ff90703c8145f642782bb33cc9bd322d54",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.044Z"
+    },
+    {
+      "path": ".rafi/compiled/manager/system.md",
+      "sha256": "87741ff97b5e6e556190a06f5ee2f7ee3c8d8777495240f2dc9239e9bd955897",
+      "mode": "generated",
+      "origin": "compile:bundle:manager",
+      "category": "runtime-state",
+      "installedSha256": "87741ff97b5e6e556190a06f5ee2f7ee3c8d8777495240f2dc9239e9bd955897",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.040Z"
+    },
+    {
+      "path": ".rafi/compiled/planner/meta.json",
+      "sha256": "1d2575a82547ea2b71d699386bd625e03d88a05fd2891211c66cee4d87281aa0",
+      "mode": "generated",
+      "origin": "compile:bundle:planner",
+      "category": "runtime-state",
+      "installedSha256": "1d2575a82547ea2b71d699386bd625e03d88a05fd2891211c66cee4d87281aa0",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.009Z"
+    },
+    {
+      "path": ".rafi/compiled/planner/system.md",
+      "sha256": "8bc5e585f5c57b6a5738ebeddf69cee4964398fee1953b359e4e2996abd88485",
+      "mode": "generated",
+      "origin": "compile:bundle:planner",
+      "category": "runtime-state",
+      "installedSha256": "8bc5e585f5c57b6a5738ebeddf69cee4964398fee1953b359e4e2996abd88485",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.005Z"
+    },
+    {
+      "path": ".rafi/compiled/qa/meta.json",
+      "sha256": "1ba9b398c13935bbd099f770954ea81c800430d5692a0a9b23908f07e56cb088",
+      "mode": "generated",
+      "origin": "compile:bundle:qa",
+      "category": "runtime-state",
+      "installedSha256": "1ba9b398c13935bbd099f770954ea81c800430d5692a0a9b23908f07e56cb088",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.001Z"
+    },
+    {
+      "path": ".rafi/compiled/qa/system.md",
+      "sha256": "9591294e3c7637fd335ed30bd6e0ece1ededab0b82f8cc07ea8e23ed46ce9c7d",
+      "mode": "generated",
+      "origin": "compile:bundle:qa",
+      "category": "runtime-state",
+      "installedSha256": "9591294e3c7637fd335ed30bd6e0ece1ededab0b82f8cc07ea8e23ed46ce9c7d",
+      "lastRafiWriteAt": "2026-11-03T02:10:05.999Z"
+    },
+    {
+      "path": ".rafi/compiled/ticket-maker/meta.json",
+      "sha256": "4bc536270161d29829d34656eb9f58ff90703c8145f642782bb33cc9bd322d54",
+      "mode": "generated",
+      "origin": "compile:bundle:ticket-maker",
+      "category": "runtime-state",
+      "installedSha256": "4bc536270161d29829d34656eb9f58ff90703c8145f642782bb33cc9bd322d54",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.020Z"
+    },
+    {
+      "path": ".rafi/compiled/ticket-maker/system.md",
+      "sha256": "3b4c0c39d4a5fcb4c68cecd94f4aa3cdc6e79c753bb3a0afedd5643aded29bfa",
+      "mode": "generated",
+      "origin": "compile:bundle:ticket-maker",
+      "category": "runtime-state",
+      "installedSha256": "3b4c0c39d4a5fcb4c68cecd94f4aa3cdc6e79c753bb3a0afedd5643aded29bfa",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.016Z"
+    },
+    {
+      "path": ".rafi/compiled/uninstaller/meta.json",
+      "sha256": "4bc536270161d29829d34656eb9f58ff90703c8145f642782bb33cc9bd322d54",
+      "mode": "generated",
+      "origin": "compile:bundle:uninstaller",
+      "category": "runtime-state",
+      "installedSha256": "4bc536270161d29829d34656eb9f58ff90703c8145f642782bb33cc9bd322d54",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.031Z"
+    },
+    {
+      "path": ".rafi/compiled/uninstaller/system.md",
+      "sha256": "1f40c811a850e386e49d1b706cfecce4916029def3d33779b8003e2f233faa6a",
+      "mode": "generated",
+      "origin": "compile:bundle:uninstaller",
+      "category": "runtime-state",
+      "installedSha256": "1f40c811a850e386e49d1b706cfecce4916029def3d33779b8003e2f233faa6a",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.027Z"
+    },
+    {
+      "path": ".tickets/.gitignore",
+      "sha256": "addb84df214f284c3ac1fda1ec7159736a1d513cd40b12cee637cefe13f21638",
+      "mode": "generated",
+      "origin": "tickets:populate",
+      "category": "tickets",
+      "installedSha256": "addb84df214f284c3ac1fda1ec7159736a1d513cd40b12cee637cefe13f21638",
+      "lastRafiWriteAt": "2026-11-03T02:10:15.745Z"
+    },
+    {
+      "path": ".tickets/config.yaml",
+      "sha256": "cb9deda8e47bbcef19028aa65934079ee2d8260d03ab8011eec627eb71d21dac",
+      "mode": "generated",
+      "origin": "tickets:populate",
+      "category": "tickets",
+      "installedSha256": "cb9deda8e47bbcef19028aa65934079ee2d8260d03ab8011eec627eb71d21dac",
+      "lastRafiWriteAt": "2026-11-03T02:10:15.633Z"
+    },
+    {
+      "path": ".tickets/delivery.yaml",
+      "sha256": "ef6bebcaf3f65377bec4ebc9dceb46c27996de099d576f89eb157e5921fb67a1",
+      "mode": "generated",
+      "origin": "tickets:populate",
+      "category": "tickets",
+      "installedSha256": "ef6bebcaf3f65377bec4ebc9dceb46c27996de099d576f89eb157e5921fb67a1",
+      "lastRafiWriteAt": "2026-11-03T02:10:15.670Z"
+    },
+    {
+      "path": ".tickets/migrations/001_init.sql",
+      "sha256": "fe0e8f4ee50fde070368af3f3cd9c903d05979d3edb26226812ff52d00eb12d2",
+      "mode": "generated",
+      "origin": "tickets:populate",
+      "category": "tickets",
+      "installedSha256": "fe0e8f4ee50fde070368af3f3cd9c903d05979d3edb26226812ff52d00eb12d2",
+      "lastRafiWriteAt": "2026-11-03T02:10:15.725Z"
+    },
+    {
+      "path": ".tickets/schema/tickets.schema.json",
+      "sha256": "cf6ee14324a2f0eb4beca65709158b3344d0d38e8083488e570ee08329550a2c",
+      "mode": "generated",
+      "origin": "tickets:populate",
+      "category": "tickets",
+      "installedSha256": "cf6ee14324a2f0eb4beca65709158b3344d0d38e8083488e570ee08329550a2c",
+      "lastRafiWriteAt": "2026-11-03T02:10:15.707Z"
+    },
+    {
+      "path": ".tickets/tickets.yaml",
+      "sha256": "d3840a58bf5222f3cfe520973ced3590bee82189aec0fe5333f9c0ab5e2eaaa4",
+      "mode": "generated",
+      "origin": "tickets:populate",
+      "category": "tickets",
+      "installedSha256": "d3840a58bf5222f3cfe520973ced3590bee82189aec0fe5333f9c0ab5e2eaaa4",
+      "lastRafiWriteAt": "2026-11-03T02:10:15.651Z"
+    },
+    {
+      "path": ".tickets/tracker-rules.md",
+      "sha256": "913a7494ffad33c7ce95b9db057164d4bf941522dc3a57bbb2906c07db2e7ff8",
+      "mode": "generated",
+      "origin": "tickets:populate",
+      "category": "tickets",
+      "installedSha256": "913a7494ffad33c7ce95b9db057164d4bf941522dc3a57bbb2906c07db2e7ff8",
+      "lastRafiWriteAt": "2026-11-03T02:10:15.689Z"
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "87cb87b111e50c93b146790e3fa7022de68fd81ba2c28634e8813d54ed9fb79f",
+      "mode": "created",
+      "origin": "compile:root:codex",
+      "category": "rules",
+      "preimageSha256": null,
+      "installedSha256": "87cb87b111e50c93b146790e3fa7022de68fd81ba2c28634e8813d54ed9fb79f",
+      "lastRafiWriteAt": "2026-11-03T02:10:05.937Z"
+    },
+    {
+      "path": "docs/admins.md",
+      "sha256": "aeaf00fa070e26e8541c615527397c96f1dd8dd7c84da8117665e29320e8bb47",
+      "mode": "created",
+      "origin": "docs:admins.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "aeaf00fa070e26e8541c615527397c96f1dd8dd7c84da8117665e29320e8bb47",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.186Z"
+    },
+    {
+      "path": "docs/ai-costs.md",
+      "sha256": "28a0aa0e355a5325a6d7d18dee4588ad2fb301b7412109c788fb7a2ef0514a17",
+      "mode": "created",
+      "origin": "docs:ai-costs.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "28a0aa0e355a5325a6d7d18dee4588ad2fb301b7412109c788fb7a2ef0514a17",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.352Z"
+    },
+    {
+      "path": "docs/ai-evals.md",
+      "sha256": "5e172b04047abdd8dd5050264a57dfeb8baed4916b1e33175333aa7522849ab7",
+      "mode": "created",
+      "origin": "docs:ai-evals.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "5e172b04047abdd8dd5050264a57dfeb8baed4916b1e33175333aa7522849ab7",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.338Z"
+    },
+    {
+      "path": "docs/ai.md",
+      "sha256": "aa3fddfb3432c551b2f9a022b9a503336fe08dbedac34dbe72bc910c29a8ef64",
+      "mode": "created",
+      "origin": "docs:ai.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "aa3fddfb3432c551b2f9a022b9a503336fe08dbedac34dbe72bc910c29a8ef64",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.325Z"
+    },
+    {
+      "path": "docs/api.md",
+      "sha256": "e4acc65e4631d27d770b9bce811b9d8ca2de2be59a448ad2e16e66280c7f4d96",
+      "mode": "created",
+      "origin": "docs:api.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "e4acc65e4631d27d770b9bce811b9d8ca2de2be59a448ad2e16e66280c7f4d96",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.163Z"
+    },
+    {
+      "path": "docs/architecture.md",
+      "sha256": "c2d8b1b07599d496ed520ff2948c82cfae06674819eb7e9fd69462bc0f22fa90",
+      "mode": "created",
+      "origin": "docs:architecture.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "c2d8b1b07599d496ed520ff2948c82cfae06674819eb7e9fd69462bc0f22fa90",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.139Z"
+    },
+    {
+      "path": "docs/business.md",
+      "sha256": "bc27c49fe51a8a7b5794dd22fca93d1b36565debdb1632cb766a647e7f916c72",
+      "mode": "created",
+      "origin": "docs:business.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "bc27c49fe51a8a7b5794dd22fca93d1b36565debdb1632cb766a647e7f916c72",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.198Z"
+    },
+    {
+      "path": "docs/data-governance.md",
+      "sha256": "6cb2bafdb8c59893a3c751f8f9ef7355ff038eeb5a41806ada92309cc4ee184f",
+      "mode": "created",
+      "origin": "docs:data-governance.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "6cb2bafdb8c59893a3c751f8f9ef7355ff038eeb5a41806ada92309cc4ee184f",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.234Z"
+    },
+    {
+      "path": "docs/decisions/0000-template.md",
+      "sha256": "4e6d21b0cd372a7a82bc97d93a2dc5de5336b49169e93eb1f1322bd1b18ca6ae",
+      "mode": "created",
+      "origin": "docs:decisions/0000-template.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "4e6d21b0cd372a7a82bc97d93a2dc5de5336b49169e93eb1f1322bd1b18ca6ae",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.311Z"
+    },
+    {
+      "path": "docs/decisions/README.md",
+      "sha256": "3d5ad4eaf109055863e9a4c0394e17a335e362827e58d7ec5e57473b956fdcc2",
+      "mode": "created",
+      "origin": "docs:decisions/README.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "3d5ad4eaf109055863e9a4c0394e17a335e362827e58d7ec5e57473b956fdcc2",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.298Z"
+    },
+    {
+      "path": "docs/features.md",
+      "sha256": "b9ba7b831df54a7d404d50ff268a6dea2c50b17dc063b1b9a25f146645637f82",
+      "mode": "created",
+      "origin": "docs:features.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "b9ba7b831df54a7d404d50ff268a6dea2c50b17dc063b1b9a25f146645637f82",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.152Z"
+    },
+    {
+      "path": "docs/local-cloud.md",
+      "sha256": "62bd855f56aa30e7634d855d677a55a8ab63a150156ce1b0e4464b2baeede3c5",
+      "mode": "created",
+      "origin": "docs:local-cloud.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "62bd855f56aa30e7634d855d677a55a8ab63a150156ce1b0e4464b2baeede3c5",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.246Z"
+    },
+    {
+      "path": "docs/operations.md",
+      "sha256": "40e6366c24717a96f90b351a000e780ae6b98ebcf51ae223ad98a1678d8383b2",
+      "mode": "created",
+      "origin": "docs:operations.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "40e6366c24717a96f90b351a000e780ae6b98ebcf51ae223ad98a1678d8383b2",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.210Z"
+    },
+    {
+      "path": "docs/rafi-plan.json",
+      "sha256": "d98bb2d2cc32196823cb29923073a8bb368e7a58848bc9bdf730aea0c6297ada",
+      "mode": "created",
+      "origin": "structured-plan",
+      "category": "plans",
+      "preimageSha256": null,
+      "installedSha256": "d98bb2d2cc32196823cb29923073a8bb368e7a58848bc9bdf730aea0c6297ada",
+      "lastRafiWriteAt": "2026-11-03T02:10:10.217Z"
+    },
+    {
+      "path": "docs/rafi-plan.md",
+      "sha256": "3fc97f445336fc4991fd5f03b67487c21add2345e753339a46f3f9b0e1322097",
+      "mode": "created",
+      "origin": "structured-plan",
+      "category": "plans",
+      "preimageSha256": null,
+      "installedSha256": "3fc97f445336fc4991fd5f03b67487c21add2345e753339a46f3f9b0e1322097",
+      "lastRafiWriteAt": "2026-11-03T02:10:10.194Z"
+    },
+    {
+      "path": "docs/rafi-plans/pln_f5c86508-8c30-42c4-8713-bcbe3efd635f-r1.json",
+      "sha256": "d98bb2d2cc32196823cb29923073a8bb368e7a58848bc9bdf730aea0c6297ada",
+      "mode": "created",
+      "origin": "structured-plan",
+      "category": "plans",
+      "preimageSha256": null,
+      "installedSha256": "d98bb2d2cc32196823cb29923073a8bb368e7a58848bc9bdf730aea0c6297ada",
+      "lastRafiWriteAt": "2026-11-03T02:10:10.181Z"
+    },
+    {
+      "path": "docs/rafi-plans/pln_f5c86508-8c30-42c4-8713-bcbe3efd635f-r1.md",
+      "sha256": "3fc97f445336fc4991fd5f03b67487c21add2345e753339a46f3f9b0e1322097",
+      "mode": "created",
+      "origin": "structured-plan",
+      "category": "plans",
+      "preimageSha256": null,
+      "installedSha256": "3fc97f445336fc4991fd5f03b67487c21add2345e753339a46f3f9b0e1322097",
+      "lastRafiWriteAt": "2026-11-03T02:10:10.167Z"
+    },
+    {
+      "path": "docs/README.md",
+      "sha256": "b064814c600afc184b947b2f7c3f651a69ba0bc49ecddc8b995cca4297a89479",
+      "mode": "created",
+      "origin": "docs:README.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "b064814c600afc184b947b2f7c3f651a69ba0bc49ecddc8b995cca4297a89479",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.128Z"
+    },
+    {
+      "path": "docs/release-checklist.md",
+      "sha256": "e74b4071430a4fab8d69d1e4b6432511d1919e8c5df0c3827df99fad378cf76d",
+      "mode": "created",
+      "origin": "docs:release-checklist.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "e74b4071430a4fab8d69d1e4b6432511d1919e8c5df0c3827df99fad378cf76d",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.284Z"
+    },
+    {
+      "path": "docs/scalability.md",
+      "sha256": "1eed010be8177c2a7ce18286dc3181e063c398a572bfee59e08267b3753fdcba",
+      "mode": "created",
+      "origin": "docs:scalability.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "1eed010be8177c2a7ce18286dc3181e063c398a572bfee59e08267b3753fdcba",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.259Z"
+    },
+    {
+      "path": "docs/security.md",
+      "sha256": "c7f244be7b9a9f946d3f2976c99f477481d1bcf644d7c8bfbf972487e143b05c",
+      "mode": "created",
+      "origin": "docs:security.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "c7f244be7b9a9f946d3f2976c99f477481d1bcf644d7c8bfbf972487e143b05c",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.221Z"
+    },
+    {
+      "path": "docs/ticket-progress.md",
+      "sha256": "05abbef9d5758559dd2653c5144bc7d628b1b8ff2b466aa05b3385fe1937eb55",
+      "mode": "generated",
+      "origin": "tickets:populate",
+      "category": "tickets",
+      "installedSha256": "05abbef9d5758559dd2653c5144bc7d628b1b8ff2b466aa05b3385fe1937eb55",
+      "lastRafiWriteAt": "2026-11-03T02:10:15.762Z"
+    },
+    {
+      "path": "docs/tickets.md",
+      "sha256": "c58310863121fc31226ade63f9f1af9f0902edc6908966519157ad1cd8626caa",
+      "mode": "created",
+      "origin": "docs:tickets.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "c58310863121fc31226ade63f9f1af9f0902edc6908966519157ad1cd8626caa",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.271Z"
+    },
+    {
+      "path": "docs/users.md",
+      "sha256": "aa05a884374deeaf746d6b5332ce59f1b6987a260245b8d534dd28ba723207b1",
+      "mode": "created",
+      "origin": "docs:users.md",
+      "category": "documentation-created",
+      "preimageSha256": null,
+      "installedSha256": "aa05a884374deeaf746d6b5332ce59f1b6987a260245b8d534dd28ba723207b1",
+      "lastRafiWriteAt": "2026-11-03T02:10:06.175Z"
+    },
+    {
+      "path": "rafi-config.yaml",
+      "sha256": "483b48c150803aa03615cd980c59667322a67042d569a25fbd3a367ac0b15ca4",
+      "mode": "created",
+      "origin": "configuration",
+      "category": "config",
+      "preimageSha256": null,
+      "installedSha256": "483b48c150803aa03615cd980c59667322a67042d569a25fbd3a367ac0b15ca4",
+      "lastRafiWriteAt": "2026-11-03T02:10:10.237Z"
+    }
+  ],
+  "dependencies": []
+}

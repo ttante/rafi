@@ -1,0 +1,17 @@
+version: 1
+plan:
+  plan_id: pln_33ee2404-678d-4dc7-b7cd-48978ba0fa60
+  revision: 1
+units:
+  - id: feature
+    tickets:
+      - T001
+    branch_mode: per-ticket
+    completion: none
+    provider: local
+    pr_ready: false
+    merge_method: squash
+    cleanup: false
+    depends_on: []
+    dependency_mode: combine
+stacks: []

@@ -1,0 +1,38 @@
+tickets:
+  - qa_preparation:
+      decisionId: scripted-depth
+      level: 2
+      minimumLevel: 2
+      minimumReasons: []
+      plannerIdentity: scripted-planner
+      plannerOperationId: scripted-planner
+      policyVersion: qa-preparation-v1
+      rationale: Ordinary bounded fixture change
+      riskFactors: []
+      timestamp: 2026-01-01T00:00:00Z
+      version: 1
+    id: T001
+    order: 0
+    title: Add feature
+    area: feature
+    priority: P1
+    size: S
+    risk: Medium
+    depends_on: []
+    summary: Implement the requested feature.
+    acceptance:
+      - The feature works.
+    required_tests:
+      - Run the focused feature test.
+    likely_files:
+      - src/feature.ts
+    documentation:
+      required: false
+      targets: []
+      criteria: []
+    rollback: Disable the feature path, restore the previous behavior, and verify the focused test passes.
+    notes: null
+    plan_ref:
+      plan_id: pln_f5c86508-8c30-42c4-8713-bcbe3efd635f
+      revision: 1
+      slice_ref: slc_2170a7ac-3400-4156-90e9-75e3595fae38

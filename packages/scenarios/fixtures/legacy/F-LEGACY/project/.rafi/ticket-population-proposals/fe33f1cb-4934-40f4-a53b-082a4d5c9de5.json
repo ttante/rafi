@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "approved_plan": {
+    "path": "docs/rafi-plan.json",
+    "plan_id": "pln_f5c86508-8c30-42c4-8713-bcbe3efd635f",
+    "revision": 1
+  },
+  "proposal": {
+    "version": 1,
+    "plan_id": "pln_f5c86508-8c30-42c4-8713-bcbe3efd635f",
+    "revision": 1,
+    "tickets": [
+      {
+        "slice_ref": "slc_2170a7ac-3400-4156-90e9-75e3595fae38",
+        "title": "Add feature",
+        "area": "feature",
+        "priority": "P1",
+        "size": "S",
+        "risk": "Medium",
+        "summary": "Implement the requested feature.",
+        "acceptance": [
+          "The feature works."
+        ],
+        "required_tests": [
+          "Run the focused feature test."
+        ],
+        "likely_files": [
+          "src/feature.ts"
+        ],
+        "depends_on": [],
+        "rollback": "Disable the feature path, restore the previous behavior, and verify the focused test passes.",
+        "notes": null
+      }
+    ],
+    "retirements": []
+  }
+}

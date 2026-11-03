@@ -1,0 +1,24 @@
+app_name: legacy-fixture
+implementation_limit: 500
+view_limit: 20000
+timezone: UTC
+timestamp_format: iso8601_offset
+paths:
+  tickets: .tickets/tickets.yaml
+  state_db: .tickets/ticket-state.sqlite
+  tracker_rules: .tickets/tracker-rules.md
+  progress_doc: docs/ticket-progress.md
+  archive_doc: docs/ticket-archive.md
+rendering:
+  preserve_legacy_llm_queue_heading: true
+  include_rules_in_progress_doc: true
+  max_work_log_rows: 50
+  max_validation_snapshot_rows: 20
+  max_recent_completed_rows: 20
+  generated_doc_warning: true
+behavior:
+  regenerate_progress_doc_after_every_update: true
+  require_validation_evidence_for_done: true
+  block_on_unresolved_dependencies: true
+  use_atomic_file_writes: true
+  backup_before_import_or_migration: true
