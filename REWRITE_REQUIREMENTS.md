@@ -1,6 +1,6 @@
 # Rewrite requirements
 
-Status: **reviewed** (guide step 2, 2026-11-01): all open questions decided (section 9.0). Independent review (step 3) and the scenario review (step 5) are applied. Next: the architecture plan (guide step 7). Updated 2026-11-01 with the step 5 scenario review's decisions D2–D6, a correction to PRM-G2 and OUT-42, and D8, dropping the 0.10.2 baseline (section 9.0). Written 2026-11-01 against `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2, branch `feature/rewrite` at `f40f417`. Updated 2026-11-02 with the architecture decisions (9.0, ARCH-1–11), the tests and CI section (8.24) and the step 8 architecture review's fixes.
+Status: **reviewed** (guide step 2, 2026-11-01): all open questions decided (section 9.0). Independent review (step 3) and the scenario review (step 5) are applied. Next: the architecture plan (guide step 7). Updated 2026-11-01 with the step 5 scenario review's decisions D2–D6, a correction to PRM-G2 and OUT-42, and D8, dropping the 0.10.2 baseline (section 9.0). Written 2026-11-01 against `@rafi-ai/cli` 0.10.2 / ai-foreman 2.0.2, branch `feature/rewrite` at `f40f417`. Updated 2026-11-02 with the architecture decisions (9.0, ARCH-1–12), the tests and CI section (8.24) and the step 8 architecture review's fixes.
 Related: `AI_FOREMAN_REWRITE.md` (the why and the decisions), `AI_FOREMAN_REWRITE_PLANNING_GUIDE.md` (step 1 asks for this doc), `GUI_PRODUCT_REQUIREMENTS.md`.
 
 This is the contract for the rewrite. It lists every user-visible behavior of rafi today and says whether the new engine keeps it, changes it, or drops it. Section 8 adds the new behavior the rewrite must build. Section 9 lists the open questions.
@@ -1050,9 +1050,19 @@ Decided 2026-11-02 in the architecture review (ARCH-5; `REWRITE_ARCHITECTURE.md`
 | NEW-CHK-17 | Rafi-owned tickets (CI fix tickets, re-check fix tickets): you're told once (terminal, notification, summary) and never asked; they aren't plan updates, write no plan revision and stay out of the scope fingerprint; they don't count toward `--steps` and aren't limited by `--to-ticket`. One that runs out of fixes is left open with no question | ARCH-11 |
 | NEW-CHK-18 | Codex sessions reach `run_check` and `check_output` through a local-only HTTP MCP endpoint the engine serves (127.0.0.1, a per-session token); Claude sessions get them in-process. No second rafi process and no experimental Codex API | ARCH-9 |
 
+### 8.25 Security and Windows
+
+Decided 2026-11-02 (ARCH-12; `REWRITE_ARCHITECTURE.md` 1.2).
+
+| ID | Requirement | Source |
+|---|---|---|
+| NEW-SEC-1 | Agents can't act outside their ticket or through rafi: no writing rafi's state, no commands outside `run_check`'s allowlist, no network beyond the grants, no code changes from QA's test runs, no calls to rafi's endpoint without the session's token. Untrusted data never becomes instructions, and secrets are redacted everywhere they're stored or shown | ARCH-12 |
+| NEW-SEC-2 | Security is built from the start: the architecture has a threat model; every milestone's done checks include security tests for what it adds; one full security review comes before release | ARCH-12 |
+| NEW-SEC-3 | Windows-safe code from the start (paths through Node's `path`, commands spawned without shell strings, no bash-only commands inside rafi), and the fast suite also runs on Windows. Windows itself is supported later, with the GUI | ARCH-12 |
+
 ## 9. Open questions
 
-### 9.0 Decided in review (2026-11-01; architecture decisions ARCH-1–11, 2026-11-02)
+### 9.0 Decided in review (2026-11-01; architecture decisions ARCH-1–12, 2026-11-02)
 
 | ID | Decision |
 |---|---|
@@ -1087,6 +1097,7 @@ Decided 2026-11-02 in the architecture review (ARCH-5; `REWRITE_ARCHITECTURE.md`
 | ARCH-9 | (Step 8 review.) Codex reaches rafi's test tools through a local-only HTTP MCP endpoint the engine serves (NEW-CHK-18). |
 | ARCH-10 | (Step 8 review.) With QA off, the check step runs the ticket's required and related tests. After any failure the builder gets every detail, by reference where long, and is told to keep its work and not start over (NEW-CHK-15, NEW-CHK-16). |
 | ARCH-11 | (Step 8 review.) Rafi-owned fix tickets are told once, never asked, aren't plan updates and don't count toward `--steps` (NEW-CHK-17). |
+| ARCH-12 | (User, 2026-11-02.) Security from the start: a threat model in the architecture (1.2), security tests in every milestone's done checks with the main pass in M2, and a full review before release. Code is kept Windows-safe and the fast suite runs on Windows, though Windows is supported later (NEW-SEC-1–3). |
 
 **Every other question in 9.1 is decided as recommended** (accepted 2026-11-01). Where a row in 9.1 and this table differ, this table wins.
 

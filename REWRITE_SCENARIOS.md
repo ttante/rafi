@@ -6,7 +6,7 @@ Inputs: `REWRITE_REQUIREMENTS.md` (status reviewed; section 9.0 wins over older 
 
 This doc lists the whole-build scenarios the new engine must pass, the design of the fake-agent harness that runs them through the real `rafi` command, and a table that maps every requirement in `REWRITE_REQUIREMENTS.md` sections 2–8 to a scenario. Nothing here is implemented yet.
 
-In numbers: 121 scenarios (41 whole-build, 14 past-bug, 40 from the decided sections, 26 command and engine-wide); 616 of the 628 requirement IDs covered and 12 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
+In numbers: 121 scenarios (41 whole-build, 14 past-bug, 40 from the decided sections, 26 command and engine-wide); 617 of the 631 requirement IDs covered and 14 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
 
 | Section | Contents |
 |---|---|
@@ -351,6 +351,7 @@ The fake records every request it gets in a transcript: role, ticket, step, sess
 - **Expected:**
   - Step 1 asks nothing about internet or local servers. The builder and QA sessions for `T2` have internet; rafi's `run_check` run of `T4`'s test binds loopback and writes its temp file, and passes; QA's session stays read-only.
   - Step 2 exits 1, naming the valid values (`internet`, `local-servers`, `installs`, `services`, per Q-FLAG-2).
+  - On a runtime whose sandbox can't allow local servers without internet, `local-servers` alone isn't granted silently: the upfront item says local servers need internet access there and offers Grant internet access, I'll run it myself then resume, or Skip for now.
   - Step 3's resumed build has internet without asking.
 
 ### 3.5 Malformed replies
@@ -1564,10 +1565,10 @@ The baseline against 0.10.2 is dropped (D8). Two past bugs were never confirmed 
 
 ## 10. Coverage
 
-Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (628 IDs), with the scenarios that check it. It was generated from the **Covers** lines above; once the harness exists (milestone 1, guide step 10), the coverage ledger (7.9) regenerates it from the scenario files.
+Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (631 IDs), with the scenarios that check it. It was generated from the **Covers** lines above; once the harness exists (milestone 1, guide step 10), the coverage ledger (7.9) regenerates it from the scenario files.
 
-- 616 IDs are covered by at least one scenario.
-- 12 are marked **not scenario-testable**, each with its reason: NEW-ENG-8, NEW-MAL-9, NEW-CAU-2, NEW-GUI-7, NEW-ADP-1, NEW-HAR-1, NEW-HAR-2, NEW-HAR-3, NEW-HAR-4, NEW-INS-6, NEW-INS-8, GUI-R2.
+- 617 IDs are covered by at least one scenario.
+- 14 are marked **not scenario-testable**, each with its reason: NEW-ENG-8, NEW-MAL-9, NEW-CAU-2, NEW-GUI-7, NEW-ADP-1, NEW-HAR-1, NEW-HAR-2, NEW-HAR-3, NEW-HAR-4, NEW-INS-6, NEW-INS-8, GUI-R2, NEW-SEC-2, NEW-SEC-3.
 - A few covered IDs are only partly scenario-testable; the Note column says which part is checked elsewhere.
 - "Drop" items are covered by S-CLI-2, which checks they're gone.
 
@@ -2238,6 +2239,9 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (628 IDs), with
 | NEW-CHK-16 | S-CHK-10 |  |
 | NEW-CHK-17 | S-CHK-6 |  |
 | NEW-CHK-18 | S-CHK-9 |  |
+| NEW-SEC-1 | S-CHK-9, S-NOT-1, S-TOOL-5, S-ENG-7 | The full list of threats is reviewed at each milestone (architecture 1.2). |
+| NEW-SEC-2 | **not scenario-testable** | A process rule: security checks in each milestone and a review before release. |
+| NEW-SEC-3 | **not scenario-testable** | Code rules checked by `scripts/check-rules.mjs` and the fast suite run on Windows, not by playing out a build. |
 
 ## 11. Decisions
 

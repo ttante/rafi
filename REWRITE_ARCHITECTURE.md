@@ -16,7 +16,7 @@ Nothing here reopens a decided item. Where REQ or SCN left a detail to this plan
 
 | Section | Contents |
 |---|---|
-| 1 | The shape in one page; how it avoids the bad patterns |
+| 1 | The shape in one page; how it avoids the bad patterns; the security model |
 | 2 | Packages, modules and size budgets |
 | 3 | The event log: tables, event types, versioning, derived state, the progress file |
 | 4 | State machines: ticket, build, project; what the loop does next; safe points |
@@ -69,6 +69,24 @@ Each row is one of the 11 patterns in RW "The bad patterns".
 | 9 | CLI launching CLI | `runCli(argv, deps)` in one process. `--detach` starts one ordinary `rafi` with your own arguments (8.7). |
 | 10 | Tests check pieces | Scenarios drive the real command in-process with fakes at the edges, including a crash at every boundary (section 14, SCN section 7). |
 | 11 | Fixes cluster in the same files | The loop is one ~400-line file; each step, the turn runner, questions and the log are separate modules with one job each. |
+
+### 1.2 Security model (decided 2026-11-02, REQ ARCH-12)
+
+Security is built in from M1, not added at the end. Every milestone's done checks include security tests for what it adds (14.1), and one full review comes before release (M10).
+
+**What's protected:** your code (files outside a ticket, uncommitted work), your secrets (environment variables, tokens, credentials), your machine (network, files outside the project, other processes), and rafi's own records (the event log, questions and answers, grants).
+
+| Threat | Example | How it's blocked |
+|---|---|---|
+| An agent acts outside its ticket | Edits a protected file; runs `rafi answer` to approve its own work | The agent permission policy refuses it (7.6, 11.3); agents never write rafi's state |
+| An agent runs commands through rafi | Passes `curl …` or `rm -rf` to `run_check` | `run_check`'s allowlist, the permission policy, and an OS sandbox matching the build's grants (6.9) |
+| QA changes code | A QA test run edits a tracked file | Tracked files are put back after QA's runs (6.9); QA's session is read-only |
+| Network beyond what you granted | A test or agent reaches the internet when only local servers were allowed | Grants mapped onto each runtime's sandbox and rafi's own (7.11); a runtime that can't separate them says so up front |
+| Another program calls rafi's endpoint | A local process sends `run_check` requests | 127.0.0.1 only, a random port, a per-session token, closed when the session ends (6.9) |
+| Instructions hidden in data | Tool output, repo files or test output saying "ignore previous instructions" | Untrusted data reaches agents only as quoted content and can't change rafi's records (10.3, S-ENG-7) |
+| Secrets leak | A token in activity, a log, an export or a notification | One `redact()` on write (3.3); credentials are named, never stored (7.2); detailed capture is marked sensitive (3.4 H) |
+| Damaged or hostile files | A broken `tickets.yaml`, a corrupt progress file, an imported log | Validated on read; imported events are never folded (3.6); a damaged progress file is rewritten from the database (3.7) |
+| Supply chain | A tool or MCP server changes under you | Tool entries pin the versions rafi tested (10.3); `rafi doctor` checks provider versions (11.4) |
 
 ## 2. Packages, modules and size budgets
 
@@ -156,7 +174,8 @@ One script, `scripts/check-rules.mjs`, uses the TypeScript compiler API and fail
 - engine code outside `deps/real/` uses `Date.now`, `new Date()` with no argument, `setTimeout`, `setInterval`, `process.env`, `process.exit`, `process.argv`, `process.stdin`/`stdout`/`stderr`, `node:fs`, `node:child_process`, or opens a database (SCN 7.2, NEW-QAM-6);
 - engine code has module-level mutable state (`let` or a mutable object at module scope), so nothing leaks between `runCli` calls in one process (SCN 7.2);
 - a migration contains `CREATE TRIGGER` (NEW-ENG-8);
-- `engine` imports `ai-foreman`, or `state/` imports anything but types (the state functions stay pure).
+- `engine` imports `ai-foreman`, or `state/` imports anything but types (the state functions stay pure);
+- **Windows-safe** (for later Windows support): paths built with Node's `path`, never joined with `/` by hand; no shell strings (commands are spawned with argument arrays); no bash-only commands inside rafi itself (the project's `scripts/rafi-setup.sh` is the one exception).
 
 Dependencies point one way: CLI → `api/` → `build/`, `ask/`, `plan/`, `tools/`, `stats/`, `manager/` → `turns/`, `facts/`, `instructions/`, `agents/` → `state/`, `log/` → `deps/`.
 
@@ -908,7 +927,7 @@ Agents never prove a test passed by saying so. Rafi runs every test command itse
 - **Two tools.** Each builder and QA session gets rafi's `run_check(command)` and `check_output(run)`. `run_check` runs a test and returns the run number, exit code, the failing tests and a short excerpt; `check_output` returns a run's full output. A test an agent runs in its own shell is never proof; only `check.run` records count.
 - **How agents reach them** (decision 7). Claude gets them in-process (the SDK's `createSdkMcpServer`, `sdk.d.ts:466`). Codex can add an MCP server only as a command it launches or a URL (`codex mcp add --help`, codex-cli 0.164.0); client-side tools exist only in app-server's experimental schema. So the engine serves both tools on a local-only HTTP MCP endpoint (127.0.0.1, a random port, a per-session token), given to the Codex thread as `mcp_servers.rafi.url`. One process, no IPC, stable surface only. M2 checks this first, exactly as it will ship.
 - **What `run_check` accepts.** Only: the requirements file's check commands; the project's test runner (`checks.test_runner`) with file or test-name arguments; and the setup script. Anything else is refused and recorded (`outcome: refused`) with the reason, so it can't be used to run `rafi answer`, `rafi stop` or any other command. Every request also goes through the agent permission policy (7.6, 11.3).
-- **Where and with what access.** Rafi runs the command in the builder's worktree under an operating-system sandbox that matches the build's grants (macOS `sandbox-exec`, Linux bubblewrap; which tool, and whether loopback can be allowed without internet, is checked in M2, **unverified**): project files writable, internet, local servers and installs only if granted (7.2). Test output is written as usual. Caches that would go to your home folder are pointed at the ignored `.rafi/cache/` (for example `npm_config_cache`). No QA copy is made for tests (NEW-MAL-6).
+- **Where and with what access.** Rafi runs the command in the builder's worktree under an operating-system sandbox that matches the build's grants (macOS `sandbox-exec`, Linux bubblewrap; which tool, and whether loopback can be allowed without internet, is checked in M2, **unverified**; if one conflicts badly with what tests need and a solid replacement without that problem exists, M2 switches to it): project files writable, internet, local servers and installs only if granted (7.2). Test output is written as usual. Caches that would go to your home folder are pointed at the ignored `.rafi/cache/` (for example `npm_config_cache`). No QA copy is made for tests (NEW-MAL-6).
 - **QA's requests.** QA stays read-only. When it asks for a test, rafi runs it the same way, then puts back any tracked file the run changed (from the snapshot) and records `restored`, so QA can't change the code through a test.
 - **The seam** is `deps.checks.run` (8.2): the real one streams a child process's output; the harness's is scripted on the fake clock, so hung and slow tests take no real time (S-CHK-4).
 - **Builder.** It runs the requirements file's checks through `run_check` and fixes failures before it reports `done`.
@@ -1108,7 +1127,7 @@ Settings, per project in `rafi-config.yaml` or per ticket (FMT-C16, FMT-T20): `m
 - **Mapping onto each runtime** (each adapter's `capabilities()` says which grants it can enforce):
   - Codex: `thread/start`'s `sandbox` and `config.sandbox_workspace_write.network_access`, and each turn's `sandboxPolicy` (`adapters/codex.ts:610-617`, `:270-272`). Builder: `workspaceWrite` on its worktree, network on when internet is granted. QA: `readOnly`, network on when local servers or internet are granted (today's QA grant, `adapters/codex.ts:957`).
   - Claude: `sandbox.network.allowedDomains` and `sandbox.filesystem.allowWrite` (`adapters/claude.ts:90-103`); QA gets a private scratch `TMPDIR` for temp files (`adapters/claude.ts:118-121`).
-  - **Unverified:** whether each runtime's sandbox can allow local servers (loopback) without full internet. MALF 3 saw EPERM in QA's sandbox. The M2 live adapter check and S-PERM-3 decide it. If a runtime can't separate them, its capability says so and the upfront item says "Local servers need internet access on Codex" rather than granting more than you chose.
+  - **Unverified:** whether each runtime's sandbox can allow local servers (loopback) without full internet. MALF 3 saw EPERM in QA's sandbox. The M2 live adapter check and S-PERM-3 decide it. If a runtime can't separate them, its capability says so and the upfront item says "Local servers need internet access on Codex" rather than granting more than you chose, with the choices: Grant internet access (this build / always on this machine) / I'll run it myself, then resume / Skip for now.
 - **`run_check` runs** under rafi's own sandbox with the same grants (6.9), not the runtime's.
 - **No approvals mid-build.** Today's per-operation sandbox escalation (`--builder-approvals`, PRM-74) folds into the upfront check. A runtime's approval request (Codex `item/commandExecution/requestApproval` and `item/fileChange/requestApproval`, `adapters/codex.ts:975-976`; Claude's `canUseTool`, `adapters/claude.ts:470`) is answered by the agent permission policy from the grants: allowed when its need was granted, otherwise denied with a message telling the agent to report `blocked(permission)`, so it explains the restriction instead of failing quietly (SCN-7).
 
@@ -1586,6 +1605,8 @@ REQ and SCN left these to the architecture plan. This is what I set; each is eas
 - **The ledger** (SCN 7.9). From M1, all 121 scenarios are registered with their `covers` lists and their milestone. One not yet active reports "not run (pending Mn)". The ledger fails if a requirement ID is in no registered scenario and isn't on SCN's not-testable list.
 - **Partial scenarios.** A scenario may declare steps that need a later milestone; those steps report "not run (pending Mn)". Each scenario passes in full at exactly one milestone, listed under "Must pass".
 - **Crashes.** From M4, crash-at-every-boundary and pause-at-every-safe-point run on S-CRASH-1's fixture, and each later milestone's new boundaries (git in M5, questions in M6, migrate and populate in M9) join the enumeration as they land. S-CLI-2 step 4 runs after every scenario from M1 on.
+- **Security** (1.2). Each milestone's done checks include security tests for the threats its new code touches. A milestone isn't done until they pass.
+- **Windows, unofficially.** The fast suite also runs on Windows from M1, so Windows problems show up early; Windows isn't supported until the GUI.
 - **The old engine stays the default** throughout.
 
 RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is M3; RW 6 (crash and resume) moves up to M4, so every later step is built redo-safe and enumerated from the start; RW 5 is M6 and M7; RW 7 is M5, M8 and M9; M10 covers what RW's list leaves out (instructions, tools, setup commands, release gates).
@@ -1594,6 +1615,7 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 
 - **First:** the D9 check (11.7), half a day.
 - **Builds:** `packages/engine` with `deps` and its real implementations; `scripts/check-rules.mjs`; the log (tables, append, cursor reads, lease, blobs, migrations); the three transition functions, the fold, `decide` and the label maps; `runCli` with the whole command surface and help text (commands not built yet say so and exit 1); dropped and merged commands and flags exiting 1 with their replacement; the engine switch, D6's refusal and format detection both ways (9.2); a thin pair of adapters over `deps` transports (session, one turn with a schema, events, cancel), completed in M2; `packages/scenarios` with the F-ONE and F-CHAIN builders, the script engine with in-process Codex and Claude fakes, the Codex fake executable (from `rafi/test/fixtures/e2e-codex-faults.cjs`), the fake `claude` if the check passes, the fake clock, notifier and terminal, the crash and pause hooks for the named boundaries (4.6) with the write fence, the invariant checker, the transcript and the coverage ledger.
+- **Security:** secret redaction on every write; the write fence; validation on read; imported events never folded; `scripts/check-rules.mjs` and the fast suite on Windows.
 - **Must pass:** S-CLI-1, S-CLI-2.
 - **Partial:** S-ENG-5 (steps 1, 2 and 4, process set), S-MIG-2 (step 1).
 - **Also:** every (state, event) pair in the transition tests; log tests (append-only, replay from a cursor, idempotency keys, busy retry on the fake clock, the fence); fidelity tests in which each fake's wire output is parsed by the real adapters.
@@ -1601,6 +1623,7 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 ### M2. Agents, replies and one-ticket builds
 
 - **Builds:** first, the check that a Codex thread reaches rafi's local MCP endpoint (decision 7) and which OS sandbox `run_check` uses (6.9); `run_check` and `check.run` records, rerunning only stale checks, the time limits (6.11); complete adapters (capabilities, grant mapping, usage, permission requests, `AskUserQuestion` pass-through, the compaction setting); the reply schemas (6.2–6.4) in rafi-spec; the turn runner (classification, the repair try, retries with backoff, idle timeout, cancel); facts (run records, snapshots, changed files, mismatches); the loop for tickets in sequence with `--steps N` (prepare, build, review that passes, deliver on the current branch with completion `none`); the progress-file write; first versions of `rafi status`, `rafi stats show`, `rafi stats export` and `rafi tickets show`; activity rows and plain-English lines; `--agent`, `--model`, `--effort`, `--fast`; a fresh session per ticket; settings with their sources. The check step, `run_check`'s allowlist and QA restore, `check_output` and the failure details sent to the builder, `--no-qa`'s tests (6.9); `AskUserQuestion` answered at once (5.1).
+- **Security** (the main pass, because M2 is where agents first act): a threat-model review of `run_check`, `check_output` and the local endpoint, with tests that `run_check` refuses everything outside its allowlist (`rafi answer`, `curl`, a shell string), the sandbox blocks the network when it isn't granted, QA's runs can't change tracked files, and the endpoint refuses a request without the session's token or from another address; plus the agent permission policy for both runtimes.
 - **Must pass:** S-START-1, S-START-4, S-MAL-1, S-MAL-5, S-TIME-1, S-TIME-2, S-SCN-1, S-SCN-14, S-ENG-4, S-ENG-5, S-CHK-1, S-CHK-9, S-CHK-10.
 - **Partial:** S-MAL-2 (variant 1), S-MAL-4 (the builder runs), S-CLI-12 (prefixes, colors and exit codes of builds).
 - **Also:** an opt-in live adapter check, by hand, on real Codex and Claude, for H01's conformance list: one small structured turn each, a cancel, a resumed session, usage, a refused tool request, Claude's compaction setting (Q-ADP-1), and local servers without internet (7.11).
@@ -1633,6 +1656,7 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 ### M7. Upfront check, permissions and notifications
 
 - **Builds:** the scan (ticket needs, tools' permissions, the setup script's installs, credentials, decisions, the plan-update setting); the one list with "answer later"; grants (once, always on this machine, don't allow); `--allow`; auto-approve's warning and D3; the no-terminal behavior (OQ-5); each runtime's mapping of local servers and internet, checked live (7.11); notifier platforms (`alerter`, `osascript`, `notify-send --action`, WSL), choices with "More…", preferences and reminder timing; the project setup script, written by the builder, run first by every fresh agent, and recorded. The CI confirmation and the slow-test question, up front and mid-build (6.10, 6.11).
+- **Security:** grants are scoped (once, always on this machine, never committed); no grant is implied by an answer that isn't a grant; notifications carry no secrets.
 - **Must pass:** S-PERM-1, S-PERM-2, S-PERM-3, S-ASK-2, S-SCN-7, S-NOT-1, S-NOT-3, S-NOT-4, S-ENG-3, S-CLI-16, S-CHK-4, S-CHK-5, S-CHK-7, S-START-5.
 
 ### M8. Plan updates
@@ -1648,6 +1672,7 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 ### M10. Instructions, tools, setup commands and release gates
 
 - **Builds:** role text rewritten to principle 13 and tagged content (NEW-INS-*); `rafi compile` writing the small core with version lines; `rafi tools add` with prerequisite checks and boilerplate; per-build ports, device locks, recordings and retention; the Codex per-thread MCP check (10.3); `rafi create` (every prompt, including log location, the Playwright and mobile-mcp offers and `alerter`), `compile`, `doctor`, `uninstall`, `uninstall:restore`, `uninstall:cleanup`, `graph`, `sources`, `discover`, `qa-rehearse-rollback`; output conventions and the launcher under Node 18; the hostile-environment set; the event-stream checks; the live suite (D7) and the two-builds-at-once load check.
+- **Security:** one full review of the whole design and code against 1.2, plus untrusted tool output (S-TOOL-5) and the hostile environment (S-ENG-7), before release.
 - **Must pass:** S-CTX-1, S-TOOL-1, S-TOOL-2, S-TOOL-3, S-TOOL-4, S-TOOL-5, S-TOOL-6, S-PORT-3, S-CLI-3, S-CLI-6, S-CLI-7, S-CLI-9, S-CLI-10, S-CLI-11, S-CLI-12, S-CLI-19, S-ENG-2, S-ENG-6, S-ENG-7, S-CHK-8.
 - **Done when** all 121 scenarios pass in their modes; the fast suite runs in under a minute, the process set in minutes and the live suite in under an hour per provider (RW "Success criteria"); the core is under 10,000 lines; then dogfooding starts (guide step 11).
 
