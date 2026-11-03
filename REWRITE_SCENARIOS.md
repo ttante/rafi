@@ -6,7 +6,7 @@ Inputs: `REWRITE_REQUIREMENTS.md` (status reviewed; section 9.0 wins over older 
 
 This doc lists the whole-build scenarios the new engine must pass, the design of the fake-agent harness that runs them through the real `rafi` command, and a table that maps every requirement in `REWRITE_REQUIREMENTS.md` sections 2–8 to a scenario. Nothing here is implemented yet.
 
-In numbers: 121 scenarios (41 whole-build, 14 past-bug, 40 from the decided sections, 26 command and engine-wide); 617 of the 631 requirement IDs covered and 14 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
+In numbers: 121 scenarios (41 whole-build, 14 past-bug, 40 from the decided sections, 26 command and engine-wide); 623 of the 638 requirement IDs covered and 15 marked not scenario-testable (section 10); no baseline against 0.10.2 (D8; section 9 lists two optional hand checks on it); no open questions (section 11 records the decisions).
 
 | Section | Contents |
 |---|---|
@@ -141,7 +141,7 @@ The fake records every request it gets in a transcript: role, ticket, step, sess
 ### 3.1 Start a build
 
 #### S-START-1 — One-ticket build finishes
-- **Covers:** CMD-7, FLAG-ST-1, FLAG-ST-2, NEW-ENG-1, NEW-ENG-2, FMT-S1, FMT-S4, FILE-40, FILE-41, OUT-8, OUT-40
+- **Covers:** CMD-7, FLAG-ST-1, FLAG-ST-2, NEW-ENG-1, NEW-ENG-2, FMT-S1, FMT-S4, FILE-40, FILE-41, OUT-8, OUT-40, NEW-WF-1
 - **Setup:** F-ONE; no script (happy path).
 - **Steps:**
   1. `rafi start . --steps 1`
@@ -150,6 +150,7 @@ The fake records every request it gets in a transcript: role, ticket, step, sess
   - Exit 0. The transcript has one requirements-file turn (QA), one builder turn and one QA review turn, in that order.
   - `T1` is `done`, with validation evidence that cites rafi's recorded test command.
   - Progress rows with timestamps appear while the builder works.
+  - `build.started` records the workflow `standard` with its version and digest, and every `step.started` names a step from it.
   - `.rafi/progress.yaml` exists and lists `T1` as done. The database file isn't tracked by git. F-ONE leaves git to you, so `git status` shows only the work, the requirements file and `.rafi/progress.yaml` for you to commit; no other rafi file appears outside the ignored set.
 
 #### S-START-2 — Interactive start with no stopping point
@@ -173,7 +174,7 @@ The fake records every request it gets in a transcript: role, ticket, step, sess
 - **Expected:** Step 1 starts building with no plan question. Step 2 asks once with Proceed / Give feedback / Cancel. Step 3 sends the feedback to the Planner and asks again. Step 4 doesn't ask, and the event log records the approval as given by auto-approve.
 
 #### S-START-4 — Agent choice and a fresh agent per ticket
-- **Covers:** FLAG-ST-4, FLAG-ST-5, FLAG-ST-6, FLAG-ST-7, FLAG-ST-R5, FLAG-AG-3, FMT-C7, NEW-TAG-5, GUI-R20
+- **Covers:** FLAG-ST-4, FLAG-ST-5, FLAG-ST-6, FLAG-ST-7, FLAG-ST-R5, FLAG-AG-3, FMT-C7, NEW-TAG-5, GUI-R20, NEW-WF-2
 - **Setup:** F-CHAIN with `harness.targets: [codex]`; a second copy with both targets.
 - **Steps:**
   1. `rafi start . --steps 2` (codex-only copy).
@@ -184,6 +185,7 @@ The fake records every request it gets in a transcript: role, ticket, step, sess
   - Step 3's transcript shows model `m-test`, effort high and fast mode, for this build only; `rafi-config.yaml` is unchanged.
   - In step 1 the builder for `T2` is a new session, not `T1`'s, and so is QA.
   - The effective setting and where it came from (flag, project, default) are visible in the event log.
+  - Each turn's role comes from the role registry: the builder's sessions may write, QA's are read-only (NEW-WF-2).
 
 #### S-START-5 — No QA, detach, one ticket, skip
 - **Covers:** FLAG-ST-8, FLAG-ST-9, FLAG-ST-15, FLAG-ST-16, FLAG-ST-48, OUT-42
@@ -210,7 +212,7 @@ The fake records every request it gets in a transcript: role, ticket, step, sess
   - QA's verdict is per requirement (satisfied, not satisfied, not applicable, unable to verify).
 
 #### S-QA-2 — The fix allowance runs out: "what next?"
-- **Covers:** PRM-81, PRM-82, PRM-83, FMT-C10, NEW-QAM-1, FLAG-MG-8
+- **Covers:** PRM-81, PRM-82, PRM-83, FMT-C10, NEW-QAM-1, FLAG-MG-8, NEW-WF-3
 - **Setup:** F-ONE. Script: QA rejects on attempts 1–4, each time on a different requirement that the next fix makes pass (so it's progress, not circling). For step 6, QA also rejects attempts 5 and 6.
 - **Steps:**
   1. In a terminal: `rafi start . --steps 1`; `tty.expect(/What next/)` after the 3rd fix.
@@ -1295,10 +1297,10 @@ The whole-build scenarios above don't touch every command and flag. These shorte
   - Manager's instance report (GUI-R18; command name set in the architecture plan) has state, progress, blockers, pending decisions, cost, risks and ETA, and each value matches `rafi status` and `rafi stats show` for the same moment. Its structured output parses as the documented JSON shape, which is what the GUI renders as cards.
 
 #### S-CLI-19 — Settings in `rafi-config.yaml`
-- **Covers:** FILE-1, FILE-2, FMT-C8, FMT-C11, ENV-4, GUI-R20, FLAG-ST-43, FLAG-ST-44
+- **Covers:** FILE-1, FILE-2, FMT-C8, FMT-C11, ENV-4, GUI-R20, FLAG-ST-43, FLAG-ST-44, NEW-WF-5, FMT-C26, FMT-T21
 - **Setup:** A 1.0 config using every new key (retries, plan-update setting, manual-checks mode, notifications, log location, capture level, recordings, approval mode, tools, tags, locked requirements, `tickets.build.*` including `max_branch_depth` and `keep_worktrees`, `agent_defaults.roles.*.display_session_cost`).
 - **Steps:** `rafi doctor`; a short build; then an unknown key; then a `RAFI_*` tuning variable from ENV-4 set in the environment.
-- **Expected:** The config validates, and each setting's effective value and source (default, project, flag) can be shown. An unknown key is an error naming it. The tuning knobs are config keys (Q-CFG-1); setting the old variable doesn't change behavior. There's no `foreman.yaml` in a 1.0 project.
+- **Expected:** The config validates, and each setting's effective value and source (default, project, flag) can be shown. An unknown key is an error naming it. The tuning knobs are config keys (Q-CFG-1); setting the old variable doesn't change behavior. There's no `foreman.yaml` in a 1.0 project. A `workflows:` key, or a `workflow` field on a ticket, exits 1 with "Custom workflows aren't supported yet."
 
 ### 6.2 Engine-wide behavior
 
@@ -1565,10 +1567,10 @@ The baseline against 0.10.2 is dropped (D8). Two past bugs were never confirmed 
 
 ## 10. Coverage
 
-Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (631 IDs), with the scenarios that check it. It was generated from the **Covers** lines above; once the harness exists (milestone 1, guide step 10), the coverage ledger (7.9) regenerates it from the scenario files.
+Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (638 IDs), with the scenarios that check it. It was generated from the **Covers** lines above; once the harness exists (milestone 1, guide step 10), the coverage ledger (7.9) regenerates it from the scenario files.
 
-- 617 IDs are covered by at least one scenario.
-- 14 are marked **not scenario-testable**, each with its reason: NEW-ENG-8, NEW-MAL-9, NEW-CAU-2, NEW-GUI-7, NEW-ADP-1, NEW-HAR-1, NEW-HAR-2, NEW-HAR-3, NEW-HAR-4, NEW-INS-6, NEW-INS-8, GUI-R2, NEW-SEC-2, NEW-SEC-3.
+- 623 IDs are covered by at least one scenario.
+- 15 are marked **not scenario-testable**, each with its reason: NEW-ENG-8, NEW-MAL-9, NEW-CAU-2, NEW-GUI-7, NEW-ADP-1, NEW-HAR-1, NEW-HAR-2, NEW-HAR-3, NEW-HAR-4, NEW-INS-6, NEW-INS-8, GUI-R2, NEW-SEC-2, NEW-SEC-3, NEW-WF-4.
 - A few covered IDs are only partly scenario-testable; the Note column says which part is checked elsewhere.
 - "Drop" items are covered by S-CLI-2, which checks they're gone.
 
@@ -1945,6 +1947,7 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (631 IDs), with
 | FMT-T18 | S-PLAN-2 |  |
 | FMT-T19 | S-QA-6 |  |
 | FMT-T20 | S-QA-6 |  |
+| FMT-T21 | S-CLI-19 |  |
 | FMT-S1 | S-START-1, S-BLK-2, S-BLK-3 |  |
 | FMT-S2 | S-MIG-1 |  |
 | FMT-S3 | S-BLK-1, S-SCN-8 |  |
@@ -1986,6 +1989,7 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (631 IDs), with
 | FMT-C23 | S-CHK-5, S-CHK-7 |  |
 | FMT-C24 | S-CHK-4 |  |
 | FMT-C25 | S-CHK-8 |  |
+| FMT-C26 | S-CLI-19 |  |
 | FMT-O1 | S-CLI-7 |  |
 | FMT-O2 | S-TAG-1, S-CTX-1 |  |
 
@@ -2241,6 +2245,11 @@ Every requirement ID in `REWRITE_REQUIREMENTS.md` sections 2–8 (631 IDs), with
 | NEW-CHK-18 | S-CHK-9 |  |
 | NEW-SEC-1 | S-CHK-9, S-NOT-1, S-TOOL-5, S-ENG-7 | The full list of threats is reviewed at each milestone (architecture 1.2). |
 | NEW-SEC-2 | **not scenario-testable** | A process rule: security checks in each milestone and a review before release. |
+| NEW-WF-1 | S-START-1 |  |
+| NEW-WF-2 | S-START-4 |  |
+| NEW-WF-3 | S-QA-2 | The fix loop's limit is `standard`'s per-step limit. |
+| NEW-WF-4 | **not scenario-testable** | Load checks and data-built transition tests run in the fast suite, not by playing out a build. |
+| NEW-WF-5 | S-CLI-19 |  |
 | NEW-SEC-3 | **not scenario-testable** | Code rules checked by `scripts/check-rules.mjs` and the fast suite run on Windows, not by playing out a build. |
 
 ## 11. Decisions

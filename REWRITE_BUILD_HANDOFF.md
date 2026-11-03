@@ -13,7 +13,7 @@ A new engine for rafi 1.0, built beside today's one and switched on with `RAFI_E
 1. `REWRITE_ARCHITECTURE.md`, the build plan. Read all of it once. Then keep these open:
    - 1.2: the security model;
    - 2: packages, modules, size budgets and code rules;
-   - 3–4: the event log and state machines;
+   - 3–4: the event log and state machines, including 4.8, workflows and roles as data;
    - 14: milestones;
    - 15: decisions.
 2. `REWRITE_REQUIREMENTS.md`, the contract: every user-visible behavior, marked keep, change or drop. Section 9.0 holds every decision (it wins over older rows). Look things up here; don't read it end to end.
@@ -70,6 +70,7 @@ The full list is `REWRITE_ARCHITECTURE.md` section 14, M1.
    - `scripts/check-rules.mjs`;
    - the event log: tables, append, cursor reads, lease, blobs, migrations;
    - the three transition functions, the fold, `decide` and the label maps;
+   - the built-in workflow (`standard`) and the role registry as data, with their load checks; build the transition tests from the workflow data (architecture 4.8). Don't hard-code the step list anywhere else;
    - `runCli` with every command and its help text (commands not built yet say so and exit 1);
    - dropped commands and flags exiting 1, naming what replaced them;
    - the engine switch and both format refusals;

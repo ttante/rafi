@@ -19,7 +19,7 @@ Nothing here reopens a decided item. Where REQ or SCN left a detail to this plan
 | 1 | The shape in one page; how it avoids the bad patterns; the security model |
 | 2 | Packages, modules and size budgets |
 | 3 | The event log: tables, event types, versioning, derived state, the progress file |
-| 4 | State machines: ticket, build, project; what the loop does next; safe points |
+| 4 | State machines: ticket, build, project; what the loop does next; safe points; workflows and roles as data |
 | 5 | Errors and retries |
 | 6 | Agent reply formats |
 | 7 | Ask everything up front; the question record; blocked tickets; grants |
@@ -116,6 +116,7 @@ Two rules hold the boundaries:
 |---|---|---|---|
 | `log/` | `db.ts`, `append.ts`, `read.ts`, `lease.ts`, `blobs.ts`, `migrations/NNN-*.ts` | Opening the database (WAL, migrations, busy retry on the clock), appending in transactions, reading by cursor, the build lease, bounded blobs | 900 |
 | `state/` | `ticket.ts`, `build.ts`, `project.ts`, `fold.ts`, `decide.ts`, `labels.ts` | The three pure transition functions, the fold, `decide`, tracker and GUI label mapping | 1,300 |
+| `workflow/` | `standard.ts`, `roles.ts`, `load.ts`, `checks.ts` | The built-in workflow and role registry as data, loading and the load checks (4.8) | 400 |
 | `build/` | `loop.ts`, `scope.ts`, `safepoint.ts`, `resume.ts`, `steps/prepare.ts`, `steps/work.ts`, `steps/review.ts`, `steps/deliver.ts`, `checks.ts` | The build loop, scope (`--steps`, `--to-ticket`, `--stacks`, `--ticket`, `--skip`), safe points, takeover and redo, one file per step; `checks.ts` runs and records tests (6.9) | 2,000 |
 | `turns/` | `runner.ts`, `classify.ts`, `repair.ts`, `circling.ts`, `backoff.ts` | Every agent turn: intent, send, validate, repair, retry, circling | 900 |
 | `facts/` | `runs.ts`, `snapshot.ts` | Command records with short numbers; git-tree snapshots after builder turns, changed files, drift | 450 |
@@ -276,7 +277,7 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 
 | Type | Class | Written when | Fields |
 |---|---|---|---|
-| `build.started` | state | `rafi start` begins | `scope: {steps \| to_ticket \| stacks \| ticket \| all, skip}`, `tickets`, `settings: {key: {value, source}}` (GUI-R20), `engine_version`, `argv` |
+| `build.started` | state | `rafi start` begins | `workflow: {id, version, digest}` (4.8; a build keeps the workflow it started with), `scope: {steps \| to_ticket \| stacks \| ticket \| all, skip}`, `tickets`, `settings: {key: {value, source}}` (GUI-R20), `engine_version`, `argv` |
 | `build.owner_acquired` / `build.owner_released` | state | a process takes or gives up the lease | `instance`, `host`, `pid` / `reason: finished \| stopped \| waiting \| failed` |
 | `build.owner_lost` | state | `rafi resume` takes over from an owner that died | `last_heartbeat_at` |
 | `build.resumed` | state | `rafi resume` continues the build | `from_state` |
@@ -292,7 +293,7 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 | Type | Class | Written when | Fields |
 |---|---|---|---|
 | `ticket.started` | state | the loop picks a ticket | `resume_step` |
-| `step.started` | state | a step begins | `step: prepare \| build \| check \| review \| fix \| deliver`, `attempt` |
+| `step.started` | state | a step begins | `step` (the step's name in the workflow; `standard` has `prepare`, `build`, `check`, `review`, `fix`, `deliver`), `attempt` |
 | `step.failed` | state | a step's turn budget runs out, or circling stops it | `category`, `reason` (one line), `circling` |
 | `turn.retry` | state | a turn is scheduled again | `key`, `category`, `attempt`, `delay_ms`, `reason` |
 | `turn.intent` | detail | before a turn is sent (crash boundary 1 follows) | `key`, `role`, `runtime`, `model`, `effort`, `fast`, `session: new \| reused`, `schema`, `instruction_chars` (NEW-MEAS-4), `instruction_digest`, `tools`, `grants`, `redo` |
@@ -453,6 +454,8 @@ interface TicketRules { qa: boolean; fixes: number; manualChecks: "wait" | "none
 - **Invalid pairs.** Before appending, the engine checks the transition; an invalid one is a bug and isn't written. A fold that meets an invalid pair (a damaged or imported log) keeps the state unchanged and reports a violation, which `rafi doctor` shows. The fold never throws, so `rafi status` always works.
 
 ### 4.2 Ticket
+
+The tables in this section are the built-in workflow, `standard` (4.8): the steps and their pass and fail rules are data in `workflow/standard.ts`, and `nextTicket` reads them.
 
 Seven states (principle 2's six, plus `dropped` for won't-do and obsolete tickets, which leave the build). Three states have steps; the step is the unit of redo.
 
@@ -670,6 +673,20 @@ Redoing is safe at every boundary because each step is written to be redone: the
 
 None guards a hand-off between rafi's own steps, and none stops a build on its own; only a locked-requirement change asks, because that's what locking means.
 
+### 4.8 Workflows and roles as data (decided 2026-11-02, REQ ARCH-13)
+
+1.0 ships exactly one workflow and today's five roles, but both are data, so custom workflows (for example plan, then audit the plan, then build) can be added later without rewriting the state machine. Nothing here is user-facing in 1.0.
+
+- **A workflow** is an ordered list of steps. Each step has a name, a type, a role (for agent steps), and its next step on pass and on fail. `standard` is prepare → build → check → review → deliver, with fix looping back through check and review.
+- **Step types.** `maker`: an agent turn that may change code (build, fix). `checker`: a read-only agent turn that gives a verdict per requirement (prepare writes requirements; review gives the verdict). `rafi`: no agent (check, deliver, a CI point). A new step reuses one of these types instead of needing new code.
+- **Every step has the same shape.** It reads what it needs from the fold, runs one agent turn or one rafi action, and writes its outcome as events. Steps are registered modules (`build/steps/*`), looked up by type.
+- **Loops are per-step limits.** "On fail, go to step X, up to N times." `standard`'s fix loop is that rule, with `retries.fixes` as its limit, and circling detection still applies.
+- **Roles are data** (`workflow/roles.ts`): each role's core instructions, reply schema, permissions (read-only or write) and default agent. `agent_defaults.roles` overrides the agent, as today. 1.0's roles: planner, ticket-maker, builder, qa, manager.
+- **Load checks** (`workflow/checks.ts`): every step is reachable, every fail path ends (in a pass, `blocked` or `unfixed`), every loop has a limit, every role exists, and each step's type matches its role's permissions (a `checker` role can't write). They run on `standard` in the fast suite and when the engine opens; later the same checks validate users' workflows.
+- **Tested from the data.** The every-combination transition test (4.1) builds its pairs from the workflow, so any workflow gets the same coverage.
+- **Pinned per build.** `build.started` records the workflow's id, version and digest; a build keeps it to the end, so resume never mixes two workflows.
+- **Reserved, rejected in 1.0.** A `workflows:` key in `rafi-config.yaml` and a `workflow` field on a ticket exit 1 with "Custom workflows aren't supported yet." (FMT-C26, FMT-T21), so no config written now breaks later.
+
 ## 5. Errors and retries
 
 ### 5.1 Categories
@@ -754,7 +771,7 @@ A retry never resends the same request. It carries the validation errors, the ti
 
 ```yaml
 retries:
-  fixes: 3              # builder fix attempts per ticket after QA rejects or a check fails (Q-CFG-3)
+  fixes: 3              # builder fix attempts per ticket after QA rejects or a check fails (Q-CFG-3); the limit on standard's fix loop (4.8)
   turn: 3               # retries of one agent turn: Q-CFG-3's 3 provider-error retries, applied to every
                         # reason a turn is redone (provider errors, timeouts, replies still invalid after repair)
   circling_repeats: 2   # no-progress attempts in a row that count as going in circles
@@ -1614,7 +1631,7 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 ### M1. Foundations and the harness
 
 - **First:** the D9 check (11.7), half a day.
-- **Builds:** `packages/engine` with `deps` and its real implementations; `scripts/check-rules.mjs`; the log (tables, append, cursor reads, lease, blobs, migrations); the three transition functions, the fold, `decide` and the label maps; `runCli` with the whole command surface and help text (commands not built yet say so and exit 1); dropped and merged commands and flags exiting 1 with their replacement; the engine switch, D6's refusal and format detection both ways (9.2); a thin pair of adapters over `deps` transports (session, one turn with a schema, events, cancel), completed in M2; `packages/scenarios` with the F-ONE and F-CHAIN builders, the script engine with in-process Codex and Claude fakes, the Codex fake executable (from `rafi/test/fixtures/e2e-codex-faults.cjs`), the fake `claude` if the check passes, the fake clock, notifier and terminal, the crash and pause hooks for the named boundaries (4.6) with the write fence, the invariant checker, the transcript and the coverage ledger.
+- **Builds:** `packages/engine` with `deps` and its real implementations; `scripts/check-rules.mjs`; the log (tables, append, cursor reads, lease, blobs, migrations); the three transition functions, the fold, `decide` and the label maps; `runCli` with the whole command surface and help text (commands not built yet say so and exit 1); dropped and merged commands and flags exiting 1 with their replacement; the engine switch, D6's refusal and format detection both ways (9.2); a thin pair of adapters over `deps` transports (session, one turn with a schema, events, cancel), completed in M2; `packages/scenarios` with the F-ONE and F-CHAIN builders, the script engine with in-process Codex and Claude fakes, the Codex fake executable (from `rafi/test/fixtures/e2e-codex-faults.cjs`), the fake `claude` if the check passes, the fake clock, notifier and terminal, the crash and pause hooks for the named boundaries (4.6) with the write fence, the invariant checker, the transcript and the coverage ledger. The built-in workflow and role registry as data, the load checks, and transition tests built from the workflow (4.8); the reserved `workflows:` key and ticket `workflow` field rejected.
 - **Security:** secret redaction on every write; the write fence; validation on read; imported events never folded; `scripts/check-rules.mjs` and the fast suite on Windows.
 - **Must pass:** S-CLI-1, S-CLI-2.
 - **Partial:** S-ENG-5 (steps 1, 2 and 4, process set), S-MIG-2 (step 1).
@@ -1706,3 +1723,4 @@ Decided in the step 8 review (2026-11-02):
 8. **Background builds keep waiting** (REQ ARCH-8) instead of exiting with code 2, so notification answers keep working. Exit code 2 stays for foreground builds without a terminal (4.3).
 9. **With QA off** (REQ ARCH-10), the check step runs the ticket's required tests and related tests. Every failure, there or anywhere, goes back to the builder with all its details (failing tests, errors, output excerpts, the full output by run number) and "keep your work; don't start over" (6.9).
 10. **Rafi-owned fix tickets** (REQ ARCH-11; from CI or a re-check): you're told once and never asked; they aren't plan updates and don't count toward `--steps` (6.10).
+11. **Workflows and roles as data** (REQ ARCH-13). 1.0 ships one workflow, `standard`, and today's five roles, defined as data with load checks, so custom workflows (maker-checker builds with any roles) can come later without a rewrite. `workflows:` and a ticket `workflow` field are reserved and rejected (4.8).

@@ -43,3 +43,4 @@ Work is split into parallel tracks. See "Parallel tracks" in [`AI_FOREMAN_REWRIT
 ## Later
 
 7. **Rafi GUI.** See [`GUI_PRODUCT_REQUIREMENTS.md`](GUI_PRODUCT_REQUIREMENTS.md). Product requirements draft 0.2, with open questions in §16 and phasing in §17. It's built after the rewrite, and the rewrite covers its engine needs (§11). Answering the §16 open questions can happen any time.
+8. **Custom workflows (after 1.0).** Let users define their own build steps and roles, for example a maker-checker build: plan, audit the plan, build, review, with different agents per step. 1.0 lays the groundwork: workflows and roles are data, with load checks, and `workflows:` and a ticket `workflow` field are reserved (`REWRITE_ARCHITECTURE.md` 4.8, `REWRITE_REQUIREMENTS.md` 8.26 and ARCH-13). Still to decide: how users write and validate workflows, which new roles to ship, picking a workflow per ticket (for example by risk), and a GUI editor.

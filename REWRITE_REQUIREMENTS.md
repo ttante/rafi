@@ -543,6 +543,7 @@ The file is `{ tickets: [ … ] }`. Unknown fields are allowed (`additionalPrope
 | FMT-T17 | *(new)* `tags` | List from the fixed rafi list plus project tags; unknown tags rejected at planning time; editable by you | **new** (decided `RW:322-324`) | `RW §Agent context: tags` |
 | FMT-T18 | *(new)* Locked marks | A mark on a single requirement; a project-wide list lives in config (FMT-C11) | **new** (decided `RW:128`) | `RW:128` |
 | FMT-T19 | *(new)* Person-only checks marked on the ticket | The Planner marks the acceptance checks only a person can do; QA verifies the rest, and rafi asks you the marked ones when the build reaches the ticket (D4, 9.0). *Was:* an operator checklist note that QA and the build ignore, shown when the ticket finishes | **new** (decided `RW:109-111`; D4) | `QAMC §1` |
+| FMT-T21 | *(new, reserved)* `workflow` on a ticket | Not supported in 1.0 | **new, rejected**: exits 1 with "Custom workflows aren't supported yet." (ARCH-13) | `REWRITE_ARCHITECTURE.md` 4.8 |
 | FMT-T20 | *(new)* Manual-checks setting per ticket | B or C as a per-ticket override of the D4 default (D4 replaces choice A, 9.0) | **new** (decided `RW:109`) | `QAMC §1` |
 
 Ticket status (kept outside `tickets.yaml` today):
@@ -610,6 +611,7 @@ The format and compile output are **kept** (decided `RW:57`). Required keys toda
 | FMT-C21 | *(new)* Saved permissions ("always allow") | Saved for the project, **on this machine only**; not committed. On a new machine they're shown in the upfront check | **new** (decided principle 5; Q-PORT-2) | `RW:286`; `RW:73` |
 | FMT-C22 | *(new)* Approval mode | Manual or auto-approve, per project or per instance | **new** (decided principle 14; GUI-INS-6, GUI-PLN-8) | `RW:311-312` |
 | FMT-C23 | *(new)* `checks.ci_tests` (`full`, `light`, `none`; default `full`), `checks.ci_when` (`each-ticket`, `each-pr`, `end-of-build`, `light-each-pr-full-end`; default `end-of-build`), `checks.ci_blocks_merge` (default `false`), `checks.test_runner`, `checks.output_paths` | Rafi's CI step (NEW-CHK-8, NEW-CHK-10) | **new** (decided 2026-11-02, ARCH-5) | `REWRITE_ARCHITECTURE.md` 6.10 |
+| FMT-C26 | *(new, reserved)* `workflows:` | Not supported in 1.0 | **new, rejected**: exits 1 with "Custom workflows aren't supported yet." (ARCH-13) | `REWRITE_ARCHITECTURE.md` 4.8 |
 | FMT-C25 | *(new)* `git.managed_by` (`rafi`, `me`) | Who manages git (ARCH-6); `me` sets branch strategy `current` and completion `none` | **new** (decided 2026-11-02, ARCH-6) | `REWRITE_ARCHITECTURE.md` 6.10 |
 | FMT-C24 | *(new)* `timeouts.check_quiet_minutes` (2), `timeouts.check_minutes` (5), `timeouts.suite_minutes` (20) | Test time limits (NEW-CHK-6) | **new** (decided 2026-11-02, ARCH-5) | `REWRITE_ARCHITECTURE.md` 6.11 |
 
@@ -1060,9 +1062,21 @@ Decided 2026-11-02 (ARCH-12; `REWRITE_ARCHITECTURE.md` 1.2).
 | NEW-SEC-2 | Security is built from the start: the architecture has a threat model; every milestone's done checks include security tests for what it adds; one full security review comes before release | ARCH-12 |
 | NEW-SEC-3 | Windows-safe code from the start (paths through Node's `path`, commands spawned without shell strings, no bash-only commands inside rafi), and the fast suite also runs on Windows. Windows itself is supported later, with the GUI | ARCH-12 |
 
+### 8.26 Workflows and roles as data
+
+Decided 2026-11-02 (ARCH-13; `REWRITE_ARCHITECTURE.md` 4.8). Groundwork only: 1.0 has no custom workflows.
+
+| ID | Requirement | Source |
+|---|---|---|
+| NEW-WF-1 | A ticket's steps are a workflow defined as data. 1.0 ships one, `standard` (prepare, build, check, review, fix, deliver). Each step is a maker (may change code), a checker (read-only verdict) or a rafi action, with the same shape: read from the log, run one turn or action, write its outcome. A build records the workflow it uses and keeps it to the end | ARCH-13 |
+| NEW-WF-2 | Roles are data: core instructions, reply schema, permissions and default agent. 1.0 ships planner, ticket-maker, builder, qa and manager | ARCH-13 |
+| NEW-WF-3 | Loops are per-step limits ("on fail go to step X, up to N times"); `retries.fixes` is the limit on `standard`'s fix loop | ARCH-13 |
+| NEW-WF-4 | Load checks: every step reachable, every fail path ends, every loop limited, every role exists, step types match role permissions. They run on the built-in workflow, and the transition tests are built from the workflow data | ARCH-13 |
+| NEW-WF-5 | `workflows:` in `rafi-config.yaml` and `workflow` on a ticket are reserved and rejected with "Custom workflows aren't supported yet." | ARCH-13 |
+
 ## 9. Open questions
 
-### 9.0 Decided in review (2026-11-01; architecture decisions ARCH-1–12, 2026-11-02)
+### 9.0 Decided in review (2026-11-01; architecture decisions ARCH-1–13, 2026-11-02)
 
 | ID | Decision |
 |---|---|
@@ -1098,6 +1112,7 @@ Decided 2026-11-02 (ARCH-12; `REWRITE_ARCHITECTURE.md` 1.2).
 | ARCH-10 | (Step 8 review.) With QA off, the check step runs the ticket's required and related tests. After any failure the builder gets every detail, by reference where long, and is told to keep its work and not start over (NEW-CHK-15, NEW-CHK-16). |
 | ARCH-11 | (Step 8 review.) Rafi-owned fix tickets are told once, never asked, aren't plan updates and don't count toward `--steps` (NEW-CHK-17). |
 | ARCH-12 | (User, 2026-11-02.) Security from the start: a threat model in the architecture (1.2), security tests in every milestone's done checks with the main pass in M2, and a full review before release. Code is kept Windows-safe and the fast suite runs on Windows, though Windows is supported later (NEW-SEC-1–3). |
+| ARCH-13 | (User, 2026-11-02.) Workflows and roles are data, so custom workflows (for example maker-checker builds: plan, audit the plan, build, review, with any roles) can come later without a rewrite. 1.0 ships one workflow and today's roles; the user-facing feature is after 1.0 (NEW-WF-1–5, FMT-C26, FMT-T21). |
 
 **Every other question in 9.1 is decided as recommended** (accepted 2026-11-01). Where a row in 9.1 and this table differ, this table wins.
 
