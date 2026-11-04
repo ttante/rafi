@@ -2,11 +2,14 @@
 // snapshots the worktree, logs claims that disagree with its record (never a retry), and records the report.
 import path from "node:path";
 import type { BuilderReply } from "rafi-spec/v1";
+import { splitCommand } from "../../agents/shellForms.js";
+import type { ToolRun } from "../../agents/types.js";
 import { snapshot } from "../../facts/snapshot.js";
 import { mismatches, runsOf } from "../../facts/runs.js";
-import { buildMessage, fixMessage, type FailedRun } from "../../instructions/messages.js";
-import { agentTurn, allEvents, append, knownRuns, ticketOf, type BuildContext } from "../context.js";
-import { failStep, readRequirements } from "./common.js";
+import { buildMessage, checksFixMessage, qaFixMessage, type FailedRun } from "../../instructions/messages.js";
+import { agentTurn, allEvents, append, knownRuns, setting, ticketOf, type BuildContext } from "../context.js";
+import { failStep, readRequirements, trustedOf } from "./common.js";
+import { findings, lastFailure, type LogEvent, type VerdictData } from "./history.js";
 
 /** Run references are checked exactly: unknown or repeated numbers are content errors (NEW-REF-3). */
 /** The builder's citations: a repeated number is an error; one rafi never recorded is a mismatch (S-MAL-4). */
@@ -49,15 +52,55 @@ async function failedRuns(ctx: BuildContext, id: string): Promise<FailedRun[]> {
   return out;
 }
 
+const EXPLORING: ReadonlySet<string> = new Set(["Read", "Grep", "Glob", "LS"]);
+
+/**
+ * C111: the worktree files a builder turn read, from its tool events (in memory, so at every capture level): Claude's
+ * Read, Grep, Glob and LS paths, and the arguments of a Codex shell command that name an existing worktree file.
+ * Worktree-relative and sorted; rafi's own folder left out.
+ */
+async function filesRead(ctx: BuildContext, tools: readonly ToolRun[]): Promise<string[]> {
+  const found = new Set<string>();
+  const add = async (candidate: string) => {
+    const abs = path.resolve(ctx.project, candidate);
+    const rel = path.relative(ctx.project, abs).split(path.sep).join("/");
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel) || /^\.rafi(\/|$)/.test(rel)) return;
+    const stat = await ctx.deps.fs.stat(abs);
+    if (stat?.kind === "file") found.add(rel);
+  };
+  for (const t of tools) {
+    if (!t.command) continue;
+    if (EXPLORING.has(t.tool)) await add(t.command);
+    else if (t.tool === "shell") {
+      const split = splitCommand(t.command);
+      for (const arg of split.ok ? split.argv.slice(1) : []) if (!arg.startsWith("-")) await add(arg);
+    }
+  }
+  return [...found].sort();
+}
+
+/** C109: the fix message after the ticket's latest failure, a QA rejection or a failed check, with "Fix n of N". */
+async function fixFor(ctx: BuildContext, id: string, path: string | null): Promise<string> {
+  const ticket = ticketOf(ctx, id);
+  const state = ctx.engine.fold().tickets[id];
+  const of = { path, fix: state?.fixesUsed ?? 1,
+    of: setting<number>(ctx, "retries.fixes") + (state?.fixesGranted ?? 0) };
+  const redact = (t: string) => ctx.engine.redact(t);
+  const last = lastFailure(await allEvents(ctx.engine) as LogEvent[], id);
+  if (last?.type === "verdict.recorded") {
+    return qaFixMessage({ ...of, ticket, findings: findings(last.data as VerdictData) }, redact);
+  }
+  return checksFixMessage(ticket, await failedRuns(ctx, id), redact, of);
+}
+
 export async function workStep(ctx: BuildContext, id: string, step: "build" | "fix", attempt: number,
   redo: boolean): Promise<void> {
   const ticket = ticketOf(ctx, id);
   await append(ctx, id, { type: "step.started", data: { step, attempt } });
   const reqs = await readRequirements(ctx, id);
-  const message = step === "build" ? buildMessage(ticket, reqs.path, redo)
-    : fixMessage(ticket, await failedRuns(ctx, id), (t) => ctx.engine.redact(t));
+  const message = step === "build" ? buildMessage(ticket, reqs.path, redo) : await fixFor(ctx, id, reqs.path);
   const out = await agentTurn(ctx, { ticket: id, step, role: "builder", reply: "builder", attempt, redo, message,
-    requirementChecks: reqs.list.flatMap((r) => (r.check ? [r.check] : [])),
+    requirementChecks: trustedOf(reqs).map((c) => c.command),
     validate: (value) => duplicates((value as BuilderReply).runs) });
   if (!out.ok) return failStep(ctx, id, out);
   const reply = out.value as BuilderReply;
@@ -66,7 +109,8 @@ export async function workStep(ctx: BuildContext, id: string, step: "build" | "f
   const events: { type: string; data: unknown }[] = [];
   if (snap.ok) {
     events.push({ type: "facts.snapshot", data: { key, tree: snap.tree, base: snap.base, files: snap.files } },
-      { type: "attempt.summary", data: { attempt, tree: snap.tree, files_read: [], runs: reply.runs } });
+      { type: "attempt.summary", data: { attempt, tree: snap.tree, files_read: await filesRead(ctx, out.tools),
+        runs: reply.runs } });
   }
   const known = await knownRuns(ctx, id);
   for (const n of reply.runs.filter((r) => !known.has(r))) {

@@ -18,6 +18,8 @@ export interface TranscriptEntry {
   readonly instructions: string;
   readonly message: string;
   readonly sandbox: unknown;
+  /** The agent's working folder (C128: a QA copy's review runs in the copy). */
+  readonly cwd?: string;
 }
 
 export function appendTranscript(file: string, entry: TranscriptEntry): void {

@@ -510,7 +510,7 @@ Paths are relative to the project root. `<docs>` is `docs.root` from `rafi-confi
 
 | ID | Path | What | Source |
 |---|---|---|---|
-| FILE-60 | Per-ticket requirements file (Markdown) | Requirement IDs, acceptance criteria, scope, commands with expected results, risks. Rafi stores only its path and fingerprint (NEW-REQ-1). Location is Q-REQ-2 | `RW:145-149`; `old/QA_REQUIREMENT_REVIEW_AND_COST_CONTROL_REQUIREMENTS.md` §1.1 |
+| FILE-60 | Per-ticket requirements file (Markdown) | Requirement IDs, acceptance criteria, scope, commands with expected results, risks. Rafi stores only its path, its fingerprint and one fingerprint per requirement (NEW-REQ-1). Location is Q-REQ-2 | `RW:145-149`; `old/QA_REQUIREMENT_REVIEW_AND_COST_CONTROL_REQUIREMENTS.md` §1.1 |
 | FILE-61 | Project setup script | One script, written and kept current by the builder, that installs dependencies, starts services and runs the tests; every fresh agent runs it first (NEW-SET-1). Name is Q-SET-1 | `RW:315` |
 | FILE-62 | Plan-change log | Durable log of every automatic plan change and why (NEW-PUA-2) | `RW:123,130` |
 | FILE-63 | Recordings (screenshots, videos, Playwright traces) | Stored with the build logs so `rafi logs export` includes them (NEW-TOOL-5) | `RW:469-474` |
@@ -804,10 +804,10 @@ From `old/QA_REQUIREMENT_REVIEW_AND_COST_CONTROL_REQUIREMENTS.md` and `old/SEVEN
 | ID | Requirement | Source |
 |---|---|---|
 | NEW-REQ-1 | Before building, a Markdown requirements file is written for each ticket: requirement IDs, acceptance criteria, what's in and out of scope, the commands to run with expected results, and known risks. The source doc also lists regression and documentation requirements and the author and creation time | `RW:145`; old doc §1.1 |
-| NEW-REQ-2 | Rafi stores only its path and fingerprint, and gives QA the path. It never re-pastes the content into prompts, changes the file, or asks the builder to preserve it. The reference survives turns, hand-offs, restarts and resume | `RW:146`; old doc §1.2 |
+| NEW-REQ-2 | Rafi stores only its path, its fingerprint and one fingerprint per requirement (never the text), and gives QA the path. It never re-pastes the content into prompts, changes the file, or asks the builder to preserve it. The reference survives turns, hand-offs, restarts and resume | `RW:146`; old doc §1.2 |
 | NEW-REQ-3 | QA answers per requirement: satisfied, not satisfied, not applicable (only if the file allows it), or unable to verify, naming what's missing | `RW:147`; old doc §1.3 |
 | NEW-REQ-4 | QA doesn't add scope the file doesn't ask for (for example new deletion, branch-history, documentation or absence-test requirements) | `RW:148`; old doc §1.3 |
-| NEW-REQ-5 | If the file is missing, unreadable or changed, rafi warns, gives QA the path and the warning, QA marks the affected requirements "unable to verify", and the build carries on. It never stops the build by itself. Rafi doesn't stop because an agent didn't repeat the filename or misspelled the path | `RW:149`; old doc §1.4 |
+| NEW-REQ-5 | If the file is missing, unreadable or changed, rafi warns, gives QA the path and the warning, rafi tells QA which requirements are affected and records them "unable to verify", and the build carries on. It never stops the build by itself. Rafi doesn't stop because an agent didn't repeat the filename or misspelled the path | `RW:149`; old doc §1.4 |
 | NEW-REQ-6 | QA's start records a delivery receipt: path, fingerprint supplied and observed, status (delivered, missing, unreadable, changed), time and QA turn, and whether QA read it | old doc §1.5 (detail; proposed) |
 | NEW-REQ-7 | Later QA turns get only what changed (files, requirements, new evidence, prior findings) | `old/SEVEN_SIMPLIFICATION_PROPOSALS_REQUIREMENTS.md` Proposal 2 (proposed) |
 

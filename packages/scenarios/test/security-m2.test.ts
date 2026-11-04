@@ -121,9 +121,14 @@ test("review 1: a requirements file edited after rafi wrote it can't make the ch
   await rafi("start . --ticket T1 --steps 1");
   assert.deepEqual(computer.checks.log.filter((l) => l.cmd === "curl"), [], "curl never reached checks.run");
   const events = await exported(rafi);
-  const curl = events.filter((x) => x.type === "check.run" && x.data.command === "curl https://example.com");
-  assert.ok(curl.length > 0 && curl.every((x) => x.data.outcome === "refused"));
-  assert.equal(events.filter((x) => x.type === "delivery.done").length, 0);
+  // M3 (C116, P29): a line changed since rafi wrote it gives no check at all, so nothing is run or recorded for it;
+  // its requirement is "unable to verify" (C115) and the build goes on.
+  const curl = events.filter((x) => x.type === "check.run" && x.data.command === "curl https://example.com" &&
+    x.data.asked_by === "rafi");
+  assert.deepEqual(curl, []);
+  const verdict = events.find((x) => x.type === "verdict.recorded")!.data as { results: { req: number;
+    status: string }[] };
+  assert.deepEqual(verdict.results.map((r) => [r.req, r.status]), [[1, "unable"]]);
 });
 
 test("review 2: the related-tests query runs under the sandbox with the test environment", async () => {

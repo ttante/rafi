@@ -22,7 +22,21 @@ function sorted<T>(record: Record<string, T>): Record<string, T> {
 
 export async function writeProgress(engine: Engine, view: Folded): Promise<void> {
   const last: Record<string, string> = {};
-  for await (const e of engine.events()) if (e.ticket_id) last[e.ticket_id] = e.at;
+  const keys: Record<string, { key: string | null; options: string[] }> = {};
+  const answers: Record<string, unknown> = {};
+  for await (const e of engine.events()) {
+    if (e.ticket_id) last[e.ticket_id] = e.at;
+    const d = e.data as { id: string; key?: string | null; choice?: string | null;
+      options?: { label: string }[] };
+    if (e.type === "question.opened") {
+      keys[d.id] = { key: d.key ?? null, options: (d.options ?? []).map((o) => o.label) };
+    }
+    // C121: saved answers by key, with when, the choice and where; a note stays out of the committed file.
+    const key = keys[d.id]?.key;
+    if (e.type === "question.answered" && key) {
+      answers[key] = { at: e.at, choice: d.choice ?? null, source: e.source ?? "unknown" };
+    }
+  }
   const tickets: Record<string, Record<string, unknown>> = {};
   for (const t of Object.values(view.tickets)) {
     const at = last[t.id] ?? engine.deps.clock.now().toISOString();
@@ -34,10 +48,10 @@ export async function writeProgress(engine: Engine, view: Folded): Promise<void>
   const questions: Record<string, unknown> = {};
   for (const q of Object.values(view.questions)) {
     if (q.status === "open") questions[String(q.no)] = { at: q.openedAt ?? "", kind: q.kind, tickets: q.tickets,
-      text: q.text, options: [] };
+      text: q.text, options: keys[q.id]?.options ?? [] };
   }
-  const body = stringify({ version: 1, tickets: sorted(tickets), questions: sorted(questions), answers: {} },
-    { sortMapEntries: true });
+  const body = stringify({ version: 1, tickets: sorted(tickets), questions: sorted(questions),
+    answers: sorted(answers) }, { sortMapEntries: true });
   engine.deps.hooks.crash("5: during the progress-file write");
   await engine.deps.fs.writeAtomic(path.join(engine.projectDir, PROGRESS), HEADER + body);
 }

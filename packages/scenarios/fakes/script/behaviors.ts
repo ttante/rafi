@@ -19,6 +19,22 @@ const extend = (extra: Partial<Behavior>, before: readonly Step[] = []): Behavio
 
 const json = JSON.stringify(DONE);
 
+type Verdict = { results: { req: number; status: string; runs: number[]; needs: string | null; note: string | null }[];
+  summary: string };
+
+/** QA's happy verdict for this turn (every requirement rafi's message lists), with some results changed. */
+const verdict = (change: (r: Verdict["results"][number]) => Verdict["results"][number], summary: string) =>
+  (meta: MetaLike, ctx: TurnContext): Behavior => {
+    const base = happy(meta, ctx).reply as Verdict;
+    return { steps: [], reply: { results: base.results.map(change), summary } };
+  };
+
+/** Any reply as JSON with trailing text starting exactly at byte `at`. */
+const malformedOf = (reply: unknown, at = 200): Behavior => {
+  const text = JSON.stringify(reply);
+  return { raw: `${text}${" ".repeat(Math.max(0, at - text.length))}trailing text` };
+};
+
 export const B = {
   done: (): BehaviorOf => happy,
   malformed: (at: number): Behavior => ({ raw: `${json}${" ".repeat(Math.max(0, at - json.length))}trailing text` }),
@@ -36,6 +52,28 @@ export const B = {
   verdictRuns: (runs: unknown[]): Behavior => ({ reply: { results: [{ req: 1, status: "satisfied", runs,
     needs: null, note: null }], summary: "checked" } }),
   hang: (): Behavior => ({ hang: true }),
+  /** The role's happy path with extra steps after it (`B.also({ read: "README.md" })`). */
+  also: (...steps: Step[]): BehaviorOf => extend({ steps }),
+  read: (file: string): BehaviorOf => extend({ steps: [{ read: file }] }),
+  /** The user edits (or removes) a file mid-turn: no tool event (C123). */
+  outside: (o: NonNullable<Step["outside"]>): BehaviorOf =>
+    extend({ steps: [{ outside: o }] }),
+  /** QA's prepare reply with these requirements. */
+  requirements: (list: { from: number; text: string; check: string | null }[]): Behavior => ({ steps: [],
+    reply: { requirements: list.map((r) => ({ ...r, expect: r.check ? "passes" : null })), in_scope: ["the ticket"],
+      out_of_scope: [], risks: [], add_tags: [] } }),
+  /** QA rejects: each listed requirement not-satisfied with its note, the rest satisfied. */
+  reject: (notes: Record<number, string>) => verdict((r) => (notes[r.req] === undefined ? r
+    : { ...r, status: "not-satisfied", note: notes[r.req]! }), "Rejected."),
+  /** The same rejection every time (SCN 2.2 same-reject). */
+  sameReject: (n: number) => verdict((r) => (r.req === n ? { ...r, status: "not-satisfied",
+    note: `R${n} still fails the same way` } : r), "Rejected."),
+  pass: () => verdict((r) => r, "Every requirement is satisfied."),
+  unable: (n: number, needs: string) => verdict((r) => (r.req === n ? { ...r, status: "unable", runs: [], needs,
+    note: `R${n} needs a ${needs}` } : r), "One requirement couldn't be verified."),
+  malformedOf,
+  /** The repair resend: the same reply, as valid JSON. */
+  repairOf: (reply: unknown): Behavior => ({ reply }),
   /** Works for `minutes` on the fake clock with activity every `every` minutes (0: none). */
   slow: (minutes: number, every = 1): BehaviorOf => {
     const steps: Step[] = [];

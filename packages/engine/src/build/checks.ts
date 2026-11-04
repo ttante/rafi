@@ -140,14 +140,14 @@ export function untrusted(text: string, redact: (t: string) => string): string {
 export async function executeCheck(env: CheckEnv, argv: string[], askedBy: "builder" | "qa" | "rafi"):
   Promise<Executed> {
   const { deps, engine } = env;
-  const before = await snapshot(deps, env.project, "before");
+  const before = await snapshot(deps, env.project, "before", { files: false });
   const tree = before.ok ? before.tree : "none";
   const run = nextRun(await events(engine), env.ticket);
   const json = path.join(cachePath(env.project), `run-${env.ticket}-${run}.json`);
   const extra = jestLike(argv) ? ["--json", `--outputFile=${json}`] : [];
   deps.hooks.crash(`10: before test run ${run} (${env.ticket})`);
   const { result, reason } = await spawn(env, [...argv, ...extra]);
-  const after = await snapshot(deps, env.project, "after");
+  const after = await snapshot(deps, env.project, "after", { files: false });
   const changed = before.ok && after.ok ? (await changedBetween(deps, env.project, before.tree, after.tree))
     .filter((f) => !env.outputPaths.some((p) => f.startsWith(p))) : [];
   let outcome = reason === "quiet" ? "timed-out" : reason === "limit" ? "too-slow"
@@ -155,7 +155,7 @@ export async function executeCheck(env: CheckEnv, argv: string[], askedBy: "buil
   let restored: string[] = [];
   if (changed.length && askedBy === "qa" && before.ok) {
     await restoreTree(deps, env.project, before.tree, changed);
-    const back = await snapshot(deps, env.project, "restored");
+    const back = await snapshot(deps, env.project, "restored", { files: false });
     if (!back.ok || (await changedBetween(deps, env.project, before.tree, back.tree))
       .some((f) => !env.outputPaths.some((p) => f.startsWith(p)))) {
       throw new Error(`rafi couldn't put back the files QA's test run changed (${changed.join(", ")})`);
@@ -231,7 +231,7 @@ export interface StepResult {
  */
 export async function checkStep(env: CheckEnv, checks: readonly { req: number; command: string }[],
   rules: CheckRules): Promise<StepResult> {
-  const now = await snapshot(env.deps, env.project, "step");
+  const now = await snapshot(env.deps, env.project, "step", { files: false });
   const tree = now.ok ? now.tree : "none";
   const runs: number[] = [];
   const reused: number[] = [];

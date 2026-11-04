@@ -7,6 +7,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { nextIndex } from "./codex-cli.mjs";
+import { outsideEdit } from "./script/roles.mjs";
 
 const VERSION = "2.1.999 (Claude Code fake)";
 const ENV_LOG_KEYS = ["RAFI_ENGINE"];
@@ -246,6 +247,7 @@ export class FakeClaude {
       if (step.wait) await (this.io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))(step.wait);
       if (step.activity) this.assistant([{ type: "text", text: step.activity }]);
       if (step.shell) await this.bash(step.shell);
+      if (step.outside) outsideEdit(cwd, step.outside);
       if (step.read) {
         await this.tool("Read", { file_path: path.resolve(cwd, step.read) }, async () => ({ text: "1\tx" }));
       }

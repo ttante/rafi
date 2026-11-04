@@ -84,3 +84,19 @@ export function configure(project: string, extra: Record<string, Record<string, 
   writeFileSync(file, stringify(config));
   git(project, ["commit", "-qam", "configure"]);
 }
+
+/** Writes files into a project and commits them. */
+export function addFiles(project: string, files: Record<string, string>): void {
+  writeFiles(project, files);
+  git(project, ["add", "-A"]);
+  git(project, ["commit", "-qm", "add files"]);
+}
+
+/** Per-ticket overrides of `.tickets/tickets.yaml` (risk, acceptance, qa_preparation, …), committed. */
+export function setTickets(project: string, overrides: Record<string, Record<string, unknown>>): void {
+  const file = path.join(project, ".tickets", "tickets.yaml");
+  const doc = parse(readFileSync(file, "utf8")) as { tickets: Record<string, unknown>[] };
+  doc.tickets = doc.tickets.map((t) => ({ ...t, ...(overrides[String(t.id)] ?? {}) }));
+  writeFileSync(file, stringify(doc));
+  git(project, ["commit", "-qam", "set tickets"]);
+}

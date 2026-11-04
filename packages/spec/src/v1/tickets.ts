@@ -16,6 +16,9 @@ export function checkReservedTicketFields(tickets: readonly unknown[]): TicketFi
 
 
 const strings = z.array(z.string()).default([]);
+
+/** The five preparation depths, shallow to deep (today's levels, `spec/src/qaPreparation.ts`; C113). */
+export const QA_DEPTHS = ["focused", "standard", "extensive", "critical", "exceptional"] as const;
 const numbers = z.array(z.number().int().positive()).default([]);
 
 export const ticketV1 = z.object({
@@ -26,7 +29,8 @@ export const ticketV1 = z.object({
   summary: z.string().optional(),
   priority: z.string().optional(),
   size: z.string().optional(),
-  risk: z.string().optional(),
+  /** Required, exactly Low, Medium or High (FMT-T6; P23 (b)): it sets QA's minimum depth (C113). */
+  risk: z.enum(["Low", "Medium", "High"]),
   depends_on: strings,
   tags: strings,
   acceptance: z.array(z.string().min(1)).min(1),
@@ -41,6 +45,10 @@ export const ticketV1 = z.object({
   person_only: numbers,
   locked: numbers,
   manual_checks: z.string().optional(),
+  /** The planner's QA preparation depth (FMT-T11, Q-REQ-1; ARCH 13); rafi raises it to its minimum for the risk. */
+  qa_preparation: z.object({ depth: z.enum(QA_DEPTHS) }).strict().optional(),
+  /** `full`: QA's review uses the full fingerprint whatever the risk (Q-COPY-1; P25 option B). */
+  qa_isolation: z.literal("full").optional(),
 }).passthrough();
 
 export type TicketV1 = z.infer<typeof ticketV1>;

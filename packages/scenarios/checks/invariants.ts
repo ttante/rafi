@@ -7,6 +7,9 @@ export interface ExportedEvent {
   readonly run_id: string | null;
   readonly ticket_id: string | null;
   readonly type: string;
+  readonly actor?: string;
+  readonly source?: string | null;
+  readonly at?: string;
   readonly data: Record<string, unknown>;
 }
 

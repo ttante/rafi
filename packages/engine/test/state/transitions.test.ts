@@ -69,7 +69,7 @@ test("the variants cover every ticket event in the registry, and each variant's 
   assert.deepEqual(ticketTypes.map((e) => e.type).filter((t) => !covered.has(t)), []);
   assert.equal(isTicketEvent("ticket.done"), false, "delivery.done marks the end of delivery (review finding 3)");
   for (const v of variants) {
-    const checked = checkEventData(v.type, 1, v.data(initialTicket("T1")));
+    const checked = checkEventData(v.type, eventRegistry.get(v.type)!.v, v.data(initialTicket("T1")));
     assert.ok(checked.ok, `${v.name}: ${checked.ok ? "" : checked.reason}`);
   }
 });
@@ -133,4 +133,31 @@ test("context rows: fixes used up, rafi-owned, QA off, requirements current, per
   assert.equal(added.state, "queued");
   assert.equal(added.rafiOwned, true);
   assert.equal(apply(at("review"), "changed material").requirementsCurrent, false);
+});
+
+test("C104: a retry from blocked(what-next) is the next attempt and uses the grant; exactly one fix, then ask", () => {
+  const asked = apply(at("review", { attempt: 4, fixesUsed: 3 }), "verdict rejected");
+  assert.equal(label(asked), "blocked(what-next)->fix");
+  const granted = apply(asked, "fix granted");
+  const retried = apply(granted, "unblocked resume fix");
+  assert.equal(retried.state, "queued");
+  assert.equal(retried.resumeNode, "fix");
+  assert.equal(retried.attempt, 5, "the next attempt");
+  assert.equal(retried.fixesUsed, 4, "the grant is used");
+  const fixing = apply(retried, "started resume fix");
+  assert.equal(label(fixing), "fixing·fix");
+  assert.equal(apply(at("review", { ...fixing, node: "review", state: "reviewing" }), "verdict rejected").block?.kind,
+    "what-next", "the next rejection asks again");
+  const early = apply(at("review", { attempt: 3, fixesUsed: 2 }), "verdict rejected circling");
+  const once = apply(apply(early, "fix granted"), "unblocked resume fix");
+  assert.equal(once.fixesUsed, 4, "after an early circling question, the grant still allows exactly one fix");
+  assert.equal(apply(at("review", { ...once, node: "review", state: "reviewing" }), "verdict rejected").block?.kind,
+    "what-next");
+});
+
+test("C104: blocked(other) back into the fix step doesn't count as an attempt or a fix", () => {
+  const failed = apply(at("fix", { attempt: 2, fixesUsed: 1 }), "step failed");
+  assert.equal(failed.block?.kind, "other");
+  const back = apply(failed, "unblocked resume fix");
+  assert.deepEqual([back.attempt, back.fixesUsed], [2, 1]);
 });

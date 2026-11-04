@@ -260,7 +260,7 @@ The fake records every request it gets in a transcript: role, ticket, step, sess
   4. Fresh fixture: the builder's reply misspells the requirements file path.
 - **Expected:**
   - Step 1, for each of `T1` and `T2`: the transcript has a new QA session that writes `docs/requirements/<ticket>.md` (location per Q-REQ-2) before the ticket's first builder turn. The file has requirement IDs (`R1`, `R2`, …), the acceptance criteria, an in-scope and an out-of-scope list, at least one command with its expected result, and a risks section. F-CHAIN leaves git to you, so it's left in the working tree with the ticket's work; on F-BRANCH (rafi manages git) it's in the same commit as the ticket's work (`git log --name-only`).
-  - `T1`'s preparation depth, in its requirements file and in `rafi tickets show T1 --json`, equals the configured minimum for High risk, not the lower depth the Planner gave. The event log has exactly one record of the raise, with the old and new depth.
+  - `T1`'s preparation depth, in its requirements file and in `rafi tickets show T1 --json`, equals rafi's minimum for High risk (ARCH 13), not the lower depth the Planner gave. The event log has exactly one record of the raise, with the old and new depth.
   - Every builder and QA instruction for `T1` and `T2` contains the file's path; QA's also contains its fingerprint. None contains any line of the file's text (the harness checks each requirement line against the instruction text).
   - `rafi stats show --run <id>` lists exactly one delivery receipt per QA review turn, each with path, fingerprint supplied, fingerprint observed, status `delivered`, time, turn, and "read: yes" when the fake opened the file during the turn.
   - Step 2 (file changed while the builder works): exactly one warning line, naming `docs/requirements/T1.md` and saying it changed. QA's review instruction for `T1` contains the path and the warning. Every requirement whose text changed is "unable to verify" in QA's verdict; the others get normal verdicts. The receipt status is `changed`. `T2`'s first turn starts without any question being asked about `T1`. Exit 0.
@@ -1040,7 +1040,7 @@ The base case is S-BLK-1 in section 3.3.
 
 #### S-CHK-3 — Only relevant tests run; every test goes through the record
 - **Covers:** NEW-CHK-4, NEW-CHK-5
-- **Setup:** F-TESTS with ten test files. `T1` changes `src/a.js`; two test files are related to it. Script: `qa T1#1: run_check("fake-test e2e/a.spec")` (a browser test not in the requirements file); `builder T1#1: setup-script`.
+- **Setup:** F-TESTS-LOCAL with ten test files. `T1` changes `src/a.js`; two test files are related to it. Script: `qa T1#1: run_check("fake-test e2e/a.spec")` (a browser test not in the requirements file); `builder T1#1: setup-script`.
 - **Steps:**
   1. `rafi start . --ticket T1 --steps 1`.
   2. `rafi plan restore <earlier revision> --ticket T1`, then `rafi start . --ticket T1 --steps 1`.

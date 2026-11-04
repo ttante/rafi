@@ -56,7 +56,7 @@ test("the 1.0 tickets file: a valid ticket reads; a bad field is named with its 
   assert.match(bad.ok ? "" : bad.message, /T1.*acceptance|acceptance.*T1/);
   const dup = checkTicketsFile({ tickets: [TICKET, TICKET] });
   assert.match(dup.ok ? "" : dup.message, /T1/);
-  const minimal = checkTicketsFile({ tickets: [{ id: "T2", title: "x", acceptance: ["a"] }] });
+  const minimal = checkTicketsFile({ tickets: [{ id: "T2", title: "x", risk: "Low", acceptance: ["a"] }] });
   assert.equal(minimal.ok && minimal.tickets[0]!.likely_files.length, 0);
 });
 

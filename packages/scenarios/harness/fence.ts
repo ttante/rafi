@@ -57,6 +57,7 @@ export class Fence {
       remove: async (p, o) => { this.check(`remove ${p}`); await real.remove(p, o); },
       mkdir: async (p) => { this.check(`mkdir ${p}`); await real.mkdir(p); },
       stat: (p) => real.stat(p),
+      realpath: (p) => real.realpath(p),
       list: (p) => real.list(p),
     };
   }

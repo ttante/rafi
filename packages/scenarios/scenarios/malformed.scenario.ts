@@ -135,7 +135,30 @@ scenario({
       assert.match(r.out, /the repair was rejected: the resend changed summary/);
       assert.match(r.out, /raw sha256:[0-9a-f]{64}/);
     });
-    await pending("variant 3: circling stops repeated changed resends", "M3");
+    await step("variant 3: the same changed resend repeating stops the retries early: blocked, malformed reply",
+      async () => {
+        const dir = ctx.fixture("F-ONE");
+        computer.script.rules.length = 0;
+        computer.script.transcript.length = 0;
+        for (let i = 0; i < 4; i += 1) {
+          computer.script.rules.push(on("builder T1", B.malformed(200)), on("builder T1", B.repairChanged("summary")));
+        }
+        const r = await rafi("start . --steps 1", { cwd: dir });
+        assert.equal(r.code, 1, r.output);
+        const builds = computer.script.transcript.filter((t) => t.role === "builder" && t.step === "build" &&
+          !t.repair);
+        assert.equal(builds.length, 3, "3 build turns, not 4 (retries.turn is 3)");
+        const e = await exported(ctx, dir);
+        assert.equal(of(e, "turn.retry").length, 2);
+        assert.deepEqual(of(e, "step.failed").map((x) => x.circling), [true]);
+        const lines = r.output.split("\n").filter((l) => /^rafi: T1/.test(l) && /malformed reply/.test(l));
+        assert.equal(lines.length, 1, r.output);
+        assert.match(lines[0]!, /`rafi [a-z]+[^`]*`/, "a command to continue");
+        assert.doesNotMatch(r.output, /delivery uncertain/);
+        const t1 = (JSON.parse((await rafi("tickets show T1 --json", { cwd: dir })).out) as
+          { tickets: { id: string; state: string }[] }).tickets.find((t) => t.id === "T1")!;
+        assert.equal(t1.state, "blocked");
+      });
     await pending("variant 2: every reply malformed; T1 blocked with 'malformed reply', T2 still builds", "M6");
   },
 });

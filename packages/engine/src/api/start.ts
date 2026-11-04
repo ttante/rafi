@@ -11,6 +11,7 @@ import { claudeAgent } from "../agents/claude/adapter.js";
 import { codexAgent } from "../agents/codex/adapter.js";
 import { agentEnv, declaredValues } from "../build/env.js";
 import { runLoop } from "../build/loop.js";
+import { staleWaiver } from "../ask/blocked.js";
 import type { BuildContext, BuildUI, RoleAgent } from "../build/context.js";
 import {
   noSandboxDecision, rememberNoSandbox, sandboxInfo, savedNoSandbox, stopLine, WARNING,
@@ -193,6 +194,7 @@ export async function startBuild(engine: Engine, o: StartOptions, ui: StartUI): 
     tickets: o.ticket ? [o.ticket] : [], settings: recorded, engine_version: ENGINE_VERSION, argv: [...o.argv] } },
   { type: "build.owner_acquired", run_id: run, actor: "engine", data: { instance: self.instance, host: self.host,
     pid: self.pid } }]);
+  if (o.ticket) await staleWaiver(engine, deps, run, o.ticket, (text) => ui.line(text));
   const ctx: BuildContext = { engine, deps, project: engine.projectDir, run, tickets: tickets.tickets,
     units: tickets.units, settings, agents: roles, sandbox: sandbox.tool, grants: { needs: [] }, runner: test.argv,
     testScripts: test.scripts, ui, sessions: new Map() };

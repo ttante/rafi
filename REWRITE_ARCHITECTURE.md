@@ -312,7 +312,7 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 
 | Type | Class | Written when | Fields |
 |---|---|---|---|
-| `requirements.written` | state | the prepare step writes the requirements file | `path`, `fp`, `depth`, `depth_raised_from` (S-QA-5), `count`, `person_only: [n]` |
+| `requirements.written` | state | the prepare step writes the requirements file | `path`, `fp`, `depth`, `depth_raised_from` (S-QA-5), `req_fps` (one fingerprint per rendered requirement line, never the text; S-QA-5 step 2), `count`, `person_only: [n]` |
 | `requirements.receipt` | detail | a QA review turn starts and ends | `key`, `path`, `fp_supplied`, `fp_observed`, `status: delivered \| missing \| unreadable \| changed`, `read` (NEW-REQ-6) |
 | `builder.reported` | state | a builder reply validates | `kind: done \| blocked \| needs-input`, `summary`, `runs`, `block`, `question` (6.2) |
 | `check.run` | state | rafi finishes running a test command (6.9) | `run` (short number), `ticket`, `command`, `asked_by: builder \| qa \| rafi`, `tree` (git tree id it ran against), `exit_code`, `outcome: passed \| failed \| timed-out \| too-slow \| changed-code \| refused`, `tests: [{name, file, outcome}]` (when the runner reports per-test results), `duration_ms`, `sandbox: os \| none` (`none` only after the no-sandbox warning was accepted, 6.9), `secrets: [names]` and `env_missing: [names]` (names only, never values or digests; 7.12), `output` (blob), `changed_tracked` (files a check changed, when any), `restored` (QA's runs: tracked files put back) |
@@ -421,7 +421,7 @@ answers:
 | `.rafi/state.sqlite3` | no | The truth on this machine | Always |
 | `.rafi/progress.yaml` | yes, even with "All Rafi" ignored (FILE-10) | Snapshot of the fold | Every safe point and every state-changing command (3.7) |
 | `docs/ticket-progress.md`, `docs/ticket-archive.md` | as today | Views for people; the `LLM_NEXT_QUEUE` heading becomes `Next up` (Q-FMT-2) | After ticket changes |
-| `<docs>/requirements/<ticket>.md` | yes (Q-REQ-2), in the same commit as the ticket's work (S-QA-5) | The requirements file: QA's content, rendered by rafi; rafi stores only its path and fingerprint (NEW-REQ-2) | Prepare step |
+| `<docs>/requirements/<ticket>.md` | yes (Q-REQ-2), in the same commit as the ticket's work (S-QA-5) | The requirements file: QA's content, rendered by rafi; rafi stores only its path, its fingerprint and one fingerprint per requirement (NEW-REQ-2) | Prepare step |
 | `<docs>/rafi-plan.json`, `.md`, `<docs>/rafi-plans/*` | yes | The plan (kept format, FMT-P) | Approval, plan changes |
 | `.tickets/tickets.yaml`, `delivery.yaml`, `config.yaml` | yes | Definitions you and the Planner write | Populate, `tickets` commands, plan changes |
 | `rafi-config.yaml` | yes, always (FILE-1) | Settings | `create`, `agents`, `tools add`, auto-approve's plan-update default (D3), your answers to the CI confirmation and the time-limit question (6.10, 6.11) |
@@ -429,6 +429,7 @@ answers:
 | `.rafi/recordings/<run>/…` | no (moves under `.rafi/logs/<run>/` when logs are in the project) | QA evidence files (FILE-63) | QA turns |
 | `scripts/rafi-setup.sh` | yes (Q-SET-1) | The project setup script, written by the builder | Builder turns |
 | `.rafi/cache/` | no | Caches tests would otherwise write to your home folder (6.9) | Test runs |
+| `.rafi/cache/qa-copy/<ticket>-<attempt>/` | no, never committed | A git worktree of the builder's snapshot, for QA's review after source drift (4.7, Q-COPY-1); removed with `git worktree remove` as soon as that review ends; it never holds your work | QA reviews after drift |
 | `.rafi/background.log` | no | A `--detach` build's output (8.7) | Background builds |
 | `.rafi/migrate-backup/<time>/` | no | Byte-for-byte copies from `rafi migrate`, plus the 0.10.x files it retired (9.3) | `rafi migrate` |
 | `.foreman/worktrees/`, `.foreman/dirty-baselines/`, `.foreman/pr-bodies/` | no | Working files (FILE-49–51) | Delivery, dirty work |
@@ -500,6 +501,7 @@ Blocked kinds: `permission`, `install`, `service`, `credential`, `decision`, `ot
 | `fixing·fix` | `builder.reported` done | `fixing·check` | |
 | `blocked(confirm)` | `ticket.unblocked` with "It doesn't" | `fixing·fix` | your note is a finding; counts against `retries.fixes` (7.7) |
 | `building·deliver` | `delivery.done` | `done` | |
+| `blocked(what-next)` | `ticket.unblocked` with "Retry another Builder fix" (after `fix.granted`) | `queued` | `resume_step` = fix; the next attempt (attempt + 1), and the grant is used, so exactly one more fix runs before rafi asks again (5.6, S-QA-2 step 6) |
 | `blocked` | `ticket.unblocked` | `queued` | keeps `resume_step`; restarts when the current ticket finishes (NEW-BLK-4) |
 | `done` | `ticket.reopened` | `reviewing·review` | only a stale "I verified it myself" when the ticket is put back in scope (S-QA-2 step 3) |
 | `done` | `recheck.requested`, `recheck.recorded` | no change | the ticket stays done; a failed re-check adds a rafi-owned fix ticket (`ticket.added`, 7.10) |
@@ -855,7 +857,7 @@ The instructions say "report `blocked` rather than swap in a different stack or 
 
 - `add_tags` is QA preparation's double-check of the ticket's tags (NEW-TAG-1): tags it thinks are missing, from the fixed and project lists only. Rafi adds them with the reason "QA preparation"; tags are never removed.
 - `from` is the ticket's acceptance-criterion number the requirement comes from (one criterion may give several requirements).
-- QA writes content; rafi does the rest (Q-REQ-3: QA's session is read-only, so rafi writes the file): it numbers the requirements `R1…Rn`, copies the Planner's person-only and locked marks from the ticket's criteria (FMT-T18, FMT-T19), sets the depth (the Planner's choice raised to the enforced minimum for the ticket's risk, recorded once, S-QA-5, Q-REQ-1), and renders the Markdown:
+- QA writes content; rafi does the rest (Q-REQ-3: QA's session is read-only, so rafi writes the file): it numbers the requirements `R1…Rn`, copies the Planner's person-only and locked marks from the ticket's criteria (FMT-T18, FMT-T19), sets the depth (the Planner's choice raised to rafi's minimum for the ticket's risk (13), recorded once, S-QA-5, Q-REQ-1), and renders the Markdown:
 
 ```markdown
 <!-- rafi requirements v1 ticket=T2 depth=standard -->
@@ -895,7 +897,7 @@ The instructions say "report `blocked` rather than swap in a different stack or 
 | `needs` | With `unable` only: `browser`, `device`, `person`, `service`, `file`, `other`. It lets rafi offer the right tool (S-TOOL-1) without guessing from prose |
 | `runs` | Run numbers QA's verdict rests on: QA's own runs in this turn, or the builder's |
 
-Rafi derives the outcome: any `not-satisfied` is a rejection; otherwise a pass, with every `unable` listed as unverified. An `unable` whose `needs` a known, unconfigured tool would meet asks you (`blocked(unverified)`, 4.2); any other `unable` (including those caused by a missing or changed requirements file, NEW-REQ-5) is recorded and the ticket goes on. Every non-person-only requirement must have a result; person-only ones are optional (QA may report a partial check, D4). QA reviews against the requirements file only and adds no scope it doesn't ask for (NEW-REQ-4).
+Rafi derives the outcome: any `not-satisfied` is a rejection; otherwise a pass, with every `unable` listed as unverified. An `unable` whose `needs` a known, unconfigured tool would meet asks you (`blocked(unverified)`, 4.2); any other `unable` (including those rafi records itself, whatever QA said, for the requirements a missing or changed requirements file affects, NEW-REQ-5) is recorded and the ticket goes on. Every non-person-only requirement must have a result; person-only ones are optional (QA may report a partial check, D4). QA reviews against the requirements file only and adds no scope it doesn't ask for (NEW-REQ-4).
 
 ### 6.5 Planner and Ticket Maker
 
@@ -948,7 +950,7 @@ Agents never prove a test passed by saying so. Rafi runs every test command itse
 
 - **Two tools.** Each builder and QA session gets rafi's `run_check(command)` and `check_output(run)`. `run_check` runs a test and returns the run number, exit code, the failing tests and a short excerpt; `check_output` returns a run's full output. A test an agent runs in its own shell is never proof; only `check.run` records count.
 - **How agents reach them** (decision 7). Claude gets them in-process (the SDK's `createSdkMcpServer`, `sdk.d.ts:466`). Codex can add an MCP server only as a command it launches or a URL (`codex mcp add --help`, codex-cli 0.164.0); client-side tools exist only in app-server's experimental schema. So the engine serves both tools on a local-only HTTP MCP endpoint (127.0.0.1, a random port, a per-session token), given to the Codex thread as `mcp_servers.rafi.url`. One process, no IPC, stable surface only. M2 checks this first, exactly as it will ship.
-- **What `run_check` accepts.** Only: the requirements file's check commands, each checked when rafi wrote the file (next item); the project's test runner (`checks.test_runner`) with file or test-name arguments; and the setup script. Anything else is refused and recorded (`outcome: refused`) with the reason, so it can't be used to run `rafi answer`, `rafi stop` or any other command. Every request also goes through the agent permission policy (7.6, 11.3).
+- **What `run_check` accepts.** Only: the requirements file's check commands, each checked when rafi wrote the file (next item) and taken only from requirement lines unchanged since (`req_fps`); the project's test runner (`checks.test_runner`) with file or test-name arguments; and the setup script. Anything else is refused and recorded (`outcome: refused`) with the reason, so it can't be used to run `rafi answer`, `rafi stop` or any other command. Every request also goes through the agent permission policy (7.6, 11.3).
 - **Checks in the requirements file.** When rafi writes the requirements file, it checks each `check`: one command, no shell syntax, and its program must be the test runner, a `package.json` test script or the setup script. Anything else is a `content` error and the prepare turn is retried.
 - **Where and with what access.** Rafi runs the command in the builder's worktree under an operating-system sandbox that matches the build's grants, where the machine has a sandbox (without one, the next item; macOS `sandbox-exec`, Linux bubblewrap; which tool, and whether loopback can be allowed without internet, is checked in M2, **unverified**; if one conflicts badly with what tests need and a solid replacement without that problem exists, M2 switches to it): project files writable, internet, local servers and installs only if granted (7.2). Test output is written as usual. Caches that would go to your home folder are pointed at the ignored `.rafi/cache/` (for example `npm_config_cache`). No QA copy is made for tests (NEW-MAL-6).
 - **The test environment** (7.12). A run never gets rafi's whole environment. Every run (`run_check`, the check step, the related-tests query, the CI points and the setup script, 10.2) gets the test allowlist: the base set, the cache variables, the `checks.env` names passed through from your shell, and the secrets the run declared (`checks.secrets` for every run, plus a ticket's `needs.credentials` for that ticket's runs only). A declared name that isn't set is recorded in `check.run`'s `env_missing`; the names a run got are in `secrets`.
@@ -956,7 +958,7 @@ Agents never prove a test passed by saying so. Rafi runs every test command itse
 - **QA's requests.** QA stays read-only. When it asks for a test, rafi runs it the same way, then puts back any tracked file the run changed (from the snapshot) and records `restored`, so QA can't change the code through a test.
 - **The seam** is `deps.checks.run` (8.2): the real one streams a child process's output; the harness's is scripted on the fake clock, so hung and slow tests take no real time (S-CHK-4).
 - **Builder.** It runs the requirements file's checks through `run_check` and fixes failures before it reports `done`.
-- **The check step** (4.2), after every builder turn that reports `done`: every requirement's check needs a passing run that's still fresh. A result is stale when a file it depends on changed since it ran: the files changed since that run's tree (tracked and non-ignored files, minus `checks.output_paths`), matched to tests with the runner's related-files query (`jest --findRelatedTests`, `vitest related`). Without that query, any change makes it stale. Only stale checks rerun. If one fails, the ticket goes straight back to the builder and the QA turn is skipped (`fixing·fix`, counted against `retries.fixes`).
+- **The check step** (4.2), after every builder turn that reports `done`: every requirement's check needs a passing run that's still fresh. A result is stale when a file it depends on changed since it ran: the files changed since that run's tree (tracked and non-ignored files, minus `checks.output_paths`), matched to tests with the runner's related-files query (`jest --findRelatedTests`, `vitest related`). Without that query, any change makes it stale. Only stale checks rerun. If one fails, the ticket goes straight back to the builder and the QA turn is skipped (`fixing·fix`, counted against `retries.fixes`). A requirement line that changed, was added or was removed since rafi wrote the file gives no check (its requirement is "unable to verify", 5.1); with the file missing or unreadable, the step runs the ticket's `required_tests` and related tests, as with QA off.
 - **What the builder gets back after a failure** (decision 9). For every failing run: its run number, the command, each failing test's name and file, the error message and the top of the stack, an excerpt of the output, and how to read the rest (`check_output(4)`). The instruction: "Fix the code so these tests pass. Keep the work you've done; don't start over. Rerun them with `run_check`." The same applies to fix turns after QA findings, CI fix tickets and person-only checks that failed.
 - **With QA off** (`--no-qa`; decision 9). There's no requirements file, so the check step runs the ticket's `required_tests` and the tests related to its changed files. A failure goes back to the builder as above.
 - **Only relevant tests.** During a ticket, only the requirements' checks and the related tests run. The full suite runs only at rafi's CI points (6.10).
@@ -1647,7 +1649,8 @@ REQ and SCN left these to the architecture plan. This is what I set; each is eas
 | How the fake matches turns without reading prompts (SCN 7.3) | `TurnRequest.meta` travels next to the wire message through the transport seam | 11.6 |
 | The 1.0 format marker | `format_version: 1` in `rafi-config.yaml` | 9.2 |
 | New `rafi-config.yaml` keys (FMT-C12–C25, FMT-C27–C34, Q-CFG-1, Q-CFG-4) | `format_version`, `retries`, `timeouts`, `checks` (`ci_tests`, `ci_when`, `ci_blocks_merge`, `test_runner`, `output_paths`, `run_without_sandbox`, `env`, `secrets`, `secrets_with_internet`, `sandbox`), `security.preset` (`greenfield`, `standard`, `sensitive`), `agents.env`, `isolation.home` (`real`, `guarded`, `empty`) and `isolation.deny_read` (`isolation.workspace` reserved and rejected), `grants.remember`, `git.managed_by`, `approvals.mode` (`manual` or `auto`), `plan_updates` (`change-then-tell` or `ask-first`), `manual_checks` (`wait`, `none`, `track`), `locked_requirements`, `tags`, `tools`, `notifications`, `logs.location` (`machine` or `project`), `logs.capture` (`none`, `normal`, `detailed`), `recordings.save`, `recordings.keep`, `agent_permissions` (from `foreman.yaml`), `tickets.build.max_branch_depth`, `tickets.build.keep_worktrees`; `tickets.build.pr_ready` is removed | 5.6, 7, 8.6, 10 |
-| New ticket fields (FMT-T17–T20, NEW-ASK-2) | `tags`, `needs` (`internet`, `local_servers`, `installs`, `services`, `credentials`), `open_decisions`, `person_only` and `locked` (acceptance-criterion numbers), `manual_checks`. Acceptance criteria stay a list of strings (`ai-foreman/src/tickets/ticketSchema.ts:75`) | 6.5, 7.2 |
+| New ticket fields (FMT-T17–T20, NEW-ASK-2) | `tags`, `needs` (`internet`, `local_servers`, `installs`, `services`, `credentials`), `open_decisions`, `person_only` and `locked` (acceptance-criterion numbers), `manual_checks`, `qa_isolation` (`full`: QA's review uses the full fingerprint whatever the ticket's risk; Q-COPY-1). Acceptance criteria stay a list of strings (`ai-foreman/src/tickets/ticketSchema.ts:75`) | 6.5, 7.2 |
+| The ticket's QA preparation depth (FMT-T11, Q-REQ-1) | `qa_preparation: { depth: focused \| standard \| extensive \| critical \| exceptional }`, optional, default `standard`. Rafi's minimum by `risk`: Low `standard`, Medium `standard`, High `extensive` | 6.3 |
 | Database, background-log and machine-state locations | `.rafi/state.sqlite3`, `.rafi/background.log`, `~/.rafi/` | 3.1, 8.7, 8.2 |
 | The turn-retry setting's name and scope (Q-CFG-3, Q-MAL-1) | `retries.turn: 3`, covering provider errors, timeouts and replies still invalid after the repair try | 5.6 |
 | Circling threshold (NEW-ENG-5) | `retries.circling_repeats: 2` | 5.5 |
@@ -1698,8 +1701,9 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 ### M3. The QA loop
 
 - **Builds:** reject, fix and re-review with only what changed; `retries.fixes`; "What next?" with its options and the minimal question record in the same terminal; `fix.granted`; circling; the requirements-file rules (the depth minimum, receipts, missing or changed files making requirements "unable to verify"); unverified requirements; QA isolation (in place or on a copy, light or full fingerprint, drift; Q-COPY-1); "I verified it myself" and "Explicitly waive QA".
-- **Must pass:** S-QA-1, S-QA-3, S-QA-5, S-QA-7, S-CHK-2.
-- **Partial:** S-QA-2 (steps 1–4), S-MAL-2 (variant 3), S-MAL-3 (QA's requirements file, QA's verdict, the builder's fix), S-CHK-3 (step 1).
+- **Security:** QA's notes reach the builder only as quoted data; typed notes are redacted; only you answer "What next?"; a requirements file changed by an agent never makes a requirement pass and never adds a check rafi runs; the QA copy and its cleanup never touch your work or git state; fingerprints never follow symlinks.
+- **Must pass:** S-QA-1, S-QA-3, S-QA-7, S-CHK-2.
+- **Partial:** S-QA-2 (steps 1–4), S-QA-5 (all but the F-BRANCH commit, which needs M5's delivery), S-MAL-2 (variant 3), S-MAL-3 (QA's requirements file, QA's verdict, the builder's fix), S-CHK-3 (step 1, without the setup script's run, which M7 builds).
 
 ### M4. Stop, crash and resume
 
@@ -1711,7 +1715,7 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 ### M5. Batches, delivery, tags and agent settings
 
 - **Builds:** the scope flags (`--to-ticket`, `--ticket`, `--skip`, `--stacks`) and the interactive "Build tickets or complete delivery stacks?" with its up-to-a-ticket choice; scope approval (unchanged scope starts; a material change asks; "Give feedback" arrives in M8); delivery units (branch modes, completion modes, stacks, PRs through the fake `gh` and `glab`); dirty work; the dependency and readiness prompts (PRM-76–78); `docs/ticket-progress.md` with its `Next up` heading; the `rafi tickets` subcommands on the log, except `populate` and `plan`; tags (the fixed list, file patterns, reasons, QA's tags); packs, skills and tools chosen by tags, with tools passed into sessions; the reused-agent override and its compaction threshold; `rafi agents`; `--set`; org-locked settings, including the security preset and any of its keys (7.12); the config-only start flags; reading the progress file on a clone, rebuilding from it and merging its git conflicts. Rafi's CI step (6.10): `checks.ci_tests`, flaky and already-broken tests, the fix ticket, `checks.ci_blocks_merge`, and never adding CI files. Delivery units and their states, merge waits, the git error categories and the delivery question (4.3.2); `git.managed_by` (ARCH-6); `checks.ci_when` and reusing fresh results (6.10); rafi-owned tickets (decision 10).
-- **Must pass:** S-START-2, S-BATCH-1, S-BATCH-2, S-BATCH-3, S-SCN-2, S-SCN-9, S-PORT-2, S-TAG-1, S-TAG-3, S-TAG-4, S-TAG-5, S-CLI-8, S-CHK-6, S-CRASH-2.
+- **Must pass:** S-START-2, S-BATCH-1, S-BATCH-2, S-BATCH-3, S-SCN-2, S-SCN-9, S-PORT-2, S-TAG-1, S-TAG-3, S-TAG-4, S-TAG-5, S-CLI-8, S-CHK-6, S-CRASH-2, S-QA-5.
 - **Partial:** S-START-3 (steps 1, 2 and 4), S-CLI-3 (all but the `uninstall:cleanup` check), S-CLI-4 (every subcommand except `populate`), S-CLI-14 (this build and everything), S-CLI-19 (the config keys in builds), S-CHK-8 (no suite runs), S-START-5 (all but step 5).
 
 ### M6. Questions and blocked tickets
@@ -1749,9 +1753,9 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 |---|---|---|
 | M1 | 2 | 2 |
 | M2 | 15 | 17 |
-| M3 | 5 | 22 |
-| M4 | 7 | 29 |
-| M5 | 14 | 43 |
+| M3 | 4 | 21 |
+| M4 | 7 | 28 |
+| M5 | 15 | 43 |
 | M6 | 18 | 61 |
 | M7 | 17 | 78 |
 | M8 | 11 | 89 |

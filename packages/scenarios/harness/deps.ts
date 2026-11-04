@@ -111,7 +111,7 @@ export function harnessDeps(computer: Computer, terminal: FakeTerminal,
     fs: {
       read: tracked(fs.read), readBytes: tracked(fs.readBytes), writeAtomic: tracked(fs.writeAtomic),
       append: tracked(fs.append), rename: tracked(fs.rename), remove: tracked(fs.remove), mkdir: tracked(fs.mkdir),
-      stat: tracked(fs.stat), list: tracked(fs.list),
+      stat: tracked(fs.stat), realpath: tracked(fs.realpath), list: tracked(fs.list),
     },
     git: (args, opts) => clock.track(async () => {
       fence.check(`git ${args[0]}`);

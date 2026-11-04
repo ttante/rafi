@@ -41,8 +41,9 @@ export interface EventDef {
   readonly schema: z.ZodType;
 }
 
-export function def(type: string, cls: EventClass, scope: EventScope, shape: z.ZodRawShape): EventDef {
-  return Object.freeze({ type, v: 1, class: cls, scope, schema: z.object(shape).strict() });
+/** One event type at version `v` (1 unless a breaking change bumped it; ARCH 3.5, C129). */
+export function def(type: string, cls: EventClass, scope: EventScope, shape: z.ZodRawShape, v = 1): EventDef {
+  return Object.freeze({ type, v, class: cls, scope, schema: z.object(shape).strict() });
 }
 
 export const id = z.string().min(1);

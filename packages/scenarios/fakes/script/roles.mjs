@@ -1,7 +1,7 @@
 // The role happy paths of SCN 2.2, shared by the in-process fakes and the fake executables (plain ESM).
 // They read the ticket from the project the agent runs in (`.tickets/tickets.yaml`), never the prompt's wording,
 // except QA's review, which cites the run numbers and requirement numbers rafi's message lists.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
 
@@ -41,4 +41,16 @@ export function happyPath(meta, ctx) {
       question: null } };
   }
   return { steps: [], reply: {} };
+}
+
+/** The `outside` step (C123): the user edits or removes a file mid-turn, straight on disk; the agent did nothing. */
+export function outsideEdit(cwd, o) {
+  if (o.remove) rmSync(path.resolve(cwd, o.remove), { force: true });
+  if (o.edit) {
+    const file = path.resolve(cwd, o.edit);
+    mkdirSync(path.dirname(file), { recursive: true });
+    const content = o.replace ? readFileSync(file, "utf8").replace(o.replace[0], o.replace[1])
+      : o.content ?? "changed by you\n";
+    writeFileSync(file, content);
+  }
 }

@@ -20,19 +20,37 @@ async function git(deps: SnapshotDeps, cwd: string, args: string[], env: Env = d
   return r.stdout.trim();
 }
 
-export async function snapshot(deps: SnapshotDeps, cwd: string, key = "snapshot"): Promise<Snapshot> {
-  const head = await deps.git(["rev-parse", "--verify", "-q", "HEAD^{tree}"], { cwd, env: deps.env });
-  if (head.code !== 0) return { ok: false, noCommit: true };
-  const base = head.stdout.trim();
+/** The real index's path without a git call when the folder is a repo's top (`.git` a folder, or a worktree's
+ * `gitdir:` file); otherwise git says (M3 section 6: fewer git spawns per snapshot). */
+async function realIndex(deps: SnapshotDeps, cwd: string): Promise<string> {
+  const dotGit = path.join(cwd, ".git");
+  const stat = await deps.fs.stat(dotGit);
+  if (stat?.kind === "dir") return path.join(dotGit, "index");
+  if (stat?.kind === "file") {
+    const linked = /^gitdir: (.+)$/m.exec(await deps.fs.read(dotGit))?.[1]?.trim();
+    if (linked) return path.join(path.resolve(cwd, linked), "index");
+  }
+  return path.resolve(cwd, await git(deps, cwd, ["rev-parse", "--git-path", "index"]));
+}
+
+/** `files: false` gives only the tree (no HEAD lookup, no diff), for callers that compare trees. */
+export async function snapshot(deps: SnapshotDeps, cwd: string, key = "snapshot", o: { files?: boolean } = {}):
+  Promise<Snapshot> {
+  const listed = o.files !== false;
+  const head = listed ? await deps.git(["rev-parse", "--verify", "-q", "HEAD^{tree}"], { cwd, env: deps.env })
+    : null;
+  if (head && head.code !== 0) return { ok: false, noCommit: true };
+  const base = head ? head.stdout.trim() : "";
   const cache = path.join(cwd, ".rafi", "cache");
   await deps.fs.mkdir(cache);
   const index = path.join(cache, `index-${key}`);
-  const real = path.resolve(cwd, await git(deps, cwd, ["rev-parse", "--git-path", "index"]));
+  const real = await realIndex(deps, cwd);
   if (await deps.fs.stat(real)) await deps.fs.writeAtomic(index, await deps.fs.readBytes(real));
   const env = { ...deps.env, GIT_INDEX_FILE: index };
   try {
     await git(deps, cwd, ["add", "-A", "--", ".", ":(exclude).rafi"], env);
     const tree = await git(deps, cwd, ["write-tree"], env);
+    if (!listed) return { ok: true, tree, base, files: [] };
     const diff = await git(deps, cwd, ["diff", "--name-only", "--no-renames", base, tree]);
     const files = diff ? diff.split("\n").filter((f) => !RAFI_DIR.test(f)).sort() : [];
     return { ok: true, tree, base, files };

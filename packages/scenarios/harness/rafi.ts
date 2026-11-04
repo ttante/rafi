@@ -55,7 +55,7 @@ export function newComputer(root: string, name = "a", env: Record<string, string
     env: Object.freeze({ TZ: "UTC", ...env }), ids: { next: 0 }, alive: new Set(),
     childEnvs: [], agentEnvs: [], canaries: {}, sentToAgents: [],
     checks: { tests: {}, sandbox: "available", log: [] }, serve: memoryServe(),
-    home: path.dirname(stateDirFor(root, name)), script: { rules: [], transcript: [] },
+    home: path.dirname(stateDirFor(root, name)), script: { rules: [], transcript: [], sessions: [] },
   };
 }
 
@@ -69,6 +69,8 @@ export function rafiRunner(computer: Computer, cwd: string, results: RafiResult[
   const run = async (line: string, o: RafiOptions = {}) => {
     const terminal = fakeTerminal({ tty: Boolean(o.tty) });
     for (const typed of o.input ?? []) terminal.send(`${typed}\n`);
+    // After the typed lines the input ends, so a prompt with nothing more to read gets end-of-input (C100).
+    terminal.end();
     const instance = harnessDeps(computer, terminal,
       { cwd: o.cwd ?? cwd, instance: `inst-${++instances}`, env: o.env });
     const argv = splitArgs(line);

@@ -29,6 +29,14 @@ export function realFs(random: Random): Fs {
         throw error;
       }
     },
+    async realpath(file) {
+      try {
+        return await fsp.realpath(file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    },
     list: (dir) => fsp.readdir(dir),
   };
 }

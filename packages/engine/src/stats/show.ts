@@ -12,6 +12,9 @@ export interface RunStats {
   readonly retries: Record<string, number>;
   readonly malformed: Record<string, number>;
   readonly failed: { ticket: string | null; key: string; outcome: string; errors: string[]; raw: string | null }[];
+  /** NEW-REQ-6: one delivery receipt per QA review turn. */
+  readonly receipts: { key: string; at: string; path: string; supplied: string | null; observed: string | null;
+    status: string; read: boolean }[];
 }
 
 export async function runStats(engine: Engine, o: { run?: string; ticket?: string } = {}): Promise<RunStats | null> {
@@ -24,7 +27,7 @@ export async function runStats(engine: Engine, o: { run?: string; ticket?: strin
   const intents = new Map<string, Data>();
   const stats: RunStats = { run, state: engine.fold().builds[run]?.state ?? "unknown",
     done: mine.filter((e) => e.type === "delivery.done").map((e) => e.ticket_id!), turns: {}, retries: {},
-    malformed: {}, failed: [] };
+    malformed: {}, failed: [], receipts: [] };
   for (const e of mine) {
     const d = e.data as Data;
     if (e.type === "turn.intent") {
@@ -41,6 +44,9 @@ export async function runStats(engine: Engine, o: { run?: string; ticket?: strin
       }
       stats.failed.push({ ticket: e.ticket_id, key: String(d.key), outcome: String(d.outcome),
         errors: d.errors as string[], raw: (d.raw as string | null) ?? null });
+    } else if (e.type === "requirements.receipt") {
+      stats.receipts.push({ key: String(d.key), at: e.at, path: String(d.path), supplied: d.fp_supplied as string,
+        observed: (d.fp_observed as string | null) ?? null, status: String(d.status), read: Boolean(d.read) });
     } else if (e.type === "turn.repair" && !d.accepted) {
       const last = stats.failed.at(-1);
       if (last) last.errors.push(`the repair was rejected: ${String(d.why)}`);
@@ -60,6 +66,15 @@ export function renderStats(s: RunStats): string {
       const [ticket, step, attempt] = f.key.split(":");
       lines.push(`- ${ticket ?? f.ticket} ${step} attempt ${attempt}: ${f.outcome} — ${f.errors.join("; ")}` +
         `${f.raw ? ` (raw ${f.raw})` : ""}`);
+    }
+  }
+  if (s.receipts.length) {
+    lines.push("Requirements file receipts:");
+    for (const r of s.receipts) {
+      const [ticket, step, attempt] = r.key.split(":");
+      lines.push(`- receipt ${ticket} ${step} attempt ${attempt} at ${r.at}: ${r.path}, ` +
+        `supplied ${r.supplied ?? "none"}, observed ${r.observed ?? "none"}, ${r.status}, ` +
+        `read: ${r.read ? "yes" : "no"}`);
     }
   }
   return `${lines.join("\n")}\n`;

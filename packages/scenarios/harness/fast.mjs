@@ -2,14 +2,17 @@
 // and scripts/check-rules.mjs, as isolated jobs on RAFI_TEST_CONCURRENCY workers (default 4); `*.real.test.ts`
 // files spawn real processes and belong to the process set. Prints totals and the slowest files; fails on any
 // failure or over 60 s of wall time. Modeled on ai-foreman's test-offline.mjs.
-//   node packages/scenarios/harness/fast.mjs [--list] [file filter]
+// Jobs run longest first, from the last run's times (C124, fast-order.mjs); `--times` prints every job's time.
+//   node packages/scenarios/harness/fast.mjs [--list] [--times] [file filter]
 import { spawn } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { order, readTimes, writeTimes } from "./fast-order.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const BUDGET_MS = 60_000;
+const TIMES = path.join(repo, "node_modules", ".cache", "rafi-fast", "times.json");
 const workers = Math.max(1, Number(process.env.RAFI_TEST_CONCURRENCY ?? 4));
 const ROOTS = [
   ["packages/engine/test", /(?<!\.real)\.test\.ts$/], ["packages/spec/test/v1", /\.test\.ts$/],
@@ -56,7 +59,9 @@ function runJob(job) {
 
 async function main() {
   const args = process.argv.slice(2);
-  const list = jobs(args.find((a) => !a.startsWith("--")));
+  const filter = args.find((a) => !a.startsWith("--"));
+  const size = (name) => { try { return statSync(path.join(repo, name)).size; } catch { return 0; } };
+  const list = order(jobs(filter), readTimes(TIMES), size);
   if (args.includes("--list")) return void console.log(list.map((j) => j.name).join("\n"));
   const started = performance.now();
   const queue = [...list];
@@ -65,6 +70,10 @@ async function main() {
     while (queue.length) results.push(await runJob(queue.shift()));
   }));
   const wall = performance.now() - started;
+  if (!filter) writeTimes(TIMES, results);
+  if (args.includes("--times")) {
+    for (const r of [...results].sort((a, b) => b.ms - a.ms)) console.log(`${(r.ms / 1000).toFixed(2)}s  ${r.name}`);
+  }
   const failed = results.filter((r) => r.code !== 0 || r.fail > 0);
   for (const r of failed) console.log(`\n--- FAILED ${r.name} (exit ${r.code})\n${r.output.slice(-4000)}`);
   const sum = (key) => results.reduce((n, r) => n + r[key], 0);

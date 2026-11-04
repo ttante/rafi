@@ -134,6 +134,8 @@ export interface FakeTerminal extends Terminal {
   err(): string;
   all(): string;
   send(text: string): void;
+  /** No more typed input. */
+  end(): void;
   interrupt(): void;
 }
 
@@ -160,6 +162,7 @@ export function fakeTerminal(o: { tty: boolean; columns?: number; rows?: number 
     err: () => err,
     all: () => all,
     send(text) { input.write(text); },
+    end() { input.end(); },
     interrupt() { for (const fn of interrupts) fn(); },
   };
 }

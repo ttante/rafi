@@ -28,7 +28,7 @@ export const registry: readonly Registered[] = Object.freeze([
     "NEW-ENG-5", "NEW-RTY-1"] },
   { id: "S-QA-4", milestone: "M4", title: "Resume after QA: rejected versus broke", covers: [
     "NEW-QAM-3", "NEW-QAM-4", "NEW-QAM-7", "PRM-G4", "NEW-ENG-3"] },
-  { id: "S-QA-5", milestone: "M3", title: "One requirements file per ticket", covers: [
+  { id: "S-QA-5", milestone: "M5", title: "One requirements file per ticket", covers: [
     "NEW-REQ-1", "NEW-REQ-2", "NEW-REQ-5", "NEW-REQ-6", "FILE-60", "FMT-T11", "NEW-KEEP-3", "NEW-CAU-5",
     "NEW-CAU-3"] },
   { id: "S-QA-6", milestone: "M9", title: "Checks only a person can do", covers: [

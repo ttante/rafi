@@ -24,9 +24,16 @@ export async function ticketsView(engine: Engine): Promise<{ ok: true; tickets: 
     const done = all.filter((e) => e.ticket_id === t.id && e.type === "delivery.done").at(-1)?.data as
       { validation: { result: string; runs: number[]; unverified: number[] } } | undefined;
     const runs = runsOf(all, t.id);
+    const written = all.filter((e) => e.ticket_id === t.id && e.type === "requirements.written").at(-1)?.data as
+      { depth: string } | undefined;
+    const waiver = all.filter((e) => e.ticket_id === t.id && e.type === "waiver.recorded").at(-1)?.data as
+      { kind: string; note: string; findings: string[] } | undefined;
     return { ...t, status: TRACKER[state?.state ?? "queued"], state: state?.state ?? "queued",
       step: state?.node ?? null, block: state?.block ?? null, fixes: state?.fixesUsed ?? 0,
+      depth: written?.depth ?? null,
       validation: done ? { result: done.validation.result, unverified: done.validation.unverified,
+        waiver: done.validation.result === "passed" || !waiver ? null
+          : { kind: waiver.kind, note: waiver.note, findings: waiver.findings },
         runs: done.validation.runs.map((n) => { const r = runs.find((x) => x.run === n);
           return { run: n, command: r?.command ?? null, outcome: r?.outcome ?? null }; }) } : null };
   });

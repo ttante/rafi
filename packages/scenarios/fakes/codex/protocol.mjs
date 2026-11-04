@@ -8,6 +8,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createSandbox } from "./sandbox.mjs";
+import { outsideEdit } from "../script/roles.mjs";
 
 const RUNS = "$runs";
 const ERROR_INFO = { quota: "usageLimitExceeded", auth: "unauthorized", transient: "httpConnectionFailed" };
@@ -197,6 +198,8 @@ function stepRunner(io) {
         io.notify("item/started", { turnId, item: { type: "contextCompaction", id } });
         io.notify("item/completed", { turnId, item: { type: "contextCompaction", id } });
       }
+      if (step.outside) outsideEdit(io.params().cwd ?? ".", step.outside);
+      if (step.read) await shell(turnId, `cat ${step.read}`);
       if (step.edit) await edit(turnId, step);
       if (step.shell) await shell(turnId, step.shell);
       if (step.escalate) await escalated(turnId, step.escalate);

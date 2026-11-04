@@ -25,6 +25,8 @@ export interface Fs {
   remove(path: string, o?: { recursive?: boolean }): Promise<void>;
   mkdir(path: string): Promise<void>;
   stat(path: string): Promise<FileStat | null>;
+  /** The path with every symlink resolved; null when it doesn't exist. */
+  realpath(path: string): Promise<string | null>;
   list(path: string): Promise<string[]>;
 }
 

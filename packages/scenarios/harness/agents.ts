@@ -1,6 +1,7 @@
 // The default in-process agents of a harness "computer" (SCN 2.2, 7.3): the scenario's script rules first, the
 // role happy paths otherwise, beneath the real adapters; every turn lands in the computer's transcript with its
 // session (new or reused), model, effort, fast mode, sandbox and network settings.
+import { existsSync } from "node:fs";
 import type { ClaudeQuery, CodexSpawn, JsonRpcStream } from "@rafi-ai/engine";
 import type { TranscriptEntry } from "../checks/transcript.js";
 import { claudeQuery } from "../fakes/claude/query.js";
@@ -14,6 +15,8 @@ type Opt = Record<string, unknown>;
 export interface ScriptState {
   readonly rules: Rule[];
   readonly transcript: TranscriptEntry[];
+  /** Claude sessions opened and closed, in order, with their cwd; `exists`: the cwd was still there at close. */
+  readonly sessions?: { op: "open" | "close"; cwd: string; exists: boolean }[];
 }
 
 function entry(meta: MetaLike, o: Partial<TranscriptEntry>): TranscriptEntry {
@@ -49,13 +52,17 @@ export function defaultAgents(state: ScriptState, serve: MemoryServe, sleep: (ms
         state.transcript.push(entry(meta, { runtime: "codex", session: turns++ === 0 ? "new" : "reused",
           model: (thread.model as string | undefined) ?? null, effort: (start.effort as string | undefined) ?? null,
           fast: start.serviceTier === "fast", writable: policy.writable, network: policy.network,
-          sandbox: policy.sandbox, message: text,
+          sandbox: policy.sandbox, message: text, cwd: String(start.cwd ?? thread.cwd ?? ""),
           tools: (thread.config as Opt | undefined)?.mcp_servers ? ["run_check", "check_output"] : [],
           repair: /Don't run tools, read files or change anything\.$/.test(text) }));
       } }).stream;
   };
   const claude: ClaudeQuery = (params) => {
     const o = params.options;
+    const cwd = String(o.cwd ?? "");
+    state.sessions?.push({ op: "open", cwd, exists: existsSync(cwd) });
+    (o.abortController as AbortController | undefined)?.signal.addEventListener("abort",
+      () => state.sessions?.push({ op: "close", cwd, exists: existsSync(cwd) }), { once: true });
     let turns = 0;
     const prompt = (async function* () {
       for await (const message of params.prompt as AsyncIterable<Record<string | symbol, unknown>>) {
@@ -67,7 +74,8 @@ export function defaultAgents(state: ScriptState, serve: MemoryServe, sleep: (ms
           fast: Boolean((o.settings as Opt | undefined)?.fastMode), sandbox: sandbox ?? null,
           writable: !((sandbox?.filesystem?.denyWrite as string[] | undefined)?.length),
           network: ((sandbox?.network?.allowedDomains as string[] | undefined) ?? []).includes("*"),
-          instructions: turns === 1 ? String((o.systemPrompt as Opt | undefined)?.append ?? "") : "", message: text,
+          cwd: String(o.cwd ?? ""), message: text,
+          instructions: turns === 1 ? String((o.systemPrompt as Opt | undefined)?.append ?? "") : "",
           tools: o.mcpServers ? ["run_check", "check_output"] : [],
           repair: /Don't run tools, read files or change anything\.$/.test(text) }));
         yield message;

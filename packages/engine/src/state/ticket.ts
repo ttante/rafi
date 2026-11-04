@@ -105,7 +105,13 @@ function unblocked(t: TicketState, data: Data, rules: TicketRules): TicketState 
   if (t.block?.kind === "confirm" && fixNode?.type === "maker" && fixNode.state === "fixing") {
     return { ...enter(t, fixNode.id, rules), attempt: t.attempt + 1, fixesUsed: t.fixesUsed + 1 };
   }
-  return { ...t, state: "queued", node: null, block: null, resumeNode: resume, stepRunning: false };
+  const queued = { ...t, state: "queued" as const, node: null, block: null, resumeNode: resume, stepRunning: false };
+  // C104 (ARCH 4.2's what-next row): "Retry another Builder fix" is the next attempt and uses the grant, so exactly
+  // one more fix runs before rafi asks again, even when circling asked early.
+  if (t.block?.kind === "what-next" && fixNode?.type === "maker" && fixNode.state === "fixing") {
+    return { ...queued, attempt: t.attempt + 1, fixesUsed: rules.fixes + t.fixesGranted };
+  }
+  return queued;
 }
 
 function namesTicket(t: TicketState, data: Data): boolean {

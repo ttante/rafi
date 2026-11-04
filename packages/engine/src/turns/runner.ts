@@ -13,6 +13,7 @@ import { escapeControl } from "../log/redact.js";
 import { quoted } from "../instructions/assemble.js";
 import { backoffMs } from "./backoff.js";
 import { classify, harmless, type Category } from "./classify.js";
+import { replySignature, turnCircling } from "./circling.js";
 import { acceptRepair, readReply, repairMessage } from "./repair.js";
 
 export interface TurnSpec {
@@ -50,11 +51,13 @@ export interface TurnLimits {
   readonly retries: number;
   readonly idleMs: number;
   readonly quotaWaitHours: number;
+  /** C112: no-progress tries in a row that stop a turn's retries (`retries.circling_repeats`). */
+  readonly circlingRepeats?: number;
 }
 
 export type TurnOutcome =
   | { ok: true; value: unknown; attempts: number }
-  | { ok: false; category: Category | "switch"; reason: string; attempts: number };
+  | { ok: false; category: Category | "switch"; reason: string; attempts: number; circling?: boolean };
 
 type Deps = { clock: Clock; hooks: Hooks; random: Pick<Random, "jitter"> };
 
@@ -63,6 +66,8 @@ interface Sent {
   timedOut: boolean;
   usage: { input: number; output: number; cost: number | null; measured: boolean };
   ms: number;
+  /** What the turn's tools did (`tool command`), for turn-level circling (C112). */
+  touched: string[];
 }
 
 const CONFIRM_MS = 30_000;
@@ -80,7 +85,7 @@ async function consume(deps: Deps, agent: Agent, request: TurnRequest, spec: Tur
   const started = deps.clock.now().getTime();
   const controller = new AbortController();
   const sent: Sent = { terminal: null, timedOut: false, usage: { input: 0, output: 0, cost: null, measured: false },
-    ms: 0 };
+    ms: 0, touched: [] };
   let forced: () => void = () => undefined;
   const ended = new Promise<"forced">((resolve) => { forced = () => resolve("forced"); });
   const cancels: (() => void)[] = [];
@@ -107,7 +112,8 @@ async function consume(deps: Deps, agent: Agent, request: TurnRequest, spec: Tur
         (request.repair ? "deny" : "allow"));
       else if (e.kind === "usage") sent.usage = { input: e.input, output: e.output, cost: e.cost ?? null,
         measured: e.measured };
-      else if (e.kind === "tool") await io.record([event(spec, "turn.tool", { key: spec.meta.key, run: null,
+      if (e.kind === "tool") sent.touched.push(`${e.run.tool} ${e.run.command ?? ""}`);
+      if (e.kind === "tool") await io.record([event(spec, "turn.tool", { key: spec.meta.key, run: null,
         tool: e.run.tool, command: e.run.command, outcome: e.run.outcome, exit_code: e.run.exitCode,
         duration_ms: e.run.durationMs, output_digest: null, harmless: harmless(e.run) })]);
       else if (e.kind === "activity") await io.record([event(spec, "turn.activity", { key: spec.meta.key,
@@ -173,6 +179,7 @@ export async function runTurn(deps: Deps, first: Agent, spec: TurnSpec, io: Turn
   let note: string | null = null;
   let instructions = spec.session === "new";
   let quotaWaited = false;
+  const tries: { signature: string | null; touched: string[]; format: boolean }[] = [];
   for (let attempt = 1; ; attempt += 1) {
     const request: TurnRequest = { meta: { ...spec.meta, attempt: (spec.meta.attempt ?? 1) + attempt - 1 },
       ...(instructions && spec.instructions ? { instructions: spec.instructions } : {}),
@@ -184,9 +191,16 @@ export async function runTurn(deps: Deps, first: Agent, spec: TurnSpec, io: Turn
     const sent = await consume(deps, agent, request, spec, io, limits);
     let judged = await judge(spec, io, sent.terminal);
     await io.record([await replyEvent(spec, io, judged, sent)]);
+    const format = judged.category === "format";
     if (judged.category === "format" && judged.format) judged = await repair(deps, agent, spec, io, limits, judged);
     if (judged.category === "ok") return { ok: true, value: judged.value, attempts: attempt };
     const reason = judged.errors[0] ?? judged.category;
+    tries.push({ signature: replySignature(judged.category, judged.errors), touched: sent.touched, format });
+    if (limits.circlingRepeats && turnCircling(tries, limits.circlingRepeats)) {
+      const what = tries.every((t) => t.format) ? "malformed reply" : "invalid reply";
+      return { ok: false, category: judged.category, attempts: attempt, circling: true,
+        reason: `${what} ${attempt} times (the same change repeated): ${reason}` };
+    }
     if (judged.category === "cancelled" || judged.category === "environment") {
       return { ok: false, category: judged.category, reason, attempts: attempt };
     }

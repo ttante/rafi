@@ -3,7 +3,7 @@
 import type { DeliveryUnit, ReplyName, Settings, TicketV1 } from "rafi-spec/v1";
 import type { Engine } from "../api/engine.js";
 import { decidePermission } from "../agents/permissions.js";
-import type { AgentEvent } from "../agents/types.js";
+import type { AgentEvent, ToolRun } from "../agents/types.js";
 import type { Deps, Grants, SandboxTool } from "../deps/types.js";
 import { runsOf, type RunRecord } from "../facts/runs.js";
 import type { NewEvent } from "../log/types.js";
@@ -13,6 +13,7 @@ import { standingInstructions } from "../instructions/assemble.js";
 import { executeCheck, refuseCheck, untrusted, type CheckEnv } from "./checks.js";
 import { agentEnv } from "./env.js";
 import { openSession, type Session } from "./session.js";
+import type { UiAnswer, UiQuestion } from "../ask/blocked.js";
 
 export interface RoleAgent {
   readonly runtime: "codex" | "claude";
@@ -29,6 +30,8 @@ export interface BuildUI {
   turn(phase: "start" | "end", o: { role: string; ticket: string | null; step: string }): void;
   line(text: string): void;
   ask?(kind: "auth" | "quota", text: string): Promise<"retry" | "switch" | "cancel">;
+  /** A question in the terminal (C100): null when there's no terminal or the input ended. */
+  question?(q: UiQuestion): Promise<UiAnswer>;
 }
 
 export interface BuildContext {
@@ -72,16 +75,17 @@ export async function ticketRuns(ctx: BuildContext, ticket: string): Promise<Run
   return runsOf(await allEvents(ctx.engine), ticket);
 }
 
-export function checkEnvFor(ctx: BuildContext, ticket: string): CheckEnv {
-  return { deps: ctx.deps, engine: ctx.engine, project: ctx.project, run: ctx.run, ticket, grants: ctx.grants,
+/** `root`: the folder the checks run in, the project unless it's a QA copy (C128). */
+export function checkEnvFor(ctx: BuildContext, ticket: string, root = ctx.project): CheckEnv {
+  return { deps: ctx.deps, engine: ctx.engine, project: root, run: ctx.run, ticket, grants: ctx.grants,
     sandbox: ctx.sandbox, runner: ctx.runner, quietMs: setting<number>(ctx, "timeouts.check_quiet_minutes") * 60_000,
     limitMs: setting<number>(ctx, "timeouts.check_minutes") * 60_000,
     outputPaths: setting<string[]>(ctx, "checks.output_paths"),
     checksEnv: setting<string[]>(ctx, "checks.env") ?? [] };
 }
 
-export function rulesFor(ctx: BuildContext, requirementChecks: readonly string[]): CheckRules {
-  return { root: ctx.project, runner: ctx.runner, requirementChecks, setupScript: "scripts/rafi-setup.sh",
+export function rulesFor(ctx: BuildContext, requirementChecks: readonly string[], root = ctx.project): CheckRules {
+  return { root, runner: ctx.runner, requirementChecks, setupScript: "scripts/rafi-setup.sh",
     testScripts: ctx.testScripts };
 }
 
@@ -90,13 +94,17 @@ export function append(ctx: BuildContext, ticket: string | null, ...events: { ty
     actor: "engine" })));
 }
 
+/** C128: sessions are cached by ticket, role, reply and root; a QA copy's review is its own session. */
+const sessionKey = (ticket: string, role: string, reply: string, root: string) =>
+  `${ticket}|${role}|${reply}|${root}`;
+
 async function session(ctx: BuildContext, ticket: string, role: "builder" | "qa", reply: ReplyName,
-  requirementChecks: readonly string[]): Promise<Session> {
-  const key = `${ticket}|${role}|${reply}`;
+  requirementChecks: readonly string[], root: string): Promise<Session> {
+  const key = sessionKey(ticket, role, reply, root);
   const found = ctx.sessions.get(key);
   if (found) return found;
-  const env = checkEnvFor(ctx, ticket);
-  const tools = toolSession({ role, rules: rulesFor(ctx, requirementChecks),
+  const env = checkEnvFor(ctx, ticket, root);
+  const tools = toolSession({ role, rules: rulesFor(ctx, requirementChecks, root),
     execute: async (argv) => (await executeCheck(env, argv, role)).text,
     refuse: (command, reason) => refuseCheck(env, command, reason, role),
     output: async (n) => {
@@ -108,10 +116,25 @@ async function session(ctx: BuildContext, ticket: string, role: "builder" | "qa"
   const a = ctx.agents[role];
   const shell = agentEnv(ctx.deps.env, a.runtime, setting<string[]>(ctx, "agents.env") ?? [],
     ctx.deps.machine.platform, role);
-  const opened = await openSession(ctx.deps, { ...a, role, reply, project: ctx.project, tools, env: shell },
+  const opened = await openSession(ctx.deps, { ...a, role, reply, project: root, tools, env: shell },
     (t) => ctx.engine.secret(t));
   ctx.sessions.set(key, opened);
   return opened;
+}
+
+/** The session a step would use has already had a turn (C108: a re-review in it gets only what changed). */
+export function sessionUsed(ctx: BuildContext, ticket: string, role: "builder" | "qa", reply: ReplyName,
+  root = ctx.project): boolean {
+  return (ctx.sessions.get(sessionKey(ticket, role, reply, root))?.turns ?? 0) > 0;
+}
+
+/** Closes one session (C128: the in-place review before a copy review; the copy's before cleanup). */
+export async function closeSession(ctx: BuildContext, ticket: string, role: "builder" | "qa", reply: ReplyName,
+  root = ctx.project): Promise<void> {
+  const key = sessionKey(ticket, role, reply, root);
+  const found = ctx.sessions.get(key);
+  ctx.sessions.delete(key);
+  await found?.close();
 }
 
 export interface AgentStep {
@@ -123,6 +146,8 @@ export interface AgentStep {
   readonly message: string;
   readonly redo: boolean;
   readonly requirementChecks?: readonly string[];
+  /** The session's root: the project, or a QA copy (C128). */
+  readonly root?: string;
   validate?(value: unknown): string[] | Promise<string[]>;
 }
 
@@ -166,21 +191,27 @@ async function switchRuntime(ctx: BuildContext, s: AgentStep): Promise<void> {
     "unchanged. It starts a new session, which loses continuity with the earlier one, and the cost may change.");
 }
 
+/** A turn's outcome and the tool runs it made (C111: the files a builder read come from them). */
+export type AgentOutcome = TurnOutcome & { readonly tools: readonly ToolRun[] };
+
 /** One agent step's turn, with retries, on the step's session; a runtime switch reruns it once on the other. */
-export async function agentTurn(ctx: BuildContext, s: AgentStep): Promise<TurnOutcome> {
+export async function agentTurn(ctx: BuildContext, s: AgentStep): Promise<AgentOutcome> {
   const out = await oneTurn(ctx, s);
   if (out.ok || out.category !== "switch") return out;
   await switchRuntime(ctx, s);
   return oneTurn(ctx, { ...s, redo: true });
 }
 
-async function oneTurn(ctx: BuildContext, s: AgentStep): Promise<TurnOutcome> {
-  const sess = await session(ctx, s.ticket, s.role, s.reply, s.requirementChecks ?? []);
+async function oneTurn(ctx: BuildContext, s: AgentStep): Promise<AgentOutcome> {
+  const root = s.root ?? ctx.project;
+  const sess = await session(ctx, s.ticket, s.role, s.reply, s.requirementChecks ?? [], root);
   const a = ctx.agents[s.role];
   const writable = s.role === "builder";
+  // C130: the compiled core is rafi's own file under the project's .rafi/, which a QA copy doesn't have.
   const instructions = await standingInstructions(ctx.deps.fs, ctx.project, { role: s.role, schema: s.reply,
     network: ctx.grants.needs.includes("internet"), writable, textSchema: a.structured ? null : sess.schema.json });
   const grants = [...ctx.grants.needs];
+  const tools: ToolRun[] = [];
   ctx.ui.turn("start", { role: s.role, ticket: s.ticket, step: s.step });
   const outcome = await runTurn(ctx.deps, sess.agent, { run: ctx.run, ticket: s.ticket, meta: { key:
     `${s.ticket}:${s.step}:${s.attempt}`, role: s.role, ticket: s.ticket, step: s.step, attempt: s.attempt },
@@ -189,18 +220,21 @@ async function oneTurn(ctx: BuildContext, s: AgentStep): Promise<TurnOutcome> {
   session: sess.turns++ === 0 ? "new" : "reused", tools: ["run_check", "check_output"], redo: s.redo }, {
     record: (events) => ctx.engine.append(events).then(() => undefined),
     blob: (text) => ctx.engine.blob(text),
-    onEvent: (event) => ctx.ui.activity({ at: ctx.deps.clock.now(), role: s.role, ticket: s.ticket,
-      event: redacted(ctx, event) }),
+    onEvent: (event) => {
+      if (event.kind === "tool") tools.push(event.run);
+      ctx.ui.activity({ at: ctx.deps.clock.now(), role: s.role, ticket: s.ticket, event: redacted(ctx, event) });
+    },
     decide: (request, repair) => {
-      const answer = decidePermission(request, { root: ctx.project, writable, repair, grants });
+      const answer = decidePermission(request, { root, writable, repair, grants });
       if (answer.decision === "deny" && !repair) ctx.ui.line(`${s.ticket}: refused ${request.tool}: ${answer.reason}`);
       return answer.decision;
     },
     validate: s.validate, ask: askRuntime(ctx, s.ticket),
   }, { retries: setting<number>(ctx, "retries.turn"), idleMs: setting<number>(ctx, "timeouts.idle_minutes") * 60_000,
-    quotaWaitHours: setting<number>(ctx, "retries.quota_wait_hours") });
+    quotaWaitHours: setting<number>(ctx, "retries.quota_wait_hours"),
+    circlingRepeats: setting<number>(ctx, "retries.circling_repeats") });
   ctx.ui.turn("end", { role: s.role, ticket: s.ticket, step: s.step });
-  return outcome;
+  return { ...outcome, tools };
 }
 
 export async function closeSessions(ctx: BuildContext, ticket?: string): Promise<void> {

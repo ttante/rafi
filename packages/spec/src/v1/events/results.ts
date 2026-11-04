@@ -1,18 +1,21 @@
 // Group D of ARCH 3.4: results of steps.
 import { z } from "zod";
+import { QA_DEPTHS } from "../tickets.js";
 import { def, digest, nullableText, runNumbers, ticketId, type EventDef } from "./envelope.js";
 
 const key = z.string().min(1);
+const depthName = z.enum(QA_DEPTHS);
 const blockType = z.enum(["permission", "install", "service", "credential", "decision", "other"]);
 const reqStatus = z.enum(["satisfied", "not-satisfied", "not-applicable", "unable"]);
 const needs = z.enum(["browser", "device", "person", "service", "file", "other"]);
 const checkOutcome = z.enum(["passed", "failed", "timed-out", "too-slow", "changed-code", "refused"]);
 
 export const resultEvents: readonly EventDef[] = [
+  // v 2 (C129): req_fps, one digest per rendered requirement line, in order, never the text (C114, P24).
   def("requirements.written", "state", "ticket", {
-    path: z.string(), fp: digest, depth: z.string(), depth_raised_from: nullableText,
-    count: z.number().int().nonnegative(), person_only: runNumbers,
-  }),
+    path: z.string(), fp: digest, depth: depthName, depth_raised_from: depthName.nullable(),
+    count: z.number().int().nonnegative(), person_only: runNumbers, req_fps: z.array(digest),
+  }, 2),
   def("requirements.receipt", "detail", "none", {
     key, path: z.string(), fp_supplied: digest.nullable(), fp_observed: digest.nullable(),
     status: z.enum(["delivered", "missing", "unreadable", "changed"]), read: z.boolean(),

@@ -42,6 +42,8 @@ export interface CheckLogEntry {
   readonly sandbox: readonly string[];
   readonly needs: readonly string[];
   readonly env: Readonly<Record<string, string | undefined>>;
+  /** Where the run ran (C128: a QA copy's runs run in the copy). */
+  readonly cwd: string;
 }
 
 export interface ScriptedChecksOptions {
@@ -171,7 +173,7 @@ export function scriptedChecks(o: ScriptedChecksOptions) {
   };
   return {
     async run(cmd: string, args: string[], run: CheckRun): Promise<CheckResult> {
-      o.log?.push({ cmd, args, sandbox: run.sandbox, needs: run.grants.needs, env: run.env });
+      o.log?.push({ cmd, args, sandbox: run.sandbox, needs: run.grants.needs, env: run.env, cwd: run.cwd });
       const started = o.clock.now().getTime();
       const result = (code: number | null, output: string, aborted = false): CheckResult => {
         if (!aborted && output) run.onOutput(output);

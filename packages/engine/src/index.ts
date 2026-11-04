@@ -14,6 +14,7 @@ export { checkWorkflow } from "./workflow/checks.js";
 export { startBuild, ENGINE_VERSION, type StartOptions, type StartUI } from "./api/start.js";
 export { eventsExport, ticketsView } from "./api/views.js";
 export type { BuildUI } from "./build/context.js";
+export type { UiAnswer, UiOption, UiQuestion } from "./ask/blocked.js";
 export type { AgentEvent, ToolRun } from "./agents/types.js";
 export { harmless } from "./turns/classify.js";
 export { renderStats, runStats } from "./stats/show.js";

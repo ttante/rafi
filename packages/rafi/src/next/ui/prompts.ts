@@ -1,5 +1,6 @@
 // Terminal prompts through deps.terminal (ARCH 8.4): a numbered list, one typed line. The runtime prompt (C46) and
-// the no-sandbox warning (C60). Without input, a prompt is a cancel.
+// the no-sandbox warning (C60), and "What next?" with its note and confirmation (C102). Without input, a prompt is a
+// cancel.
 import type { Readable } from "node:stream";
 import type { Deps } from "@rafi-ai/engine";
 
@@ -7,6 +8,8 @@ import type { Deps } from "@rafi-ai/engine";
 export function readLine(deps: Deps): Promise<string | null> {
   const input = deps.terminal.input as Readable | null;
   if (!input) return Promise.resolve(null);
+  // An input that already ended never emits "end" again: nothing more will come (C100).
+  if (input.readableEnded && input.readableLength === 0) return Promise.resolve(null);
   return new Promise((resolve) => {
     let buffer = "";
     const done = (value: string | null) => {
@@ -41,4 +44,16 @@ export async function choose(deps: Deps, text: string, choices: readonly string[
     deps.terminal.write(`Type a number from 1 to ${choices.length}.\n> `);
   }
   return null;
+}
+
+/** One typed line. With `required`, an empty line is refused with `refusal` (one line) and asked again. */
+export async function askText(deps: Deps, prompt: string, o: { required: boolean; refusal: string }):
+  Promise<string | null> {
+  deps.terminal.write(`${prompt}\n> `);
+  for (;;) {
+    const line = await readLine(deps);
+    if (line === null) return null;
+    if (line || !o.required) return line;
+    deps.terminal.write(`${o.refusal}\n> `);
+  }
 }

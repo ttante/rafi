@@ -15,8 +15,12 @@ export interface Step {
   readonly toolFail?: number;
   /** Claude: the S-SCN-14 set of tool outcomes. */
   readonly toolShapes?: boolean;
-  /** Claude: a Read tool use (Claude Code allows reads without asking canUseTool). */
+  /** A file read: Claude's Read tool use (allowed without canUseTool); Codex's `cat <path>` command. */
   readonly read?: string;
+  /** The user, not the agent, edits or removes a file mid-turn: written straight to disk, no tool event (C123). */
+  readonly outside?: { readonly edit?: string; readonly remove?: string; readonly content?: string;
+    /** Replace this text with that in the file instead of writing `content`. */
+    readonly replace?: readonly [string, string] };
   readonly ask?: { question: string; options: string[] };
   /** Waits on the fake clock (in-process fakes; real time in the executables). */
   readonly wait?: number;
