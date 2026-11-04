@@ -1,12 +1,14 @@
-// The real deps set. Seams nothing in M1 calls throw "not available until M<n>".
+// The real deps set. Seams no milestone has built yet throw "not available until M<n>".
 import { randomBytes, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { Deps } from "../types.js";
 import { realClaudeQuery, realClaudeTools, realCodex } from "./agents.js";
+import { backgroundSpawner } from "./background.js";
 import { realChecks } from "./checks.js";
 import { realClock } from "./clock.js";
 import { openRealDb } from "./db.js";
+import { realLogChanged } from "./watch.js";
 import { realExec, realGit } from "./exec.js";
 import { realFs } from "./fs.js";
 import { realProcesses } from "./processes.js";
@@ -33,7 +35,7 @@ export function realDeps(): Deps {
     exec: realExec,
     checks: realChecks(),
     serve: realServe,
-    spawnBackground: () => later("--detach", "M4"),
+    spawnBackground: backgroundSpawner(process.argv[1] ?? ""),
     db: { open: openRealDb },
     processes: realProcesses(random.id()),
     hooks: { crash: () => undefined, pause: () => undefined },
@@ -41,9 +43,10 @@ export function realDeps(): Deps {
     env: Object.freeze({ ...process.env }),
     cwd: process.cwd(),
     random,
-    logChanged: () => later("watching the log", "M4"),
+    logChanged: realLogChanged,
   };
 }
 
+export { realLogChanged } from "./watch.js";
 export { openRealDb, realChecks, realClock, realExec, realFs, realGit, realProcesses, realServe, realTerminal,
   realCodex };

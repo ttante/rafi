@@ -65,9 +65,10 @@ function replay(db: Db, idemKey: string): StoredEvent[] {
   });
 }
 
-/** Appends events in one transaction. An invalid event or transition throws and writes nothing (ARCH 3.3). */
+/** Appends events in one transaction. An invalid event or transition throws and writes nothing (ARCH 3.3).
+ * `inTx` runs first inside the same transaction (C132: the lease row with the owner events); throwing aborts. */
 export async function append(
-  ctx: AppendContext, events: readonly NewEvent[], o: { idemKey?: string } = {},
+  ctx: AppendContext, events: readonly NewEvent[], o: { idemKey?: string; inTx?: (db: Db) => void } = {},
 ): Promise<AppendResult> {
   const idemKey = o.idemKey ?? null;
   const prepared = events.map((event) => prepare(ctx, event, idemKey));
@@ -76,6 +77,7 @@ export async function append(
       const earlier = replay(db, idemKey);
       if (earlier.length) return { events: earlier, replayed: true };
     }
+    o.inTx?.(db);
     const insert = db.prepare(INSERT);
     const written = prepared.map((event) => {
       const info = insert.run(event.id, event.run_id, event.ticket_id, event.type, event.v, event.class,

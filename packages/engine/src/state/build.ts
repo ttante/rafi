@@ -7,6 +7,7 @@ export function initialBuild(run: string): BuildState {
   return {
     run, state: "none", pausing: false, unpausing: false, stopMode: null, stopSource: null, cause: null,
     complete: null, ownerReleased: false, startedAt: null, workflow: null, scope: null, tickets: [], settings: {},
+    narrowed: null, overrides: {}, recovering: false, everOwned: false,
   };
 }
 
@@ -46,8 +47,13 @@ function causeOfSource(source: string | null): "stop" | "ctrl-c" {
   return source === "ctrl-c" ? "ctrl-c" : "stop";
 }
 
-function resumed(b: BuildState): BuildState {
-  const clear = { pausing: false, unpausing: false, stopMode: null, stopSource: null, cause: null };
+function resumed(b: BuildState, data: Data): BuildState {
+  // P32: the narrowed ticket and the one-off overrides last until the next build.resumed.
+  const clear = { pausing: false, unpausing: false, stopMode: null, stopSource: null, cause: null,
+    narrowed: (data.ticket as string | null | undefined) ?? null,
+    overrides: (data.settings as BuildState["overrides"] | undefined) ?? {} };
+  // P31: a reset build is finished; it's never resumed.
+  if (b.state === "stopped" && b.cause === "reset") throw new InvalidTransition("stopped(reset)", "build.resumed");
   if (within(b, ["stopped", "failed"])) return to(b, "running", { ...clear, complete: null });
   if (b.state === "waiting" && b.ownerReleased) return to(b, "running", clear);
   if (b.state === "finished" && b.complete === false) return to(b, "running", { ...clear, complete: null });
@@ -64,7 +70,7 @@ export function nextBuild(build: BuildState, event: StateEvent): BuildState {
     case "build.started":
       return b.state === "none" ? started(b, event) : fail();
     case "build.owner_acquired":
-      return b.state === "none" ? fail() : { ...b, ownerReleased: false };
+      return b.state === "none" ? fail() : { ...b, ownerReleased: false, everOwned: true };
     case "build.owner_released":
       return b.state === "none" ? fail() : { ...b, ownerReleased: true };
     case "build.waiting":
@@ -89,11 +95,17 @@ export function nextBuild(build: BuildState, event: StateEvent): BuildState {
     case "build.failed":
       return within(b, ["running", "waiting", "stopping"]) ? to(b, "failed", { pausing: false }) : fail();
     case "build.owner_lost":
-      if (within(b, ["running", "waiting", "paused"])) return to(b, "stopped", { cause: "crash", pausing: false });
+      if (within(b, ["running", "waiting", "paused"])) {
+        return to(b, "stopped", { cause: "crash", pausing: false, recovering: true });
+      }
       if (b.state === "stopping") return to(b, "stopped", { cause: causeOfSource(b.stopSource) });
       return fail();
     case "build.resumed":
-      return resumed(b);
+      return resumed(b, data);
+    case "build.reset":
+      // P31: any build but one not started or already reset; the API refuses while an owner is alive.
+      if (b.state === "none" || (b.state === "stopped" && b.cause === "reset")) return fail();
+      return to(b, "stopped", { cause: "reset", pausing: false, unpausing: false, stopMode: null, recovering: false });
   }
   return fail();
 }

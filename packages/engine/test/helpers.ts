@@ -1,15 +1,51 @@
 // Test helpers for engine unit tests: a temp dir, a manual clock, and a log opened on real SQLite.
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Clock, Db, Processes } from "../src/deps/types.js";
 import { openRealDb } from "../src/deps/real/db.js";
+import { realExec } from "../src/deps/real/exec.js";
+import type { ExecOptions } from "../src/deps/types.js";
 import { openLog, type Log } from "../src/log/db.js";
 import { redactor } from "../src/log/redact.js";
 import type { AppendContext } from "../src/log/append.js";
 
-export function tempDir(): string {
-  return mkdtempSync(path.join(tmpdir(), "rafi-engine-"));
+/**
+ * The git binary itself (its `--exec-path` folder holds it). Tests pass git an environment with no PATH, so a bare
+ * `git` resolves through the OS default path, which on macOS is the xcrun shim at /usr/bin/git (about 90 ms a
+ * call); only the program path changes, never the environment the test gives.
+ */
+const GIT = (() => {
+  try {
+    const file = path.join(execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim(),
+      process.platform === "win32" ? "git.exe" : "git");
+    return existsSync(file) ? file : "git";
+  } catch {
+    return "git";
+  }
+})();
+
+/** realGit with the git binary found once (the same arguments and environment). */
+export function testGit(args: string[], o: ExecOptions) {
+  return realExec(GIT, args, o);
+}
+
+const made = new Set<string>();
+
+/** Removes every temp folder this process made once it exits with all tests passed (a failing run keeps them). */
+function removeMade(): void {
+  if ((process.exitCode ?? 0) !== 0) return;
+  for (const dir of made) rmSync(dir, { recursive: true, force: true, maxRetries: 2 });
+  made.clear();
+}
+
+/** A `<tmpdir>/<prefix>XXXXXX` folder, removed at a passing exit. */
+export function tempDir(prefix = "rafi-engine-"): string {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  if (!made.size) process.on("exit", removeMade);
+  made.add(dir);
+  return dir;
 }
 
 /** A clock whose sleeps move time at once and are recorded. */

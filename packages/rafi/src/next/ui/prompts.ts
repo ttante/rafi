@@ -4,10 +4,11 @@
 import type { Readable } from "node:stream";
 import type { Deps } from "@rafi-ai/engine";
 
-/** Reads exactly one line and puts back what follows it, so typed-ahead answers reach the next prompt. */
-export function readLine(deps: Deps): Promise<string | null> {
+/** Reads exactly one line and puts back what follows it, so typed-ahead answers reach the next prompt. `signal`
+ * closes it with null (C146: the question was answered elsewhere, or the build is stopping). */
+export function readLine(deps: Deps, signal?: AbortSignal): Promise<string | null> {
   const input = deps.terminal.input as Readable | null;
-  if (!input) return Promise.resolve(null);
+  if (!input || signal?.aborted) return Promise.resolve(null);
   // An input that already ended never emits "end" again: nothing more will come (C100).
   if (input.readableEnded && input.readableLength === 0) return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -15,9 +16,16 @@ export function readLine(deps: Deps): Promise<string | null> {
     const done = (value: string | null) => {
       input.off("data", onData);
       input.off("end", onEnd);
+      signal?.removeEventListener("abort", onAbort);
       input.pause();
       resolve(value);
     };
+    const onAbort = () => {
+      if (buffer) input.unshift(buffer);
+      deps.terminal.write("\n");
+      done(null);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     const onData = (chunk: Buffer | string) => {
       buffer += chunk.toString();
       const at = buffer.indexOf("\n");
@@ -34,10 +42,11 @@ export function readLine(deps: Deps): Promise<string | null> {
 }
 
 /** Asks one question with numbered choices; returns the chosen index, or null (cancelled). */
-export async function choose(deps: Deps, text: string, choices: readonly string[]): Promise<number | null> {
+export async function choose(deps: Deps, text: string, choices: readonly string[], signal?: AbortSignal):
+  Promise<number | null> {
   deps.terminal.write(`${text}\n${choices.map((c, i) => `  ${i + 1}. ${c}`).join("\n")}\n> `);
   for (let tries = 0; tries < 3; tries += 1) {
-    const line = await readLine(deps);
+    const line = await readLine(deps, signal);
     if (line === null) return null;
     const n = Number(line);
     if (Number.isInteger(n) && n >= 1 && n <= choices.length) return n - 1;
@@ -47,11 +56,11 @@ export async function choose(deps: Deps, text: string, choices: readonly string[
 }
 
 /** One typed line. With `required`, an empty line is refused with `refusal` (one line) and asked again. */
-export async function askText(deps: Deps, prompt: string, o: { required: boolean; refusal: string }):
-  Promise<string | null> {
+export async function askText(deps: Deps, prompt: string, o: { required: boolean; refusal: string },
+  signal?: AbortSignal): Promise<string | null> {
   deps.terminal.write(`${prompt}\n> `);
   for (;;) {
-    const line = await readLine(deps);
+    const line = await readLine(deps, signal);
     if (line === null) return null;
     if (line || !o.required) return line;
     deps.terminal.write(`${o.refusal}\n> `);

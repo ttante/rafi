@@ -1,8 +1,7 @@
 // S-ENG-5 steps 1, 2 and 4 in the process set, on the built launcher. Step 3 needs a build (M2).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { snapshot } from "../checks/snapshot.js";
 import { git, tempRoot } from "../fixtures/common.js";
@@ -10,11 +9,13 @@ import { fOne } from "../fixtures/f-one.js";
 import { copyLegacy, LEGACY_DIR } from "../fixtures/legacy.js";
 import { project as legacyProject } from "../fixtures/legacy/generate.mjs";
 import { launcher } from "../harness/process.js";
+import { trackTemp } from "../harness/temp.js";
 
 test("S-ENG-5 step 1: without RAFI_ENGINE, the old engine builds T1 on a 0.10.x project", { timeout: 300_000 },
   () => {
-    const scratch = mkdtempSync(path.join(tmpdir(), "rafi-eng5-"));
+    const scratch = tempRoot("rafi-eng5-");
     const { root, extra } = legacyProject(path.join(scratch, "faults"), path.join(scratch, "ops"));
+    trackTemp(root);
     const r = launcher(["start", root, "--steps", "1", "--no-qa", "--yes", "--agent", "codex", "--dirty-work",
       "include"], { cwd: root, pathFirst: path.join(root, "bin"), env: extra });
     const output = `${r.stdout}${r.stderr}`;

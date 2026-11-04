@@ -7,17 +7,17 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync }
   from "node:fs";
 import path from "node:path";
-import { realFs, realGit } from "../../src/deps/real/index.js";
+import { realFs } from "../../src/deps/real/index.js";
 import { fullFingerprint } from "../../src/facts/fingerprint.js";
 import { snapshot } from "../../src/facts/snapshot.js";
 import { isolationFor, makeCopy, removeCopy } from "../../src/build/isolation.js";
-import { tempDir } from "../helpers.js";
+import { tempDir, testGit } from "../helpers.js";
 
 const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t",
   GIT_COMMITTER_EMAIL: "t@t" };
 const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
 let n = 0;
-const deps = { git: realGit, fs: realFs({ id: () => `t${++n}`, jitter: () => 0 } as never), env: {} };
+const deps = { git: testGit, fs: realFs({ id: () => `t${++n}`, jitter: () => 0 } as never), env: {} };
 
 function repo(): { dir: string; outside: string } {
   const dir = tempDir();

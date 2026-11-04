@@ -200,6 +200,11 @@ export function nextTicket(ticket: TicketState | null, event: StateEvent, rules:
   const t = ticket ?? initialTicket(id);
   const data = (event.data ?? {}) as Data;
   if (NO_CHANGE.has(event.type)) return t;
+  // P31 (ARCH 4.2): back to queued with no resume step, attempt 1 and no fixes; dropped tickets stay dropped.
+  if (event.type === "build.reset") {
+    return t.state === "dropped" ? t : { ...t, state: "queued", node: null, block: null, resumeNode: null,
+      attempt: 1, fixesUsed: 0, fixesGranted: 0, stepRunning: false };
+  }
   if (event.type === "fix.granted") return { ...t, fixesGranted: t.fixesGranted + 1 };
   if (event.type === "ticket.status_set") return setStatus(t, String(data.status));
   if (event.type === "progress.imported") {

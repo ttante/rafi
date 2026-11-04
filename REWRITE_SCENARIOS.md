@@ -434,7 +434,7 @@ The fake records every request it gets in a transcript: role, ticket, step, sess
 - **Setup:** F-CHAIN trimmed to `T1`–`T3`. Script: QA rejects `T2` once; `T3`'s first builder reply is malformed.
 - **Steps:**
   1. Run once with no crash and record the list of crash points the build passes (section 7.7).
-  2. For each crash point *k*: fresh fixture; `rafi start . --steps 3` with `crash.at(k)`; then `rafi resume` until the build finishes (at most 3 times).
+  2. For each crash point *k*: the project as a crash at *k* leaves it (a fresh fixture with `rafi start . --steps 3` and `crash.at(k)`, or, in the fast suite, a snapshot the clean run took at *k*, section 7.7); then `rafi resume` until the build finishes (at most 3 times).
 - **Expected, for every *k*:**
   - The final ticket states, plan files and committed files match the clean run's.
   - Each agent turn (run, ticket, step) ran at most once before the crash and once after: the interrupted step is redone, never skipped.
@@ -1329,7 +1329,7 @@ The whole-build scenarios above don't touch every command and flag. These shorte
 #### S-CLI-13 — Resume picks saved interviews; old ones are pruned
 - **Covers:** FLAG-RS-3, FLAG-CR-2, FLAG-PL-5, FILE-31, PRM-90
 - **Setup:** Saved create, plan and ticket-setup interviews; one completed 31 days ago on the fake clock.
-- **Steps:** `rafi resume`; `rafi resume --id <prefix>`; `rafi resume --discard <prefix>`; any rafi command after `clock.advance`.
+- **Steps:** `rafi resume`; `rafi resume --id <prefix>`; `rafi resume --discard <prefix>`; any rafi command that writes after `clock.advance`.
 - **Expected:** The picker lists the saved interviews; `--id` resumes and `--discard` discards one. The 31-day-old completed record is removed; unfinished ones never are.
 
 #### S-CLI-14 — `rafi reset`
@@ -1491,7 +1491,7 @@ One script engine, two ways to connect:
   - The script engine matches a turn by the role, ticket, step and attempt the engine passes when it opens the session and sends the turn (an architecture-plan input), plus the reply schema. Nothing is parsed out of prompt text. Tool-permission requests go through the adapter's permission path (7.2).
 - **Fake provider executables** (mode `next-process`). The process set runs every scenario on **both** fakes: the existing Codex fake and a new fake `claude` executable (decided 2026-11-01, D9). The fake `claude` speaks the stream-json protocol the Claude adapter uses when it spawns the system `claude`, scripted from the same scenario files as the in-process fake. It's built in milestone 1, before the Claude adapter; whether a fake can satisfy the SDK's startup handshake is still unverified, so milestone 1 checks that first. If it can't, the adapter's spawn point takes an executable path from config, never a hidden test flag (principle 9).
   - `codex`: the app-server JSON-RPC protocol. Start from `rafi/test/fixtures/e2e-codex-faults.cjs`. It already answers `thread/start`, `thread/resume` and `turn/start`; sends token usage, the final message and `turn/completed` (`e2e-codex-faults.cjs:177-204`); logs each operation (`:190`); and fires one-shot faults (`invalid`, `crash`, `hang`, `killhost`) tracked with marker files outside the project (`:161-175`). Add the behaviors from section 2.2 and replace the env-var fault list with the script file.
-- **Matching.** A rule matches on role, ticket and attempt. A turn with no rule gets the role's happy path (section 2.2). A request the fake can't classify fails the scenario with the request dumped, as `e2e-codex.cjs:128` does today ("Fixture has no native response").
+- **Matching.** A rule matches on role, ticket and attempt. The fake executables read that identity from the `ticket`, `step`, `attempt` and `role` fields of the newest `turn.intent` rafi committed to the project's `.rafi/state.sqlite3` before sending the turn (read-only, checked against the reply schema's role; never parsed from `key`); with no log, they apply rules in order. A turn with no rule gets the role's happy path (section 2.2). A request the fake can't classify fails the scenario with the request dumped, as `e2e-codex.cjs:128` does today ("Fixture has no native response").
 - **Replies in the provider's wire shape.** Reuse `codexWireFixture` (`ai-foreman/test/helpers/nativeOutput.ts:6`) and the fixtures' `wire()` encoder (`e2e-codex.cjs:88-99`).
 - **Transcript.** Every request is appended to a JSONL file (section 2.2). Helpers count rule-pack text per session, list tags and tools per turn, and check sandbox and network settings.
 - **Behaving like a provider.** Like today's fixtures, the fake never shortcuts the CLI: create, plan, ticket writing, validation, queue selection and start all run for real (comment at `e2e-codex.cjs:1-4`).
@@ -1535,7 +1535,7 @@ These follow harness E03's list (before dispatch, after send, before completion 
 
 **Pause at a boundary.** `pause.at(k)` uses the same named boundaries. When the build reaches boundary *k*, the pause hook records a pause request exactly as Manager `/pause` would (FLAG-MG-6), and the build holds at the next safe point. This lets S-CRASH-5 pause at every safe point in turn without racing the build.
 
-**Crash at every step.** A scenario first runs clean and records the boundaries it passes, in order, with each occurrence numbered (for example "4: recorded, before progress write (T2, review, 2nd)"). Then it runs once per boundary, crashing there and resuming until done. After each, the shared invariant checker runs the checks listed in S-CRASH-1. A failure reports the boundary by name and number, which is enough to reproduce it.
+**Crash at every step.** A scenario first runs clean and records the boundaries it passes, in order, with each occurrence numbered (for example "4: recorded, before progress write (T2, review, 2nd)"). Then it runs once per boundary, crashing there and resuming until done. After each, the shared invariant checker runs the checks listed in S-CRASH-1. A failure reports the boundary by name and number, which is enough to reproduce it. In the fast suite a crash run may start from a snapshot the clean run took at the boundary. The snapshot holds the project's files and git folder; a copy of its database with exactly the committed transactions, made with SQLite's own copy (`VACUUM INTO` or the backup API), never a file copy, since the log runs in WAL mode; the machine-state folder; the clock's time; and the fakes' state (consumed script rules, sessions, transcript, ids, check and notifier records). It leaves out what a killed process loses: its timers, open transaction and endpoints. A few points per scenario still run with `crash.at(k)`, so the fence and the crash path stay exercised.
 
 **Torn writes and storage faults** (S-CRASH-2). In-process, the harness wraps the engine's file and database access to cut a write short, report the disk as full, report the database as busy, or refuse a directory.
 

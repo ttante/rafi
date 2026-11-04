@@ -8,7 +8,7 @@ import type { CommandSpec } from "./commands/spec.js";
 import { actions } from "./commands/actions.js";
 import { commands } from "./commands/table.js";
 import { findProject, NEW_ENGINE_REFUSAL, readFormat, type FormatFs } from "./format.js";
-import { legacyRunLine, line, notBuiltLine } from "./ui/lines.js";
+import { legacyRunLine, line, notBuiltLine, storageLine } from "./ui/lines.js";
 
 export const VERSION = "1.0.0-next.0";
 
@@ -81,8 +81,15 @@ function build(parent: Command, spec: CommandSpec, deps: Deps, argv: string[], o
     }
     const action = actions[name];
     if (action && checked.project) {
-      outcome.code = await action({ deps, project: checked.project, args: actionArgs.slice(0, -2),
-        opts: command.opts(), argv });
+      try {
+        outcome.code = await action({ deps, project: checked.project, args: actionArgs.slice(0, -2),
+          opts: command.opts(), argv });
+      } catch (error) {
+        const said = storageLine(error, checked.project);
+        if (!said) throw error;
+        deps.terminal.error(said);
+        outcome.code = 1;
+      }
       return;
     }
     deps.terminal.error(notBuiltLine(name, spec.milestone ?? "M10"));

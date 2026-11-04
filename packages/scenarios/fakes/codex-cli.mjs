@@ -1,11 +1,14 @@
 // Fake `codex app-server` executable for the process set, rewritten from rafi/test/fixtures/e2e-codex-faults.cjs:
 // it reads a script file (baked into its PATH shim, plan choice C12) instead of RAFI_E2E_FAULT, keeps an
-// operation log, and records its environment for the ENV-5 check. Until P8 is decided, rules apply in order
-// and a rule with a role, ticket, step or attempt selector is refused.
+// operation log, and records its environment for the ENV-5 check. A script with `match: "identity"` matches rules by
+// the turn's identity from rafi's log (P8 option C, script/match.mjs); an order-only script refuses selectors.
+// `kill` behaviors SIGKILL rafi (C162), and a SIGINT (Ctrl+C in rafi's terminal reaches the whole foreground
+// group) is logged and ignored: the fake takes rafi's cancel instead, as plan 9 item 2 scripts it.
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { createCodexFake } from "./codex/protocol.mjs";
+import { pickBehavior } from "./script/match.mjs";
 
 function rafiEnv() {
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("RAFI_")));
@@ -41,18 +44,23 @@ export function main(scriptPath, argv = process.argv.slice(2)) {
   }
   const script = JSON.parse(readFileSync(scriptPath, "utf8"));
   const log = (entry) => { if (script.log) appendFileSync(script.log, `${JSON.stringify(entry)}\n`); };
-  for (const rule of script.rules ?? []) {
+  for (const rule of script.match === "identity" ? [] : script.rules ?? []) {
     if (rule.selector && Object.keys(rule.selector).length) {
       throw new Error("fake codex: process-mode scripts can't match by role, ticket, step or attempt yet (P8)");
     }
   }
-  const nextBehavior = () => {
-    const rules = script.rules ?? [];
-    const index = nextIndex(scriptPath);
+  const nextBehavior = (meta, ctx) => {
+    const picked = pickBehavior(script, scriptPath, ctx, () => nextIndex(scriptPath));
     if (script.ps) log({ op: "ps", ancestry: ancestry() });
-    return rules[Math.min(index, rules.length - 1)]?.behavior ?? { reply: {} };
+    log({ op: "pick", identity: picked.identity, rule: picked.rule ?? null, kill: picked.behavior.kill ?? null });
+    return picked.behavior;
   };
-  log({ op: "start", argv, env: rafiEnv() });
+  const killHost = () => {
+    log({ op: "killhost", ppid: process.ppid });
+    process.kill(process.ppid, "SIGKILL");
+  };
+  process.on("SIGINT", () => log({ op: "sigint" }));
+  log({ op: "start", argv, env: rafiEnv(), pid: process.pid, ppid: process.ppid });
   const callMcp = async (url, headers, body) => {
     const response = await fetch(url, { method: "POST", body: JSON.stringify(body), headers: { ...headers,
       "content-type": "application/json", accept: "application/json, text/event-stream" } });
@@ -60,7 +68,7 @@ export function main(scriptPath, argv = process.argv.slice(2)) {
   };
   const fake = createCodexFake({
     send: (message) => process.stdout.write(`${JSON.stringify(message)}\n`), nextBehavior, log, callMcp,
-    exit: (code) => setTimeout(() => process.exit(code), 10),
+    exit: (code) => setTimeout(() => process.exit(code), 10), killHost,
   });
   createInterface({ input: process.stdin }).on("line", (line) => {
     if (line.trim()) fake.onMessage(JSON.parse(line));

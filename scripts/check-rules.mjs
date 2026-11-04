@@ -18,8 +18,9 @@ const SHELLS = new Set(["bash", "sh", "zsh"]);
 const FREEZE = /^(Object\.freeze|deepFreeze)$/;
 // ARCH 2.2 module budgets (reported, not enforced).
 const BUDGETS = Object.freeze({ log: 900, state: 1300, workflow: 400, build: 2000, turns: 900, facts: 450,
-  ask: 1300, progress: 400, plan: 750, api: 600, deps: 650, instructions: 1000, notify: 650, tools: 1100,
-  stats: 700, manager: 500, config: 400, agents: 700, "agents/codex": 600, "agents/claude": 600, migrate: 900 });
+  ask: 1300, progress: 400, plan: 750, api: 600, deps: 750, instructions: 1000, notify: 650, tools: 1000,
+  stats: 700, manager: 500, config: 400, agents: 700, "agents/codex": 600, "agents/claude": 600, migrate: 900,
+  tickets: 4200, git: 2400, graph: 2200, sources: 500, planning: 2800, setup: 1100 });
 
 function scope(file) {
   if (file.startsWith(ENGINE)) return { full: true, real: file.startsWith(`${ENGINE}deps/real/`) };

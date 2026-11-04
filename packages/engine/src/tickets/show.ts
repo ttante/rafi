@@ -1,8 +1,8 @@
-// Read-only views of the fold (ARCH 3.6: readers never write): `rafi tickets show`, `rafi stats export`.
-import type { Engine } from "./engine.js";
-import { migrations } from "../log/migrations/index.js";
+// `rafi tickets show` (ARCH 3.6: readers never write): each ticket with its state from the fold, its tracker
+// status, its depth and its validation runs.
+import type { Engine } from "../api/engine.js";
 import { runsOf } from "../facts/runs.js";
-import { loadTickets } from "../tickets/load.js";
+import { loadTickets } from "./load.js";
 
 const TRACKER: Readonly<Record<string, string>> = Object.freeze({ queued: "planned", building: "in_progress",
   reviewing: "in_progress", fixing: "in_progress", blocked: "blocked", done: "done", dropped: "canceled" });
@@ -38,12 +38,4 @@ export async function ticketsView(engine: Engine): Promise<{ ok: true; tickets: 
           return { run: n, command: r?.command ?? null, outcome: r?.outcome ?? null }; }) } : null };
   });
   return { ok: true, tickets };
-}
-
-/** ARCH 3.5: `{ format: "rafi-events", schema, events }`, stable JSON (same input, same output). */
-export async function eventsExport(engine: Engine, o: { run?: string } = {}): Promise<string> {
-  const list = (await events(engine)).filter((e) => !o.run || e.run_id === o.run);
-  return `${JSON.stringify({ format: "rafi-events", schema: migrations.length, events: list.map((e) => ({
-    seq: e.seq, id: e.id, run_id: e.run_id, ticket_id: e.ticket_id, type: e.type, v: e.v, class: e.class, at: e.at,
-    actor: e.actor, source: e.source, origin: e.origin, data: e.data })) }, null, 2)}\n`;
 }

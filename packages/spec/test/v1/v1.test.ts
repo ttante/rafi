@@ -24,13 +24,16 @@ function archTypes(): Map<string, string> {
   return types;
 }
 
-test("the registry has exactly ARCH 3.4's event types, each with its class, all at v 1 but requirements.written", () => {
+// M4 (P35, option C): turn.intent moves to v 2 with the turn's identity, as requirements.written did in M3.
+const AT_V2: ReadonlySet<string> = new Set(["requirements.written", "turn.intent"]);
+
+test("the registry has exactly ARCH 3.4's event types, each with its class, all at v 1 but those at v 2", () => {
   const expected = archTypes();
   assert.ok(expected.size > 90, `${expected.size} types read from ARCH 3.4`);
   assert.deepEqual([...eventTypes()].sort(), [...expected.keys()].sort());
   for (const [type, cls] of expected) {
     assert.equal(eventRegistry.get(type)?.class, cls, type);
-    assert.equal(eventRegistry.get(type)?.v, type === "requirements.written" ? 2 : 1, type);
+    assert.equal(eventRegistry.get(type)?.v, AT_V2.has(type) ? 2 : 1, type);
   }
 });
 
@@ -110,4 +113,38 @@ test("C129: requirements.written v 2 needs req_fps and a depth name; v 1 is an u
   const { req_fps: _drop, ...noFps } = data;
   assert.match(String((checkEventData("requirements.written", 2, noFps) as { reason: string }).reason), /req_fps/);
   assert.equal(checkEventData("requirements.written", 2, { ...data, depth: "deep" }).ok, false);
+});
+
+const intent = { key: "T1:build:1", role: "builder", ticket: "T1", step: "build", attempt: 1, runtime: "codex",
+  model: null, effort: null, fast: false, session: "new", schema: "builder", instruction_chars: 0,
+  instruction_digest: `sha256:${"0".repeat(64)}`, tools: [], grants: [], redo: false };
+
+test("P35 C: turn.intent v 2 carries ticket, step and attempt (null outside a ticket); v 1 is unknown", () => {
+  assert.equal(checkEventData("turn.intent", 2, intent).ok, true);
+  assert.equal(checkEventData("turn.intent", 2, { ...intent, ticket: null, step: null, attempt: null }).ok, true);
+  const missing = checkEventData("turn.intent", 2, { ...intent, attempt: undefined });
+  assert.equal(missing.ok, false);
+  assert.match((missing as { reason: string }).reason, /attempt/);
+  assert.equal(checkEventData("turn.intent", 2, { ...intent, attempt: 0 }).ok, false);
+  assert.equal(checkEventData("turn.intent", 2, { ...intent, ticket: "../x" }).ok, false);
+  assert.match((checkEventData("turn.intent", 1, intent) as { reason: string }).reason, /unknown version 1/);
+});
+
+test("P31: build.reset names its scope, action, cleanup, tickets and archive branch; P32: build.resumed's fields", () => {
+  const reset = { scope: "build", action: "restart-current", cleanup: "stash", tickets: ["T1", "T2"],
+    archive_branch: null };
+  assert.equal(checkEventData("build.reset", 1, reset).ok, true);
+  assert.equal(checkEventData("build.reset", 1, { ...reset, scope: "everything", action: null, cleanup: null,
+    tickets: ["T1"] }).ok, true);
+  assert.equal(checkEventData("build.reset", 1, { ...reset, action: "archive-restart",
+    archive_branch: "rafi/archive/r1" }).ok, true);
+  for (const bad of [{ scope: "plan" }, { action: "force" }, { cleanup: "clean" }, { tickets: ["../x"] }]) {
+    assert.equal(checkEventData("build.reset", 1, { ...reset, ...bad }).ok, false, JSON.stringify(bad));
+  }
+  const resumed = { from_state: "stopped", ticket: "T3", settings: { "agent.runtime": { value: "claude",
+    source: "flag" }, "agent.model": { value: "m2", source: "flag" } } };
+  assert.equal(checkEventData("build.resumed", 1, resumed).ok, true);
+  assert.equal(checkEventData("build.resumed", 1, { ...resumed, ticket: null, settings: {} }).ok, true);
+  assert.equal(checkEventData("build.resumed", 1, { from_state: "stopped" }).ok, false, "both fields are required");
+  assert.equal(checkEventData("build.stopped", 1, { cause: "reset" }).ok, false, "reset is build.reset's, not a cause");
 });

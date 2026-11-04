@@ -5,10 +5,8 @@ import type { VerdictReply } from "rafi-spec/v1";
 import { changedBetween, snapshot } from "../../facts/snapshot.js";
 import { escapeControl } from "../../log/redact.js";
 import { reviewMessage, type ReviewDelta } from "../../instructions/messages/review.js";
-import {
-  agentTurn, allEvents, append, knownRuns, sessionUsed, setting, ticketOf, ticketRuns, type AgentOutcome,
-  type BuildContext,
-} from "../context.js";
+import { allEvents, append, knownRuns, setting, ticketOf, ticketRuns, type BuildContext } from "../context.js";
+import { agentTurn, qaBroke, sessionUsed, type AgentOutcome } from "../../turns/agent.js";
 import { isolated } from "../isolation.js";
 import {
   affectedRequirements, digest, failStep, readRequirements, trustedOf, type Requirements,
@@ -114,12 +112,13 @@ async function reviewTurn(ctx: BuildContext, r: Review, root: string): Promise<A
 
 export async function reviewStep(ctx: BuildContext, id: string, attempt: number, redo: boolean): Promise<void> {
   const ticket = ticketOf(ctx, id);
+  if (redo) ctx.ui.line(qaBroke(id, "the review was interrupted"));
   await append(ctx, id, { type: "step.started", data: { step: "review", attempt } });
   const reqs = await readRequirements(ctx, id);
   const count = reqs.written?.count ?? (reqs.list.length || ticket.acceptance.length);
   const { warning, affected } = fileWarning(reqs);
   if (warning) ctx.ui.line(`${id}: ${warning}; QA can't verify those requirements against it. The build goes on.`);
-  const snap = await snapshot(ctx.deps, ctx.project, `${id}-review`);
+  const snap = await snapshot(ctx.deps, ctx.project, `${id}-review`, { heads: ctx.heads });
   const review: Review = { id, attempt, redo, reqs, count, warning, files: snap.ok ? snap.files : [],
     optional: [...(reqs.written?.person_only ?? []), ...affected] };
   const out = await isolated(ctx, ticket, review, snap.ok ? snap.tree : null, (root) => reviewTurn(ctx, review, root));

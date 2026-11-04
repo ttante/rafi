@@ -1,10 +1,11 @@
-// `rafi tickets show` and `rafi stats export`: views of the fold; readers never write (ARCH 3.6).
+// `rafi tickets show`, `rafi stats`, `rafi status`: views of the fold; readers open the log read-only and create
+// nothing (ARCH 3.6, C147).
 import { eventsExport, openEngine, renderStats, runStats, statusLines, ticketsView } from "@rafi-ai/engine";
 import { line } from "../ui/lines.js";
 import type { ActionContext } from "./actions.js";
 
 export async function ticketsShowAction(ctx: ActionContext): Promise<number> {
-  const engine = await openEngine({ projectDir: ctx.project, deps: ctx.deps });
+  const engine = await openEngine({ projectDir: ctx.project, deps: ctx.deps, readOnly: true });
   try {
     const view = await ticketsView(engine);
     if (!view.ok) { ctx.deps.terminal.error(line(view.message)); return 1; }
@@ -24,7 +25,7 @@ export async function ticketsShowAction(ctx: ActionContext): Promise<number> {
 }
 
 export async function statsExportAction(ctx: ActionContext): Promise<number> {
-  const engine = await openEngine({ projectDir: ctx.project, deps: ctx.deps });
+  const engine = await openEngine({ projectDir: ctx.project, deps: ctx.deps, readOnly: true });
   try {
     const text = await eventsExport(engine, { run: ctx.opts.run as string | undefined });
     if (ctx.opts.output) await ctx.deps.fs.writeAtomic(String(ctx.opts.output), text);
@@ -36,7 +37,7 @@ export async function statsExportAction(ctx: ActionContext): Promise<number> {
 }
 
 export async function statsShowAction(ctx: ActionContext): Promise<number> {
-  const engine = await openEngine({ projectDir: ctx.project, deps: ctx.deps });
+  const engine = await openEngine({ projectDir: ctx.project, deps: ctx.deps, readOnly: true });
   try {
     const stats = await runStats(engine, { run: ctx.opts.run as string | undefined,
       ticket: ctx.opts.ticket as string | undefined });
@@ -49,7 +50,7 @@ export async function statsShowAction(ctx: ActionContext): Promise<number> {
 }
 
 export async function statusAction(ctx: ActionContext): Promise<number> {
-  const engine = await openEngine({ projectDir: ctx.project, deps: ctx.deps });
+  const engine = await openEngine({ projectDir: ctx.project, deps: ctx.deps, readOnly: true });
   try {
     ctx.deps.terminal.write(`${(await statusLines(engine)).join("\n")}\n`);
     return 0;

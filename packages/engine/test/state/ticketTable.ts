@@ -74,6 +74,8 @@ export const variants: readonly Variant[] = [
     data: () => ({ entry: { kind: "ticket", key: "T1", status: "done", at: "2026-11-01T14:00:00.000Z" },
       chose: "theirs" }) },
   { name: "added", type: "ticket.added", data: () => ({ ticket: "T1", source: "ci", requirements: [], hint: null }) },
+  { name: "build reset", type: "build.reset", data: () => ({ scope: "build", action: "restart-current",
+    cleanup: "handled", tickets: ["T1"], archive_branch: null }) },
 ];
 
 function status(value: string) {
@@ -141,4 +143,6 @@ export const ticketRows: readonly (readonly [string[], string, string])[] = [
   [["fixing·fix"], "builder needs-input", "blocked(decision)->fix"],
   [["building·deliver"], "delivery done", "done"],
   [["done"], "reopened", "reviewing·review"],
+  // P31: back to queued with no resume step, attempt 1 and no fixes; dropped tickets are never listed.
+  [["queued", "active", "blocked", "done"], "build reset", "reset"],
 ];

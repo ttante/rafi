@@ -50,10 +50,21 @@ function finish(view: Folded, build: BuildState, inScope: readonly string[], com
   return { kind: "finish", complete, done: [...new Set([...doneHere(view, build), ...done])], left };
 }
 
-/** Rules 6–9: start a ticket, wait on a question, or finish. */
+/** Rules 6–9: start a ticket, wait on a question, or finish. C144: a narrowed segment works on its ticket only and
+ * then finishes with the rest of the scope left (complete: false), for a later `rafi resume`. */
 function nextWork(view: Folded, build: BuildState, inScope: readonly string[]): Action {
-  const owned = rafiOwnedNext(view);
+  const owned = build.narrowed ? undefined : rafiOwnedNext(view);
   if (owned) return { kind: "start-ticket", ticket: owned.id, resumeNode: owned.resumeNode };
+  if (build.narrowed) {
+    const id = build.narrowed;
+    if (eligible(view, id)) return { kind: "start-ticket", ticket: id,
+      resumeNode: view.tickets[id]?.resumeNode ?? null };
+    const asked = openBlocking(view, [id]);
+    if (asked.length) return build.state === "waiting" ? { kind: "hold", why: "waiting on you" }
+      : { kind: "wait", questions: asked };
+    const allClosed = inScope.every((t) => ["done", "dropped"].includes(view.tickets[t]?.state ?? ""));
+    return finish(view, build, inScope, allClosed);
+  }
   const next = inScope.find((id) => eligible(view, id));
   if (next) return { kind: "start-ticket", ticket: next, resumeNode: view.tickets[next]?.resumeNode ?? null };
   const questions = openBlocking(view, inScope);
@@ -74,12 +85,13 @@ export function decide(view: Folded, live: Liveness): Action {
   if (build.state === "paused") return { kind: "hold", why: "paused" };
   if (!LIVE_BUILD.has(build.state)) return { kind: "none", why: `build ${build.state}` };
   if (build.pausing && (live.safePoint || build.state === "waiting")) return { kind: "pause" };
-  const current = Object.values(view.tickets).find((t) => ACTIVE.has(t.state) && t.node);
+  const current = Object.values(view.tickets).find((t) => ACTIVE.has(t.state) && t.node &&
+    (!build.narrowed || t.id === build.narrowed));
   if (current) return { kind: "step", ticket: current.id, node: current.node!, redo: current.stepRunning };
   for (const [unit, state] of Object.entries(view.units)) {
     if (state === "ready" || state === "failed") return { kind: "deliver-unit", unit };
   }
   const inScope = scopeTickets(view, build);
-  if (scopeReached(view, build) && !rafiOwnedNext(view)) return finish(view, build, inScope, true);
+  if (!build.narrowed && scopeReached(view, build) && !rafiOwnedNext(view)) return finish(view, build, inScope, true);
   return nextWork(view, build, inScope);
 }

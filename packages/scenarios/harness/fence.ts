@@ -62,11 +62,17 @@ export class Fence {
     };
   }
 
-  db(real: Db): Db {
+  /** `onCommit`: after each committed write (an explicit COMMIT, or a write outside a transaction), C139. */
+  db(real: Db, onCommit: () => void = () => undefined): Db {
     this.dbs.add(real);
     const fence = this;
     const statement = (inner: DbStatement): DbStatement => ({
-      run: (...params) => { fence.check("database write"); return inner.run(...params); },
+      run: (...params) => {
+        fence.check("database write");
+        const out = inner.run(...params);
+        if (!real.inTransaction) onCommit();
+        return out;
+      },
       get: (...params) => inner.get(...params),
       all: (...params) => inner.all(...params),
     });
@@ -74,6 +80,7 @@ export class Fence {
       exec(sql) {
         if (!/^\s*ROLLBACK/i.test(sql)) fence.check("database write");
         real.exec(sql);
+        if (/^\s*COMMIT/i.test(sql)) onCommit();
       },
       prepare: (sql) => statement(real.prepare(sql)),
       pragma: (sql, o) => {

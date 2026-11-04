@@ -72,12 +72,16 @@ export function checkCrashRun(run: CrashRun): string[] {
   if (JSON.stringify(prefix) !== JSON.stringify(run.beforeResume.events)) {
     problems.push("the event log before the crash changed after resume");
   }
-  const sent = run.final.events.filter((e) => e.type === "turn.sent");
+  // M4: each turn attempt once (its turn.intent; a repair or a retry in the run sends again under the same key, but
+  // a retry is a new attempt and a repair has no intent); exports with no intents count turn.sent, as in M1.
+  const intents = run.final.events.filter((e) => e.type === "turn.intent");
+  const sent = intents.length ? intents : run.final.events.filter((e) => e.type === "turn.sent");
   const counts = new Map<string, { before: number; after: number }>();
   for (const event of sent) {
-    const entry = counts.get(turnKey(event)) ?? { before: 0, after: 0 };
+    const attempt = event.type === "turn.intent" ? `|${String(event.data.attempt)}` : "";
+    const entry = counts.get(turnKey(event) + attempt) ?? { before: 0, after: 0 };
     if (event.seq <= crashSeq) entry.before += 1; else entry.after += 1;
-    counts.set(turnKey(event), entry);
+    counts.set(turnKey(event) + attempt, entry);
   }
   for (const [key, c] of counts) {
     if (c.before > 1 || c.after > 1) problems.push(`turn ${key} ran ${c.before} times before and ${c.after} after`);

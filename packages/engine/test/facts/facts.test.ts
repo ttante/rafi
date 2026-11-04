@@ -5,14 +5,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { realFs, realGit } from "../../src/deps/real/index.js";
+import { realFs } from "../../src/deps/real/index.js";
 import { snapshot } from "../../src/facts/snapshot.js";
 import { mismatches, nextRun } from "../../src/facts/runs.js";
-import { tempDir } from "../helpers.js";
+import { tempDir, testGit } from "../helpers.js";
 
 const env = { PATH: process.env.PATH, HOME: process.env.HOME, GIT_AUTHOR_NAME: "a", GIT_AUTHOR_EMAIL: "a@b",
   GIT_COMMITTER_NAME: "a", GIT_COMMITTER_EMAIL: "a@b" };
-const deps = { git: realGit, fs: realFs({ id: () => "t", jitter: () => 0 }), env };
+const deps = { git: testGit, fs: realFs({ id: () => "t", jitter: () => 0 }), env };
 const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
 
 function repo(): string {
@@ -76,4 +76,28 @@ test("run numbers count up per ticket; a cited run that failed is a mismatch, no
   assert.equal(nextRun(events, "T3"), 1);
   assert.deepEqual(mismatches(events, "T1", { kind: "done", runs: [1, 2] }),
     [{ claim: "run 2 cited as evidence the work is done", record: "run 2 `npm test` failed (exit 1)" }]);
+});
+
+test("M4: with a heads cache, HEAD's tree is asked once per commit, and a new commit is seen", async () => {
+  const dir = tempDir();
+  sh(dir, "init", "-q", "-b", "main");
+  writeFileSync(path.join(dir, "a.txt"), "1\n");
+  sh(dir, "add", "-A");
+  sh(dir, "commit", "-qm", "one");
+  let asked = 0;
+  const counting = { ...deps, git: (args: string[], o: { cwd: string }) => {
+    if (args[0] === "rev-parse") asked += 1;
+    return testGit(args, { ...o, env });
+  } };
+  const heads = new Map<string, string>();
+  const first = await snapshot(counting, dir, "a", { heads });
+  await snapshot(counting, dir, "b", { heads });
+  assert.equal(asked, 1, "the second snapshot read HEAD's tree from the cache");
+  writeFileSync(path.join(dir, "a.txt"), "2\n");
+  sh(dir, "commit", "-qam", "two");
+  const third = await snapshot(counting, dir, "c", { heads });
+  assert.ok(first.ok && third.ok);
+  assert.equal(third.base, sh(dir, "rev-parse", "HEAD^{tree}"), "the new commit's tree");
+  assert.notEqual(third.base, first.base);
+  assert.deepEqual(third.files, []);
 });

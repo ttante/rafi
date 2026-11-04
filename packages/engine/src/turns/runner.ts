@@ -8,6 +8,7 @@ import type {
   Agent, AgentEvent, Decision, PermissionRequest, ReplySchema, TurnMeta, TurnRequest,
 } from "../agents/types.js";
 import type { Clock, Hooks, Random } from "../deps/types.js";
+import { boundary } from "../deps/hooks.js";
 import type { NewEvent } from "../log/types.js";
 import { escapeControl } from "../log/redact.js";
 import { quoted } from "../instructions/assemble.js";
@@ -36,7 +37,8 @@ export interface TurnSpec {
 
 export interface TurnIO {
   record(events: readonly NewEvent[]): Promise<void>;
-  blob(text: string): Promise<string>;
+  /** Null when the disk refused it (optional data, C157). */
+  blob(text: string): Promise<string | null>;
   onEvent?(event: AgentEvent, key: string): void | Promise<void>;
   decide?(request: PermissionRequest, repair: boolean): Decision;
   /** rafi's own rules on a schema-valid reply (references, scope); returns errors in plain words. */
@@ -45,6 +47,10 @@ export interface TurnIO {
   fresh?(): Promise<Agent>;
   /** The runtime question (C46) for auth and an unknown-reset quota; without one, the turn fails. */
   ask?(kind: "auth" | "quota", message: string): Promise<"retry" | "switch" | "cancel">;
+  /** C137: `rafi stop` (now) or Ctrl+C cancels the turn; its reason ("stop" | "ctrl-c") is the cancel's cause. */
+  stop?: AbortSignal;
+  /** C137: a second Ctrl+C ends the provider at once, without waiting for it to confirm. */
+  kill?: AbortSignal;
 }
 
 export interface TurnLimits {
@@ -64,6 +70,8 @@ type Deps = { clock: Clock; hooks: Hooks; random: Pick<Random, "jitter"> };
 interface Sent {
   terminal: AgentEvent | null;
   timedOut: boolean;
+  /** Cancelled by a stop (C137): its cause. */
+  stopped: string | null;
   usage: { input: number; output: number; cost: number | null; measured: boolean };
   ms: number;
   /** What the turn's tools did (`tool command`), for turn-level circling (C112). */
@@ -84,8 +92,8 @@ async function consume(deps: Deps, agent: Agent, request: TurnRequest, spec: Tur
   limits: TurnLimits): Promise<Sent> {
   const started = deps.clock.now().getTime();
   const controller = new AbortController();
-  const sent: Sent = { terminal: null, timedOut: false, usage: { input: 0, output: 0, cost: null, measured: false },
-    ms: 0, touched: [] };
+  const sent: Sent = { terminal: null, timedOut: false, stopped: null,
+    usage: { input: 0, output: 0, cost: null, measured: false }, ms: 0, touched: [] };
   let forced: () => void = () => undefined;
   const ended = new Promise<"forced">((resolve) => { forced = () => resolve("forced"); });
   const cancels: (() => void)[] = [];
@@ -99,9 +107,20 @@ async function consume(deps: Deps, agent: Agent, request: TurnRequest, spec: Tur
     }, "timeout");
   };
   arm();
+  const end = () => { void agent.close(); forced(); };
+  const onStop = () => {
+    if (sent.stopped || sent.timedOut) return;
+    sent.stopped = io.stop?.reason === "ctrl-c" ? "ctrl-c" : "stop";
+    idle();
+    controller.abort();
+    cancels.push(deps.clock.timer(CONFIRM_MS, end, "timeout"));
+  };
+  io.stop?.addEventListener("abort", onStop, { once: true });
+  io.kill?.addEventListener("abort", end, { once: true });
+  if (io.stop?.aborted) onStop();
   const it = agent.turn(request, controller.signal)[Symbol.asyncIterator]();
   await io.record([event(spec, "turn.sent", { key: spec.meta.key, native_session: null, native_turn: null })]);
-  deps.hooks.crash(`2: sent, before any reply (${label(spec, request.meta.attempt ?? 1)})`);
+  await boundary(deps.hooks, `2: sent, before any reply (${label(spec, request.meta.attempt ?? 1)})`);
   try {
     for (;;) {
       const next = await Promise.race([it.next(), ended]);
@@ -124,14 +143,20 @@ async function consume(deps: Deps, agent: Agent, request: TurnRequest, spec: Tur
   } finally {
     idle();
     for (const cancel of cancels) cancel();
+    io.stop?.removeEventListener("abort", onStop);
+    io.kill?.removeEventListener("abort", end);
   }
-  if (sent.timedOut) {
+  if (sent.stopped) {
+    const confirmed = sent.terminal?.kind === "cancelled" && sent.terminal.confirmed;
+    await io.record([event(spec, "turn.cancelled", { key: spec.meta.key, cause: sent.stopped, confirmed })]);
+    sent.terminal = { kind: "cancelled", confirmed };
+  } else if (sent.timedOut) {
     const confirmed = sent.terminal?.kind === "cancelled" && sent.terminal.confirmed;
     await io.record([event(spec, "turn.cancelled", { key: spec.meta.key, cause: "timeout", confirmed })]);
     sent.terminal = { kind: "idle-timeout" };
   }
   sent.ms = deps.clock.now().getTime() - started;
-  deps.hooks.crash(`3: reply arrived, before it's recorded (${label(spec, request.meta.attempt ?? 1)})`);
+  await boundary(deps.hooks, `3: reply arrived, before it's recorded (${label(spec, request.meta.attempt ?? 1)})`);
   return sent;
 }
 
@@ -186,13 +211,15 @@ export async function runTurn(deps: Deps, first: Agent, spec: TurnSpec, io: Turn
       message: note ? `${note}\n\n${spec.message}` : spec.message, schema: spec.schema, grants: spec.grants,
       tools: spec.tools };
     await io.record([intent(spec, request, attempt)]);
-    deps.hooks.crash(`1: intent, before sending (${label(spec, attempt)})`);
+    await boundary(deps.hooks, `1: intent, before sending (${label(spec, attempt)})`);
     instructions = false;
     const sent = await consume(deps, agent, request, spec, io, limits);
     let judged = await judge(spec, io, sent.terminal);
     await io.record([await replyEvent(spec, io, judged, sent)]);
     const format = judged.category === "format";
-    if (judged.category === "format" && judged.format) judged = await repair(deps, agent, spec, io, limits, judged);
+    if (judged.category === "format" && judged.format) {
+      judged = await repair(deps, agent, spec, request.meta, io, limits, judged);
+    }
     if (judged.category === "ok") return { ok: true, value: judged.value, attempts: attempt };
     const reason = judged.errors[0] ?? judged.category;
     tries.push({ signature: replySignature(judged.category, judged.errors), touched: sent.touched, format });
@@ -235,7 +262,9 @@ export async function runTurn(deps: Deps, first: Agent, spec: TurnSpec, io: Turn
 
 function intent(spec: TurnSpec, request: TurnRequest, attempt: number): NewEvent {
   const text = request.instructions ?? "";
-  return event(spec, "turn.intent", { key: spec.meta.key, role: spec.meta.role, runtime: spec.runtime,
+  const m = request.meta;
+  return event(spec, "turn.intent", { key: spec.meta.key, role: spec.meta.role, ticket: m.ticket ?? null,
+    step: m.step ?? null, attempt: m.attempt ?? null, runtime: spec.runtime,
     model: spec.model, effort: spec.effort, fast: spec.fast, session: attempt === 1 ? spec.session : "reused",
     schema: spec.schema.name, instruction_chars: text.length,
     instruction_digest: `sha256:${createHash("sha256").update(text).digest("hex")}`, tools: [...spec.tools],
@@ -250,10 +279,11 @@ async function replyEvent(spec: TurnSpec, io: TurnIO, judged: Judged, sent: Sent
 }
 
 /** The one repair try, in the same session, tools refused (5.3). A rejected resend becomes a content error. */
-async function repair(deps: Deps, agent: Agent, spec: TurnSpec, io: TurnIO, limits: TurnLimits,
+/** C166: the repair carries the meta of the attempt it repairs (an in-run retry's raised attempt included). */
+async function repair(deps: Deps, agent: Agent, spec: TurnSpec, meta: TurnMeta, io: TurnIO, limits: TurnLimits,
   judged: Judged): Promise<Judged> {
   const format = judged.format!;
-  const request: TurnRequest = { meta: spec.meta, message: repairMessage(format.error, format.atByte),
+  const request: TurnRequest = { meta, message: repairMessage(format.error, format.atByte),
     schema: spec.schema, grants: spec.grants, tools: spec.tools, repair: true };
   const sent = await consume(deps, agent, request, spec, io, limits);
   const resend = await judge(spec, io, sent.terminal);

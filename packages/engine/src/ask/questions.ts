@@ -23,14 +23,29 @@ export interface Answered {
   readonly by: { actor: string; source: string | null; at: string } | null;
 }
 
+class NumberTaken extends Error {}
+const MAX_NO = "SELECT MAX(CAST(json_extract(data, '$.no') AS INTEGER)) AS n FROM events " +
+  "WHERE type = 'question.opened'";
+
+/** The next short number is checked again inside the append's transaction (M4; M3's open item, 10.9), so two
+ * processes opening questions at once never share a number. */
 export async function openQuestion(log: QuestionLog, run: string | null, q: QuestionDraft):
   Promise<{ id: string; no: number }> {
-  const no = Math.max(0, ...Object.values(log.fold().questions).map((x) => x.no)) + 1;
-  const id = `question-${no}`;
-  await log.append([{ type: "question.opened", run_id: run, actor: "engine", data: { id, no, kind: q.kind,
-    tickets: [...q.tickets], text: q.text, options: q.options.map((o) => ({ id: o.id, label: o.label })),
-    recommended: q.recommended, context: q.context, urgency: q.urgency, key: q.key } }]);
-  return { id, no };
+  for (let tries = 0; ; tries += 1) {
+    const last = Math.max(0, ...Object.values(log.fold().questions).map((x) => x.no));
+    const no = last + 1;
+    const id = `question-${no}`;
+    try {
+      await log.append([{ type: "question.opened", run_id: run, actor: "engine", data: { id, no, kind: q.kind,
+        tickets: [...q.tickets], text: q.text, options: q.options.map((o) => ({ id: o.id, label: o.label })),
+        recommended: q.recommended, context: q.context, urgency: q.urgency, key: q.key } }], { inTx: (db) => {
+        if (Number((db.prepare(MAX_NO).get() as { n: number | null }).n ?? 0) !== last) throw new NumberTaken();
+      } });
+      return { id, no };
+    } catch (error) {
+      if (!(error instanceof NumberTaken) || tries >= 4) throw error;
+    }
+  }
 }
 
 async function answeredBy(log: QuestionLog, id: string): Promise<Answered["by"]> {
@@ -45,12 +60,12 @@ async function answeredBy(log: QuestionLog, id: string): Promise<Answered["by"]>
 export async function answerQuestion(log: QuestionLog, run: string | null, id: string,
   a: { choice: string | null; note: string | null; text?: string | null; save?: "none" | "build" | "project" },
   effects: readonly { type: string; ticket_id?: string | null; data: unknown }[],
-  source: "terminal" | "rafi-answer" | "notification" = "terminal"): Promise<Answered> {
+  source: "terminal" | "rafi-answer" | "notification" | "manager" = "terminal", actor = "user"): Promise<Answered> {
   const q = log.fold().questions[id];
   if (q && q.status === "answered") return { written: false, by: await answeredBy(log, id) };
-  const result = await log.append([{ type: "question.answered", run_id: run, actor: "user", source,
+  const result = await log.append([{ type: "question.answered", run_id: run, actor, source,
     data: { id, choice: a.choice, text: a.text ?? null, note: a.note, save: a.save ?? "none" } },
-  ...effects.map((e) => ({ ...e, run_id: run, actor: "user", source }))], { idemKey: `answer|${id}` });
+  ...effects.map((e) => ({ ...e, run_id: run, actor, source }))], { idemKey: `answer|${id}` });
   if (!result.replayed) return { written: true, by: null };
   const first = result.events[0]!;
   return { written: false, by: { actor: first.actor, source: first.source, at: first.at } };

@@ -36,7 +36,7 @@ export const WHAT_NEXT_OPTIONS: readonly UiOption[] = Object.freeze([
   { id: "waive", label: "Explicitly waive QA", confirm: { text: "Record validation_result=failed and retain " +
     "unresolved issues?", options: ["No", "Waive and continue"], yes: 1 } },
   { id: "planner", label: "Discuss with read-only Planner", later: WHAT_NEXT_LATER.planner! },
-  { id: "pause", label: "Pause at this checkpoint", later: WHAT_NEXT_LATER.pause! },
+  { id: "pause", label: "Pause at this checkpoint" },
 ]);
 
 interface Ev { readonly type: string; readonly ticket_id: string | null; readonly data: unknown; readonly id: string;
@@ -95,15 +95,17 @@ export async function openWhatNext(engine: Engine, deps: KeyDeps, run: string, i
   return made ? openQuestion(engine, run, made.draft) : null;
 }
 
-/** Asks one open what-next question in the terminal and applies the answer. Null: no answer (the input ended). */
+/** Asks one open what-next question in the terminal and applies the answer. False: no answer (the input ended, or
+ * the prompt was closed). "pause": "Pause at this checkpoint" (C149), which leaves the question open. */
 export async function askWhatNext(engine: Engine, deps: KeyDeps, run: string, q: Question,
-  ask: (q: UiQuestion) => Promise<UiAnswer>, fixes: number): Promise<boolean> {
+  ask: (q: UiQuestion) => Promise<UiAnswer>, fixes: number): Promise<boolean | "pause"> {
   const id = q.tickets[0]!;
   const made = await whatNextDraft(engine, deps, id, fixes);
   for (;;) {
     const answer = await ask({ no: q.no, kind: q.kind, text: q.text, options: WHAT_NEXT_OPTIONS,
       recommended: "retry" });
     if (!answer) return false;
+    if (answer.choice === "pause") return "pause";
     const effects = whatNextEffects({ ticket: id, choice: answer.choice, note: answer.note,
       confirmed: answer.confirmed, findings: made?.findings ?? [], fp: made?.fp ?? "sha256:none" });
     if (!effects.ok) continue;

@@ -13,31 +13,26 @@ import { outsideEdit } from "../script/roles.mjs";
 const RUNS = "$runs";
 const ERROR_INFO = { quota: "usageLimitExceeded", auth: "unauthorized", transient: "httpConnectionFailed" };
 
-/** callMcp(url, headers, body) → { status, body } posts one JSON-RPC request to rafi's endpoint. */
-export function createCodexFake({ send, nextBehavior, log = () => {}, exit = () => {}, callMcp, record = () => {},
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
-  let thread = null;
-  let threadParams = {};
-  let turnSeq = 0;
-  let hanging = null;
-  let serverId = 1000;
-  let rpc = 0;
-  const approvals = new Map();
-  let turns = 0;
-  let initialized = false;
-  const sandbox = createSandbox();
-
-  const notify = (method, params) => send({ method, params: { threadId: thread, ...params } });
-  const ask = (method, params) => new Promise((resolve) => {
-    const id = ++serverId;
-    approvals.set(id, resolve);
-    send({ id, method, params: { threadId: thread, ...params } });
+/** Real time, ended early by `signal` (an interrupt mid-wait, M4). */
+function sleepFor(ms, signal) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
   });
+}
 
+/** M4: false once the turn was interrupted, before or during a step's wait. */
+async function waitUnlessStopped(io, turnId, step) {
+  if (io.stopped?.(turnId)) return false;
+  if (step.wait) await io.sleep(step.wait, io.signal?.(turnId)).catch(() => undefined);
+  return !io.stopped?.(turnId);
+}
+
+/** The final message and turn/completed for a behavior's reply or error. */
+function finisher(notify) {
   const finalMessage = (turnId, text) => notify("item/completed", { turnId, item: { type: "agentMessage",
     id: `msg-${turnId}-${Math.random().toString(36).slice(2, 6)}`, phase: "final_answer", text } });
-
-  const finish = (turnId, behavior, runs) => {
+  return (turnId, behavior, runs) => {
     const usage = behavior.usage ?? { inputTokens: 120, outputTokens: 30 };
     notify("thread/tokenUsage/updated", { tokenUsage: { total: { ...usage,
       totalTokens: usage.inputTokens + usage.outputTokens }, last: { totalTokens: 20 },
@@ -53,9 +48,36 @@ export function createCodexFake({ send, nextBehavior, log = () => {}, exit = () 
     if (behavior.twoFinals) finalMessage(turnId, JSON.stringify(behavior.twoFinals));
     notify("turn/completed", { turn: { id: turnId, status: "completed" } });
   };
+}
+
+/** callMcp(url, headers, body) → { status, body } posts one JSON-RPC request to rafi's endpoint. */
+export function createCodexFake({ send, nextBehavior, log = () => {}, exit = () => {}, callMcp, record = () => {},
+  sleep = sleepFor, killHost = null }) {
+  let thread = null;
+  let threadParams = {};
+  let turnSeq = 0;
+  // M4: the turn in flight. A turn working through its steps (slow's waits) stops at the next step once interrupted;
+  // one whose behavior has `ignoreCancel` doesn't take rafi's cancel (process set: a provider stuck mid-turn).
+  const live = { hanging: null, working: null, deaf: false, interrupted: new Set(), waits: new Map() };
+  let serverId = 1000;
+  let rpc = 0;
+  const approvals = new Map();
+  let turns = 0;
+  let initialized = false;
+  const sandbox = createSandbox();
+
+  const notify = (method, params) => send({ method, params: { threadId: thread, ...params } });
+  const ask = (method, params) => new Promise((resolve) => {
+    const id = ++serverId;
+    approvals.set(id, resolve);
+    send({ id, method, params: { threadId: thread, ...params } });
+  });
+
+  const finish = finisher(notify);
 
   const { escalated, runSteps } = stepRunner({ notify, ask, params: () => threadParams, callMcp, sleep, log,
-    next: () => ++rpc, sandbox });
+    next: () => ++rpc, sandbox, stopped: (turnId) => live.interrupted.has(turnId),
+    signal: (turnId) => live.waits.get(turnId)?.signal });
 
   const turn = async (request, meta) => {
     const behavior = nextBehavior(meta, { cwd: threadParams.cwd, message: request.params?.input?.[0]?.text ?? "" });
@@ -63,13 +85,27 @@ export function createCodexFake({ send, nextBehavior, log = () => {}, exit = () 
     record({ turn: ++turns, meta, thread: threadParams, start: request.params, active: sandbox.profile() });
     log({ op: "turn", behavior: Object.keys(behavior), hasMeta: "meta" in request });
     send({ id: request.id, result: { turn: { id: turnId } } });
+    // C162: killhost (process mode only): rafi is killed after it sent the turn, before any reply.
+    if (behavior.kill === "before-reply" && killHost) { killHost(); return; }
     if (behavior.activity) notify("item/completed", { turnId, item: { type: "agentMessage", id: `act-${turnId}`,
       phase: "commentary", text: behavior.activity } });
     if (behavior.bash) await escalated(turnId, behavior.bash);
+    live.working = turnId;
+    live.deaf = Boolean(behavior.ignoreCancel);
+    live.waits.set(turnId, new AbortController());
     const runs = await runSteps(turnId, behavior);
-    if (behavior.hang) { hanging = turnId; return; }
+    live.working = null;
+    live.waits.delete(turnId);
+    if (live.interrupted.delete(turnId)) {
+      log({ op: "interrupted", turnId });
+      notify("turn/completed", { turn: { id: turnId, status: "interrupted" } });
+      return;
+    }
+    if (behavior.hang) { live.hanging = turnId; return; }
     if (behavior.crash) { exit(Number(behavior.crash === true ? 70 : behavior.crash)); return; }
     finish(turnId, behavior, runs);
+    // killhost-after-reply: the reply is written; rafi may or may not have recorded it.
+    if (behavior.kill === "after-reply" && killHost) killHost();
   };
 
   return {
@@ -104,15 +140,24 @@ export function createCodexFake({ send, nextBehavior, log = () => {}, exit = () 
       }
       if (message.method === "turn/interrupt") {
         send({ id: message.id, result: {} });
-        if (hanging) {
-          notify("turn/completed", { turn: { id: hanging, status: "interrupted" } });
-          hanging = null;
-        }
-        return undefined;
+        return void interruptTurn(live, notify, log);
       }
       return send({ id: message.id, result: {} });
     },
   };
+}
+
+/** turn/interrupt: a hanging turn completes as interrupted; a working one stops at its next step. */
+function interruptTurn(live, notify, log) {
+  if (live.deaf) return log({ op: "cancel-ignored" });
+  if (live.hanging) {
+    notify("turn/completed", { turn: { id: live.hanging, status: "interrupted" } });
+    live.hanging = null;
+  } else if (live.working) {
+    live.interrupted.add(live.working);
+    live.waits.get(live.working)?.abort();
+  }
+  return undefined;
 }
 
 /** The steps a behavior runs inside a turn: edits, shell commands, rafi's MCP tools. */
@@ -185,7 +230,7 @@ function stepRunner(io) {
   const runSteps = async (turnId, behavior) => {
     const runs = [];
     for (const step of behavior.steps ?? []) {
-      if (step.wait) await io.sleep(step.wait);
+      if (!(await waitUnlessStopped(io, turnId, step))) break;
       if (step.echoToken) {
         const token = io.params().config?.mcp_servers?.rafi?.http_headers?.Authorization;
         io.notify("item/completed", { turnId, item: { type: "agentMessage", id: `act-${io.next()}`,

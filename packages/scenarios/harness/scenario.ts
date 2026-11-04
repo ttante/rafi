@@ -1,6 +1,6 @@
 // The scenario() API of SCN 7.9. Each scenario runs as a node:test test; steps that need a later milestone
 // report "not run (pending Mn)"; the after-each checks of S-CLI-2 step 4 run after every scenario.
-import { cpSync, existsSync, mkdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -100,6 +100,8 @@ export function scenario(def: ScenarioDef): void {
     await def.run(ctx);
     const problems = scenarioProblems(ctx.computer, projects, ctx.results);
     assert.deepEqual(problems, [], "S-CLI-2 step 4");
+    // M4: a passing scenario removes the folders it made (a failing one keeps them to look at).
+    rmSync(ctx.root, { recursive: true, force: true });
   });
 }
 

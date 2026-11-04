@@ -2,9 +2,11 @@
 // numbers them, renders the Markdown and records `requirements.written`.
 import path from "node:path";
 import type { RequirementsReply, TicketV1 } from "rafi-spec/v1";
+import { boundary } from "../../deps/hooks.js";
 import { prepareMessage } from "../../instructions/messages.js";
 import { requirementCheckProblem } from "../../tools/session.js";
-import { agentTurn, append, rulesFor, ticketOf, type BuildContext } from "../context.js";
+import { append, rulesFor, ticketOf, type BuildContext } from "../context.js";
+import { agentTurn } from "../../turns/agent.js";
 import { depthFor } from "../depth.js";
 import { digest, failStep, requirementLines, requirementsPath } from "./common.js";
 
@@ -46,7 +48,7 @@ export async function prepareStep(ctx: BuildContext, id: string, attempt: number
   if (!out.ok) return failStep(ctx, id, out);
   const reply = out.value as RequirementsReply;
   const markdown = render(ticket, reply, depth.depth);
-  ctx.deps.hooks.crash(`7: writing the requirements file (${id})`);
+  await boundary(ctx.deps.hooks, `7: writing the requirements file (${id})`);
   await ctx.deps.fs.writeAtomic(path.join(ctx.project, rel), markdown);
   const personOnly = reply.requirements.flatMap((r, i) => (ticket.person_only.includes(r.from) ? [i + 1] : []));
   await append(ctx, id, { type: "requirements.written", data: { path: rel,

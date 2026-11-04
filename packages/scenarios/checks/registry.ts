@@ -268,7 +268,7 @@ export const registry: readonly Registered[] = Object.freeze([
   { id: "S-CLI-12", milestone: "M10", title: "Output conventions, colors, exit codes", covers: [
     "ENV-1", "ENV-2", "OUT-9", "OUT-10", "OUT-11", "OUT-40", "OUT-41", "OUT-42", "NEW-KEEP-6", "FLAG-MG-10",
     "GUI-R24"] },
-  { id: "S-CLI-13", milestone: "M4", title: "Resume picks saved interviews; old ones are pruned", covers: [
+  { id: "S-CLI-13", milestone: "M10", title: "Resume picks saved interviews; old ones are pruned", covers: [
     "FLAG-RS-3", "FLAG-CR-2", "FLAG-PL-5", "FILE-31", "PRM-90"] },
   { id: "S-CLI-14", milestone: "M8", title: "`rafi reset`", covers: [
     "CMD-13", "CMD-14", "CMD-32", "FLAG-RE-1", "FLAG-RE-2", "FLAG-RE-3", "PRM-100", "GUI-R7", "GUI-R10",

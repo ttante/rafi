@@ -5,9 +5,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { realGit } from "../../src/deps/real/exec.js";
 import { changedCovered, coveredDigest, waiverKey, whatNextKey } from "../../src/ask/keys.js";
-import { tempDir } from "../helpers.js";
+import { tempDir, testGit } from "../helpers.js";
 
 const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t",
   GIT_COMMITTER_EMAIL: "t@t" };
@@ -33,7 +32,7 @@ test("keys name exactly what was answered", () => {
 
 test("the covered-files digest changes with a covered file, not with a README edit", async () => {
   const dir = repo();
-  const deps = { git: realGit, env: {} };
+  const deps = { git: testGit, env: {} };
   const t0 = treeOf(dir);
   const d0 = await coveredDigest(deps, dir, t0, ["src/T1.txt"]);
   assert.match(d0, /^sha256:[0-9a-f]{64}$/);

@@ -41,12 +41,12 @@ test("Explicitly waive QA: only after PRM-82's confirmation; the waiver keeps th
   ]);
 });
 
-test("the Planner and Pause options aren't built yet and change nothing; an unknown choice is refused", () => {
-  for (const [choice, milestone] of [["planner", "M8"], ["pause", "M4"]] as const) {
-    const out = whatNextEffects({ ...base, choice, note: null });
-    assert.equal(out.ok, false);
-    assert.match(out.ok ? "" : out.reason, new RegExp(`isn't in the new engine yet \\(milestone ${milestone}\\)`));
-  }
+// M4 (C149): Pause is a pause request, not an answer, so it has no answer effects (ask/blocked.ts handles it).
+test("the Planner option isn't built yet; Pause has no answer effects; an unknown choice is refused", () => {
+  const planner = whatNextEffects({ ...base, choice: "planner", note: null });
+  assert.equal(planner.ok, false);
+  assert.match(planner.ok ? "" : planner.reason, /isn't in the new engine yet \(milestone M8\)/);
+  assert.equal(whatNextEffects({ ...base, choice: "pause", note: null }).ok, false);
   assert.equal(whatNextEffects({ ...base, choice: "nonsense", note: null }).ok, false);
 });
 

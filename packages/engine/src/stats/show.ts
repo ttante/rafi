@@ -1,6 +1,7 @@
 // `rafi stats show` (M2's first version; ARCH 3.6, 5.3 NEW-SO-4): a run's turns by role and runtime, retries by
 // reason, the malformed-reply count by runtime and role, and the failed replies kept with their errors.
 import type { Engine } from "../api/engine.js";
+import { outcomeOf } from "./status.js";
 
 type Data = Record<string, unknown>;
 
@@ -15,6 +16,8 @@ export interface RunStats {
   /** NEW-REQ-6: one delivery receipt per QA review turn. */
   readonly receipts: { key: string; at: string; path: string; supplied: string | null; observed: string | null;
     status: string; read: boolean }[];
+  /** C137 (S-CRASH-3 run 2): a turn a stop or Ctrl+C cancelled, with its evidence so far. */
+  readonly interrupted: { key: string; cause: string; confirmed: boolean; activity: string[]; files: string[] }[];
 }
 
 export async function runStats(engine: Engine, o: { run?: string; ticket?: string } = {}): Promise<RunStats | null> {
@@ -25,9 +28,13 @@ export async function runStats(engine: Engine, o: { run?: string; ticket?: strin
   if (!run) return null;
   const mine = all.filter((e) => e.run_id === run && (!o.ticket || e.ticket_id === o.ticket));
   const intents = new Map<string, Data>();
-  const stats: RunStats = { run, state: engine.fold().builds[run]?.state ?? "unknown",
+  // M4 (C134): the shown outcome (crashed, cancelled, …), not the stored state.
+  const view = engine.fold();
+  const build = view.builds[run];
+  const state = build ? (await outcomeOf(engine, view, build, all)).text : "unknown";
+  const stats: RunStats = { run, state,
     done: mine.filter((e) => e.type === "delivery.done").map((e) => e.ticket_id!), turns: {}, retries: {},
-    malformed: {}, failed: [], receipts: [] };
+    malformed: {}, failed: [], receipts: [], interrupted: [] };
   for (const e of mine) {
     const d = e.data as Data;
     if (e.type === "turn.intent") {
@@ -47,6 +54,13 @@ export async function runStats(engine: Engine, o: { run?: string; ticket?: strin
     } else if (e.type === "requirements.receipt") {
       stats.receipts.push({ key: String(d.key), at: e.at, path: String(d.path), supplied: d.fp_supplied as string,
         observed: (d.fp_observed as string | null) ?? null, status: String(d.status), read: Boolean(d.read) });
+    } else if (e.type === "turn.cancelled") {
+      const key = String(d.key);
+      stats.interrupted.push({ key, cause: String(d.cause), confirmed: Boolean(d.confirmed),
+        activity: mine.filter((x) => x.type === "turn.activity" && (x.data as Data).key === key)
+          .map((x) => String((x.data as Data).text)).slice(-5),
+        files: (mine.filter((x) => x.type === "facts.snapshot" && (x.data as Data).key === `${key}:stopped`)
+          .at(-1)?.data as { files?: string[] } | undefined)?.files ?? [] });
     } else if (e.type === "turn.repair" && !d.accepted) {
       const last = stats.failed.at(-1);
       if (last) last.errors.push(`the repair was rejected: ${String(d.why)}`);
@@ -76,6 +90,14 @@ export function renderStats(s: RunStats): string {
         `supplied ${r.supplied ?? "none"}, observed ${r.observed ?? "none"}, ${r.status}, ` +
         `read: ${r.read ? "yes" : "no"}`);
     }
+  }
+  const CAUSE: Record<string, string> = { stop: "cancelled", "ctrl-c": "cancelled by Ctrl+C", timeout: "timed out" };
+  for (const t of s.interrupted) {
+    const [ticket, step, attempt] = t.key.split(":");
+    lines.push(`Interrupted turn ${ticket} ${step} attempt ${attempt} (${CAUSE[t.cause] ?? t.cause}, ` +
+      `${t.confirmed ? "confirmed" : "not confirmed"})`);
+    if (t.activity.length) lines.push(`  activity: ${t.activity.join("; ")}`);
+    lines.push(`  changed files: ${t.files.join(", ") || "none"}`);
   }
   return `${lines.join("\n")}\n`;
 }

@@ -1,11 +1,11 @@
 // D9 (ARCH 11.7): the installed Agent SDK drives the fake `claude` executable.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AbortError, query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { madeTemp } from "../harness/temp.js";
 
 const fakePath = fileURLToPath(new URL("../fakes/claude-cli.mjs", import.meta.url));
 const schema = {
@@ -16,7 +16,7 @@ const schema = {
 };
 
 function shim(rules: unknown[]) {
-  const dir = mkdtempSync(path.join(tmpdir(), "rafi-d9-"));
+  const dir = madeTemp("rafi-d9-");
   const log = path.join(dir, "log.jsonl");
   const scriptPath = path.join(dir, "script.json");
   writeFileSync(scriptPath, JSON.stringify({ log, rules }));
@@ -160,7 +160,7 @@ test("D9: the extensionless `claude` PATH shim is spawned directly by the SDK", 
   skip: process.platform === "win32" ? "a shebang shim; Windows uses claude.cmd" : false,
 }, async () => {
   const { writeShims } = await import("../fakes/shims.js");
-  const dir = mkdtempSync(path.join(tmpdir(), "rafi-d9-shim-"));
+  const dir = madeTemp("rafi-d9-shim-");
   const shims = writeShims(dir, { codex: [], claude: [{ reply: { kind: "done", summary: "shim" } }] });
   const run = startQuery(shims.claude, dir);
   run.input.push(userTurn("Build T1."));

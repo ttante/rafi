@@ -3,6 +3,7 @@
 import path from "node:path";
 import { stringify } from "yaml";
 import type { Engine } from "../api/engine.js";
+import { boundary } from "../deps/hooks.js";
 import type { Folded, TicketState } from "../state/types.js";
 
 export const PROGRESS = path.join(".rafi", "progress.yaml");
@@ -52,6 +53,6 @@ export async function writeProgress(engine: Engine, view: Folded): Promise<void>
   }
   const body = stringify({ version: 1, tickets: sorted(tickets), questions: sorted(questions),
     answers: sorted(answers) }, { sortMapEntries: true });
-  engine.deps.hooks.crash("5: during the progress-file write");
+  await boundary(engine.deps.hooks, "5: during the progress-file write");
   await engine.deps.fs.writeAtomic(path.join(engine.projectDir, PROGRESS), HEADER + body);
 }

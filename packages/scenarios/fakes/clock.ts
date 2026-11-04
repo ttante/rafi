@@ -18,7 +18,7 @@ interface Timer {
 }
 
 export class FakeClock {
-  private nowMs = CLOCK_START;
+  private nowMs: number;
   private timers: Timer[] = [];
   private nextId = 0;
   private inflight = 0;
@@ -26,6 +26,11 @@ export class FakeClock {
   private checking = false;
   private readonly dead = new Set<string>();
   private readonly hooks: { kind: TimerKind; fn: () => Promise<void> | void }[] = [];
+
+  /** `start`: a restored snapshot's time (P33, C163); a fresh computer starts at CLOCK_START. */
+  constructor(start = CLOCK_START) {
+    this.nowMs = start;
+  }
 
   now(): Date {
     return new Date(this.nowMs);
@@ -38,9 +43,12 @@ export class FakeClock {
       timer: (ms, fn, kind) => this.add(ms, fn, kind, owner),
       sleep: (ms, kind, signal) => new Promise<void>((resolve, reject) => {
         if (signal?.aborted) return reject(signal.reason);
-        const cancel = this.add(ms, () => { signal?.removeEventListener("abort", onAbort); resolve(); }, kind, owner);
+        // The listener goes on first: arming the timer can run a whenTimer step that aborts at once (M4).
+        let cancel: Cancel = () => undefined;
         const onAbort = () => { cancel(); reject(signal?.reason); };
         signal?.addEventListener("abort", onAbort, { once: true });
+        cancel = this.add(ms, () => { signal?.removeEventListener("abort", onAbort); resolve(); }, kind, owner);
+        if (signal?.aborted) cancel();
       }),
     };
   }

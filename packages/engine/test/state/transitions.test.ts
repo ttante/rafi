@@ -50,6 +50,10 @@ function label(t: TicketState): string {
 }
 
 function satisfies(t: TicketState, before: TicketState, spec: string): boolean {
+  if (spec === "reset") {
+    return t.state === "queued" && t.node === null && t.resumeNode === null && t.block === null && t.attempt === 1 &&
+      t.fixesUsed === 0 && t.fixesGranted === 0 && !t.stepRunning;
+  }
   if (spec === "same") {
     return t.state === before.state && t.node === before.node && t.resumeNode === before.resumeNode &&
       JSON.stringify(t.block) === JSON.stringify(before.block);
@@ -160,4 +164,14 @@ test("C104: blocked(other) back into the fix step doesn't count as an attempt or
   assert.equal(failed.block?.kind, "other");
   const back = apply(failed, "unblocked resume fix");
   assert.deepEqual([back.attempt, back.fixesUsed], [2, 1]);
+});
+
+test("P31: build.reset clears a fixing ticket's attempt, fixes used and granted, and its resume step", () => {
+  const fixing = { ...at("fix"), attempt: 4, fixesUsed: 3, fixesGranted: 1, stepRunning: true };
+  const after = apply(fixing, "build reset");
+  assert.deepEqual([after.state, after.node, after.attempt, after.fixesUsed, after.fixesGranted, after.resumeNode],
+    ["queued", null, 1, 0, 0, null]);
+  const blocked = { ...initialTicket("T1"), state: "blocked" as const, resumeNode: "fix", attempt: 4,
+    block: { kind: "what-next" as const, reason: "r", question: null } };
+  assert.equal(apply(blocked, "build reset").resumeNode, null);
 });

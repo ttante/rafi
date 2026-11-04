@@ -54,6 +54,8 @@ function rulesFor(acc: Acc, event: FoldEvent, ctx: FoldContext, rafiOwned: boole
 function ticketTargets(event: FoldEvent): string[] {
   const data = (event.data ?? {}) as Data;
   if (event.type === "tickets.changed") return ((data.items as { ticket: string }[]) ?? []).map((i) => i.ticket);
+  // P31: build.reset reaches each ticket it puts back, as tickets.changed's items do.
+  if (event.type === "build.reset") return (data.tickets as string[] | undefined) ?? [];
   if (event.type === "progress.imported") {
     const entry = data.entry as { kind: string; key: string };
     return entry.kind === "ticket" ? [entry.key] : [];
@@ -70,8 +72,19 @@ const TICKET_TYPES: ReadonlySet<string> = new Set([
   "checks.passed", "checks.failed", "attempt.summary", "facts.snapshot", "verdict.recorded", "fix.granted",
   "waiver.recorded", "recheck.requested", "recheck.recorded", "ticket.blocked", "ticket.unblocked",
   "ticket.dropped", "ticket.reopened", "git.committed", "git.branch_created", "delivery.done", "scan.gap",
-  "recording.saved", "recording.removed", "tickets.changed", "progress.imported",
+  "recording.saved", "recording.removed", "tickets.changed", "progress.imported", "build.reset",
 ]);
+
+/** The outcomes a step records; the first one after a takeover ends "recovering" (C145). */
+const OUTCOMES: ReadonlySet<string> = new Set([
+  "requirements.written", "builder.reported", "checks.passed", "checks.failed", "verdict.recorded", "delivery.done",
+  "step.failed", "ticket.blocked",
+]);
+
+function endRecovering(acc: Acc, event: FoldEvent): void {
+  const build = event.run_id ? acc.builds[event.run_id] : undefined;
+  if (build?.recovering && OUTCOMES.has(event.type)) acc.builds[event.run_id!] = { ...build, recovering: false };
+}
 
 export function isTicketEvent(type: string): boolean {
   return TICKET_TYPES.has(type);
@@ -151,12 +164,20 @@ export function emptyAcc(ctx: FoldContext): Acc {
     grants: [], units: {}, violations: [] };
 }
 
+/** A copy the transition check can apply trial events to (state values are immutable; containers are copied). */
+export function cloneAcc(a: Acc): Acc {
+  return { ...a, builds: { ...a.builds }, tickets: { ...a.tickets }, questions: { ...a.questions },
+    answers: { ...a.answers }, grants: [...a.grants], units: { ...a.units }, violations: [...a.violations],
+    doneInRun: Object.fromEntries(Object.entries(a.doneInRun).map(([k, v]) => [k, [...v]])) };
+}
+
 /** Applies one event. Returns the violations it caused (empty when valid). */
 export function applyEvent(acc: Acc, event: FoldEvent, ctx: FoldContext): Violation[] {
   if (event.class === "detail" || event.origin === "imported") return [];
   const before = acc.violations.length;
   applyBuild(acc, event);
   applyTickets(acc, event, ctx);
+  endRecovering(acc, event);
   applyProject(acc, event);
   applyRecords(acc, event);
   return acc.violations.slice(before);

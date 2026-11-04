@@ -2,20 +2,21 @@
 // Process set only (it spawns real processes and opens sockets); skipped, with the reason, where no sandbox exists.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
-import { sandboxInfo, sandboxPrefix } from "../../src/build/sandbox.js";
+import { sandboxInfo, sandboxPrefix } from "../../src/ask/grants.js";
 import { testEnv } from "../../src/build/env.js";
 import { realChecks } from "../../src/deps/real/checks.js";
 import type { CheckResult, Need } from "../../src/deps/types.js";
+import { tempDir } from "../helpers.js";
 
 const checks = realChecks();
 const info = sandboxInfo(await checks.sandbox());
 const skip = info.available ? false : `no sandbox on this machine: ${info.missing}`;
 if (skip) console.log(`# sandbox probes skipped: ${skip}`);
 
-const root = realpathSync(mkdtempSync(path.join(tmpdir(), "rafi-sbx-")));
+const root = realpathSync(tempDir("rafi-sbx-"));
 const project = path.join(root, "project");
 const outside = path.join(root, "outside");
 const cache = path.join(project, ".rafi", "cache");

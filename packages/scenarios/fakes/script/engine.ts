@@ -113,8 +113,7 @@ export interface TurnContext {
 
 /** The in-process matcher: the first unused rule whose selector matches the turn's meta. */
 export function scriptEngine(rules: readonly Rule[],
-  happy: (meta: MetaLike, ctx: TurnContext) => Behavior = () => ({ reply: {} })) {
-  const used = new Set<Rule>();
+  happy: (meta: MetaLike, ctx: TurnContext) => Behavior = () => ({ reply: {} }), used = new Set<Rule>()) {
   return {
     next(meta: MetaLike, ctx: TurnContext = { cwd: ".", message: "" }): Behavior {
       const index = rules.findIndex((r) => !used.has(r) && matches(r.selector, meta));

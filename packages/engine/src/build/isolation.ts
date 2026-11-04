@@ -10,7 +10,8 @@ import type { Clock, ExecOptions, ExecResult, Env, Fs } from "../deps/types.js";
 import { fullFingerprint } from "../facts/fingerprint.js";
 import { changedBetween, snapshot } from "../facts/snapshot.js";
 import { escapeControl } from "../log/redact.js";
-import { append, closeSession, type AgentOutcome, type BuildContext } from "./context.js";
+import { append, type BuildContext } from "./context.js";
+import { closeSession, type AgentOutcome } from "../turns/agent.js";
 
 export interface CopyDeps {
   git(args: string[], o: ExecOptions): Promise<ExecResult>;

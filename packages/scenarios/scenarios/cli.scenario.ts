@@ -146,9 +146,11 @@ scenario({
         assert.doesNotMatch(r.output, /unknown option/, line);
         assert.equal(r.code, 0, `${line}: ${r.output}`);
       }
+      // M4: resume is built; with no build here it says there's nothing to resume.
       const r = await rafi("resume --yes");
       assert.doesNotMatch(r.output, /unknown option/);
-      assert.match(r.err, /isn't in the new engine yet \(milestone M4\)/);
+      assert.match(r.output, /Nothing to resume\./);
+      assert.equal(r.code, 0, r.output);
     });
     await step("1-2: nothing was written", () => {
       clean();

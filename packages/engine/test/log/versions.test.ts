@@ -10,9 +10,23 @@ import { testLog } from "../helpers.js";
 const written = { path: "docs/requirements/T1.md", fp: "sha256:f", depth: "standard", depth_raised_from: null,
   count: 1, person_only: [], req_fps: ["sha256:r1"] };
 
-test("requirements.written is v 2 and needs req_fps; every other type stays at v 1", () => {
-  assert.equal(eventRegistry.get("requirements.written")?.v, 2);
-  for (const [type, entry] of eventRegistry) if (type !== "requirements.written") assert.equal(entry.v, 1, type);
+// M4 (P35 C): turn.intent is v 2 too, with the turn's ticket, step and attempt.
+const AT_V2: ReadonlySet<string> = new Set(["requirements.written", "turn.intent"]);
+
+test("requirements.written and turn.intent are v 2; every other type stays at v 1", () => {
+  for (const [type, entry] of eventRegistry) assert.equal(entry.v, AT_V2.has(type) ? 2 : 1, type);
+});
+
+const intent = { key: "T1:build:1", role: "builder", ticket: "T1", step: "build", attempt: 1, runtime: "codex",
+  model: null, effort: null, fast: false, session: "new", schema: "builder", instruction_chars: 0,
+  instruction_digest: `sha256:${"0".repeat(64)}`, tools: [], grants: [], redo: false };
+
+test("a stored turn.intent v 1 row is one violation naming its version (M4, P35 C)", async () => {
+  const { ctx, log } = await testLog();
+  await append(ctx, [{ type: "turn.intent", ticket_id: "T1", actor: "engine", data: intent }]);
+  assert.deepEqual(readEvents(log.db).violations, []);
+  log.db.prepare("UPDATE events SET v = 1").run();
+  assert.deepEqual(readEvents(log.db).violations.map((v) => v.reason), ["unknown version 1 of turn.intent"]);
 });
 
 test("a stored v 1 row is one violation naming the version; a v 2 row with req_fps reads back", async () => {

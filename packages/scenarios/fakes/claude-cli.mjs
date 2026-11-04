@@ -1,21 +1,24 @@
 // Fake `claude` executable for the process set (ARCH 11.7, D9).
 // Speaks the stream-json protocol the Agent SDK uses on stdio. Plain ESM: the SDK strips NODE_OPTIONS.
 // The script path is baked into a per-test shim that calls main(scriptPath) (plan choice C12);
-// rafi never passes it. Until P8 is decided, rules apply in order and selectors are refused.
+// rafi never passes it. A script with `match: "identity"` matches rules by the turn's identity from rafi's log (P8
+// option C, script/match.mjs); an order-only script refuses selectors. `kill` behaviors SIGKILL rafi (C162); a
+// SIGINT is logged and ignored, so the fake takes rafi's cancel (plan 9 item 2).
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { nextIndex } from "./codex-cli.mjs";
 import { outsideEdit } from "./script/roles.mjs";
+import { claudeShape, pickBehavior } from "./script/match.mjs";
 
 const VERSION = "2.1.999 (Claude Code fake)";
 const ENV_LOG_KEYS = ["RAFI_ENGINE"];
 
 function readScript(scriptPath) {
   const script = JSON.parse(readFileSync(scriptPath, "utf8"));
-  for (const rule of script.rules ?? []) {
-    if (rule.role || rule.ticket || rule.attempt || rule.step) {
+  for (const rule of script.match === "identity" ? [] : script.rules ?? []) {
+    if (rule.role || rule.ticket || rule.attempt || rule.step || rule.selector) {
       throw new Error("fake claude: process-mode scripts can't match by role, ticket, step or attempt yet (P8)");
     }
   }
@@ -44,6 +47,7 @@ function envRecord() {
 const STDIO = Object.freeze({
   write: (message) => process.stdout.write(`${JSON.stringify(message)}\n`),
   exit: (code) => process.exit(code),
+  killHost: () => process.kill(process.ppid, "SIGKILL"),
 });
 
 export class FakeClaude {
@@ -60,7 +64,8 @@ export class FakeClaude {
     this.nextRequest = 0;
     this.interrupted = null;
     this.busy = Promise.resolve();
-    this.log({ op: "start", argv, env: envRecord(), resumed: this.resumed, session: this.sessionId });
+    this.log({ op: "start", argv, env: envRecord(), resumed: this.resumed, session: this.sessionId, pid: process.pid,
+      ppid: process.ppid });
   }
 
   toolId() {
@@ -117,7 +122,10 @@ export class FakeClaude {
     if (subtype === "interrupt") {
       this.log({ op: "interrupt" });
       this.respond(message.request_id, {});
+      // M4 process set: a turn whose rule has `ignoreCancel` doesn't take rafi's cancel (a provider stuck mid-turn).
+      if (this.current?.ignoreCancel) return void this.log({ op: "cancel-ignored" });
       this.interruptRequested = true;
+      this.waiting?.abort();
       this.interrupted?.();
       return undefined;
     }
@@ -140,8 +148,17 @@ export class FakeClaude {
     }
   }
 
-  nextRule() {
+  nextRule(message) {
     const rules = this.script.rules ?? [];
+    if (this.script.match === "identity" && this.script.path) {
+      const content = message?.message?.content;
+      const text = typeof content === "string" ? content : (content ?? []).map((p) => p.text ?? "").join("\n");
+      const picked = pickBehavior(this.script, this.script.path, { cwd: this.io.cwd ?? process.cwd(), message: text },
+        () => nextIndex(this.script.path));
+      this.log({ op: "pick", identity: picked.identity, rule: picked.rule ?? null,
+        kill: picked.behavior.kill ?? null });
+      return claudeShape(picked.behavior);
+    }
     const index = this.script.path ? nextIndex(this.script.path) : this.ruleIndex++;
     return rules[Math.min(index, rules.length - 1)] ?? {};
   }
@@ -244,7 +261,14 @@ export class FakeClaude {
     const runs = [];
     const cwd = this.io.cwd ?? process.cwd();
     for (const step of steps) {
-      if (step.wait) await (this.io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))(step.wait);
+      // M4: a turn working through its steps (slow's waits) stops at the next step once interrupted.
+      if (this.interruptRequested) break;
+      if (step.wait) {
+        this.waiting = new AbortController();
+        await (this.io.sleep ?? sleepFor)(step.wait, this.waiting.signal).catch(() => undefined);
+        this.waiting = null;
+      }
+      if (this.interruptRequested) break;
       if (step.activity) this.assistant([{ type: "text", text: step.activity }]);
       if (step.shell) await this.bash(step.shell);
       if (step.outside) outsideEdit(cwd, step.outside);
@@ -283,7 +307,8 @@ export class FakeClaude {
 
   async turn(message) {
     this.interruptRequested = false;
-    const rule = this.io.nextRule ? this.io.nextRule(message) : this.nextRule();
+    const rule = this.io.nextRule ? this.io.nextRule(message) : this.nextRule(message);
+    this.current = rule;
     this.log({ op: "turn", rule: rule.behavior ?? "reply", content: summarize(message.message?.content),
       keys: Object.keys(message) });
     this.send({
@@ -298,6 +323,16 @@ export class FakeClaude {
     if (rule.activity) this.assistant([{ type: "text", text: rule.activity }]);
     const denials = rule.bash ? await this.bash(rule.bash) : [];
     const runs = await this.steps(rule.steps ?? []);
+    // C162: killhost (process mode only): rafi is killed after it sent the turn, before any reply.
+    if (rule.kill === "before-reply" && this.io.killHost) {
+      this.log({ op: "killhost", ppid: process.ppid });
+      return this.io.killHost();
+    }
+    if (this.interruptRequested && rule.behavior !== "hang") {
+      this.interruptRequested = false;
+      this.log({ op: "interrupted" });
+      return this.result("error_during_execution", { fields: { errors: ["interrupted"] } });
+    }
     if (rule.behavior === "hang") return this.hang();
     if (rule.behavior === "crash") return this.io.exit(Number(rule.code ?? 1));
     if (rule.behavior === "error") return this.result("error_during_execution", { fields: { errors: [rule.message] } });
@@ -314,6 +349,11 @@ export class FakeClaude {
     }
     this.toolResult(toolUseId, "Structured output provided successfully", false);
     this.result("success", { denials, fields: { structured_output: reply } });
+    // killhost-after-reply: the reply is written; rafi may or may not have recorded it.
+    if (rule.kill === "after-reply" && this.io.killHost) {
+      this.log({ op: "killhost", ppid: process.ppid });
+      this.io.killHost();
+    }
   }
 
   hang() {
@@ -327,6 +367,14 @@ export class FakeClaude {
       if (this.interruptRequested) this.interrupted();
     });
   }
+}
+
+/** Real time, ended early by `signal` (an interrupt mid-wait, M4). */
+function sleepFor(ms, signal) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+  });
 }
 
 function summarize(content) {
@@ -348,6 +396,7 @@ export function main(scriptPath, argv = process.argv.slice(2)) {
     if (fake.interrupted) process.exit(0);
     fake.busy.finally(() => process.exit(0));
   });
+  process.on("SIGINT", () => fake.log({ op: "sigint" }));
   process.on("SIGTERM", () => {
     fake.log({ op: "sigterm" });
     process.exit(143);

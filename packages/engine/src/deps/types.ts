@@ -109,9 +109,10 @@ export interface Notifier {
   onAnswer(fn: (id: string, choice: string) => void): Cancel;
 }
 
+/** No-ops in production. At each boundary the engine awaits `pause`, then calls `crash` (P34, C164). */
 export interface Hooks {
   crash(boundary: string): void;
-  pause(boundary: string): void;
+  pause(boundary: string): void | Promise<void>;
 }
 
 export interface Machine {
@@ -146,7 +147,7 @@ export interface CheckRun {
   env: Env;
   /** The build's grants (ARCH 8.2); the prefix below enforces them where the machine has a sandbox. */
   grants: Grants;
-  /** The sandbox argv prefix from build/sandbox.ts (C40); empty when the no-sandbox warning was accepted. */
+  /** The sandbox argv prefix from ask/grants.ts (C40); empty when the no-sandbox warning was accepted. */
   sandbox: readonly string[];
   onOutput(chunk: string): void;
   signal: AbortSignal;
@@ -163,7 +164,7 @@ export interface CheckResult {
 
 export type SandboxTool = "sandbox-exec" | "bwrap";
 export type SandboxInfo = { available: true; tool: SandboxTool } | { available: false; missing: string };
-/** What the machine has for a test sandbox; build/sandbox.ts turns it into a SandboxInfo. */
+/** What the machine has for a test sandbox; ask/grants.ts turns it into a SandboxInfo. */
 export type SandboxFacts =
   | { platform: "darwin"; sandboxExec: boolean }
   | { platform: NodeJS.Platform; bwrap: string | null; bwrapWorks: boolean };
@@ -211,7 +212,7 @@ export interface Deps {
   exec(cmd: string, args: string[], o: ExecOptions): Promise<ExecResult>;
   checks: {
     run(cmd: string, args: string[], o: CheckRun): Promise<CheckResult>;
-    /** What this machine has for a test sandbox (6.9); build/sandbox.ts decides if it's usable. */
+    /** What this machine has for a test sandbox (6.9); ask/grants.ts decides if it's usable. */
     sandbox(): Promise<SandboxFacts>;
   };
   serve(o: { host: "127.0.0.1"; handler: McpHandler }): Promise<{ url: string; close(): Promise<void> }>;

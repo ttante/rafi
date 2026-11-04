@@ -1,4 +1,5 @@
-// "What next?" (SCN 3.2): S-QA-2 steps 1–4 (M3). Step 5 needs the read-only Planner (M8), step 6 Manager (M4).
+// "What next?" (SCN 3.2): S-QA-2 steps 1–4 (M3) and 6 (M4: Manager's /request-attempt, C153, C146). Step 5 needs the
+// read-only Planner (M8).
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
@@ -6,7 +7,7 @@ import { registry } from "../checks/registry.js";
 import { B, on } from "../fakes/script/behaviors.js";
 import type { Rule } from "../fakes/script/engine.js";
 import { git } from "../fixtures/common.js";
-import { copyProject, scenario } from "../harness/scenario.js";
+import { copyProject, scenario, type ScenarioContext } from "../harness/scenario.js";
 import { rafiRunner } from "../harness/rafi.js";
 import { exported, of, ticketJson, turns } from "./m3-helpers.js";
 
@@ -21,6 +22,40 @@ function script(): Rule[] {
   return [on("qa T1 @prepare", B.requirements(FOUR)),
     ...[1, 2, 3, 4].map((n) => on(`qa T1#${n} @review`, B.reject({ [n]: `R${n} isn't met yet` }))),
     ...[2, 3, 4].map((n) => on(`builder T1#${n}`, B.also({ edit: "src/T1.txt", content: `fix ${n}\n` })))];
+}
+
+/** Step 6 (M4, C153, C146): Retry, then Manager's /request-attempt from a second shell closes the open prompt. */
+async function step6(ctx: ScenarioContext): Promise<void> {
+  const { rafi, computer, fixture } = ctx;
+  await ctx.step("6: Retry runs exactly T1#5 and asks again; Manager /request-attempt grants T1#6", async () => {
+    const dir = fixture("F-ONE");
+    computer.script.rules.length = 0;
+    computer.script.rules.push(on("qa T1 @prepare", B.requirements(FOUR)),
+      ...[1, 2, 3, 4, 5, 6].map((n) => on(`qa T1#${n} @review`, B.reject({ [((n - 1) % 4) + 1]: `R${n} not yet` }))),
+      ...[2, 3, 4, 5, 6].map((n) => on(`builder T1#${n}`, B.also({ edit: "src/T1.txt", content: `fix ${n}\n` }))));
+    const before = computer.script.transcript.length;
+    const live = rafi.start("start . --steps 1", { cwd: dir, tty: true });
+    await live.expect(/What next\?/);
+    live.send("1\n");
+    await live.expect(/What next\?/);
+    const fixes = () => computer.script.transcript.slice(before).filter((t) => t.role === "builder" &&
+      t.step === "fix" && !t.repair).map((t) => t.attempt);
+    assert.deepEqual(fixes(), [2, 3, 4, 5], "Retry ran exactly one more fix, then asked again");
+    const run = (await exported(ctx, dir)).events.find((x) => x.type === "build.started")!.run_id;
+    const m = await rafi(`manager --ask "/request-attempt ${run} T1 \\"one more try\\""`, { cwd: dir });
+    assert.equal(m.code, 0, m.output);
+    await live.expect(/answered by Manager/);
+    await live.expect(/What next\?/);
+    live.end();
+    const r = await live.done();
+    assert.deepEqual(fixes(), [2, 3, 4, 5, 6], "exactly T1#6, and no T1#7");
+    assert.notEqual(r.code, 0);
+    const e = await exported(ctx, dir);
+    const granted = e.events.filter((x) => x.type === "fix.granted" && x.actor === "manager");
+    assert.deepEqual(granted.map((x) => [x.source, x.data.by, x.data.reason]),
+      [["manager", "manager", "one more try"]]);
+    assert.equal(of(e, "question.opened").length, 3, "What next? asked again after T1#6");
+  });
 }
 
 scenario({
@@ -107,6 +142,6 @@ scenario({
         assert.equal((t1.validation as { result: string }).result, "failed");
       });
     await pending("5: Discuss with read-only Planner shows the proposal in plain English", "M8");
-    await pending("6: Retry, then Manager /request-attempt grants exactly one more builder turn", "M4");
+    await step6(ctx);
   },
 });

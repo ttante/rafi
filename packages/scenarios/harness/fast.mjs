@@ -30,11 +30,21 @@ function find(dir, pattern, out) {
   }
 }
 
+// M4 plan section 6, lever (b): the engine's and the spec's unit tests run as one job per package, in one process
+// (they're pure or use their own temp folders), so the suite doesn't pay a process start per small file.
+const GROUPED = ["packages/engine/test", "packages/spec/test/v1"];
+
 function jobs(filter) {
   const files = [];
   for (const [dir, pattern] of ROOTS) find(dir, pattern, files);
-  const list = files.map((file) => ({ name: file, args: ["--conditions=source", "--import", "tsx", "--test",
-    "--test-reporter=tap", file] }));
+  const test = (names) => ["--conditions=source", "--import", "tsx", "--test", "--test-reporter=tap", ...names];
+  const grouped = GROUPED.map((dir) => ({ dir, files: files.filter((f) => f.startsWith(`${dir}/`)) }));
+  const list = files.filter((f) => !GROUPED.some((dir) => f.startsWith(`${dir}/`)))
+    .map((file) => ({ name: file, args: test([file]) }));
+  for (const g of grouped) {
+    if (g.files.length) list.push({ name: `${g.dir} (${g.files.length} files)`,
+      args: test(["--test-isolation=none", ...g.files]) });
+  }
   list.push({ name: "check-rules (tree)", args: ["scripts/check-rules.mjs"], plain: true });
   return filter ? list.filter((j) => j.name.includes(filter)) : list;
 }

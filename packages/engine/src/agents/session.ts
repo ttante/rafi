@@ -4,13 +4,13 @@
 // gets the agent allowlist (ARCH 7.12), never rafi's whole shell; Codex's shells also drop its API key.
 import path from "node:path";
 import { replySchemas, type ReplyName } from "rafi-spec/v1";
-import { claudeAgent } from "../agents/claude/adapter.js";
-import { codexAgent } from "../agents/codex/adapter.js";
-import type { Agent, ReplySchema } from "../agents/types.js";
+import { claudeAgent } from "./claude/adapter.js";
+import { codexAgent } from "./codex/adapter.js";
+import type { Agent, ReplySchema } from "./types.js";
 import type { Deps, Env } from "../deps/types.js";
 import { mcpHandler, RAFI_TOOLS } from "../tools/mcp.js";
 import type { SessionTools } from "../tools/session.js";
-import { codexShellPolicy } from "./env.js";
+import { codexShellPolicy } from "../build/env.js";
 
 export interface SessionSpec {
   readonly runtime: "codex" | "claude";

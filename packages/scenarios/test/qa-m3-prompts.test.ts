@@ -1,6 +1,7 @@
 // Item 18 (M3 plan), part 2 (split from qa-m3.test.ts to stay under 8 s): PRM-82's "No"
-// returns to "What next?"; the Planner and Pause options aren't built yet and ask again (C102); a prompt with no
-// input, or no terminal, leaves the question open and exits 1 (C100); a review with no verdict says "QA broke" (C110).
+// returns to "What next?"; the Planner option isn't built yet and asks again (C102; Pause is built in M4); a
+// prompt with no input, or no terminal, leaves the question open and exits 1 (C100); a review with no verdict says
+// "QA broke" (C110).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { EventsExport } from "../checks/invariants.js";
@@ -30,14 +31,14 @@ const progress = (attempts: number): Rule[] => [on("qa T1 @prepare", B.requireme
   ...Array.from({ length: attempts }, (_, i) => on(`builder T1#${i + 2}`, B.also({ edit: "src/T1.txt",
     content: `fix ${i + 2}\n` })))];
 
-test("Planner and Pause aren't built yet and ask again; PRM-82's No returns to What next?", async () => {
+// M4: "Pause at this checkpoint" is built (C149, tested in resume-m4.test.ts), so only the Planner asks again here.
+test("Planner isn't built yet and asks again; PRM-82's No returns to What next?", async () => {
   const { rafi, exported } = setup(progress(4));
-  const r = await rafi("start . --steps 1", { tty: true, input: ["4", "5", "3", "1", "2", "Checked it by hand"] });
+  const r = await rafi("start . --steps 1", { tty: true, input: ["4", "3", "1", "2", "Checked it by hand"] });
   assert.equal(r.code, 0, r.output);
   assert.match(r.output, /isn't in the new engine yet \(milestone M8\)/);
-  assert.match(r.output, /isn't in the new engine yet \(milestone M4\)/);
   assert.match(r.output, /Record validation_result=failed and retain unresolved issues\?/);
-  assert.equal((r.output.match(/1\. Retry another Builder fix/g) ?? []).length, 4, "asked again after each");
+  assert.equal((r.output.match(/1\. Retry another Builder fix/g) ?? []).length, 3, "asked again after each");
   const e = await exported();
   assert.deepEqual(of(e, "waiver.recorded").map((x) => (x.data as { kind: string }).kind), ["verified-myself"]);
   assert.deepEqual(of(e, "question.answered").map((x) => (x.data as { choice: string }).choice), ["verified"]);

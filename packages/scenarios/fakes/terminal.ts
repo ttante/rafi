@@ -137,6 +137,10 @@ export interface FakeTerminal extends Terminal {
   /** No more typed input. */
   end(): void;
   interrupt(): void;
+  /** A killed process prints nothing more: later writes are dropped (C156). */
+  freeze(): void;
+  /** Called after each write, with all the output so far. */
+  onWrite(fn: () => void): Cancel;
 }
 
 /** A TTY with a screen model, or (tty: false) plain pipes. */
@@ -147,10 +151,13 @@ export function fakeTerminal(o: { tty: boolean; columns?: number; rows?: number 
   let err = "";
   let all = "";
   const interrupts = new Set<() => void>();
+  const writes = new Set<() => void>();
+  let frozen = false;
+  const wrote = () => { for (const fn of [...writes]) fn(); };
   return {
     screen,
-    write(text) { out += text; all += text; screen?.write(text); },
-    error(text) { err += text; all += text; screen?.write(text); },
+    write(text) { if (frozen) return; out += text; all += text; screen?.write(text); wrote(); },
+    error(text) { if (frozen) return; err += text; all += text; screen?.write(text); wrote(); },
     isTTY: o.tty,
     columns: o.columns ?? 120,
     rows: o.rows ?? 24,
@@ -163,6 +170,8 @@ export function fakeTerminal(o: { tty: boolean; columns?: number; rows?: number 
     all: () => all,
     send(text) { input.write(text); },
     end() { input.end(); },
-    interrupt() { for (const fn of interrupts) fn(); },
+    interrupt() { for (const fn of [...interrupts]) fn(); },
+    freeze() { frozen = true; },
+    onWrite(fn): Cancel { writes.add(fn); return () => writes.delete(fn); },
   };
 }

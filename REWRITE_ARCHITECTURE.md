@@ -131,10 +131,10 @@ Two rules hold the boundaries:
 | Module | Files | Owns | Budget |
 |---|---|---|---|
 | `api/` | `engine.ts`, `actions.ts`, `preview.ts` | `openEngine()`, every action with its validation and idempotency key, plain-language previews with the CLI form (GUI-R3) | 600 |
-| `deps/` | `types.ts`, `real/clock.ts`, `real/fs.ts`, `real/exec.ts`, `real/db.ts`, `real/processes.ts` | The seams (section 8.2) and their real implementations; the only engine code allowed to touch timers, files, processes and SQLite | 650 |
+| `deps/` | `types.ts`, `real/clock.ts`, `real/fs.ts`, `real/exec.ts`, `real/db.ts`, `real/processes.ts` | The seams (section 8.2) and their real implementations; the only engine code allowed to touch timers, files, processes and SQLite | 750 |
 | `instructions/` | `assemble.ts`, `tags.ts`, `packs.ts`, `messages/*.ts` | Standing instructions per session, per-turn messages, tags and file patterns | 1,000 |
 | `notify/` | `notifier.ts`, `reminders.ts`, `platforms/{alerter,notifySend,osascript,wsl}.ts` | Engine-owned notifications and reminders | 650 |
-| `tools/` | `registry.ts`, `add.ts`, `session.ts`, `locks.ts`, `recordings.ts`, `boilerplate/*.ts` | `tools:` entries, `rafi tools add`, tools in sessions, ports and device locks, recordings and retention | 1,100 |
+| `tools/` | `registry.ts`, `add.ts`, `session.ts`, `locks.ts`, `recordings.ts`, `boilerplate/*.ts` | `tools:` entries, `rafi tools add`, tools in sessions, ports and device locks, recordings and retention | 1,000 |
 | `stats/` | `show.ts`, `timeline.ts`, `export.ts`, `logs.ts`, `delete.ts` | Run history views, `rafi logs export/import`, the only deletion | 700 |
 | `manager/` | `host.ts`, `ask.ts`, `report.ts` | Manager host commands (no model turn), Manager questions, the instance report | 500 |
 | `config/` | `load.ts`, `set.ts`, `policy.ts` | Settings in layers with their source, `--set`, org-locked settings | 400 |
@@ -283,13 +283,14 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 | `build.started` | state | `rafi start` begins | `workflow: {id, version, digest}` (4.8; a build keeps the workflow it started with), `scope: {steps \| to_ticket \| stacks \| ticket \| all, skip}`, `tickets`, `settings: {key: {value, source}}` (GUI-R20), `engine_version`, `argv` |
 | `build.owner_acquired` / `build.owner_released` | state | a process takes or gives up the lease | `instance`, `host`, `pid` / `reason: finished \| stopped \| waiting \| failed` |
 | `build.owner_lost` | state | `rafi resume` takes over from an owner that died | `last_heartbeat_at` |
-| `build.resumed` | state | `rafi resume` continues the build | `from_state` |
+| `build.resumed` | state | `rafi resume` continues the build | `from_state`, `ticket` (`--ticket`, or null), `settings` (this resume's one-off overrides, as in `build.started`; they last until the build ends or the next `build.resumed`) |
 | `build.waiting` / `build.unwaiting` | state | nothing is eligible and a question blocks the rest / an answer makes work eligible | `questions` |
 | `build.pause_requested`, `build.paused`, `build.unpause_requested`, `build.unpaused` | state | Manager `/pause`, a safe point, `rafi resume` | `source`, `boundary` |
 | `build.stop_requested` | state | `rafi stop`, Ctrl+C | `mode: graceful \| now`, `source: rafi-stop \| ctrl-c \| gui \| manager` |
 | `build.stopped` | state | the stop takes effect | `cause: stop \| cancel \| ctrl-c` |
 | `build.finished` | state | `decide` finds the scope reached or nothing left | `complete`, `done`, `left` |
 | `build.failed` | state | an internal error the loop can't continue past | `error`, `message` |
+| `build.reset` | state | `rafi reset`, this build or everything (8.9) | `scope: build \| everything`, `action: restart-current \| archive-restart \| null`, `cleanup: stash \| discard \| handled \| null`, `tickets` (the tickets it puts back; each one's fold gets the event, as with `tickets.changed`'s items), `archive_branch` |
 
 **C. Steps and turns**
 
@@ -299,7 +300,7 @@ Field lists are the `data` payload; every event also has the envelope columns ab
 | `step.started` | state | a step begins | `step` (the step's name in the workflow; `standard` has `prepare`, `build`, `check`, `review`, `fix`, `deliver`), `attempt` |
 | `step.failed` | state | a step's turn budget runs out, or circling stops it | `category`, `reason` (one line), `circling` |
 | `turn.retry` | state | a turn is scheduled again | `key`, `category`, `attempt`, `delay_ms`, `reason` |
-| `turn.intent` | detail | before a turn is sent (crash boundary 1 follows) | `key`, `role`, `runtime`, `model`, `effort`, `fast`, `session: new \| reused`, `schema`, `instruction_chars` (NEW-MEAS-4), `instruction_digest`, `tools`, `grants`, `redo` |
+| `turn.intent` | detail | before a turn is sent (crash boundary 1 follows) | `key`, `role`, `ticket`, `step`, `attempt` (the turn's identity as `TurnRequest.meta` has it, including an in-run retry's attempt; null outside a ticket; `v: 2`, 3.5), `runtime`, `model`, `effort`, `fast`, `session: new \| reused`, `schema`, `instruction_chars` (NEW-MEAS-4), `instruction_digest`, `tools`, `grants`, `redo` |
 | `turn.sent` | detail | the adapter accepted the turn (boundary 2 follows) | `key`, `native_session`, `native_turn` |
 | `turn.reply` | detail | the reply arrived and was classified (boundaries 3–4 around it) | `key`, `outcome: ok \| format \| content \| provider \| timeout \| cancelled \| quota \| auth`, `errors`, `raw` (blob ref), `usage: {input, output, cost, measured}`, `timing: {first_output_ms, agent_ms, tools_ms, rafi_ms}` (NEW-MEAS-1) |
 | `turn.repair` | detail | the one repair try ends | `key`, `error`, `at_byte`, `accepted`, `why` |
@@ -507,6 +508,7 @@ Blocked kinds: `permission`, `install`, `service`, `credential`, `decision`, `ot
 | `done` | `recheck.requested`, `recheck.recorded` | no change | the ticket stays done; a failed re-check adds a rafi-owned fix ticket (`ticket.added`, 7.10) |
 | — | `ticket.added` | `queued`, rafi-owned | first in the queue (6.10) |
 | any | `progress.imported` | the imported status (table below) | rebuild on a clone |
+| any but `dropped` (this build: only its unfinished tickets) | `build.reset` listing the ticket | `queued`, with no `resume_step`, attempt 1 and no fixes used or granted | "everything" lists every ticket, `done` ones too (post-population, FLAG-RE-2) |
 | any | `ticket.tags_added`, `fix.granted`, `waiver.recorded`, `facts.snapshot`, `check.run`, `attempt.summary` | no change | kept in the ticket's context |
 | `done`, `dropped` | anything else | no change | |
 
@@ -546,9 +548,10 @@ Seven states (Q-LIFE-1).
 | `running`, `waiting`, `stopping` | `build.failed` | `failed` | an internal error (5.1) |
 | `running`, `waiting`, `paused` | `build.owner_lost` | `stopped`, cause `crash` | written by the process that takes over |
 | `stopping` | `build.owner_lost` | `stopped`, the requested cause | the process died while stopping, for example on a second Ctrl+C |
-| `stopped`, `failed`, `waiting` | `build.resumed` | `running` | `waiting` only when its owner released or was lost |
+| `stopped` (any cause but `reset`), `failed`, `waiting` | `build.resumed` | `running` | `waiting` only when its owner released or was lost; a reset build is never resumed |
 | `finished`, not complete | `build.resumed` | `running` | retries skipped tickets |
 | `finished`, complete | `build.resumed` | no change | `rafi resume` says "Nothing to resume." |
+| `stopped`, `failed`, `finished`, `waiting` with its owner released, or a live state with no live owner | `build.reset` | `stopped`, cause `reset` | the cause comes from this event, not from `build.stopped`; `rafi resume` doesn't list it and `rafi stop` treats it as finished |
 | any | `build.owner_acquired`, `build.owner_released` | no change | liveness only |
 
 **Is a "crashed" state needed?** No (SCN flagged this at S-CRASH-3 run 4). A process that crashes can't write its own state, so a stored `crashed` state could only be written later by another process, and that's exactly what `build.owner_lost` is, just before `build.resumed`. Instead, "crashed" is derived: a build whose stored state is `running`, `waiting` (with an owner), `paused` or `stopping`, and whose lease owner isn't alive (4.3.1), is shown as **crashed** by `rafi status`, the GUI and `stats show`. The takeover then records `build.owner_lost` with the last heartbeat time, so the history keeps the crash as its own outcome (SCN-8).
@@ -561,6 +564,7 @@ Seven states (Q-LIFE-1).
 | crashed | non-terminal state with no live owner, before takeover; `stopped`, cause `crash`, after |
 | paused | `paused` |
 | waiting on you since 14:05 | `waiting` |
+| reset | `stopped`, cause `reset` |
 
 **4.3.1 Liveness.** The owner refreshes `lease.heartbeat_at` every 10 seconds. An owner is alive when `deps.processes.isAlive(owner)` says so: the real check is the same host, the pid running, and its start time matching (today's `ai-foreman/src/processIdentity.ts` reads it from `/proc` on Linux, `:50`, and with `ps -o lstart=` on macOS, `:58`), so a reused pid doesn't count. In-process, the harness marks a fenced instance dead. A live owner whose heartbeat is over 60 seconds old is shown as "not responding since …" (GUI-R11) and can't be taken over until it's gone.
 
@@ -596,10 +600,12 @@ Eight states (Q-LIFE-1).
 | `ticketing` | `tickets.populated` | `ready` | |
 | `draft` | `tickets.populated`, or a ticket added by hand or by `accept-future-work` | `ready` | tickets from Linear, Jira, a URL or `tickets.yaml` with no rafi plan |
 | `ready`, `complete` | `build.started` | `building` | |
+| `ready` | `build.resumed` | `building` | as `build.started` |
 | `building` | `build.finished`, complete, and every ticket `done` or `dropped` | `complete` | |
-| `building` | any other build end (`finished` with work left, `stopped`, `failed`, `waiting` with its owner released) | `ready` | a crash keeps `building` until the takeover |
+| `building` | any other build end (`finished` with work left, `stopped`, `failed`, `waiting` with its owner released, `build.reset`, `build.owner_lost`) | `ready` | a crash keeps `building` until the takeover |
+| `ready` | `build.stopped`, `build.failed`, `build.reset` (this build) | no change | the build ended earlier |
 | any but `archived` | `plan.reset` | `ticketing` | `rafi reset`, plan (Q-CMD-3 d) |
-| `complete` | `tickets.changed` adding a ticket, or `plan.changed` | `ready` | |
+| `complete` | `tickets.changed` adding a ticket, `plan.changed`, or `build.reset` (everything) | `ready` | |
 | any | `project.archived` | `archived` | GUI only; no 1.0 command writes it |
 | `archived` | `project.unarchived` | `ready` | GUI only |
 
@@ -646,7 +652,7 @@ A safe point is the moment after a step's outcome is recorded and before the nex
 4. re-checks a reused agent's tag union (NEW-TAG-6, 10.1);
 5. scans tickets newly in scope and asks only their new questions (NEW-ASK-1).
 
-**Crash boundaries** (SCN 7.7). The engine calls `deps.hooks.crash(name)` and `deps.hooks.pause(name)` at each:
+**Crash boundaries** (SCN 7.7). At each, the engine calls `await deps.hooks.pause(name)` and then `deps.hooks.crash(name)`:
 
 | # | Boundary | Where |
 |---|---|---|
@@ -1234,7 +1240,7 @@ interface Deps {
   spawnBackground(argv: string[], o: { cwd: string; log: string }): { pid: number };   // --detach only (8.7)
   db: { open(path: string): Db };
   processes: { self(): Owner; isAlive(owner: Owner): Promise<boolean> };
-  hooks: { crash(boundary: string): void; pause(boundary: string): void };   // no-ops in production
+  hooks: { crash(boundary: string): void; pause(boundary: string): void | Promise<void> };   // no-ops in production; pause is awaited
   machine: { stateDir: string; host: string; platform: NodeJS.Platform };   // stateDir defaults to ~/.rafi
   env: Readonly<Record<string, string | undefined>>;                        // a snapshot; the engine never reads process.env; never passed whole to a child (7.12)
   secrets: SecretStore;                          // list, get, set, remove, bindings (7.12); `get` only to hand a value to a child
@@ -1299,7 +1305,7 @@ engine.tickets.*, engine.plan.*, engine.tools.*, engine.stats.*, engine.manager.
 - **`rafi stop`**, from any shell, writes `build.stop_requested` (graceful) and prints "Stopping after the current step. Run `rafi stop` again or press Ctrl+C to stop now." A second one writes `now` (Q-CMD-6). The owner sees it through `deps.logChanged`. When no process owns the build (a foreground run that exited with code 2), `rafi stop` writes `build.stopped` itself.
 - **Ctrl+C** in the build's terminal writes `build.stop_requested` (now, `ctrl-c`): rafi cancels the current turn, waits for the provider to take the cancel and exit (OUT-14), records `turn.cancelled` with the evidence so far, writes `build.stopped` and exits 130. A second Ctrl+C exits at once and ends the provider processes.
 - **Pause** is a Manager control for now (Q-CMD-6): `/pause <run> <ticket>` writes `build.pause_requested`; the build shows "Pausing…" and holds at the next safe point (GUI-R5).
-- **One live build per checkout.** `rafi start` while a build is live offers to attach instead; `rafi reset` refuses (FLAG-RE-3).
+- **One live build per checkout.** `rafi start` while a build is live offers to attach instead; `rafi reset` refuses (FLAG-RE-3). A build that's unfinished but has no live owner doesn't block `rafi start`: the new build first redoes any interrupted step, a crashed predecessor gets its `build.owner_lost`, and the older build is shown as superseded, not offered by `rafi resume`.
 
 ### 8.6 Settings in layers, `--set`, locked settings (FLAG-ST-R1, GUI-R20, GUI-R21)
 
@@ -1332,7 +1338,7 @@ A foreground build in a terminal never exits while it waits (NEW-BLK-5).
 - **This build:** restart-current (keep the branch and redo the build's unfinished tickets from your current files) or archive-restart (move the unfinished work to an archive branch and restart from the base), then the working-tree cleanup: stash, discard, or handled (you've dealt with it). Untracked folders are left alone (S-SCN-2).
 - **Everything:** tickets go back to their post-population state and the plan approval is carried forward (FLAG-RE-2).
 - **The plan:** a chosen revision becomes current again and tickets are repopulated from it (`plan.reset`; GUI-INS-8).
-- The event log is kept in every case: reset appends events, and the old run stays in `rafi stats` (Q-CMD-3 c). Afterwards every role starts a new session; no session pointer survives, because none is stored (SCN-12).
+- The event log is kept in every case: reset appends events (`build.reset`, 3.4), and the old run stays in `rafi stats` (Q-CMD-3 c). Afterwards every role starts a new session; no session pointer survives, because none is stored (SCN-12).
 - Never force-pushes or closes or deletes remote state; refuses while a build has a live owner (FLAG-RE-3). `rafi tickets reset` stays the tracker-only reset (Q-CMD-3 e).
 
 ### 8.10 `rafi status` (OUT-1, NEW-ASK-6, GUI-R11)
@@ -1556,7 +1562,7 @@ type AgentEvent =
 - Adapters map and report; they never retry, prompt or decide.
 - Before a build, rafi checks each role's model against what the role needs (structured replies, for example) using `capabilities()`, and flags a model that can't meet them in the upfront list instead of failing mid-build (GUI-R22, S-ENG-4). A missing feature uses its known fallback (NEW-CAP-1).
 - **Where capabilities come from.** The provider's model list, where it reports a feature; otherwise rafi's per-runtime table. A model the provider doesn't list is flagged.
-- `meta` travels next to each wire message through the transport seam: the real transport drops it before writing to the provider; the in-process fake reads it. That's how the fake matches a turn by role, ticket, step and attempt without parsing prompt text (SCN 7.3).
+- `meta` travels next to each wire message through the transport seam: the real transport drops it before writing to the provider; the in-process fake reads it. That's how the fake matches a turn by role, ticket, step and attempt without parsing prompt text (SCN 7.3). The fake executables, which sit beyond the real transport, read the same identity from the turn's `turn.intent` in the log (SCN 7.3).
 - Transports come from `deps.agents` (8.2). There's no `Reflect.construct` or method patching, as today's tests need (`ai-foreman/test/qaGuidanceDelivery.test.ts:101,104-107`).
 
 ### 11.7 D9: the fake `claude` executable, checked first in M1
@@ -1646,7 +1652,7 @@ REQ and SCN left these to the architecture plan. This is what I set; each is eas
 | The org-policy mechanism for locked settings (S-CLI-3, GUI-R21) | `~/.rafi/policy.yaml` with a `locked:` map; the harness gives each "computer" its own state folder | 8.6 |
 | The Manager instance report's command (GUI-R18, S-CLI-18) | The host command `/report`, built from the log with no model turn | 6.7 |
 | Hostile-environment limits (S-ENG-7) | SCN's starting values: resident memory under 500 MB, at most 10 MB of activity stored per turn with a cut marker, `rafi status` answering within 2 seconds during a flood | 3.4 |
-| How the fake matches turns without reading prompts (SCN 7.3) | `TurnRequest.meta` travels next to the wire message through the transport seam | 11.6 |
+| How the fake matches turns without reading prompts (SCN 7.3) | `TurnRequest.meta` travels next to the wire message through the transport seam; the fake executables read the turn's `turn.intent` from the log | 11.6 |
 | The 1.0 format marker | `format_version: 1` in `rafi-config.yaml` | 9.2 |
 | New `rafi-config.yaml` keys (FMT-C12–C25, FMT-C27–C34, Q-CFG-1, Q-CFG-4) | `format_version`, `retries`, `timeouts`, `checks` (`ci_tests`, `ci_when`, `ci_blocks_merge`, `test_runner`, `output_paths`, `run_without_sandbox`, `env`, `secrets`, `secrets_with_internet`, `sandbox`), `security.preset` (`greenfield`, `standard`, `sensitive`), `agents.env`, `isolation.home` (`real`, `guarded`, `empty`) and `isolation.deny_read` (`isolation.workspace` reserved and rejected), `grants.remember`, `git.managed_by`, `approvals.mode` (`manual` or `auto`), `plan_updates` (`change-then-tell` or `ask-first`), `manual_checks` (`wait`, `none`, `track`), `locked_requirements`, `tags`, `tools`, `notifications`, `logs.location` (`machine` or `project`), `logs.capture` (`none`, `normal`, `detailed`), `recordings.save`, `recordings.keep`, `agent_permissions` (from `foreman.yaml`), `tickets.build.max_branch_depth`, `tickets.build.keep_worktrees`; `tickets.build.pr_ready` is removed | 5.6, 7, 8.6, 10 |
 | New ticket fields (FMT-T17–T20, NEW-ASK-2) | `tags`, `needs` (`internet`, `local_servers`, `installs`, `services`, `credentials`), `open_decisions`, `person_only` and `locked` (acceptance-criterion numbers), `manual_checks`, `qa_isolation` (`full`: QA's review uses the full fingerprint whatever the ticket's risk; Q-COPY-1). Acceptance criteria stay a list of strings (`ai-foreman/src/tickets/ticketSchema.ts:75`) | 6.5, 7.2 |
@@ -1708,8 +1714,9 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 ### M4. Stop, crash and resume
 
 - **Builds:** the lease and liveness, the derived "crashed" status, takeover and redo, attach; `rafi stop` (graceful and now) and Ctrl+C; pause and unpause, with Manager's thin host commands `/pause`, `/request-attempt` and `/answer-question`; the `rafi resume` picker (builds and saved interviews) and interview pruning; `rafi reset` (this build, everything); torn progress-file writes and storage faults; `--detach`; the crash and pause enumerations.
-- **Must pass:** S-QA-4, S-CRASH-1, S-CRASH-3, S-CRASH-4, S-SCN-3, S-SCN-12, S-CLI-13.
-- **Partial:** S-CRASH-5 (every safe point without a plan update or a question), S-START-5 (step 4, process set), S-ENG-7 (start, Ctrl+C and resume cycles; file handles; process set), S-CRASH-2 (all but the git faults).
+- **Security:** agents can't stop, pause, reset, resume or answer through rafi's commands or Manager's host commands; a live owner is never taken over, and a reused pid doesn't count as alive; reset never pushes, force-pushes, deletes remote state or touches untracked files, and refuses while a build is live; damaged interview and progress files are validated on read, and the database wins; new outputs (status, the picker, the attached view, the background log) are redacted and escaped; `--detach` passes nothing but ordinary arguments.
+- **Must pass:** S-QA-4, S-CRASH-1, S-CRASH-3, S-CRASH-4, S-SCN-3, S-SCN-12.
+- **Partial:** S-CRASH-5 (every safe point without a plan update or a question), S-START-5 (step 4, process set), S-ENG-7 (start, Ctrl+C and resume cycles; file handles; process set), S-CRASH-2 (all but the git faults), S-CLI-13 (the picker, `--discard` and pruning; `--id` needs the interviews' commands, M9 and M10).
 - **Also:** a sample of S-CRASH-1 with a real SIGKILL in the process set, on both fake executables (D9).
 
 ### M5. Batches, delivery, tags and agent settings
@@ -1744,7 +1751,7 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 
 - **Builds:** role text rewritten to principle 13 and tagged content (NEW-INS-*); `rafi compile` writing the small core with version lines; `rafi tools add` with prerequisite checks and boilerplate; per-build ports, device locks, recordings and retention; the Codex per-thread MCP check (10.3); `rafi create` (every prompt, including log location, the security preset (7.12), the Playwright and mobile-mcp offers and `alerter`), `compile`, `doctor` (including the `checks.env` names that aren't set), `uninstall`, `uninstall:restore`, `uninstall:cleanup`, `graph`, `sources`, `discover`, `qa-rehearse-rollback`; output conventions and the launcher under Node 18; the hostile-environment set; the event-stream checks; the live suite (D7) and the two-builds-at-once load check.
 - **Security:** one full review of the whole design and code against 1.2, plus untrusted tool output (S-TOOL-5) and the hostile environment (S-ENG-7), before release; and a release-gate grep of every artifact (`rafi logs export`, `rafi stats export`, `detailed` capture, the diagnostics bundle) for each canary and its encodings (7.12).
-- **Must pass:** S-CTX-1, S-TOOL-1, S-TOOL-2, S-TOOL-3, S-TOOL-4, S-TOOL-5, S-TOOL-6, S-PORT-3, S-CLI-3, S-CLI-6, S-CLI-7, S-CLI-9, S-CLI-10, S-CLI-11, S-CLI-12, S-CLI-19, S-ENG-2, S-ENG-6, S-ENG-7, S-CHK-8.
+- **Must pass:** S-CTX-1, S-TOOL-1, S-TOOL-2, S-TOOL-3, S-TOOL-4, S-TOOL-5, S-TOOL-6, S-PORT-3, S-CLI-3, S-CLI-6, S-CLI-7, S-CLI-9, S-CLI-10, S-CLI-11, S-CLI-12, S-CLI-19, S-ENG-2, S-ENG-6, S-ENG-7, S-CHK-8, S-CLI-13.
 - **Done when** all 126 scenarios pass in their modes; the fast suite runs in under a minute, the process set in minutes and the live suite in under an hour per provider (RW "Success criteria"); the core is under 10,000 lines; then dogfooding starts (guide step 11).
 
 ### 14.2 Count
@@ -1754,13 +1761,13 @@ RW's seven milestones map onto these ten: RW 1 is M1; RW 2 and 3 are M2; RW 4 is
 | M1 | 2 | 2 |
 | M2 | 15 | 17 |
 | M3 | 4 | 21 |
-| M4 | 7 | 28 |
-| M5 | 15 | 43 |
-| M6 | 18 | 61 |
-| M7 | 17 | 78 |
-| M8 | 11 | 89 |
-| M9 | 17 | 106 |
-| M10 | 20 | 126 |
+| M4 | 6 | 27 |
+| M5 | 15 | 42 |
+| M6 | 18 | 60 |
+| M7 | 17 | 77 |
+| M8 | 11 | 88 |
+| M9 | 17 | 105 |
+| M10 | 21 | 126 |
 
 ## 15. Decisions (all decided 2026-11-02)
 

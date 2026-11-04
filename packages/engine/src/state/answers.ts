@@ -16,7 +16,8 @@ export interface WhatNextAnswer {
 
 export type Effects = { ok: true; events: { type: string; data: unknown }[] } | { ok: false; reason: string };
 
-export const WHAT_NEXT_LATER: Readonly<Record<string, string>> = Object.freeze({ planner: "M8", pause: "M4" });
+// M4 (C149): "Pause at this checkpoint" is built; it writes a pause request, not an answer (ask/blocked.ts).
+export const WHAT_NEXT_LATER: Readonly<Record<string, string>> = Object.freeze({ planner: "M8" });
 
 export function whatNextEffects(a: WhatNextAnswer): Effects {
   const unblock = (resume: string) => ({ type: "ticket.unblocked", data: { resume_step: resume, by: "user" } });

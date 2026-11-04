@@ -59,7 +59,7 @@ export interface BuildState {
   readonly unpausing: boolean;
   readonly stopMode: "graceful" | "now" | null;
   readonly stopSource: string | null;
-  readonly cause: "stop" | "cancel" | "ctrl-c" | "crash" | null;
+  readonly cause: "stop" | "cancel" | "ctrl-c" | "crash" | "reset" | null;
   readonly complete: boolean | null;
   readonly ownerReleased: boolean;
   readonly startedAt: string | null;
@@ -67,6 +67,14 @@ export interface BuildState {
   readonly scope: { kind: string; value: unknown; skip: string[] } | null;
   readonly tickets: readonly string[];
   readonly settings: Readonly<Record<string, { value: unknown; source: string }>>;
+  /** C144: the ticket a `rafi resume --ticket` narrowed this segment to (P32), until the next build.resumed. */
+  readonly narrowed: string | null;
+  /** P32: this resume's one-off overrides (agent, model), until the build ends or the next build.resumed. */
+  readonly overrides: Readonly<Record<string, { value: unknown; source: string }>>;
+  /** C145: between build.owner_lost and the first outcome a redone step records. */
+  readonly recovering: boolean;
+  /** C152: an owner has acquired it (a detached start has none until its child takes it). */
+  readonly everOwned: boolean;
 }
 
 export type ProjectStateName =

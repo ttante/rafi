@@ -1,9 +1,11 @@
 // Harness Deps (SCN 7.2): real fs, git, exec and db wrapped by the fence; the fake clock, notifier and
 // terminal; crash and pause hooks; a seeded random (plan choice C24); a per-"computer" state folder.
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ClaudeQuery, CodexSpawn, Deps, Env, JsonRpcStream } from "@rafi-ai/engine";
-import { openRealDb, realExec, realFs, realGit } from "@rafi-ai/engine/deps/real";
+import type { ClaudeQuery, CodexSpawn, Db, DbStatement, Deps, Env, JsonRpcStream } from "@rafi-ai/engine";
+import { openRealDb, realExec, realFs } from "@rafi-ai/engine/deps/real";
 import type { FakeClock } from "../fakes/clock.js";
 import type { FakeNotifier } from "../fakes/notifier.js";
 import type { FakeTerminal } from "../fakes/terminal.js";
@@ -12,6 +14,45 @@ import { defaultAgents, type ScriptState } from "./agents.js";
 import type { MemoryServe } from "../fakes/serve.js";
 import { Fence } from "./fence.js";
 import { hookControl, type HookControl } from "./hooks.js";
+
+/**
+ * The git binary itself, found once from the test runner's PATH (its `--exec-path` folder holds the real binary).
+ * A computer's environment has no PATH, so a bare `git` resolves through the OS default path, which on macOS is the
+ * xcrun shim at /usr/bin/git: about 90 ms a call with no HOME, against 6 ms. Only the program path changes; the
+ * environment rafi passes, and every recorded child environment, stay as they were. See `noGlobalConfig` for the one
+ * variable added, and only when it changes nothing.
+ */
+export const GIT_BINARY = (() => {
+  try {
+    const dir = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
+    const file = path.join(dir, process.platform === "win32" ? "git.exe" : "git");
+    return existsSync(file) ? file : "git";
+  } catch {
+    return "git";
+  }
+})();
+
+/** Folders found missing (a fake HOME such as `/home/u` can't appear later); existing ones are looked at each time. */
+const MISSING = new Set<string>();
+const missing = (dir: string) => {
+  if (MISSING.has(dir)) return true;
+  if (existsSync(dir)) return false;
+  MISSING.add(dir);
+  return true;
+};
+
+/**
+ * M4 review, finding 5: whether `GIT_CONFIG_GLOBAL=/dev/null` changes nothing for this environment, so the harness
+ * may add it. It's exactly when git would read no global config file anyway: no GIT_CONFIG_GLOBAL of its own, and
+ * neither `$XDG_CONFIG_HOME/git/config` (else `$HOME/.config/git/config`) nor `$HOME/.gitconfig` exists. The win is
+ * a fake HOME under macOS's automounter (`/home/u`), about 70 ms a lookup; its missing folder is looked up once.
+ */
+export function noGlobalConfig(env: Env): boolean {
+  if (env.GIT_CONFIG_GLOBAL !== undefined) return false;
+  const xdg = env.XDG_CONFIG_HOME ?? (env.HOME ? path.join(env.HOME, ".config") : null);
+  const files: [string | null, string][] = [[xdg, path.join("git", "config")], [env.HOME ?? null, ".gitconfig"]];
+  return files.every(([dir, file]) => !dir || missing(dir) || !existsSync(path.join(dir, file)));
+}
 
 /** One "computer": its clock, notifier, machine state folder and environment, shared by its instances. */
 export interface Computer {
@@ -42,6 +83,52 @@ export interface Computer {
   readonly home: string;
   /** The fake agents' script rules (first match wins, else the role happy path) and their transcript. */
   readonly script: ScriptState;
+  /** C139: who watches which database; a commit by one instance tells the others on the same file. */
+  readonly bus: { instance: string; file: string; fn: () => void }[];
+}
+
+/** C157 (S-CRASH-2): a torn write of the at-th matching file (half its bytes land, then the instance dies); the
+ * database busy for busyMs on the clock; SQLITE_FULL on the n-th event insert. */
+export interface StorageFaults {
+  readonly tornWrite?: RegExp;
+  readonly at?: number;
+  readonly busyMs?: number;
+  readonly fullOnAppend?: number;
+  /** C157 "refused large write": a blob over this many bytes fails with SQLITE_FULL (optional data that won't fit). */
+  readonly refuseBlobsOver?: number;
+  /** The at-th BEGIN this instance runs is refused once as busy, so its write waits on a `backoff` timer before it
+   * retries (a race test's interleaving point: another command writes in that wait, as a held lock would allow). */
+  readonly busyAt?: number;
+}
+
+function faulty(real: Db, f: StorageFaults, now: () => number): Db {
+  let busyUntil: number | null = null;
+  let inserts = 0;
+  let begins = 0;
+  const statement = (inner: DbStatement, sql: string): DbStatement => ({ ...inner,
+    run: (...params) => {
+      if (/^\s*INSERT INTO events/i.test(sql) && ++inserts === f.fullOnAppend) {
+        throw Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" });
+      }
+      const data = params.at(-1);
+      if (f.refuseBlobsOver !== undefined && /INSERT\s+(OR\s+IGNORE\s+)?INTO blobs/i.test(sql) &&
+        data instanceof Uint8Array && data.byteLength > f.refuseBlobsOver) {
+        throw Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" });
+      }
+      return inner.run(...params);
+    }, get: (...p) => inner.get(...p), all: (...p) => inner.all(...p) });
+  return { ...real, get inTransaction() { return real.inTransaction; }, close: () => real.close(),
+    pragma: (s, o) => real.pragma(s, o), prepare: (sql) => statement(real.prepare(sql), sql),
+    exec(sql) {
+      if (/^\s*BEGIN/i.test(sql) && ++begins === f.busyAt) {
+        throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+      }
+      if (f.busyMs && /^\s*BEGIN/i.test(sql)) {
+        busyUntil ??= now() + f.busyMs;
+        if (now() < busyUntil) throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+      }
+      real.exec(sql);
+    } };
 }
 
 export interface Instance {
@@ -59,7 +146,9 @@ const unavailable = (what: string) => (): never => {
 function recordedAgents(computer: Computer): Deps["agents"] {
   const sent = (message: unknown) => { computer.sentToAgents.push(JSON.stringify(message) ?? ""); };
   const fakeClock = computer.clock.forInstance("fake-agents");
-  const defaults = defaultAgents(computer.script, computer.serve, (ms) => fakeClock.sleep(ms, "agent"));
+  // M4: an interrupt ends a wait early (the fakes pass a signal); an ended wait resolves rather than rejects.
+  const defaults = defaultAgents(computer.script, computer.serve,
+    (ms, signal) => fakeClock.sleep(ms, "agent", signal).catch(() => undefined));
   const codex = computer.agents?.codex ?? defaults.codex;
   const query = computer.agents?.claudeQuery ?? defaults.claudeQuery;
   return {
@@ -85,22 +174,44 @@ function recordedAgents(computer: Computer): Deps["agents"] {
 }
 
 export function harnessDeps(computer: Computer, terminal: FakeTerminal,
-  o: { cwd: string; instance: string; env?: Record<string, string> }) {
+  o: { cwd: string; instance: string; env?: Record<string, string>; faults?: StorageFaults;
+    onGit?: (args: readonly string[]) => Promise<void> | void }) {
   const fence = new Fence();
   const clock = computer.clock;
   const id = o.instance;
   const hooks = hookControl(() => fence.crash());
+  const unwatch = () => {
+    const kept = computer.bus.filter((w) => w.instance !== id);
+    computer.bus.splice(0, computer.bus.length, ...kept);
+  };
   fence.whenCrashed(() => {
     clock.drop(id);
     computer.alive.delete(id);
+    unwatch();
+    terminal.freeze();
   });
+  const committed = (file: string) => () => {
+    for (const w of computer.bus.filter((x) => x.file === file && x.instance !== id)) {
+      void clock.track(async () => w.fn());
+    }
+  };
   computer.alive.add(id);
   const random = {
     id: () => `id-${String(++computer.ids.next).padStart(6, "0")}`,
     jitter: () => 0,
     secret: () => `tok${String(++computer.ids.next).padStart(6, "0")}${"0".repeat(55)}`,
   };
-  const fs = fence.fs(realFs(random));
+  const real = realFs(random);
+  let writes = 0;
+  const torn = o.faults?.tornWrite;
+  const fs = fence.fs(torn ? { ...real, writeAtomic: async (p, d) => {
+    if (torn.test(p) && ++writes === (o.faults?.at ?? 1)) {
+      const bytes = typeof d === "string" ? Buffer.from(d) : Buffer.from(d);
+      await real.writeAtomic(p, bytes.subarray(0, Math.floor(bytes.length / 2)));
+      hooks.crashNow(`torn write of ${path.basename(p)} (${writes})`);
+    }
+    return real.writeAtomic(p, d);
+  } } : real);
   const tracked = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) =>
     (...args: A) => clock.track(() => fn(...args));
   const deps: Deps = {
@@ -115,8 +226,10 @@ export function harnessDeps(computer: Computer, terminal: FakeTerminal,
     },
     git: (args, opts) => clock.track(async () => {
       fence.check(`git ${args[0]}`);
+      await o.onGit?.(args);
       computer.childEnvs.push(opts.env ?? computer.env);
-      return realGit(args, opts);
+      const env = opts.env && noGlobalConfig(opts.env) ? { ...opts.env, GIT_CONFIG_GLOBAL: os.devNull } : opts.env;
+      return realExec(GIT_BINARY, args, { ...opts, env });
     }),
     exec: (cmd, args, opts) => clock.track(() => {
       computer.childEnvs.push(opts.env ?? computer.env);
@@ -127,7 +240,11 @@ export function harnessDeps(computer: Computer, terminal: FakeTerminal,
       get listing() { return computer.checks.listing; } }),
     serve: (opts) => computer.serve.serve(opts),
     spawnBackground: unavailable("spawnBackground"),
-    db: { open: (file, opts) => fence.db(openRealDb(file, opts)) },
+    db: { open: (file, opts) => {
+      const opened = openRealDb(file, opts);
+      return fence.db(o.faults ? faulty(opened, o.faults, () => clock.now().getTime()) : opened,
+        committed(path.resolve(file)));
+    } },
     processes: {
       self: () => ({ instance: id, host: computer.host, pid: 1000, startedAt: null }),
       isAlive: async (owner) => computer.alive.has(owner.instance),
@@ -137,7 +254,11 @@ export function harnessDeps(computer: Computer, terminal: FakeTerminal,
     env: o.env ? Object.freeze({ ...computer.env, ...o.env }) : computer.env,
     cwd: o.cwd,
     random,
-    logChanged: () => () => undefined,
+    logChanged: (file, fn) => {
+      const entry = { instance: id, file: path.resolve(file), fn };
+      computer.bus.push(entry);
+      return () => { const at = computer.bus.indexOf(entry); if (at >= 0) computer.bus.splice(at, 1); };
+    },
   };
   return { id, deps, fence, hooks } satisfies Instance;
 }

@@ -10,3 +10,4 @@ export * from "./tickets.js";
 export * from "./replies.js";
 export * from "./delivery.js";
 export * from "./progress.js";
+export { checkInterview, interviewId, interviewSchema, type InterviewV1 } from "./interviews.js";

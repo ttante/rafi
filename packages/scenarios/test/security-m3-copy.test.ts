@@ -5,7 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { realFs, realGit } from "@rafi-ai/engine/deps/real";
+import { realExec, realFs } from "@rafi-ai/engine/deps/real";
+import { GIT_BINARY } from "../harness/deps.js";
 import { fullFingerprint } from "@rafi-ai/engine/build";
 import { B, on } from "../fakes/script/behaviors.js";
 import type { Behavior, MetaLike, TurnContext } from "../fakes/script/engine.js";
@@ -54,7 +55,8 @@ test("a copy review's run_check runs in the copy and is restored there; your fil
 test("the full fingerprint stays bounded on F-HUGE's ignored folder of 20,000 files", async () => {
   const dir = fHuge(tempRoot(), "ignored");
   let n = 0;
-  const deps = { git: realGit, fs: realFs({ id: () => `x${++n}`, jitter: () => 0 } as never), env: {} };
+  const git = (args: string[], o: Parameters<typeof realExec>[2]) => realExec(GIT_BINARY, args, o);
+  const deps = { git, fs: realFs({ id: () => `x${++n}`, jitter: () => 0 } as never), env: {} };
   const started = performance.now();
   const fp = await fullFingerprint(deps, dir, "huge");
   assert.ok(fp.files < 20, `${fp.files} files: the ignored folder isn't read`);

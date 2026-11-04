@@ -1,7 +1,7 @@
 // C40 and item 28 (M2 plan): grants → the sandbox argv prefix (pure), and what's missing on a machine without one.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { missingReason, sandboxInfo, sandboxPrefix } from "../../src/build/sandbox.js";
+import { missingReason, sandboxInfo, sandboxPrefix } from "../../src/ask/grants.js";
 import { testEnv } from "../../src/build/env.js";
 
 const W = "/work/proj";

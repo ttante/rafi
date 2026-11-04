@@ -7,7 +7,8 @@ type Data = Record<string, unknown>;
 
 export const initialProject: ProjectState = Object.freeze({ state: "none", before: null });
 
-const BUILD_ENDS: ReadonlySet<string> = new Set(["build.stopped", "build.failed"]);
+const BUILD_ENDS: ReadonlySet<string> = new Set(["build.stopped", "build.failed", "build.reset",
+  "build.owner_lost"]);
 
 function to(p: ProjectState, state: ProjectStateName, before: ProjectStateName | null = p.before): ProjectState {
   return { state, before };
@@ -31,8 +32,24 @@ const PROJECT_EVENTS: ReadonlySet<string> = new Set([
   "project.created", "project.migrated", "project.archived", "project.unarchived", "plan.started",
   "plan.proposed", "plan.failed", "plan.rejected", "plan.approved", "tickets.populated", "tickets.changed",
   "future_work.accepted", "build.started", "build.finished", "build.stopped", "build.failed",
-  "build.owner_released", "plan.reset", "plan.changed",
+  "build.owner_released", "plan.reset", "plan.changed", "build.reset", "build.owner_lost", "build.resumed",
 ]);
+
+/**
+ * C168 (M4): events about a build that already ended. A stopped or failed build left the project ready, so a later
+ * end (`rafi stop` writing both events for a waiting build whose owner released, a reset) changes nothing, and a
+ * resume makes it building again, as a start does. "Everything" also takes complete back to ready (P31).
+ */
+function afterBuild(p: ProjectState, event: StateEvent, data: Data): ProjectState | null {
+  if (event.type === "build.resumed") return p.state === "ready" ? to(p, "building") : p;
+  if (event.type === "build.owner_lost") return p;
+  if (event.type === "build.reset" && data.scope === "everything" && (p.state === "complete" || p.state === "ready")) {
+    return to(p, "ready");
+  }
+  if (event.type === "build.reset" && (p.state === "ready" || p.state === "complete")) return p;
+  if ((event.type === "build.stopped" || event.type === "build.failed") && p.state === "ready") return p;
+  return null;
+}
 
 export function isProjectEvent(type: string): boolean {
   return PROJECT_EVENTS.has(type);
@@ -90,9 +107,12 @@ export function nextProject(project: ProjectState, event: StateEvent, ctx: Proje
   if (p.state === "building") {
     const next = building(p, event, data, ctx);
     if (next) return next;
-    if (event.type === "build.owner_released" || event.type === "tickets.changed") return p;
+    if (["build.owner_released", "tickets.changed", "build.resumed"].includes(event.type)) return p;
   } else if (event.type === "build.owner_released") {
     return p;
+  } else {
+    const after = afterBuild(p, event, data);
+    if (after) return after;
   }
   const next = planning(p, event, data) ?? tickets(p, event, data);
   if (next) return next;

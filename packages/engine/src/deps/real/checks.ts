@@ -1,4 +1,4 @@
-// The real deps.checks (ARCH 8.2, 6.9): spawns a test command behind build/sandbox.ts's prefix (C40), streams its
+// The real deps.checks (ARCH 8.2, 6.9): spawns a test command behind ask/grants.ts's prefix (C40), streams its
 // output, ends its whole process group on abort; and finds whether this machine has a sandbox.
 import { spawn, spawnSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";

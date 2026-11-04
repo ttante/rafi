@@ -33,14 +33,43 @@ async function realIndex(deps: SnapshotDeps, cwd: string): Promise<string> {
   return path.resolve(cwd, await git(deps, cwd, ["rev-parse", "--git-path", "index"]));
 }
 
-/** `files: false` gives only the tree (no HEAD lookup, no diff), for callers that compare trees. */
-export async function snapshot(deps: SnapshotDeps, cwd: string, key = "snapshot", o: { files?: boolean } = {}):
-  Promise<Snapshot> {
+/** HEAD's commit read from the git folder (a loose ref or a detached HEAD), or null when git must say. */
+async function headCommit(fs: Fs, cwd: string): Promise<string | null> {
+  const dir = path.join(cwd, ".git");
+  if ((await fs.stat(dir))?.kind !== "dir") return null;
+  try {
+    const head = (await fs.read(path.join(dir, "HEAD"))).trim();
+    const ref = /^ref: (refs\/[^\s]+)$/.exec(head)?.[1];
+    if (!ref) return /^[0-9a-f]{40,64}$/.test(head) ? head : null;
+    const file = path.join(dir, ...ref.split("/"));
+    if (!(await fs.stat(file))) return null;
+    const sha = (await fs.read(file)).trim();
+    return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/** HEAD's tree. M4 (speed): with `heads`, one git call per commit HEAD points at, found by reading the ref. */
+async function headTree(deps: SnapshotDeps, cwd: string, heads?: Map<string, string>): Promise<string | null> {
+  const commit = heads ? await headCommit(deps.fs, cwd) : null;
+  const known = commit ? heads!.get(commit) : undefined;
+  if (known) return known;
+  const r = await deps.git(["rev-parse", "--verify", "-q", "HEAD^{tree}"], { cwd, env: deps.env });
+  if (r.code !== 0) return null;
+  const tree = r.stdout.trim();
+  if (commit) heads!.set(commit, tree);
+  return tree;
+}
+
+/** `files: false` gives only the tree (no HEAD lookup, no diff), for callers that compare trees. `heads`: a
+ * per-build cache of HEAD commit → tree. */
+export async function snapshot(deps: SnapshotDeps, cwd: string, key = "snapshot",
+  o: { files?: boolean; heads?: Map<string, string> } = {}): Promise<Snapshot> {
   const listed = o.files !== false;
-  const head = listed ? await deps.git(["rev-parse", "--verify", "-q", "HEAD^{tree}"], { cwd, env: deps.env })
-    : null;
-  if (head && head.code !== 0) return { ok: false, noCommit: true };
-  const base = head ? head.stdout.trim() : "";
+  const head = listed ? await headTree(deps, cwd, o.heads) : "";
+  if (head === null) return { ok: false, noCommit: true };
+  const base = head;
   const cache = path.join(cwd, ".rafi", "cache");
   await deps.fs.mkdir(cache);
   const index = path.join(cache, `index-${key}`);

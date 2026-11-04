@@ -1,10 +1,10 @@
 // C124: the fast suite runs its jobs longest first, from the last run's times, falling back to file size.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { order, readTimes, writeTimes } from "../harness/fast-order.mjs";
+import { madeTemp } from "../harness/temp.js";
 
 const job = (name: string) => ({ name });
 
@@ -27,7 +27,7 @@ test("jobs with no recorded time go first, by size; recorded names that aren't j
 });
 
 test("times round-trip through the cache file; a missing or broken file reads as no times", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "rafi-fast-order-"));
+  const dir = madeTemp("rafi-fast-order-");
   const file = path.join(dir, "deep", "times.json");
   assert.deepEqual(readTimes(file), {});
   writeTimes(file, [{ name: "x", ms: 12.5 }]);

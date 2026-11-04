@@ -107,3 +107,71 @@ test("labels: tracker status for every state, and GUI labels", () => {
   assert.equal(guiLabel(fresh.project, fresh, { ownerAlive: false, recovering: true }), "Recovering");
   assert.equal(guiLabel({ state: "awaiting-approval", before: null }, fresh, alive), "Awaiting plan approval");
 });
+
+// M4 slice 2 (P31, P32, C144).
+const reset = (tickets: string[], scope = "build") => ev("build.reset", { scope, action: scope === "build"
+  ? "restart-current" : null, cleanup: scope === "build" ? "handled" : null, tickets, archive_branch: null });
+
+test("P31: build.reset reaches each listed ticket's fold and no other; the reset build can't be resumed", () => {
+  const events = [...started(), ev("ticket.started", { resume_step: null }, t("T1")),
+    ev("ticket.started", { resume_step: null }, t("T2")), ev("ticket.started", { resume_step: null }, t("T3")),
+    reset(["T1", "T2"])];
+  const view = fold(events, ctx);
+  assert.deepEqual([view.tickets.T1?.state, view.tickets.T2?.state, view.tickets.T3?.state],
+    ["queued", "queued", "building"]);
+  assert.equal(view.builds.r1?.state, "stopped");
+  assert.equal(view.builds.r1?.cause, "reset");
+  const again = fold([...events, ev("build.resumed", { from_state: "stopped", ticket: null, settings: {} })], ctx);
+  assert.equal(again.violations.length, 1);
+  assert.match(again.violations[0]!.reason, /build.resumed/);
+});
+
+test("P31: reset everything takes a complete project back to ready", () => {
+  const events = [...started(), ...deliverAll("T1"), ...deliverAll("T2"), ...deliverAll("T3"),
+    ev("build.finished", { complete: true, done: ["T1", "T2", "T3"], left: [] }), reset(["T1", "T2", "T3"],
+      "everything")];
+  const view = fold(events, ctx);
+  assert.deepEqual(view.violations, []);
+  assert.equal(view.project.state, "ready");
+  assert.equal(view.tickets.T1?.state, "queued");
+});
+
+test("C144: a narrowed resume redoes or starts only its ticket, and finishes incomplete with the rest left", () => {
+  const base = [...started(), ev("ticket.started", { resume_step: null }, t("T1")),
+    ev("step.started", { step: "prepare", attempt: 1 }, t("T1")), ev("build.owner_lost",
+      { last_heartbeat_at: "2026-11-01T14:00:00.000Z" }),
+    ev("build.resumed", { from_state: "stopped", ticket: "T2", settings: {} })];
+  const view = fold(base, ctx);
+  assert.equal(view.builds.r1?.narrowed, "T2");
+  assert.deepEqual(decide(view, between), { kind: "start-ticket", ticket: "T2", resumeNode: null });
+  const done = fold([...base, ...deliverAll("T2")], ctx);
+  const end = decide(done, between);
+  assert.equal(end.kind, "finish");
+  assert.equal((end as { complete: boolean }).complete, false);
+  assert.deepEqual((end as { left: string[] }).left, ["T1", "T3"]);
+  const wide = fold([...base, ...deliverAll("T2"), ev("build.finished", { complete: false, done: ["T2"],
+    left: ["T1", "T3"] }), ev("build.resumed", { from_state: "finished", ticket: null, settings: {} })], ctx);
+  assert.equal(wide.builds.r1?.narrowed, null, "a resume without --ticket widens it again");
+  assert.deepEqual(decide(wide, between), { kind: "step", ticket: "T1", node: "prepare", redo: true });
+});
+
+test("rule 1: graceful stop lets a running step finish, now doesn't; rule 2: a waiting build pauses at once", () => {
+  const stop = (mode: string) => fold([...started(), ev("build.stop_requested", { mode, source: "rafi-stop" })], ctx);
+  assert.deepEqual(decide(stop("graceful"), { safePoint: false, stepInFlight: true }),
+    { kind: "stop", now: false, letStepFinish: true });
+  assert.deepEqual(decide(stop("now"), { safePoint: false, stepInFlight: true }),
+    { kind: "stop", now: true, letStepFinish: false });
+  const waiting = fold([...started(), ev("build.waiting", { questions: [] }),
+    ev("build.pause_requested", { source: "manager", boundary: null })], ctx);
+  assert.deepEqual(decide(waiting, { safePoint: false, stepInFlight: false }), { kind: "pause" });
+});
+
+test("C168: a resume after a stop makes the project building again; the takeover's owner_lost ends the crash", () => {
+  const stopped = [...started(), ev("build.stop_requested", { mode: "graceful", source: "rafi-stop" }),
+    ev("build.stopped", { cause: "stop" })];
+  assert.equal(fold(stopped, ctx).project.state, "ready");
+  const resumed = fold([...stopped, ev("build.resumed", { from_state: "stopped", ticket: null, settings: {} })], ctx);
+  assert.deepEqual([resumed.project.state, resumed.violations.length], ["building", 0]);
+  const crashed = fold([...started(), ev("build.owner_lost", { last_heartbeat_at: "2026-11-01T14:00:00.000Z" })], ctx);
+  assert.equal(crashed.project.state, "ready");
+});

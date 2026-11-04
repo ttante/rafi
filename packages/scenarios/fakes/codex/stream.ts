@@ -17,7 +17,7 @@ export interface CodexStreamOptions {
     Promise<{ status: number; body: string }>;
   /** Called at each turn with its meta, the thread's params and turn/start's params (the transcript). */
   /** Waits on the fake clock for `wait` steps. */
-  readonly sleep?: (ms: number) => Promise<void>;
+  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly onTurn?: (entry: { meta: MetaLike; thread: Record<string, unknown>;
     start: Record<string, unknown> }) => void;
 }

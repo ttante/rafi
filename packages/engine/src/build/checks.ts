@@ -7,13 +7,16 @@ import path from "node:path";
 import type { Engine } from "../api/engine.js";
 import { splitCommand } from "../agents/shellForms.js";
 import type { Deps, Grants, SandboxTool } from "../deps/types.js";
+import { boundary } from "../deps/hooks.js";
+import { throwIfStopped, type StopControl } from "./stop.js";
 import { changedBetween, restoreTree, snapshot } from "../facts/snapshot.js";
 import { quoted } from "../instructions/assemble.js";
 import { escapeControl } from "../log/redact.js";
 import { requirementCheckProblem, type CheckRules } from "../tools/session.js";
 import { nextRun, runsOf, type RunRecord } from "../facts/runs.js";
 import { testEnv } from "./env.js";
-import { sandboxPrefix } from "./sandbox.js";
+import { optionalBlob } from "../log/blobs.js";
+import { sandboxPrefix } from "../ask/grants.js";
 
 export interface CheckEnv {
   readonly deps: Deps;
@@ -30,10 +33,13 @@ export interface CheckEnv {
   readonly outputPaths: readonly string[];
   /** `checks.env`: names passed through from the shell to every test run (ARCH 7.12, FMT-C28). */
   readonly checksEnv: readonly string[];
+  /** C137: a stop now aborts the run; the step then records no outcome. */
+  readonly control?: StopControl;
 }
 
 type Test = { name: string; file: string | null; outcome: string; error: string | null };
-export type Executed = { record: RunRecord & { tests: Test[] }; text: string };
+/** `after`: the worktree's tree after the run (null without a commit), the next run's `before` (slice 0, M4). */
+export type Executed = { record: RunRecord & { tests: Test[] }; text: string; after: string | null };
 
 const JEST_LIKE: ReadonlySet<string> = new Set(["jest", "fake-test"]);
 
@@ -102,6 +108,8 @@ async function spawn(env: CheckEnv, argv: string[]) {
   const limit = deps.clock.timer(env.limitMs, () => stop("limit"), "timeout");
   const prefix = env.sandbox ? sandboxPrefix({ tool: env.sandbox, worktree: env.project, cache, grants: env.grants })
     : [];
+  const halt = () => controller.abort();
+  env.control?.now.signal.addEventListener("abort", halt, { once: true });
   try {
     const result = await deps.checks.run(argv[0]!, argv.slice(1), { cwd: env.project, grants: env.grants,
       env: environment(env).env, sandbox: prefix, signal: controller.signal,
@@ -111,6 +119,7 @@ async function spawn(env: CheckEnv, argv: string[]) {
   } finally {
     quiet();
     limit();
+    env.control?.now.signal.removeEventListener("abort", halt);
   }
 }
 
@@ -137,16 +146,20 @@ export function untrusted(text: string, redact: (t: string) => string): string {
 }
 
 /** Runs one accepted command, records `check.run`, and returns the record and the text the agent gets. */
-export async function executeCheck(env: CheckEnv, argv: string[], askedBy: "builder" | "qa" | "rafi"):
-  Promise<Executed> {
+export async function executeCheck(env: CheckEnv, argv: string[], askedBy: "builder" | "qa" | "rafi",
+  known?: string): Promise<Executed> {
   const { deps, engine } = env;
-  const before = await snapshot(deps, env.project, "before", { files: false });
+  // M4 slice 0: the check step passes the tree it just took (nothing ran since), saving one snapshot per run.
+  const before = known ? { ok: true as const, tree: known } : await snapshot(deps, env.project, "before",
+    { files: false });
   const tree = before.ok ? before.tree : "none";
   const run = nextRun(await events(engine), env.ticket);
   const json = path.join(cachePath(env.project), `run-${env.ticket}-${run}.json`);
   const extra = jestLike(argv) ? ["--json", `--outputFile=${json}`] : [];
-  deps.hooks.crash(`10: before test run ${run} (${env.ticket})`);
+  await boundary(deps.hooks, `10: before test run ${run} (${env.ticket})`);
+  throwIfStopped(env.control);
   const { result, reason } = await spawn(env, [...argv, ...extra]);
+  throwIfStopped(env.control);
   const after = await snapshot(deps, env.project, "after", { files: false });
   const changed = before.ok && after.ok ? (await changedBetween(deps, env.project, before.tree, after.tree))
     .filter((f) => !env.outputPaths.some((p) => f.startsWith(p))) : [];
@@ -167,12 +180,15 @@ export async function executeCheck(env: CheckEnv, argv: string[], askedBy: "buil
   const tests = extra.length ? await perTest(env, json) : [];
   const record = { run, ticket: env.ticket, command: argv.join(" "), asked_by: askedBy, tree,
     exit_code: reason ? null : result.code, outcome, tests: tests.map(({ error: _e, ...t }) => t),
-    duration_ms: result.durationMs, output: await engine.blob(result.output),
+    duration_ms: result.durationMs,
+    output: await optionalBlob(engine, result.output, { what: `test run ${run}'s output`,
+      key: `${env.ticket}:check:run-${run}`, run: env.run, ticket: env.ticket }),
     changed_tracked: askedBy === "qa" ? [] : changed, restored, refused: null,
     sandbox: env.sandbox ? "os" as const : "none" as const, env_missing: environment(env).missing };
   await engine.append([{ type: "check.run", run_id: env.run, ticket_id: env.ticket, actor: "engine", data: record }]);
-  deps.hooks.crash(`10: after test run ${run} (${env.ticket})`);
-  return { record: { ...record, tests }, text: summary(record, tests, result.output, (t) => engine.redact(t)) };
+  await boundary(deps.hooks, `10: after test run ${run} (${env.ticket})`);
+  return { record: { ...record, tests }, text: summary(record, tests, result.output, (t) => engine.redact(t)),
+    after: after.ok ? after.tree : null };
 }
 
 /** A refused run_check request, recorded (`outcome: refused`) with the reason the agent is given. */
@@ -191,9 +207,14 @@ export async function refuseCheck(env: CheckEnv, command: string, reason: string
  * It runs through the same executor as a test (the runner's config can run code): the sandbox, the cache
  * variables and the quiet and total limits.
  */
+/** The related-tests listing runs the test runner (so it may change files); without one, nothing runs. */
+export function listsRelated(env: CheckEnv, changed: readonly string[]): boolean {
+  return Boolean(env.runner && jestLike(env.runner) && changed.length);
+}
+
 export async function relatedTests(env: CheckEnv, changed: readonly string[]): Promise<string[] | null> {
-  if (!env.runner || !jestLike(env.runner) || !changed.length) return null;
-  const { result, reason } = await spawn(env, [...env.runner, "--listTests", "--findRelatedTests", ...changed]);
+  if (!listsRelated(env, changed)) return null;
+  const { result, reason } = await spawn(env, [...env.runner!, "--listTests", "--findRelatedTests", ...changed]);
   if (reason || result.code !== 0) return null;
   return result.output.split("\n").map((f) => f.trim()).filter(Boolean).map((f) => path.relative(env.project, f));
 }
@@ -230,9 +251,12 @@ export interface StepResult {
  * first (C43); one that doesn't is refused and recorded, and counts as failing: it never runs and never passes.
  */
 export async function checkStep(env: CheckEnv, checks: readonly { req: number; command: string }[],
-  rules: CheckRules): Promise<StepResult> {
-  const now = await snapshot(env.deps, env.project, "step", { files: false });
+  rules: CheckRules, taken?: string): Promise<StepResult> {
+  // M4 slice 0: the caller's tree when nothing ran since it took it.
+  const now = taken ? { ok: true as const, tree: taken } : await snapshot(env.deps, env.project, "step",
+    { files: false });
   const tree = now.ok ? now.tree : "none";
+  let known: string | null = now.ok ? now.tree : null;
   const runs: number[] = [];
   const reused: number[] = [];
   const failing: { req: number; run: number }[] = [];
@@ -254,7 +278,8 @@ export async function checkStep(env: CheckEnv, checks: readonly { req: number; c
       records.push(last);
       continue;
     }
-    const out = await executeCheck(env, split.argv, "rafi");
+    const out = await executeCheck(env, split.argv, "rafi", known ?? undefined);
+    known = out.after;
     runs.push(out.record.run);
     records.push(out.record);
     if (out.record.outcome === "too-slow") slow = true;

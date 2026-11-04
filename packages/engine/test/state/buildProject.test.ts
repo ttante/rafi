@@ -13,7 +13,13 @@ const buildVariants: Record<string, [string, unknown]> = {
   acquired: ["build.owner_acquired", { instance: "i", host: "h", pid: 1 }],
   released: ["build.owner_released", { reason: "waiting" }],
   lost: ["build.owner_lost", { last_heartbeat_at: "2026-11-01T14:00:00.000Z" }],
-  resumed: ["build.resumed", { from_state: "x" }],
+  resumed: ["build.resumed", { from_state: "x", ticket: null, settings: {} }],
+  "resumed narrowed": ["build.resumed", { from_state: "x", ticket: "T3", settings: { "agent.model": { value: "m2",
+    source: "flag" } } }],
+  "reset build": ["build.reset", { scope: "build", action: "restart-current", cleanup: "handled", tickets: ["T1"],
+    archive_branch: null }],
+  "reset everything": ["build.reset", { scope: "everything", action: null, cleanup: null, tickets: ["T1"],
+    archive_branch: null }],
   waiting: ["build.waiting", { questions: [] }],
   unwaiting: ["build.unwaiting", { questions: [] }],
   "pause requested": ["build.pause_requested", { source: "manager", boundary: null }],
@@ -37,7 +43,8 @@ const buildFrom: Record<string, BuildState> = {
   "paused(unpausing)": b("paused", { unpausing: true }),
   stopping: b("stopping", { stopMode: "graceful", stopSource: "rafi-stop" }),
   "stopping(ctrl-c)": b("stopping", { stopMode: "now", stopSource: "ctrl-c" }),
-  stopped: b("stopped", { cause: "stop" }), "finished complete": b("finished", { complete: true }),
+  stopped: b("stopped", { cause: "stop" }), "stopped(reset)": b("stopped", { cause: "reset" }),
+  "finished complete": b("finished", { complete: true }),
   "finished incomplete": b("finished", { complete: false }), failed: b("failed"),
 };
 
@@ -45,10 +52,11 @@ const buildFrom: Record<string, BuildState> = {
 const live = ["running", "running(pausing)", "waiting", "waiting(pausing)", "waiting(released)", "paused",
   "paused(unpausing)", "stopping", "stopping(ctrl-c)", "stopped", "finished complete", "finished incomplete",
   "failed"];
+const withReset = [...live, "stopped(reset)"];
 const buildRows: [string[], string, string][] = [
   [["none"], "started", "running"],
-  [live, "acquired", "same"],
-  [live, "released", "same"],
+  [withReset, "acquired", "same"],
+  [withReset, "released", "same"],
   [["running", "running(pausing)"], "waiting", "waiting"],
   [["waiting", "waiting(pausing)", "waiting(released)"], "unwaiting", "running"],
   [["running", "waiting", "waiting(released)"], "pause requested", "(pausing)"],
@@ -72,13 +80,24 @@ const buildRows: [string[], string, string][] = [
   [["stopping"], "lost", "stopped:stop"],
   [["stopping(ctrl-c)"], "lost", "stopped:ctrl-c"],
   [["stopped", "failed", "waiting(released)", "finished incomplete"], "resumed", "running"],
+  [["stopped", "failed", "waiting(released)", "finished incomplete"], "resumed narrowed", "running(narrowed)"],
   [["finished complete"], "resumed", "same"],
+  [["finished complete"], "resumed narrowed", "same"],
+  // P31: a reset ends any build but one already reset; a reset build is never resumed.
+  ...["reset build", "reset everything"].map((v) => [live, v, "stopped:reset"] as [string[], string, string]),
 ];
 
 function buildMatches(got: BuildState, before: BuildState, want: string): boolean {
-  if (want === "same") return JSON.stringify(got) === JSON.stringify({ ...before, ownerReleased: got.ownerReleased });
+  // Owner events are liveness only (4.3): ownerReleased and (M4, C152) everOwned may change.
+  if (want === "same") {
+    return JSON.stringify(got) === JSON.stringify({ ...before, ownerReleased: got.ownerReleased,
+      everOwned: got.everOwned });
+  }
   if (want === "(pausing)") return got.state === before.state && got.pausing;
   if (want.startsWith("stopped:")) return got.state === "stopped" && got.cause === want.slice(8);
+  if (want === "running(narrowed)") {
+    return got.state === "running" && got.narrowed === "T3" && got.overrides["agent.model"]?.value === "m2";
+  }
   if (want === "stopping(now)") return got.state === "stopping" && got.stopMode === "now";
   if (want === "paused(unpausing)") return got.state === "paused" && got.unpausing;
   const keepsFlag = want === "running" || want === "waiting";
@@ -135,6 +154,10 @@ const projectVariants: Record<string, [string, unknown]> = {
   "finished incomplete": ["build.finished", { complete: false, done: [], left: [] }],
   "build stopped": ["build.stopped", { cause: "stop" }],
   "build failed": ["build.failed", { error: "e", message: "m" }],
+  "owner lost": ["build.owner_lost", { last_heartbeat_at: "2026-11-01T14:00:00.000Z" }],
+  resumed: ["build.resumed", { from_state: "stopped", ticket: null, settings: {} }],
+  "reset build": ["build.reset", buildVariants["reset build"]![1]],
+  "reset everything": ["build.reset", buildVariants["reset everything"]![1]],
   "released waiting": ["build.owner_released", { reason: "waiting" }],
   "released finished": ["build.owner_released", { reason: "finished" }],
 };
@@ -166,6 +189,22 @@ const projectRows: [readonly string[], string, string][] = [
   [["building"], "finished incomplete", "ready"],
   [["building"], "build stopped", "ready"],
   [["building"], "build failed", "ready"],
+  // P31: build.reset is a build end; "everything" also takes complete back to ready (4.4).
+  [["building"], "reset build", "ready"],
+  [["building", "complete"], "reset everything", "ready"],
+  // C168 (M4): a build that already ended left the project ready, so a later end (rafi stop on a waiting build
+  // whose owner released, a reset) changes nothing; a reset of a finished build leaves complete as it is.
+  [["ready"], "build stopped", "same"],
+  [["ready"], "build failed", "same"],
+  [["ready"], "reset build", "same"],
+  [["ready", "complete"], "reset build", "same"],
+  [["ready"], "reset everything", "ready"],
+  // C168: the takeover's owner_lost is the crashed build's end (a crash keeps building until then); a resume makes
+  // the project building again, as a start does.
+  [["building"], "owner lost", "ready"],
+  [states.filter((s) => s !== "building"), "owner lost", "same"],
+  [["ready"], "resumed", "building"],
+  [states.filter((s) => s !== "ready"), "resumed", "same"],
   [["building"], "released waiting", "ready"],
   [states.filter((s) => s !== "building"), "released waiting", "same"],
   [states, "released finished", "same"],

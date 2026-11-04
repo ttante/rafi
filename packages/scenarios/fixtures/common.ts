@@ -1,9 +1,10 @@
 // Shared fixture setup (SCN 2.1): a temp git repo with one commit, a fixed author, TZ=UTC; 1.0 file writers.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parse, stringify } from "yaml";
+import { cachedRepo } from "../harness/fixture-cache.js";
+import { madeTemp } from "../harness/temp.js";
 
 export const GIT_ENV = Object.freeze({
   GIT_AUTHOR_NAME: "Rafi Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test",
@@ -15,8 +16,9 @@ export function git(dir: string, args: string[]): string {
   return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
 }
 
+/** A temp folder, removed when the test process exits with every test passed (harness/temp.ts). */
 export function tempRoot(prefix = "rafi-scn-"): string {
-  return realpathSync(mkdtempSync(path.join(tmpdir(), prefix)));
+  return madeTemp(prefix);
 }
 
 export function writeFiles(dir: string, files: Record<string, string>): void {
@@ -27,14 +29,16 @@ export function writeFiles(dir: string, files: Record<string, string>): void {
   }
 }
 
-/** A git repo with the given files in one commit. */
+/** A git repo with the given files in one commit (built once per job, then copied: C158). */
 export function gitRepo(dir: string, files: Record<string, string>): string {
-  mkdirSync(dir, { recursive: true });
-  execFileSync("git", ["init", "-q", "-b", "main", dir]);
-  writeFiles(dir, { "README.md": "# Fixture\n", ...files });
-  git(dir, ["add", "-A"]);
-  git(dir, ["commit", "-qm", "fixture"]);
-  return dir;
+  const all = { "README.md": "# Fixture\n", ...files };
+  return cachedRepo(dir, all, (target) => {
+    mkdirSync(target, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main", target]);
+    writeFiles(target, all);
+    git(target, ["add", "-A"]);
+    git(target, ["commit", "-qm", "fixture"]);
+  });
 }
 
 export interface FixtureTicket {

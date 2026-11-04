@@ -20,7 +20,10 @@ export const buildEvents: readonly EventDef[] = [
   }),
   def("build.owner_released", "state", "build", { reason: z.enum(["finished", "stopped", "waiting", "failed"]) }),
   def("build.owner_lost", "state", "build", { last_heartbeat_at: z.string().datetime() }),
-  def("build.resumed", "state", "build", { from_state: z.string() }),
+  // P32: the narrowed ticket (`--ticket`) and this resume's one-off overrides, so a fold after a restart agrees.
+  def("build.resumed", "state", "build", {
+    from_state: z.string(), ticket: ticketId.nullable(), settings: z.record(z.string(), settingValue),
+  }),
   def("build.waiting", "state", "build", { questions: z.array(z.string()) }),
   def("build.unwaiting", "state", "build", { questions: z.array(z.string()) }),
   def("build.pause_requested", "state", "build", { source: z.string(), boundary: z.string().nullable() }),
@@ -35,4 +38,10 @@ export const buildEvents: readonly EventDef[] = [
     complete: z.boolean(), done: z.array(ticketId), left: z.array(ticketId),
   }),
   def("build.failed", "state", "build", { error: z.string(), message: z.string() }),
+  // P31: `rafi reset` (ARCH 8.9). The fold sends it to each listed ticket; the build stops with cause `reset`.
+  def("build.reset", "state", "build", {
+    scope: z.enum(["build", "everything"]), action: z.enum(["restart-current", "archive-restart"]).nullable(),
+    cleanup: z.enum(["stash", "discard", "handled"]).nullable(), tickets: z.array(ticketId),
+    archive_branch: z.string().nullable(),
+  }),
 ];

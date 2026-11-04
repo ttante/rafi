@@ -1,20 +1,21 @@
 // `rafi start <project>` (CMD-7): parse, call engine.start, render. --steps N, --ticket, --no-qa, --agent, --model,
-// --effort, --fast, -y; the other flags are later milestones and are refused by name for now.
+// --effort, --fast, -y, --detach (M4); the other flags are later milestones and are refused by name for now.
 import { openEngine, startBuild, type Deps, type UiAnswer, type UiQuestion } from "@rafi-ai/engine";
 import { activityUI } from "../ui/activity.js";
+import { attachView } from "../ui/attach.js";
 import { askText, choose } from "../ui/prompts.js";
 import { line } from "../ui/lines.js";
 import type { ActionContext } from "./actions.js";
 
-const LATER: Readonly<Record<string, string>> = Object.freeze({ stacks: "M5", toTicket: "M5", detach: "M4",
+const LATER: Readonly<Record<string, string>> = Object.freeze({ stacks: "M5", toTicket: "M5",
   branchPerTicket: "M5", completion: "M5", base: "M5", dirtyWork: "M5", skip: "M5", allow: "M7", set: "M5" });
 
 /** "What next?" in a terminal (C100, C102): the options; a required note; PRM-82's confirmation ("No" asks again);
  * an option that isn't built says so and asks again. Null: no terminal, or the input ended. */
-async function question(deps: Deps, q: UiQuestion): Promise<UiAnswer> {
+async function question(deps: Deps, q: UiQuestion, signal?: AbortSignal): Promise<UiAnswer> {
   if (!deps.terminal.isTTY) return null;
   for (;;) {
-    const i = await choose(deps, q.text, q.options.map((o) => o.label));
+    const i = await choose(deps, q.text, q.options.map((o) => o.label), signal);
     if (i === null) return null;
     const o = q.options[i]!;
     if (o.later) {
@@ -23,11 +24,11 @@ async function question(deps: Deps, q: UiQuestion): Promise<UiAnswer> {
     }
     if (o.note) {
       const note = await askText(deps, o.note.prompt, { required: o.note.required,
-        refusal: `"${o.label.replace(/ \(.*\)$/, "")}" needs a note saying what you checked.` });
+        refusal: `"${o.label.replace(/ \(.*\)$/, "")}" needs a note saying what you checked.` }, signal);
       return note === null ? null : { choice: o.id, note, confirmed: false };
     }
     if (o.confirm) {
-      const c = await choose(deps, o.confirm.text, o.confirm.options);
+      const c = await choose(deps, o.confirm.text, o.confirm.options, signal);
       if (c === null) return null;
       if (c !== o.confirm.yes) continue;
       return { choice: o.id, note: null, confirmed: true };
@@ -36,7 +37,7 @@ async function question(deps: Deps, q: UiQuestion): Promise<UiAnswer> {
   }
 }
 
-function ui(deps: Deps) {
+export function startUI(deps: Deps) {
   const base = activityUI(deps);
   return { ...base,
     async ask(kind: "auth" | "quota", text: string) {
@@ -49,7 +50,8 @@ function ui(deps: Deps) {
         "differently)", "Cancel"]);
       return i === 0 ? "retry" as const : i === 1 ? "switch" as const : "cancel" as const;
     },
-    question: (q: UiQuestion) => question(deps, q),
+    question: (q: UiQuestion, signal?: AbortSignal) => question(deps, q, signal),
+    onInterrupt: (fn: () => void) => deps.terminal.onInterrupt(fn),
     async confirmNoSandbox(warning: string) {
       const i = await choose(deps, warning, ["Run tests without a sandbox", "Cancel"]);
       return i === 0;
@@ -79,7 +81,11 @@ export async function startAction(ctx: ActionContext): Promise<number> {
       qa: opts.qa === false ? false : undefined, agent: opts.agent as "claude" | "codex" | undefined,
       model: opts.model as string | undefined, effort: opts.effort as string | undefined,
       fast: opts.fast === true ? true : undefined, autoApprove: Boolean(opts.autoApprove || opts.yes),
-      tty: deps.terminal.isTTY }, ui(deps));
+      tty: deps.terminal.isTTY, detach: opts.detach === true }, { ...startUI(deps),
+      // ARCH 8.5: a live build here; attaching follows it as `rafi resume` does.
+      async offerAttach(run: string, q: string) {
+        return (await choose(deps, q, ["Attach to it", "Cancel"])) === 0 ? attachView(deps, engine, run) : null;
+      } });
   } finally {
     engine.close();
   }

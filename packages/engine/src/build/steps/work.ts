@@ -7,7 +7,8 @@ import type { ToolRun } from "../../agents/types.js";
 import { snapshot } from "../../facts/snapshot.js";
 import { mismatches, runsOf } from "../../facts/runs.js";
 import { buildMessage, checksFixMessage, qaFixMessage, type FailedRun } from "../../instructions/messages.js";
-import { agentTurn, allEvents, append, knownRuns, setting, ticketOf, type BuildContext } from "../context.js";
+import { allEvents, append, knownRuns, setting, ticketOf, type BuildContext } from "../context.js";
+import { agentTurn } from "../../turns/agent.js";
 import { failStep, readRequirements, trustedOf } from "./common.js";
 import { findings, lastFailure, type LogEvent, type VerdictData } from "./history.js";
 
@@ -104,7 +105,7 @@ export async function workStep(ctx: BuildContext, id: string, step: "build" | "f
     validate: (value) => duplicates((value as BuilderReply).runs) });
   if (!out.ok) return failStep(ctx, id, out);
   const reply = out.value as BuilderReply;
-  const snap = await snapshot(ctx.deps, ctx.project, `${id}-${attempt}`);
+  const snap = await snapshot(ctx.deps, ctx.project, `${id}-${attempt}`, { heads: ctx.heads });
   const key = `${id}:${step}:${attempt}`;
   const events: { type: string; data: unknown }[] = [];
   if (snap.ok) {

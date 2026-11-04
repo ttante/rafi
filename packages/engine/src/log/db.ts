@@ -70,7 +70,20 @@ export async function withBusyRetry<T>(clock: Clock, path: string, fn: () => T):
   }
 }
 
-export async function openLog(deps: { db: { open(path: string): Db }; clock: Clock }, path: string): Promise<Log> {
+/** `readOnly` (C147): readers open the log without writing: no WAL switch, no migrations. */
+export async function openLog(deps: { db: { open(path: string, o?: { readonly?: boolean }): Db }; clock: Clock },
+  path: string, o: { readOnly?: boolean } = {}): Promise<Log> {
+  if (o.readOnly) {
+    const db = deps.db.open(path, { readonly: true });
+    const version = userVersion(db);
+    if (version !== latestVersion) {
+      db.close();
+      throw new StorageError(`The rafi database at ${path} is at schema ${version}, not ${latestVersion}; a ` +
+        "command that writes (`rafi resume`, `rafi start`) updates it.", path);
+    }
+    return { db, path, clock: deps.clock, close: () => db.close(),
+      write: () => Promise.reject(new StorageError(`The rafi database at ${path} is open read-only.`, path)) };
+  }
   const db = deps.db.open(path);
   await withBusyRetry(deps.clock, path, () => {
     db.pragma("journal_mode = WAL");
@@ -87,4 +100,12 @@ export async function openLog(deps: { db: { open(path: string): Db }; clock: Clo
 
 export function userVersion(db: Db): number {
   return Number(db.pragma("user_version", { simple: true }) ?? 0);
+}
+
+/** A reader's view of a project whose log doesn't exist yet: no events, and nothing can be written (C147). */
+export function emptyLog(file: string, clock: Clock): Log {
+  const none = { exec: () => undefined, prepare: () => ({ run: () => ({ changes: 0, lastInsertRowid: 0 }),
+    get: () => undefined, all: () => [] }), pragma: () => 0, close: () => undefined, inTransaction: false };
+  return { db: none, path: file, clock, close: () => undefined,
+    write: () => Promise.reject(new Error("rafi: there's no event log here to write to")) };
 }

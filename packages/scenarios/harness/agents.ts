@@ -17,6 +17,15 @@ export interface ScriptState {
   readonly transcript: TranscriptEntry[];
   /** Claude sessions opened and closed, in order, with their cwd; `exists`: the cwd was still there at close. */
   readonly sessions?: { op: "open" | "close"; cwd: string; exists: boolean }[];
+  /** Called as each turn reaches the fake, with its meta and session root (item 25's fidelity check). */
+  onTurn?: (meta: MetaLike, cwd: string) => void;
+  /** C166: the rules consumed so far, kept per computer so a crash and a resume don't free one again. */
+  used?: Set<Rule>;
+}
+
+/** The computer's consumed rules (C166), created on first use. */
+export function scriptUsed(state: ScriptState): Set<Rule> {
+  return (state.used ??= new Set());
 }
 
 function entry(meta: MetaLike, o: Partial<TranscriptEntry>): TranscriptEntry {
@@ -38,10 +47,14 @@ function sandboxOf(thread: Opt, start: Opt): { writable: boolean; network: boole
     sandbox: policy ?? null };
 }
 
-export function defaultAgents(state: ScriptState, serve: MemoryServe, sleep: (ms: number) => Promise<void>) {
-  const engine = () => scriptEngine(state.rules, happyPath as never);
+export function defaultAgents(state: ScriptState, serve: MemoryServe,
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>) {
+  const engine = () => scriptEngine(state.rules, happyPath as never, scriptUsed(state));
   let shared: ReturnType<typeof engine> | null = null;
-  const next = (meta: MetaLike, ctx: { cwd: string; message: string }) => (shared ??= engine()).next(meta, ctx);
+  const next = (meta: MetaLike, ctx: { cwd: string; message: string }) => {
+    state.onTurn?.(meta, ctx.cwd);
+    return (shared ??= engine()).next(meta, ctx);
+  };
   const codex = (_o: CodexSpawn): JsonRpcStream => {
     let turns = 0;
     return codexStream(next, { wire: [], metas: [] }, { sleep,

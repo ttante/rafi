@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { realFs } from "../../src/deps/real/fs.js";
 import { forgetNoSandbox, noSandboxDecision, rememberNoSandbox, savedNoSandbox, stopLine,
-  WARNING } from "../../src/build/sandbox.js";
+  WARNING } from "../../src/ask/grants.js";
 import { tempDir } from "../helpers.js";
 
 test("the decision, in order: saved, the setting, auto-approve, a terminal prompt, else stop", () => {

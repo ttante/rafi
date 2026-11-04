@@ -3,7 +3,7 @@
 // goes straight back to the builder (fixing·fix); a too-slow run blocks only this ticket (C59).
 import { splitCommand } from "../../agents/shellForms.js";
 import { snapshot } from "../../facts/snapshot.js";
-import { checkStep, relatedTests, type CheckEnv } from "../checks.js";
+import { checkStep, listsRelated, relatedTests, type CheckEnv } from "../checks.js";
 import { checksSignature } from "../../turns/circling.js";
 import {
   allEvents, append, checkEnvFor, rulesFor, setting, ticketOf, ticketRuns, type BuildContext,
@@ -23,10 +23,14 @@ function dedupe(checks: readonly { req: number; command: string }[]): { req: num
   return checks.filter((c) => !seen.has(fileOf(c.command)) && Boolean(seen.add(fileOf(c.command))));
 }
 
-/** The ticket's required_tests and the runner's related tests for its changed files. */
-async function ownChecks(ctx: BuildContext, id: string, env: CheckEnv): Promise<string[]> {
-  const snap = await snapshot(ctx.deps, ctx.project, `${id}-related`);
-  return [...ticketOf(ctx, id).required_tests, ...await relatedChecks(env, snap.ok ? snap.files : [])];
+/** The ticket's required_tests and the runner's related tests for its changed files; `tree` is the snapshot's
+ * when no listing ran after it (the check step reuses it: M4 slice 0). */
+async function ownChecks(ctx: BuildContext, id: string, env: CheckEnv):
+  Promise<{ commands: string[]; tree: string | undefined }> {
+  const snap = await snapshot(ctx.deps, ctx.project, `${id}-related`, { heads: ctx.heads });
+  const files = snap.ok ? snap.files : [];
+  const tree = snap.ok && !listsRelated(env, files) ? snap.tree : undefined;
+  return { commands: [...ticketOf(ctx, id).required_tests, ...await relatedChecks(env, files)], tree };
 }
 
 export async function checkNode(ctx: BuildContext, id: string, attempt: number): Promise<void> {
@@ -40,8 +44,8 @@ export async function checkNode(ctx: BuildContext, id: string, attempt: number):
   const qa = setting<boolean>(ctx, "harness.qa") && reqs.written !== null && reqs.text !== null;
   const trusted = qa ? trustedOf(reqs) : [];
   const first = trusted.length ? Math.max(...trusted.map((c) => c.req), reqs.written?.count ?? 0) : 0;
-  const checks = dedupe([...trusted, ...own.map((command, i) => ({ req: first + i + 1, command }))]);
-  const result = await checkStep(env, checks, rulesFor(ctx, []));
+  const checks = dedupe([...trusted, ...own.commands.map((command, i) => ({ req: first + i + 1, command }))]);
+  const result = await checkStep(env, checks, rulesFor(ctx, []), own.tree);
   if (result.outcome === "passed") {
     await append(ctx, id, { type: "checks.passed", data: { runs: result.runs, reused: result.reused } });
   } else if (result.outcome === "failed") {

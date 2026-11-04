@@ -74,3 +74,62 @@ export function guiLabel(project: ProjectState, view: Folded, live: LabelLivenes
   }
   return PROJECT_LABELS[project.state] ?? "Draft";
 }
+
+// The outcome a build shows (ARCH 4.3's table, C134, C145): rafi status, stats show and the picker all use this one
+// function. "Crashed" is derived: a live state whose owner isn't alive (4.3.1). Pure: the caller passes liveness.
+export type OwnerLiveness = "alive" | "dead" | "not-responding" | "released" | "none";
+
+export interface OutcomeContext {
+  readonly owner: OwnerLiveness;
+  /** When the build started waiting on you. */
+  readonly since: string | null;
+  /** The owner's last heartbeat. */
+  readonly heartbeat: string | null;
+  readonly recovering?: boolean;
+  /** A newer build started while this one was unfinished (Q3 a). */
+  readonly superseded: boolean;
+}
+
+export type OutcomeKind = "running" | "pausing" | "paused" | "stopping" | "waiting" | "not-responding" |
+  "recovering" | "crashed" | "stopped" | "cancelled" | "cancelled-ctrl-c" | "reset" | "superseded" | "finished" |
+  "finished-left" | "failed";
+
+/** `resumable`: `rafi resume` takes it over and continues it (C142); a live build is attached to instead. */
+export interface Outcome {
+  readonly kind: OutcomeKind;
+  readonly text: string;
+  readonly resumable: boolean;
+}
+
+const hhmm = (iso: string | null) => (iso ? iso.slice(11, 16) : "an unknown time");
+const out = (kind: OutcomeKind, text: string, resumable: boolean): Outcome => ({ kind, text, resumable });
+
+const STOPPED: Readonly<Record<string, Outcome>> = Object.freeze({
+  stop: out("stopped", "stopped", true), cancel: out("cancelled", "cancelled", true),
+  "ctrl-c": out("cancelled-ctrl-c", "cancelled by Ctrl+C", true), crash: out("crashed", "crashed", true),
+});
+
+export function shownOutcome(build: BuildState, ctx: OutcomeContext): Outcome {
+  if (build.state === "stopped" && build.cause === "reset") return out("reset", "reset", false);
+  if (build.state === "finished") {
+    return build.complete ? out("finished", "finished", false)
+      : ctx.superseded ? out("superseded", "superseded", false)
+        : out("finished-left", "finished, with work left", true);
+  }
+  if (ctx.superseded) return out("superseded", "superseded", false);
+  if (build.state === "failed") return out("failed", "failed", true);
+  if (build.state === "stopped") return STOPPED[build.cause ?? "stop"] ?? STOPPED.stop!;
+  const released = ctx.owner === "released";
+  if (ctx.owner === "dead" || ctx.owner === "none" || (released && build.state !== "waiting")) {
+    return out("crashed", "crashed", true);
+  }
+  if (ctx.owner === "not-responding") {
+    return out("not-responding", `not responding since ${hhmm(ctx.heartbeat)}`, false);
+  }
+  if (build.recovering || ctx.recovering) return out("recovering", "recovering", false);
+  if (build.state === "paused") return out("paused", "paused", false);
+  if (build.pausing) return out("pausing", "pausing", false);
+  if (build.state === "stopping") return out("stopping", "stopping", false);
+  if (build.state === "waiting") return out("waiting", `waiting on you since ${hhmm(ctx.since)}`, released);
+  return out("running", "running", false);
+}
