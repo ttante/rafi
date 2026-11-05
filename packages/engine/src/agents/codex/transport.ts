@@ -1,6 +1,7 @@
 // JSON-RPC over a JsonRpcStream (ARCH 11.4, decision 2): request ids, responses, notifications and server
 // requests. `meta` is passed beside each message; the real stream drops it (plan choice C11).
-import type { Cancel, JsonRpcStream } from "../../deps/types.js";
+import type { Cancel, Clock, JsonRpcStream } from "../../deps/types.js";
+import { endProvider } from "../ending.js";
 import type { TurnMeta } from "../types.js";
 
 type Params = Record<string, unknown>;
@@ -67,9 +68,15 @@ export class CodexTransport {
     return () => this.closeFns.delete(fn);
   }
 
-  async close(): Promise<void> {
+  /** Ends the app-server (ending.ts): stdin's end and SIGTERM, then SIGKILL to its process group. */
+  async close(clock: Clock): Promise<void> {
     for (const cancel of this.cancels) cancel();
-    await this.stream.close();
+    let gone = this.closed;
+    const waiting: (() => void)[] = [];
+    const off = this.stream.onClose(() => { gone = true; for (const fn of waiting.splice(0)) fn(); });
+    await endProvider(clock, { terminate: () => void this.stream.close(), kill: () => this.stream.kill(),
+      onGone: (fn) => { if (gone) fn(); else waiting.push(fn); } });
+    off();
   }
 
   private onMessage(message: RpcMessage): void {

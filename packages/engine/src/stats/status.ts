@@ -1,7 +1,7 @@
 // `rafi status` (ARCH 8.10, C48): a read-only view of the fold and the lease (C147). The build's shown outcome
 // (C134, C145), its scope and progress, one plain line per blocked ticket, the current turn's liveness; for a build
 // rafi resume continues: the last step that finished, the step it redoes, the open questions and the exact command
-// (S-CRASH-4 step 5). Never JSON; only 1.0 command names.
+// (S-CRASH-4 step 5); one line per delivery unit (C228, `units.ts`). Never JSON; only 1.0 command names.
 import { escapeControl } from "../log/redact.js";
 import { interrupted } from "../build/resume.js";
 import { openQuestions } from "../ask/questions.js";
@@ -9,6 +9,13 @@ import { shownOutcome, type Outcome } from "../state/labels.js";
 import type { BuildState, Folded } from "../state/types.js";
 import type { Engine } from "../api/engine.js";
 import { definitions, ownerOf, runIds } from "../build/runs.js";
+import { pendingImport } from "../progress/import.js";
+import { status } from "../progress/write.js";
+import { fold } from "../state/fold.js";
+import { builtInWorkflows } from "../workflow/load.js";
+import { unitLines } from "./units.js";
+
+const PROGRESS_SHOWN = ".rafi/progress.yaml";
 
 type Data = Record<string, unknown>;
 type Ev = { type: string; run_id: string | null; ticket_id: string | null; data: unknown; at: string };
@@ -76,10 +83,34 @@ function resumeLines(view: Folded, build: BuildState, mine: readonly Ev[]): stri
   return lines;
 }
 
+/** ARCH 3.6 `:390`: a progress file newer than this database is folded in memory, never imported by a reader; the
+ * lines say so and name what it changes (C302). */
+async function withFile(engine: Engine, all: readonly (Ev & { seq: number })[]):
+  Promise<{ view: Folded; said: string[] }> {
+  const defs = await definitions(engine);
+  const view = engine.fold(defs);
+  const pending = await pendingImport(engine, defs.map((d) => d.id));
+  if (!pending?.events.length) return { view, said: [] };
+  const at = engine.deps.clock.now().toISOString();
+  const seq = all.at(-1)?.seq ?? 0;
+  const extra = pending.events.map((e, i) => ({ ...e, seq: seq + i + 1, at, class: "state" as const }));
+  const shown = fold([...all, ...extra], { workflows: builtInWorkflows, definitions: defs });
+  const changed = Object.values(shown.tickets).filter((t) => !view.tickets[t.id] ||
+    status(view.tickets[t.id]!) !== status(t)).map((t) => `${t.id} ${status(t)}`);
+  return { view: shown, said: [`Shown with ${PROGRESS_SHOWN}'s newer entries, folded in memory: this computer's ` +
+    `database is older (${changed.join(", ")}). The next command that writes, such as \`rafi resume\`, ` +
+    "imports them."] };
+}
+
 export async function statusLines(engine: Engine): Promise<string[]> {
-  const all: Ev[] = [];
+  const all: (Ev & { seq: number })[] = [];
   for await (const e of engine.events()) all.push(e);
-  const view = engine.fold(await definitions(engine));
+  const { view, said } = await withFile(engine, all);
+  const lines = await viewLines(engine, view, all);
+  return [...lines.slice(0, 1), ...said, ...lines.slice(1)];
+}
+
+async function viewLines(engine: Engine, view: Folded, all: readonly Ev[]): Promise<string[]> {
   if (!view.run) return ["No build has run here yet. Start one with `rafi start . --steps 1`."];
   const build = view.builds[view.run]!;
   const mine = all.filter((e) => e.run_id === view.run);
@@ -92,6 +123,7 @@ export async function statusLines(engine: Engine): Promise<string[]> {
     if (live && ["building", "reviewing", "fixing"].includes(t.state)) lines.push(`${t.id}: ${t.state} (${t.node})`);
     if (t.state === "blocked" && t.block) lines.push(`${t.id} is blocked: ${escapeControl(t.block.reason)}`);
   }
+  lines.push(...unitLines(engine, view, all));
   if (live) {
     const turn = turnLine(engine, build, mine);
     if (turn) lines.push(turn);

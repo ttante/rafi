@@ -1,7 +1,10 @@
 // The build loop (ARCH 4.5): fold → decide → run one step → safe point, until decide says finish. Steps are
 // looked up by the workflow node's step name; the workflow is the one build.started pinned (ARCH 4.8). M4: the
 // owner holds the lease with a heartbeat (C132, C136), watches the log for stop, pause and answers (C139), acts on
-// decide's stop, pause and hold (C137, C140), and Ctrl+C in its terminal stops it now (C137).
+// decide's stop, pause and hold (C137, C140), and Ctrl+C in its terminal stops it now (C137); a closed terminal or a
+// SIGTERM stops it gracefully, then now (C183).
+import { InvalidEventError } from "../log/append.js";
+import { KILL_GRACE_MS } from "../agents/ending.js";
 import { openQuestions } from "../ask/questions.js";
 import type { StoredEvent } from "../log/types.js";
 import { watchControls } from "../log/watch.js";
@@ -11,6 +14,11 @@ import { standard } from "../workflow/standard.js";
 import { writeProgress } from "../progress/write.js";
 import { append, type BuildContext } from "./context.js";
 import { closeSessions } from "../turns/agent.js";
+import { refreshed } from "../tickets/changes.js";
+import { ownedTickets } from "../tickets/owned.js";
+import { ciPoint } from "./ci.js";
+import { definitionsOf, deliverAction, inWorkspace } from "../git/step.js";
+import { removeTornTemps } from "./resume.js";
 import { askInTerminal, safePoint, stopCauseOf, type Prompting } from "./safepoint.js";
 import { checkNode } from "./steps/check.js";
 import { deliverStep } from "./steps/deliver.js";
@@ -20,6 +28,10 @@ import { workStep } from "./steps/work.js";
 import { BuildStopped, stopControl, type StopControl } from "./stop.js";
 
 async function runStep(ctx: BuildContext, view: Folded, ticket: string, nodeId: string, redo: boolean) {
+  return inWorkspace(ctx, ticket, (c) => step(c, view, ticket, nodeId, redo));
+}
+
+async function step(ctx: BuildContext, view: Folded, ticket: string, nodeId: string, redo: boolean) {
   const node = standard.nodes.find((n) => n.id === nodeId);
   const attempt = view.tickets[ticket]?.attempt ?? 1;
   switch (node?.step) {
@@ -46,6 +58,8 @@ interface Live {
   wake: () => void;
   /** Ctrl+C's own request, so the loop sees it in the log before it decides again. */
   requested: Promise<unknown> | null;
+  /** C183: after a hangup, cancels the stop now that follows the graceful stop. */
+  hungUp: (() => void) | null;
 }
 
 function onControl(live: Live, e: StoredEvent): void {
@@ -78,6 +92,24 @@ function interrupt(ctx: BuildContext, live: Live): void {
     live.prompting.current.controller.abort();
   }
   live.wake();
+}
+
+/**
+ * C183 (M4 follow-up 3): SIGHUP (the terminal closed) or SIGTERM to rafi. No locked doc says what they do, so it's
+ * `rafi stop` at once (graceful), then `rafi stop` again (now) after KILL_GRACE_MS if the build is still going; the
+ * providers are ended through endProvider as the loop ends. A later signal changes nothing.
+ */
+function hangup(ctx: BuildContext, live: Live): void {
+  if (live.hungUp) return;
+  const request = (mode: "graceful" | "now") => {
+    const state = ctx.engine.fold().builds[ctx.run]?.state;
+    if (!state || !["running", "waiting", "paused", "stopping"].includes(state)) return;
+    live.requested = ctx.engine.append([{ type: "build.stop_requested", run_id: ctx.run, actor: "user",
+      source: "terminal", data: { mode, source: "rafi-stop" } }]).catch(() => undefined);
+    live.wake();
+  };
+  live.hungUp = ctx.deps.clock.timer(KILL_GRACE_MS, () => request("now"), "timeout");
+  request("graceful");
 }
 
 /** A paused build holds, keeping its lease and heartbeat (C140), until an unpause or a stop request arrives. */
@@ -127,12 +159,23 @@ async function pauseOrHold(ctx: BuildContext, defs: readonly TicketDefinition[],
 
 export async function runLoop(ctx: BuildContext, defs: readonly TicketDefinition[]): Promise<number> {
   const live: Live = { control: ctx.control ?? stopControl(), prompting: { current: null, closed: null },
-    wake: () => undefined, requested: null };
-  const run: BuildContext = { ...ctx, control: live.control };
+    wake: () => undefined, requested: null, hungUp: null };
+  let run: BuildContext = { ...ctx, control: live.control };
+  const warned = new Set<string>();
+  // C211: the definitions as the files hold them now, at the loop's start and after each safe point.
+  const fresh = async () => {
+    const next = await refreshed(run, warned);
+    if (next) run = next;
+    for (const [id, o] of await ownedTickets(run.engine, run.units)) run.owned?.set(id, o);
+    defs = definitionsOf(run);
+  };
   const beat = ctx.engine.heartbeat(ctx.run);
   const unwatch = watchControls(ctx.engine, ctx.run, (e) => onControl(live, e));
   const offInterrupt = ctx.ui.onInterrupt?.(() => interrupt(run, live)) ?? (() => undefined);
+  const offHangup = ctx.ui.onHangup?.(() => hangup(run, live)) ?? (() => undefined);
   try {
+    await removeTornTemps(run);
+    await fresh();
     for (;;) {
       if (live.requested) { await live.requested; live.requested = null; }
       const view = ctx.engine.fold(defs);
@@ -141,7 +184,12 @@ export async function runLoop(ctx: BuildContext, defs: readonly TicketDefinition
       if (action.kind === "stop") return await stopped(run, defs, view);
       if (await pauseOrHold(run, defs, view, live, action.kind)) continue;
       if (action.kind === "start-ticket") {
-        await append(run, action.ticket, { type: "ticket.started", data: { resume_step: action.resumeNode } });
+        // R1: a `rafi tickets` command may have changed this ticket since decide chose it; decide again.
+        await append(run, action.ticket, { type: "ticket.started", data: { resume_step: action.resumeNode } })
+          .catch((error: unknown) => {
+            const now = ctx.engine.fold(defs).tickets[action.ticket]?.state;
+            if (!(error instanceof InvalidEventError) || now === "queued") throw error;
+          });
         continue;
       }
       if (action.kind === "step") {
@@ -157,6 +205,18 @@ export async function runLoop(ctx: BuildContext, defs: readonly TicketDefinition
           continue;
         }
         await safePoint(run, defs, action.ticket);
+        await fresh();
+        continue;
+      }
+      if (action.kind === "ci") {
+        await ciPoint(run, action);
+        await writeProgress(ctx.engine, ctx.engine.fold(defs));
+        continue;
+      }
+      if (action.kind === "deliver-unit") {
+        await deliverAction(run, action.unit, view.units[action.unit] ?? "ready");
+        await writeProgress(ctx.engine, ctx.engine.fold(defs));
+        await fresh(); // C238: a delivery is a safe point too; delivery.yaml's change is recorded and applied here
         continue;
       }
       if (action.kind === "finish") {
@@ -175,6 +235,8 @@ export async function runLoop(ctx: BuildContext, defs: readonly TicketDefinition
     offInterrupt();
     unwatch();
     beat();
+    live.hungUp?.();
     await closeSessions(ctx);
+    offHangup();
   }
 }

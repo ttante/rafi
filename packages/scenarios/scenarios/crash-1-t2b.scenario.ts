@@ -1,3 +1,4 @@
+// Crash enumeration (SCN 7.7): full tier only (SCN 7.10, plan 10.12).
 // S-CRASH-1 (SCN 3.7), shard t2b (C160): T2, every other point (the odd ones). Each point is a snapshot of the
 // clean run (P33), resumed until the build finishes; checkCrashRun and the files check hold at every one.
 import assert from "node:assert/strict";

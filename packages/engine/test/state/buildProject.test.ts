@@ -179,6 +179,8 @@ const projectRows: [readonly string[], string, string][] = [
   [["awaiting-approval"], "approved carried", "ready"],
   [["ticketing", "draft"], "populated", "ready"],
   [["draft"], "future accepted", "ready"],
+  // ARCH 4.4 :603 (approved in M5 part 4a-2): accept-future-work in a ready, complete or building project.
+  [["ready", "complete", "building"], "future accepted", "same"],
   [["draft", "complete"], "ticket added", "ready"],
   [states.filter((s) => s !== "draft" && s !== "complete"), "ticket added", "same"],
   [states, "ticket edited", "same"],

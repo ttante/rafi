@@ -1,3 +1,4 @@
+// Milestone: M4
 // M4 plan section 4, "Reset destroys your work" (FLAG-RE-3, ARCH 1.2): reset refuses while a build has a live owner
 // and writes nothing; a reset of a crashed build only appends (the earlier log is unchanged); untracked files stay
 // byte-identical; no push, force-push, clean or remote command (the git spy is in engine/test/git/reset.test.ts).

@@ -1,7 +1,9 @@
 // Takeover and redo (ARCH 8.5, 4.5 rule 3): what `rafi resume` writes for a build, by its stored state and its
 // owner's liveness. A live owner is attached to (C141); a dead or released one is taken over, with
 // build.owner_lost when the old owner never released, then build.resumed (P32's ticket and overrides). A detached
-// build's first owner writes neither (C152). The redo itself is the loop's rule 3; this names it (C135).
+// build's first owner writes neither (C152). The redo itself is the loop's rule 3; this names it (C135). The owner
+// also removes temp files a torn atomic write left (C182).
+import path from "node:path";
 import type { Engine } from "../api/engine.js";
 import { coveredFiles } from "../ask/blocked.js";
 import { coveredDigest } from "../ask/keys.js";
@@ -11,6 +13,7 @@ import { escapeControl } from "../log/redact.js";
 import type { OwnerLiveness } from "../state/labels.js";
 import type { BuildState, Folded } from "../state/types.js";
 import { standard } from "../workflow/standard.js";
+import { setting, type BuildContext } from "./context.js";
 
 export type TakeoverPlan =
   | { kind: "attach" }
@@ -84,4 +87,26 @@ export async function closeStale(engine: Engine, run: string): Promise<string[]>
       `(${covered.files.map((f) => escapeControl(f)).join(", ") || "its files"}); QA reviews the changed code.`);
   }
   return said;
+}
+
+/** writeAtomic's temp name (deps/real/fs.ts; pinned by engine/test/deps/fs.test.ts): `.<name>.<id>.tmp`. */
+export const TORN_TEMP = /^\.(.+)\.[0-9A-Za-z-]+\.tmp$/;
+
+/**
+ * C182 (M4 follow-up 3): a crash between writeAtomic's temp write and its rename leaves the temp file. A build's owner
+ * (one live build per checkout) removes rafi's own when its loop begins, so at every takeover and redo: writeAtomic's
+ * names for the files rafi writes, in the folders it writes them in. `~/.rafi/` is every project's, so it stays.
+ */
+export async function removeTornTemps(ctx: BuildContext): Promise<void> {
+  const own: readonly [string, RegExp][] = [[".rafi", /^(progress\.yaml|\.gitignore)$/],
+    [path.join(".rafi", "cache"), /^(index-.+|run-.+\.json)$/],
+    [path.join(setting<string>(ctx, "docs.root"), "requirements"), /\.md$/]];
+  for (const [dir, names] of own) {
+    const full = path.join(ctx.project, dir);
+    if ((await ctx.deps.fs.stat(full))?.kind !== "dir") continue;
+    for (const name of await ctx.deps.fs.list(full)) {
+      const base = TORN_TEMP.exec(name)?.[1];
+      if (base && names.test(base)) await ctx.deps.fs.remove(path.join(full, name));
+    }
+  }
 }

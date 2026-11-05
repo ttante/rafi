@@ -2,8 +2,9 @@
 // from the database with one line; a busy database is waited out on the clock; a full disk on an event append and an
 // unwritable `.rafi/` each stop with one line naming the folder and `rafi resume`; a crash halfway through writing a
 // requirements file is redone before the builder starts; optional data the disk refuses (a large blob: a malformed
-// reply's raw text) is skipped and recorded as skipped, and the build goes on (C157). The git faults need F-BRANCH
-// and git delivery (M5).
+// reply's raw text) is skipped and recorded as skipped, and the build goes on (C157). M5 (C229): on F-BRANCH, a
+// failed git commit stops with C155's line and resume commits once; a crash after a ticket's branch is created is
+// resumed on that branch and worktree.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmodSync, readFileSync } from "node:fs";
@@ -12,14 +13,64 @@ import { registry } from "../checks/registry.js";
 import { scenario, type ScenarioContext } from "../harness/scenario.js";
 import { exported, of } from "./m3-helpers.js";
 import { B, on } from "../fakes/script/behaviors.js";
+import { workFiles } from "../checks/crash.js";
+import { git } from "../fixtures/common.js";
+import { fBranch } from "../fixtures/f-branch.js";
+
+const T1_BRANCH = "feature/T1-add-the-parser";
+/** Your checkout's files: everything outside `.git/`, `.rafi/` and rafi's working files under `.foreman/`. */
+const yours = (dir: string) => Object.fromEntries(Object.entries(workFiles(dir))
+  .filter(([f]) => !f.startsWith(".foreman")));
+const verb = (args: readonly string[]) => args.find((a, i) => !a.startsWith("-") && args[i - 1] !== "-c");
 
 const done = async (ctx: ScenarioContext, dir: string) => new Set((await exported(ctx, dir)).events
   .filter((e) => e.type === "delivery.done").map((e) => e.ticket_id));
 
+/** C229 (M5): the git faults, on F-BRANCH. */
+async function gitFaults(ctx: ScenarioContext): Promise<void> {
+  const { rafi, step } = ctx;
+  await step("a failed git commit (F-BRANCH): C155's one-line stop, your files unchanged; resume makes one commit",
+    async () => {
+      const dir = fBranch(path.join(ctx.root, "git-commit-fault"));
+      const before = yours(dir);
+      // C229: the ticket's staging in its worktree can't write git's index (a full disk) until the fault is lifted.
+      type Env = Readonly<Record<string, string | undefined>>;
+      const faults = { git: (args: readonly string[], cwd: string, env?: Env) =>
+        verb(args) === "add" && cwd.includes(".foreman") && !env?.GIT_INDEX_FILE
+          ? "fatal: unable to write new index file\n" : null };
+      const r = await rafi("start . --steps 1", { cwd: dir, faults });
+      assert.equal(r.code, 1, r.output);
+      const lines = r.output.split("\n").filter((l) => /^rafi: /.test(l));
+      assert.equal(lines.length, 1, r.output);
+      assert.match(lines[0]!, /disk is full.*`rafi resume`/, r.output);
+      assert.doesNotMatch(r.output, /Internal error|failed \(rejected\)/);
+      assert.deepEqual(yours(dir), before, "your files byte-identical after the failed delivery");
+      const again = await rafi("resume", { cwd: dir });
+      assert.equal(again.code, 0, again.output);
+      assert.equal(git(dir, ["rev-list", "--count", `main..${T1_BRANCH}`]).trim(), "1", "exactly one commit");
+      assert.equal(of(await exported(ctx, dir), "git.committed", "T1").length, 1);
+      assert.deepEqual(yours(dir), before);
+    });
+  await step("a crash right after T1's branch is created: resume reuses the branch and worktree; one of each",
+    async () => {
+      const dir = fBranch(path.join(ctx.root, "git-branch-crash"));
+      const crashed = await rafi("start . --steps 1", { cwd: dir, crashAt: "6: after branch (T1" });
+      assert.ok(crashed.crashed?.startsWith("6: after branch (T1"), crashed.output);
+      const r = await rafi("resume", { cwd: dir });
+      assert.equal(r.code, 0, r.output);
+      const e = await exported(ctx, dir);
+      assert.equal(of(e, "git.branch_created", "T1").length, 1);
+      assert.deepEqual(git(dir, ["branch", "--list", "feature/*", "--format=%(refname:short)"]).trim(), T1_BRANCH);
+      assert.equal(git(dir, ["worktree", "list", "--porcelain"]).split("\n")
+        .filter((l) => l.startsWith("worktree ")).length, 2, "the main checkout and T1's one worktree");
+      assert.equal(git(dir, ["rev-list", "--count", `main..${T1_BRANCH}`]).trim(), "1", "exactly one commit");
+    });
+}
+
 scenario({
   id: "S-CRASH-2", covers: registry.find((r) => r.id === "S-CRASH-2")!.covers, modes: ["next"], fixture: "F-CHAIN",
   async run(ctx) {
-    const { rafi, step, fixture, computer, pending } = ctx;
+    const { rafi, step, fixture, computer } = ctx;
     await step("a torn .rafi/progress.yaml: rebuilt from the database with one line; nothing lost", async () => {
       const dir = fixture("F-CHAIN");
       const torn = await rafi("start . --steps 2", { cwd: dir, faults: { tornWrite: /progress\.yaml$/, at: 3 } });
@@ -87,7 +138,7 @@ scenario({
       assert.ok(now.length > half.length, "the half-written file was rewritten");
       assert.equal(`sha256:${createHash("sha256").update(now).digest("hex")}`, written.fp);
     });
-    await pending("a failed git commit, and a crash while creating a ticket branch (F-BRANCH)", "M5");
+    await gitFaults(ctx);
     await step("optional data refused for lack of space: skipped and recorded as skipped; the build continues",
       async () => {
         const dir = fixture("F-CHAIN");

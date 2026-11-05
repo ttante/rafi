@@ -1,3 +1,4 @@
+// Milestone: M4
 // Item 24 (M4 plan 3.3): the harness pieces M4 adds. Slice 0: the fixture cache (C158) and the git-call cut.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -25,8 +26,9 @@ function tree(dir: string, base = dir, out: Record<string, string> = {}): Record
 }
 
 test("slice 0: a fixture is built once per job and copied after; the copies are byte-identical", () => {
-  const hits = fixtureCache.hits;
+  // M5 part 4a-2: small files can share a process now, so F-ONE may already be cached; the second is a hit anyway.
   const a = fOne(tempRoot());
+  const hits = fixtureCache.hits;
   const b = fOne(tempRoot());
   assert.equal(fixtureCache.hits, hits + 1, "the second F-ONE is a copy of the first");
   assert.deepEqual(tree(b), tree(a));

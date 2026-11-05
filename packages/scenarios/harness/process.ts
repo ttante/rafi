@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { shellEnv } from "./shell-env.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 export const LAUNCHER = path.join(repo, "packages", "rafi", "dist", "launcher.js");
@@ -49,7 +50,7 @@ export interface ProcessResult {
 export function launcher(args: string[], o: { cwd: string; engine?: "next"; pathFirst?: string;
   env?: Record<string, string>; timeoutMs?: number }): ProcessResult {
   assertFreshBuild();
-  const env: Record<string, string | undefined> = { ...process.env, TZ: "UTC", ...o.env };
+  const env: Record<string, string | undefined> = { ...shellEnv(), TZ: "UTC", ...o.env };
   delete env.RAFI_ENGINE;
   if (o.engine) env.RAFI_ENGINE = o.engine;
   if (o.pathFirst) env.PATH = `${o.pathFirst}${path.delimiter}${env.PATH ?? ""}`;

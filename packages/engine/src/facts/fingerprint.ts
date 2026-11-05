@@ -3,7 +3,7 @@
 // symlink as its link text, so links are never followed (`git hash-object` on a path does follow them), and
 // ignored folders are never read. Files and bytes come from `git ls-tree -r -l`. The real index is never touched.
 import path from "node:path";
-import type { SnapshotDeps } from "./snapshot.js";
+import { hooksOff, type SnapshotDeps } from "./snapshot.js";
 
 export interface FullFingerprint {
   readonly fp: string;
@@ -13,7 +13,7 @@ export interface FullFingerprint {
 }
 
 async function git(deps: SnapshotDeps, cwd: string, args: string[], index: string): Promise<string> {
-  const r = await deps.git(args, { cwd, env: { ...deps.env, GIT_INDEX_FILE: index } });
+  const r = await deps.git(args, { cwd, env: hooksOff({ ...deps.env, GIT_INDEX_FILE: index }, cwd) });
   if (r.code !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr.trim().split("\n")[0]}`);
   return r.stdout;
 }

@@ -1,3 +1,4 @@
+// Milestone: M4
 // M4 review, finding 5: the harness runs git by its own path (C177) and, for speed, tells git to read no global
 // config. That must never change what git does: the harness's git reads a user's global config exactly as
 // production's `deps.git` does (HOME's .gitconfig, XDG_CONFIG_HOME's git/config, an explicit GIT_CONFIG_GLOBAL), and

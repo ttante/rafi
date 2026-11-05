@@ -7,10 +7,12 @@ import type { Engine } from "../api/engine.js";
 import { modelFlag, roleAgents, type Roles } from "../agents/roles.js";
 import { sandboxFor, type UpfrontUI } from "../ask/upfront.js";
 import { runner } from "../config/runner.js";
-import type { SandboxTool } from "../deps/types.js";
+import type { SandboxTool } from "../ask/grants.js";
 import { loadTickets } from "../tickets/load.js";
+import { importProgress } from "../progress/import.js";
 import type { BuildContext, BuildUI } from "./context.js";
-import { declaredValues } from "./env.js";
+import { declaredValues } from "../agents/env.js";
+import { deliveryChecks, type DirtyFlag } from "../git/ready.js";
 
 /** What start and resume show and ask before the loop. */
 export type RunUI = BuildUI & UpfrontUI;
@@ -29,8 +31,8 @@ export interface Prepared {
   readonly test: { argv: string[] | null; scripts: string[] };
 }
 
-export async function prepareRun(engine: Engine, settings: Settings, o: { tty: boolean; ticket?: string },
-  ui: RunUI): Promise<Prepared | number> {
+export async function prepareRun(engine: Engine, settings: Settings, o: { tty: boolean; ticket?: string } &
+  DirtyFlag, ui: RunUI): Promise<Prepared | number> {
   const { deps } = engine;
   const declared = ["checks.env", "agents.env"].flatMap((k) => (settings[k]?.value as string[] | undefined) ?? []);
   for (const [name, value] of declaredValues(deps.env, declared, deps.machine.platform)) {
@@ -39,6 +41,7 @@ export async function prepareRun(engine: Engine, settings: Settings, o: { tty: b
   const tickets = await loadTickets(deps.fs, engine.projectDir);
   if (!tickets.ok) { ui.line(tickets.message); return 1; }
   if (!tickets.tickets.length) { ui.line("There are no tickets in .tickets/tickets.yaml to build."); return 1; }
+  await importProgress(engine, tickets.tickets.map((t) => t.id), (text) => ui.line(text));
   if (o.ticket && !tickets.tickets.some((t) => t.id === o.ticket)) {
     ui.line(`There's no ticket ${o.ticket}.`);
     return 1;
@@ -49,6 +52,8 @@ export async function prepareRun(engine: Engine, settings: Settings, o: { tty: b
       "commit\"`, then run `rafi start` again.");
     return 1;
   }
+  const delivery = await deliveryChecks(engine, settings, tickets, o, ui);
+  if (delivery !== null) return delivery;
   const sandbox = await sandboxFor(engine, settings, { tty: o.tty }, ui);
   if ("code" in sandbox) return sandbox.code;
   const { roles, extra } = await roleAgents(settings, deps);
@@ -67,6 +72,7 @@ export async function prepareRun(engine: Engine, settings: Settings, o: { tty: b
 /** The loop's context for a run, from its settings and what prepareRun found. */
 export function contextFor(engine: Engine, run: string, settings: Settings, p: Prepared, ui: BuildUI): BuildContext {
   return { engine, deps: engine.deps, project: engine.projectDir, run, tickets: p.tickets.tickets,
-    units: p.tickets.units, settings, agents: p.roles, sandbox: p.sandbox, grants: { needs: [] }, runner: p.test.argv,
-    testScripts: p.test.scripts, ui, sessions: new Map(), heads: new Map() };
+    units: p.tickets.units, digests: { digest: p.tickets.digest, delivery_digest: p.tickets.delivery_digest },
+    settings, agents: p.roles, sandbox: p.sandbox, grants: { needs: [] }, runner: p.test.argv,
+    testScripts: p.test.scripts, ui, sessions: new Map(), heads: new Map(), owned: new Map() };
 }

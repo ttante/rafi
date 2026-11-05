@@ -1,3 +1,4 @@
+// Milestone: M4
 // M4 plan section 4 (ARCH 1.2 rows M4's code touches; P37). Agents can't use rafi's controls; a live owner isn't
 // taken over; hostile interview records are skipped, escaped and never followed out of their folder; secrets stay out
 // of every new output (status, the picker, the attached view, stop and reset lines, the export).

@@ -63,7 +63,9 @@ test("delivery.done carries the validation summary; ticket.done is gone (review 
 });
 
 test("config subset: the integer marker, and workflows: reserved", () => {
-  assert.equal(checkConfigV1({ format_version: 1, anything: { else: true } }).ok, true);
+  // M5 (C182): an unknown key now exits 1 naming it (it passed until M5).
+  assert.deepEqual(checkConfigV1({ format_version: 1, anything: { else: true } }),
+    { ok: false, message: "rafi-config.yaml: unknown key anything." });
   assert.equal(checkConfigV1({ format_version: "1" }).ok, false);
   assert.equal(checkConfigV1({ format_version: 2 }).ok, false);
   assert.deepEqual(checkConfigV1({ format_version: 1, workflows: {} }), { ok: false, message: CUSTOM_WORKFLOWS_MESSAGE });
@@ -147,4 +149,12 @@ test("P31: build.reset names its scope, action, cleanup, tickets and archive bra
   assert.equal(checkEventData("build.resumed", 1, { ...resumed, ticket: null, settings: {} }).ok, true);
   assert.equal(checkEventData("build.resumed", 1, { from_state: "stopped" }).ok, false, "both fields are required");
   assert.equal(checkEventData("build.stopped", 1, { cause: "reset" }).ok, false, "reset is build.reset's, not a cause");
+});
+
+// M5 slice 6 (P50, ARCH 3.4 `:274`): a conflict fix ticket names the delivery unit it repairs.
+test("ticket.added: source conflict with its unit; ci and recheck keep a null unit", () => {
+  const base = { ticket: "FIX-1", requirements: ["no conflict markers in src/T3.txt"], hint: null };
+  assert.equal(checkEventData("ticket.added", 1, { ...base, source: "conflict", unit: "U2" }).ok, true);
+  assert.equal(checkEventData("ticket.added", 1, { ...base, source: "ci", unit: null }).ok, true);
+  assert.equal(checkEventData("ticket.added", 1, { ...base, source: "merge", unit: "U2" }).ok, false);
 });

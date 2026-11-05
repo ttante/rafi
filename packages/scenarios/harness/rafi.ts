@@ -4,6 +4,8 @@ import { FakeClock } from "../fakes/clock.js";
 import { FakeNotifier } from "../fakes/notifier.js";
 import { fakeTerminal, stripAnsi } from "../fakes/terminal.js";
 import { memoryServe } from "../fakes/serve.js";
+import { fakeGh } from "../fakes/gh.js";
+import { fakeHttp } from "../fakes/http.js";
 import path from "node:path";
 import { defaultHost, harnessDeps, stateDirFor, type Computer } from "./deps.js";
 import type { PauseFn } from "./hooks.js";
@@ -58,7 +60,7 @@ export function newComputer(root: string, name = "a", env: Record<string, string
     clock: new FakeClock(), notifier: new FakeNotifier(), stateDir: stateDirFor(root, name), host: defaultHost(),
     env: Object.freeze({ TZ: "UTC", ...env }), ids: { next: 0 }, alive: new Set(),
     childEnvs: [], agentEnvs: [], canaries: {}, sentToAgents: [],
-    checks: { tests: {}, sandbox: "available", log: [] }, serve: memoryServe(),
+    checks: { tests: {}, sandbox: "available", log: [] }, serve: memoryServe(), http: fakeHttp(), gh: fakeGh(),
     home: path.dirname(stateDirFor(root, name)), script: { rules: [], transcript: [], sessions: [] }, bus: [],
   };
 }
@@ -76,6 +78,8 @@ export interface RafiOptions {
   faults?: StorageFaults;
   /** Awaited before each git call this instance makes (a race test's interleaving point). */
   onGit?: (args: readonly string[]) => Promise<void> | void;
+  /** Awaited before each file this instance reads (M5 R4's interleaving point). */
+  onRead?: (file: string) => Promise<void> | void;
 }
 
 /** A command still running (C156): wait for output, type lines, press Ctrl+C, then its result. */
@@ -85,6 +89,8 @@ export interface LiveRafi {
   expect(re: RegExp): Promise<void>;
   send(text: string): void;
   interrupt(): void;
+  /** SIGHUP (the terminal closed) or SIGTERM to this rafi. */
+  signal(name: "SIGHUP" | "SIGTERM"): void;
   /** No more typed input. */
   end(): void;
   output(): string;
@@ -104,7 +110,8 @@ export function rafiRunner(computer: Computer, cwd: string, results: RafiResult[
     // handle keeps its input open for send().
     if (!live) terminal.end();
     const instance = harnessDeps(computer, terminal,
-      { cwd: o.cwd ?? cwd, instance: `inst-${++instances}`, env: o.env, faults: o.faults, onGit: o.onGit });
+      { cwd: o.cwd ?? cwd, instance: `inst-${++instances}`, env: o.env, faults: o.faults, onGit: o.onGit,
+        onRead: o.onRead });
     if (o.crashAt !== undefined) instance.hooks.crashAt(o.crashAt);
     if (o.pauseAt) instance.hooks.pauseAt(o.pauseAt.at, o.pauseAt.fn);
     if (o.onEach) instance.hooks.onEach(o.onEach);
@@ -136,6 +143,7 @@ export function rafiRunner(computer: Computer, cwd: string, results: RafiResult[
       done: () => pending,
       send: (text) => terminal.send(text),
       interrupt: () => terminal.interrupt(),
+      signal: (name) => terminal.signal(name),
       end: () => terminal.end(),
       output: () => stripAnsi(terminal.all()),
       expect: (re) => new Promise<void>((resolve, reject) => {

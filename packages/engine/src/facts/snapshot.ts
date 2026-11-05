@@ -3,6 +3,7 @@
 // real index is never touched. Changed files are computed against HEAD's tree. `.rafi/` is rafi's, never listed.
 import path from "node:path";
 import type { Env, ExecOptions, ExecResult, Fs } from "../deps/types.js";
+import { nulPaths } from "../git/run.js";
 
 export interface SnapshotDeps {
   git(args: string[], o: ExecOptions): Promise<ExecResult>;
@@ -13,11 +14,26 @@ export interface SnapshotDeps {
 export type Snapshot = { ok: true; tree: string; base: string; files: string[] } | { ok: false; noCommit: true };
 
 const RAFI_DIR = /^\.rafi(\/|$)/;
+/** Rafi's own views (ARCH 3.8; M5 C207) at their default paths: rafi's writes, never the builder's work. */
+const VIEWS: readonly string[] = ["docs/ticket-progress.md", "docs/ticket-archive.md"];
+const rafis = (f: string) => RAFI_DIR.test(f) || VIEWS.includes(f);
+
+/** Q1 a (C197; M5 10.10): no repository hook runs under rafi's git, set through git's environment config so each
+ * call's arguments stay as they are; a hooks folder under `.git` can't exist in a worktree, and agents can't write
+ * `.git`. */
+export const hooksOff = (env: Env, cwd: string): Env => ({ ...env, GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: path.join(cwd, ".git", "rafi-no-hooks") });
+
+/** `git add` exits 1 when an exclude pathspec names a path `.gitignore` ignores; everything else was staged. */
+export const ignoredOnly = (r: ExecResult): boolean => r.code === 1 &&
+  /^The following paths are ignored by one of your \.gitignore files:/.test(r.stderr);
 
 async function git(deps: SnapshotDeps, cwd: string, args: string[], env: Env = deps.env): Promise<string> {
-  const r = await deps.git(args, { cwd, env });
-  if (r.code !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr.trim().split("\n")[0]}`);
-  return r.stdout.trim();
+  const r = await deps.git(args, { cwd, env: hooksOff(env, cwd) });
+  if (r.code !== 0 && !(args[0] === "add" && ignoredOnly(r))) {
+    throw new Error(`git ${args[0]} failed: ${r.stderr.trim().split("\n")[0]}`);
+  }
+  return args.includes("-z") ? r.stdout : r.stdout.trim();
 }
 
 /** The real index's path without a git call when the folder is a repo's top (`.git` a folder, or a worktree's
@@ -77,11 +93,11 @@ export async function snapshot(deps: SnapshotDeps, cwd: string, key = "snapshot"
   if (await deps.fs.stat(real)) await deps.fs.writeAtomic(index, await deps.fs.readBytes(real));
   const env = { ...deps.env, GIT_INDEX_FILE: index };
   try {
-    await git(deps, cwd, ["add", "-A", "--", ".", ":(exclude).rafi"], env);
+    await git(deps, cwd, ["add", "-A", "--", ".", ":(exclude).rafi", ...VIEWS.map((v) => `:(exclude)${v}`)], env);
     const tree = await git(deps, cwd, ["write-tree"], env);
     if (!listed) return { ok: true, tree, base, files: [] };
-    const diff = await git(deps, cwd, ["diff", "--name-only", "--no-renames", base, tree]);
-    const files = diff ? diff.split("\n").filter((f) => !RAFI_DIR.test(f)).sort() : [];
+    const files = nulPaths(await git(deps, cwd, ["diff", "--name-only", "--no-renames", "-z", base, tree]))
+      .filter((f) => !rafis(f)).sort();
     return { ok: true, tree, base, files };
   } finally {
     await deps.fs.remove(index);
@@ -91,8 +107,8 @@ export async function snapshot(deps: SnapshotDeps, cwd: string, key = "snapshot"
 /** Files changed between two trees (for staleness and QA restore), rafi's folder left out. */
 export async function changedBetween(deps: SnapshotDeps, cwd: string, from: string, to: string): Promise<string[]> {
   if (from === to) return [];
-  const diff = await git(deps, cwd, ["diff", "--name-only", "--no-renames", from, to]);
-  return diff ? diff.split("\n").filter((f) => !RAFI_DIR.test(f)).sort() : [];
+  return nulPaths(await git(deps, cwd, ["diff", "--name-only", "--no-renames", "-z", from, to]))
+    .filter((f) => !rafis(f)).sort();
 }
 
 /**
@@ -103,8 +119,7 @@ export async function changedBetween(deps: SnapshotDeps, cwd: string, from: stri
 export async function restoreTree(deps: SnapshotDeps, cwd: string, tree: string, files: readonly string[]):
   Promise<void> {
   if (!files.length) return;
-  const known = new Set((await git(deps, cwd, ["ls-tree", "-r", "--name-only", tree, "--", ...files]))
-    .split("\n").filter(Boolean));
+  const known = new Set(nulPaths(await git(deps, cwd, ["ls-tree", "-r", "--name-only", "-z", tree, "--", ...files])));
   for (const file of files.filter((f) => !known.has(f))) await deps.fs.remove(path.join(cwd, file));
   const kept = files.filter((f) => known.has(f));
   if (kept.length) await git(deps, cwd, ["restore", `--source=${tree}`, "--worktree", "--", ...kept]);

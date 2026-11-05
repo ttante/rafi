@@ -1,3 +1,4 @@
+// Milestone: M4
 // M4 review, findings 1 and 2: one live build per checkout (ARCH 8.5) holds when a second command races a takeover.
 // The interleavings are forced at fixed points, not by timing: `rafi start` waits on its no-sandbox prompt (after it
 // has looked at the crashed build) while `rafi resume` takes that build over; `rafi reset` is held at its first git

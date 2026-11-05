@@ -49,7 +49,7 @@ Otherwise keep going without asking.
 
 Don't pass on a session's claims unchecked. Before you report:
 
-1. Run the fast suite yourself and confirm it passes, and in under 60 seconds.
+1. Run the fast suite yourself and confirm it passes in under 60 seconds; then run the full suite and confirm it passes, and report its time.
 2. Confirm every scenario in the milestone's "Must pass" list passes, by name, from the test output.
 3. Run `scripts/check-rules.mjs` and confirm it passes.
 4. Confirm the milestone's security tests exist and pass (the "Security" line in architecture section 14).

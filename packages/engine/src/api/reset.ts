@@ -3,7 +3,7 @@
 // changes (FLAG-RE-3). Reset holds the build's lease while it works (taken as start and resume take it, so nothing
 // can take the build meanwhile); the git actions run, then `build.reset` puts the tickets back and the lease is
 // dropped in one transaction. The log is only appended to.
-import { resetWorktree, type ResetAction } from "../git/reset.js";
+import { resetTrees, type ResetAction } from "../git/reset.js";
 import { pruneInterviews } from "../setup/interviews.js";
 import type { Engine } from "./engine.js";
 import { definitions, findRun, ownerOf } from "../build/runs.js";
@@ -24,6 +24,7 @@ export interface ResetPlan {
   readonly form: string;
   /** The newest build event when this was decided (engine.own's `since`). */
   readonly since: number;
+  readonly branches: string[];
 }
 
 export function resetForm(o: ResetOptions): string {
@@ -51,8 +52,11 @@ export async function resetPlan(engine: Engine, o: ResetOptions): Promise<ResetP
   }
   const owner = await ownerOf(engine, build);
   if (owner === "alive" || owner === "not-responding") return running(build.run);
-  const touched = new Set<string>();
-  for await (const e of engine.events({ run: build.run })) if (e.ticket_id) touched.add(e.ticket_id);
+  const [touched, branches] = [new Set<string>(), [] as string[]]; // C261: the branches this build created
+  for await (const e of engine.events({ run: build.run })) {
+    if (e.ticket_id) touched.add(e.ticket_id);
+    if (e.type === "git.branch_created") branches.push(String((e.data as { branch: string }).branch));
+  }
   const open = (id: string) => view.tickets[id] && view.tickets[id]!.state !== "dropped";
   const tickets = o.scope === "everything" ? defs.map((d) => d.id).filter(open)
     : defs.map((d) => d.id).filter((id) => open(id) && touched.has(id) && view.tickets[id]!.state !== "done");
@@ -61,7 +65,7 @@ export async function resetPlan(engine: Engine, o: ResetOptions): Promise<ResetP
   const files = o.scope === "everything" ? "your branch and files stay as they are"
     : o.action === "archive-restart" ? `the unfinished work is committed to rafi/archive/${build.run} and tracked ` +
       "files go back to the branch's last commit" : `your branch stays, and ${CLEANUP[o.cleanup ?? "handled"]}`;
-  return { run: build.run, tickets, since, form: resetForm({ ...o, run: o.run }),
+  return { run: build.run, tickets, since, branches, form: resetForm({ ...o, run: o.run }),
     lines: [`This resets ${o.scope === "everything" ? "everything" : `build ${build.run}`}: ${what}; ${files}. ` +
       "Untracked files are never touched, nothing is pushed, and the old run stays in `rafi stats`."] };
 }
@@ -81,7 +85,7 @@ export async function resetBuild(engine: Engine, o: ResetOptions): Promise<Said 
     if (o.scope === "build") {
       const action: ResetAction = o.action === "archive-restart" ? { action: o.action, cleanup: null, run: plan.run }
         : { action: "restart-current", cleanup: o.cleanup ?? "handled", run: plan.run };
-      const done = await resetWorktree(engine.deps, engine.projectDir, action);
+      const done = await resetTrees(engine.deps, engine.projectDir, action, plan.branches);
       if (!done.ok) {
         await engine.disown(plan.run, []);
         return { code: 1, line: `Reset stopped before changing the log: ${done.message}`, lines: [] };

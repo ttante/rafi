@@ -136,6 +136,12 @@ export function heartbeat(log: Log, processes: Processes, runId: string): Promis
   });
 }
 
+/** Inside a write transaction: this instance holds the run's lease (M5 C235: an effect's intent is the owner's). */
+export function holdsLease(db: Db, processes: Processes, runId: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM lease WHERE run_id = ? AND instance = ?").get(runId,
+    processes.self().instance));
+}
+
 /** Inside a write transaction: drops this instance's row (C132: with build.owner_released). */
 export function dropLease(db: Db, processes: Processes, runId: string): void {
   db.prepare("DELETE FROM lease WHERE run_id = ? AND instance = ?").run(runId, processes.self().instance);

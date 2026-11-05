@@ -103,7 +103,12 @@ test("labels: tracker status for every state, and GUI labels", () => {
   assert.equal(trackerStatus({ ...fresh.tickets.T1!, state: "dropped", dropped: "wont-do" }, fresh), "canceled");
   const alive = { ownerAlive: true, recovering: false };
   assert.equal(guiLabel(fresh.project, fresh, alive), "Building");
-  assert.equal(guiLabel(fresh.project, fresh, { ownerAlive: false, recovering: false }), "Failed");
+  // M4 follow-up 1 (user decision): a derived crash shows as "Crashed" everywhere, the GUI label included.
+  assert.equal(guiLabel(fresh.project, fresh, { ownerAlive: false, recovering: false }), "Crashed");
+  const failed: Folded = { ...fresh, builds: { ...fresh.builds,
+    [fresh.run!]: { ...fresh.builds[fresh.run!]!, state: "failed" } } };
+  assert.equal(guiLabel(failed.project, failed, alive), "Failed");
+  assert.equal(guiLabel(failed.project, failed, { ownerAlive: false, recovering: false }), "Failed");
   assert.equal(guiLabel(fresh.project, fresh, { ownerAlive: false, recovering: true }), "Recovering");
   assert.equal(guiLabel({ state: "awaiting-approval", before: null }, fresh, alive), "Awaiting plan approval");
 });

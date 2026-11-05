@@ -33,8 +33,13 @@ export function prepareMessage(ticket: TicketV1, o: { depth: string; raisedFrom:
     `check when a test can show it. Depth: ${o.depth}${raised}. Rafi writes them to ${o.path}.`].join("\n");
 }
 
-export function buildMessage(ticket: TicketV1, requirements: string | null, redo: boolean): string {
-  return [`Build ticket ${ticket.id}.`, ticketBlock(ticket, { criteria: true, tests: true }),
+/** NEW-INS-4: one line per dependency, never the queue. */
+export const dependencyLine = (id: string, title: string, status: string) =>
+  `Depends on ${id} (${escapeControl(title)}): ${status}.`;
+
+export function buildMessage(ticket: TicketV1, requirements: string | null, redo: boolean,
+  dependencies: readonly string[] = []): string {
+  return [`Build ticket ${ticket.id}.`, ticketBlock(ticket, { criteria: true, tests: true }), ...dependencies,
     requirements ? `Requirements file: ${requirements} (read it; it's the spec QA reviews against).` : "",
     "Run the ticket's required tests with run_check and fix failures before you report done.",
     redo ? "An earlier attempt may have left changes in the working tree; check `git status` first." : ""]

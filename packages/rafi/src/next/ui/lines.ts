@@ -8,7 +8,7 @@ export function line(text: string): string {
  * continue; null for any other error. Nothing recorded is deleted, and the lease stays for `rafi resume`. */
 export function storageLine(error: unknown, project: string): string | null {
   const code = (error as { code?: string }).code ?? "";
-  const folder = path.join(project, ".rafi");
+  const folder = (error as { folder?: string }).folder ?? path.join(project, ".rafi");
   if (code === "SQLITE_FULL" || code === "ENOSPC") {
     return line(`The disk is full: rafi couldn't write to ${folder}. Free some space, then run \`rafi resume\`.`);
   }

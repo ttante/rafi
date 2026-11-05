@@ -20,8 +20,27 @@ export function readTimes(file) {
   }
 }
 
-export function writeTimes(file, results) {
+/** Writes this run's times; `kept` (the last cache) keeps the solo times of files that ran in a group this time. */
+export function writeTimes(file, results, kept = {}) {
   mkdirSync(path.dirname(file), { recursive: true });
-  const times = Object.fromEntries(results.map((r) => [r.name, Math.round(r.ms * 10) / 10]));
+  const times = { ...kept, ...Object.fromEntries(results.map((r) => [r.name, Math.round(r.ms * 10) / 10])) };
   writeFileSync(file, `${JSON.stringify(times, null, 2)}\n`);
+}
+
+/**
+ * M5 speed (plan 10.8): a scenario job's process start and module load cost about half a second, so files whose
+ * last solo time is under `solo` ms share one process (`--test-isolation=none`), packed first fit, longest first,
+ * into groups of at most `group` ms. A file with no recorded time, or a heavy one, runs alone (and so gets a time).
+ */
+export function pack(files, times, o) {
+  const known = (f) => typeof times[f] === "number";
+  const alone = files.filter((f) => !known(f) || times[f] >= o.solo);
+  const light = files.filter((f) => known(f) && times[f] < o.solo).sort((a, b) => times[b] - times[a]);
+  const groups = [];
+  for (const f of light) {
+    const fits = groups.find((g) => g.ms + times[f] <= o.group);
+    if (fits) { fits.files.push(f); fits.ms += times[f]; } else groups.push({ files: [f], ms: times[f] });
+  }
+  const solo = alone.sort((a, b) => (times[b] ?? Infinity) - (times[a] ?? Infinity) || a.localeCompare(b));
+  return [...solo.map((f) => [f]), ...groups.map((g) => g.files)];
 }

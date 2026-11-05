@@ -10,6 +10,7 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { nextIndex } from "./codex-cli.mjs";
 import { outsideEdit } from "./script/roles.mjs";
+import { deafness } from "./script/deaf.mjs";
 import { claudeShape, pickBehavior } from "./script/match.mjs";
 
 const VERSION = "2.1.999 (Claude Code fake)";
@@ -157,6 +158,7 @@ export class FakeClaude {
         () => nextIndex(this.script.path));
       this.log({ op: "pick", identity: picked.identity, rule: picked.rule ?? null,
         kill: picked.behavior.kill ?? null });
+      if (picked.behavior.ignoreTerm) this.io.deaf?.start();
       return claudeShape(picked.behavior);
     }
     const index = this.script.path ? nextIndex(this.script.path) : this.ruleIndex++;
@@ -387,17 +389,21 @@ export function main(scriptPath, argv = process.argv.slice(2)) {
     process.stdout.write(`${VERSION}\n`);
     return;
   }
-  const fake = new FakeClaude({ ...readScript(scriptPath), path: scriptPath }, argv);
+  const script = { ...readScript(scriptPath), path: scriptPath };
+  const deaf = deafness(makeLog(script));
+  const fake = new FakeClaude(script, argv, { ...STDIO, deaf });
   const lines = createInterface({ input: process.stdin });
   lines.on("line", (line) => fake.onLine(line));
   lines.on("close", () => {
     fake.log({ op: "stdin-closed" });
+    if (deaf.on) return;
     // A hanging turn can't finish once the SDK has gone; anything else finishes writing first.
     if (fake.interrupted) process.exit(0);
     fake.busy.finally(() => process.exit(0));
   });
   process.on("SIGINT", () => fake.log({ op: "sigint" }));
   process.on("SIGTERM", () => {
+    if (deaf.term()) return;
     fake.log({ op: "sigterm" });
     process.exit(143);
   });

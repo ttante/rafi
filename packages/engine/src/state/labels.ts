@@ -38,7 +38,7 @@ export function trackerStatus(ticket: TicketState, view: Folded): TrackerStatus 
 
 export type GuiLabel =
   | "Draft" | "Planning" | "Awaiting plan approval" | "Ticketing" | "Ready" | "Building" | "QA" | "Awaiting you"
-  | "Paused" | "Pausing…" | "Failed" | "Recovering" | "Complete" | "Archived";
+  | "Paused" | "Pausing…" | "Failed" | "Crashed" | "Recovering" | "Complete" | "Archived";
 
 const PROJECT_LABELS: Readonly<Record<string, GuiLabel>> = Object.freeze({
   draft: "Draft", planning: "Planning", "awaiting-approval": "Awaiting plan approval", ticketing: "Ticketing",
@@ -54,8 +54,9 @@ export interface LabelLiveness {
 
 function buildLabel(build: BuildState, view: Folded, live: LabelLiveness): GuiLabel | null {
   if (live.recovering) return "Recovering";
-  const crashed = ["running", "waiting", "paused", "stopping"].includes(build.state) && !live.ownerAlive;
-  if (build.state === "failed" || crashed) return "Failed";
+  if (build.state === "failed") return "Failed";
+  // A derived crash (4.3): shown as "Crashed" here too, as rafi status and stats show say (M4 follow-up 1).
+  if (["running", "waiting", "paused", "stopping"].includes(build.state) && !live.ownerAlive) return "Crashed";
   if (build.state === "paused") return "Paused";
   if (build.pausing) return "Pausing…";
   if (build.state === "waiting") return "Awaiting you";

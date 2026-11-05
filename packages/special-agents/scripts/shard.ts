@@ -90,6 +90,22 @@ const MAP: Record<string, Meta | null> = {
   "Test-Driven Development": { dir: "process", name: "tdd", condition: "always", description: "Test-driven development discipline: identify behavior, write tests first, then minimal code." },
 };
 
+/**
+ * M5 (ARCH 10.1, C221): the tags that pick each pack in the 1.0 engine, beside `condition:` (which today's engine
+ * still reads). `always` is the small core every agent gets; every other pack reaches an agent only when one of its
+ * tags is among the ticket's.
+ */
+const TAGS: Record<string, readonly string[]> = {
+  core: ["always"], "git-safety": ["always"], "code-quality": ["always"], "definition-of-done": ["always"],
+  "response-expectations": ["always"], stack: ["always"], tdd: ["always"], testing: ["always"],
+  infra: ["infra"], database: ["database"], "project-docs": ["docs"], tickets: ["docs"], ci: ["infra", "testing"],
+  dependencies: ["security", "backend"], "api-docs": ["api"], release: ["docs"], "business-docs": ["docs"],
+  architecture: ["docs", "backend"], scalability: ["backend", "infra"], "data-governance": ["database", "security"],
+  security: ["security", "auth"], robustness: ["backend", "infra"], observability: ["backend", "infra"],
+  accessibility: ["ui", "mobile"], "ai-safety": ["ai"], "ai-governance": ["ai"], "ai-evals": ["ai"],
+  "ai-reproducibility": ["ai"], "ai-cost": ["ai"], "ai-batch-testing": ["ai"],
+};
+
 /** Expected number of packs emitted (one per section of the snapshot). */
 export const EXPECTED_PACK_COUNT = 30;
 
@@ -98,6 +114,7 @@ interface IndexEntry {
   category: string;
   path: string;
   condition: string;
+  tags: readonly string[];
   template: boolean;
   supersededByForeman?: boolean;
   order: number;
@@ -175,11 +192,14 @@ export function shard(snapshotText: string): ShardResult {
     const relPath = `${meta.dir}/${meta.name}.md`;
     files.push({ path: relPath, content: fm.join("\n") + body });
 
+    const tags = TAGS[meta.name];
+    if (!tags?.length) throw new Error(`Pack ${meta.name} has no tags`);
     index.push({
       name: meta.name,
       category: meta.dir,
       path: relPath,
       condition: meta.condition,
+      tags,
       template,
       ...(meta.supersededByForeman ? { supersededByForeman: true } : {}),
       order,
@@ -200,6 +220,7 @@ export function shard(snapshotText: string): ShardResult {
     indexLines.push(`    category: ${e.category}`);
     indexLines.push(`    path: ${e.path}`);
     indexLines.push(`    condition: ${e.condition}`);
+    indexLines.push(`    tags: [${e.tags.join(", ")}]`);
     indexLines.push(`    template: ${e.template}`);
     if (e.supersededByForeman) indexLines.push(`    supersededByForeman: true`);
     indexLines.push(`    order: ${e.order}`);

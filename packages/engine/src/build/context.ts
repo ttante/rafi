@@ -2,13 +2,16 @@
 // settings and tickets, its check environment and run records. The agent turn itself is turns/agent.ts.
 import type { DeliveryUnit, Settings, TicketV1 } from "rafi-spec/v1";
 import type { Engine } from "../api/engine.js";
-import type { Deps, Grants, SandboxTool } from "../deps/types.js";
+import type { SandboxTool } from "../ask/grants.js";
+import type { Deps, Grants } from "../deps/types.js";
 import { runsOf, type RunRecord } from "../facts/runs.js";
 import type { NewEvent } from "../log/types.js";
 import type { UiAnswer, UiQuestion } from "../ask/blocked.js";
 import type { AgentEvent } from "../agents/types.js";
 import type { Session } from "../agents/session.js";
 import type { CheckRules } from "../tools/session.js";
+import type { Digests } from "../tickets/load.js";
+import { ownedTicket, type Owned } from "../tickets/owned.js";
 import type { CheckEnv } from "./checks.js";
 import type { StopControl } from "./stop.js";
 
@@ -32,6 +35,8 @@ export interface BuildUI {
   question?(q: UiQuestion, signal?: AbortSignal): Promise<UiAnswer>;
   /** Ctrl+C in the build's terminal (C137); the CLI wires it to deps.terminal. */
   onInterrupt?(fn: () => void): () => void;
+  /** SIGHUP (the terminal closed) or SIGTERM to rafi (C183); the CLI wires it to deps.terminal too. */
+  onHangup?(fn: () => void): () => void;
 }
 
 export interface BuildContext {
@@ -41,6 +46,10 @@ export interface BuildContext {
   readonly run: string;
   readonly tickets: readonly TicketV1[];
   readonly units: readonly DeliveryUnit[];
+  /** P41: the digests of the files `tickets` and `units` were read from (the safe point compares them, C211). */
+  readonly digests?: Digests;
+  /** A unit's delivery in progress: its first git.intent compared delivery.yaml (C238, C283). */
+  readonly delivering?: { checked: boolean };
   readonly settings: Settings;
   /** Per role; a runtime switch (C46) changes it for this build only. */
   readonly agents: Record<"builder" | "qa", RoleAgent>;
@@ -54,12 +63,15 @@ export interface BuildContext {
   readonly control?: StopControl;
   /** M4 (speed): HEAD commit → tree, so a snapshot asks git for HEAD's tree once per commit. */
   readonly heads?: Map<string, string>;
+  /** Rafi-owned tickets with their run details and unit (tickets/owned.ts, M5 C272), loaded by the loop. */
+  readonly owned?: Map<string, Owned>;
 }
 
 export const setting = <T>(ctx: BuildContext, key: string): T => ctx.settings[key]?.value as T;
 
 export function ticketOf(ctx: BuildContext, id: string): TicketV1 {
-  const ticket = ctx.tickets.find((t) => t.id === id);
+  const ticket = ctx.tickets.find((t) => t.id === id) ?? ctx.owned?.get(id)?.ticket ??
+    ownedTicket(ctx.engine.fold().tickets[id]);
   if (!ticket) throw new Error(`ticket ${id} isn't in tickets.yaml`);
   return ticket;
 }

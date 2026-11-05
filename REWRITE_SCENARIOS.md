@@ -55,7 +55,7 @@ F-ONE and F-CHAIN save the plan-update setting as change-then-tell (the default)
 | F-CHAIN | Seven tickets `T1`–`T7` in queue order; `T5` depends on `T2`; the rest independent. One current-branch delivery unit per ticket, completion `none`; plan-update setting saved as change-then-tell | Blocked tickets, `--steps`, `--to-ticket`, batches (the example in `AI_FOREMAN_REWRITE.md` "Blocked tickets") |
 | F-NEEDS20 | Twenty tickets. `T2` installs PostgreSQL from the internet; `T4`'s tests start a local server; `T6` adds a package not yet installed; `T20` (the last ticket) calls a live service; `T11` needs an API key; `T13` has a check only a person can do; `T15` has a decision the Planner flagged as open. No plan-update setting saved | The upfront scan and permission check |
 | F-BIG34 | Thirty-four small independent tickets | Batch resume (SCN-3) |
-| F-BRANCH | Four tickets in two delivery units: one `per-ticket` unit of two tickets, and a two-unit stack (`dependency_mode: stack`). Fake `gh` and `glab` on `PATH` | Branch modes, completion modes, `--stacks` |
+| F-BRANCH | Four tickets in three delivery units: `U1`, a `per-ticket` unit of `T1` and `T2`; and a stack of two one-ticket units, `U2` (`T3`) then `U3` (`T4`, `depends_on: [U2]`, `dependency_mode: stack`). Fake `gh` and `glab` on `PATH` | Branch modes, completion modes, `--stacks` |
 | F-UI | `T1` with likely files `src/App.tsx` and `src/app.css` and no `ui` tag; `T2` tagged `database`; `T3` tagged `ai`. Project tags with file patterns (`ui`: `**/*.tsx`, `**/*.css`) | Tags, tools, instruction content |
 | F-MOBILE | `T1` tagged `mobile`, `T2` tagged `push` | Device lock, push boilerplate |
 | F-LEGACY | A real 0.10.x project, made by running 0.10.2 itself (create, plan, populate, one finished build, one blocked ticket, one saved answer) against the Codex fake (`rafi/test/fixtures/e2e-codex-faults.cjs`), once, then frozen as a fixture. This is a one-time fixture build, so it doesn't need a live provider. Includes `foreman.yaml`, an `autonomy` block, `tickets.build.pr_ready: true`, `.tickets/ticket-state.sqlite` and `.rafi/interviews/` | `rafi migrate` |
@@ -524,7 +524,7 @@ The fake records every request it gets in a transcript: role, ticket, step, sess
   - Step 4 follows each config key (worktrees kept, prefix used, depth limit enforced); the flag is rejected as unknown.
   - Step 5 asks "Start eligible dependency <id>: <title> instead?" and "Resume unfinished delivery unit <id> (N remaining)?".
   - Step 6 asks "Retry GitHub readiness check?".
-  - Step 7 (FLAG-ST-R6): the two `S` tickets share one builder invocation and the `M` ticket gets its own (transcript sessions). The explicitly named branch is exactly `release/x`, without the `work/` prefix; automatically named branches in the same build start with `work/`.
+  - Step 7 (FLAG-ST-R6): the two `S` tickets share one branch and one PR (one review), and the `M` ticket gets its own branch and PR; each ticket still gets its own fresh builder session (NEW-TAG-5). The explicitly named branch is exactly `release/x`, without the `work/` prefix; automatically named branches in the same build start with `work/`.
 
 #### S-BATCH-3 — Building on uncommitted work
 - **Covers:** FLAG-ST-14, NEW-KEEP-8, PRM-75, FILE-50, NEW-ENG-7, NEW-CAU-4
@@ -711,7 +711,7 @@ Most of these are fixed in 0.10.2 (`AI_FOREMAN_REWRITE.md` "Past bugs to turn in
 - **Covers:** SCN-9, OUT-7, OUT-2, FLAG-TK-21
 - **Setup:** F-BRANCH, `--branch-per-ticket`.
 - **Steps:** `rafi start . --steps 4 --branch-per-ticket`; `rafi tickets queue`; `rafi status`.
-- **Expected:** Four tickets finish across both delivery units. `tickets queue` doesn't say "No remaining tickets" while any remain. `rafi status` calls the finished build finished.
+- **Expected:** Four tickets finish across all three delivery units. `tickets queue` doesn't say "No remaining tickets" while any remain. `rafi status` calls the finished build finished.
 
 #### S-SCN-10 — Planner-written tickets are validated before they're applied
 - **Covers:** SCN-10, FLAG-TK-4, FMT-T1, FMT-T3, FMT-T4, FMT-T5, FMT-T6, FMT-T7, FMT-T8, FMT-T9, FMT-T16, FLAG-TK-20, OUT-5
@@ -783,8 +783,8 @@ Most of these are fixed in 0.10.2 (`AI_FOREMAN_REWRITE.md` "Past bugs to turn in
 #### S-TAG-5 — File patterns add tags, with reasons
 - **Covers:** NEW-TAG-4, OUT-19, FMT-T9, FMT-C13
 - **Setup:** F-UI.
-- **Steps:** `rafi start . --steps 1`; then remove `ui` from `T1` by hand and run again.
-- **Expected:** Before `T1` builds, `ui` is added because `src/App.tsx` matches `**/*.tsx`, shown with that reason, without an AI call. Rafi only adds tags; the second run adds `ui` again, with the reason.
+- **Steps:** `rafi start . --steps 1`; then run again on a fresh copy of the fixture (or after `rafi reset`): `ui` is added again, with the same reason.
+- **Expected:** Before `T1` builds, `ui` is added because `src/App.tsx` matches `**/*.tsx`, shown with that reason, without an AI call. Rafi only adds tags; the second run, on a fresh copy of the fixture (or after `rafi reset`), adds `ui` again, with the same reason.
 
 #### S-CTX-1 — Short, consistent instructions
 - **Covers:** NEW-INS-1, NEW-INS-2, NEW-INS-3, NEW-INS-4, NEW-INS-5, NEW-INS-7, NEW-INS-9, NEW-MAL-8, FILE-7, FILE-27, FMT-O2, NEW-KEEP-4, NEW-MEAS-4, FMT-C3, NEW-MAL-5, NEW-REQ-4
@@ -1240,8 +1240,8 @@ The whole-build scenarios above don't touch every command and flag. These shorte
 #### S-CLI-3 — Flags are one-off overrides
 - **Covers:** FLAG-ST-R1, FLAG-ST-R2, FLAG-ST-51, FLAG-RS-8, GUI-R21
 - **Setup:** F-CHAIN with `tickets.build.completion: pr` saved; a second copy with a locked setting in the org-policy layer (mechanism set in the architecture plan).
-- **Steps:** `rafi start . --steps 1 --completion none`; `rafi start . --steps 1 --set qa.model=m-qa`; `--set nosuch.key=1`; `--set` on the locked key; `rafi resume -y`; `rafi resume --auto-approve`.
-- **Expected:** The flag wins for that build and `rafi-config.yaml` is unchanged. `qa.model` applies to this build's QA turns only. The unknown key exits 1 naming it. The locked key is refused with the reason (Q-FLAG-1). `-y`, `--yes` and `--auto-approve` all work and do the same thing (FLAG-ST-17, FLAG-RS-8). Single-action confirmations such as `uninstall:cleanup` keep `--yes` (Q-FLAG-3).
+- **Steps:** `rafi start . --steps 1 --completion none`; `rafi start . --steps 1 --set agent_defaults.roles.qa.model=m-qa`; `--set nosuch.key=1`; `--set` on the locked key; `rafi resume -y`; `rafi resume --auto-approve`.
+- **Expected:** The flag wins for that build and `rafi-config.yaml` is unchanged. That model applies to this build's QA turns only. The unknown key exits 1 naming it. The locked key is refused with the reason (Q-FLAG-1). `-y`, `--yes` and `--auto-approve` all work and do the same thing (FLAG-ST-17, FLAG-RS-8). Single-action confirmations such as `uninstall:cleanup` keep `--yes` (Q-FLAG-3).
 
 #### S-CLI-4 — `rafi tickets`
 - **Covers:** CMD-6, FLAG-TK-1, FLAG-TK-2, FLAG-TK-3, FLAG-TK-4, FLAG-TK-5, FLAG-TK-6, FLAG-TK-7, FLAG-TK-8, FLAG-TK-9, FLAG-TK-10, FLAG-TK-11, FLAG-TK-12, FLAG-TK-13, FLAG-TK-14, FLAG-TK-15, FLAG-TK-16, FLAG-TK-18, FLAG-TK-19, FLAG-TK-20, FLAG-TK-22, FLAG-TK-25, PRM-50, PRM-51, PRM-52, PRM-53, PRM-54, PRM-55, PRM-56, PRM-57, PRM-58, PRM-59, OUT-4, OUT-30, OUT-31, FMT-S5, FMT-K1, FMT-T12, FMT-T13, FMT-T14, FMT-T15, FILE-24, FILE-25, FILE-29, FILE-32, FMT-C8
@@ -1335,7 +1335,7 @@ The whole-build scenarios above don't touch every command and flag. These shorte
 #### S-CLI-14 — `rafi reset`
 - **Covers:** CMD-13, CMD-14, CMD-32, FLAG-RE-1, FLAG-RE-2, FLAG-RE-3, PRM-100, GUI-R7, GUI-R10, FLAG-TK-9
 - **Setup:** F-DIRTY after an interrupted build, with a fake remote and fake `gh`.
-- **Steps:** In a terminal: `rafi reset`; pick "this build"; try restart-current and archive-restart, each with stash, discard and handled. Then "everything". Then reset the plan. Then `rafi reset` while a build is running. Then `rafi tickets reset T3`.
+- **Steps:** In a terminal: `rafi reset`; pick "this build"; try restart-current with stash, discard and handled, and archive-restart. Then "everything". Then reset the plan. Then `rafi reset` while a build is running. Then `rafi tickets reset T3`.
 - **Expected:**
   - The first question is "this build, everything, or the plan?". Each choice previews what it will do before doing it.
   - "This build" offers exactly restart-current and archive-restart, plus cancel. The start-over actions dropped by Q-CMD-3 (a) — archive-new-branch, new-branch, retain-merged, revert-branch and manual — aren't offered, and if `rafi reset` takes an action argument (set in the architecture plan), each of those values exits 1 as unknown.
@@ -1589,7 +1589,8 @@ scenario({
 
 | Suite | What runs | Budget | When |
 |---|---|---|---|
-| Fast | Every scenario in mode `next`, including the crash enumerations | Under 60 s on 4 workers | Every change (the gate for each milestone) |
+| Fast | The current and previous milestone's scenarios in mode `next` (their crash enumerations run in Full), the transition tests, the log tests and `scripts/check-rules.mjs` | Under 60 s on 4 workers | Every change |
+| Full | Every scenario in mode `next`, including the crash enumerations, plus everything in Fast | Reported, no limit | The end of every implementing session and every milestone (with Fast, the gate for each milestone) |
 | Process | S-START-1, S-START-5 step 4 (`--detach`, D5), S-NOT-1 step 3 (notifications from a background build), a sample of S-CRASH-1 with real SIGKILL, S-CRASH-3 (real Ctrl+C), S-SCN-5 and S-SCN-6 (real PTY and shell), S-PORT-1 (two real home directories), S-TOOL-3, S-CLI-12 (launcher under Node 18), S-ENG-5 (process tree), S-ENG-7 (flood and file handles) | A few minutes | Every change to the CLI entry, adapters or process handling, and before release |
 | Load | S-ENG-6: the new-engine live suite's Claude set and Codex set run side by side (D7) | The live suite's budget, run in parallel | Before each release, with the live suite |
 | Live | Opt-in, real providers, the new engine only. The D7 set, per provider, on tiny tickets (for example "add a function and its test"): one simple ticket (S-START-1); a 3-ticket batch (S-BATCH-1 trimmed to `T1`–`T3`); a blocked permission (S-SCN-7: `T2` needs internet and it isn't granted); kill the build, then resume (S-CRASH-1's clean run with one real SIGKILL mid-build). Also: the absolute `claude` path check (NEW-ADP-4, S-ENG-4); `rafi doctor --live-claude` (S-CLI-9); the Claude compaction check (NEW-ADP-1); one real Playwright run of S-TOOL-3, including the visible "show the browser" window | Well under an hour per provider; bounded by an explicit deadline, as the live scripts already require | Before each release, by hand, with authorization; not per change |

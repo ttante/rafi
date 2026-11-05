@@ -3,8 +3,8 @@
 import path from "node:path";
 import type { Settings } from "rafi-spec/v1";
 import type { Engine } from "../api/engine.js";
-import type { SandboxTool } from "../deps/types.js";
-import { noSandboxDecision, rememberNoSandbox, sandboxInfo, savedNoSandbox, stopLine, WARNING } from "./grants.js";
+import { type SandboxTool, noSandboxDecision, rememberNoSandbox, sandboxInfo, savedNoSandbox, stopLine, WARNING }
+  from "./grants.js";
 
 /** The no-sandbox warning in a terminal: true runs the tests without one (C60 d). */
 export interface UpfrontUI {

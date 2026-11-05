@@ -21,6 +21,12 @@ export const ticketEvents: readonly EventDef[] = [
   def("git.pushed", "state", "build", git),
   def("pr.created", "state", "build", git),
   def("pr.merged", "state", "build", git),
+  // P51: what a git or gh/glab action should leave, written by the owner right before it; no state change.
+  def("git.intent", "state", "build", {
+    op: z.enum(["branch", "commit", "push", "pr-create", "pr-ready", "auto-merge", "merge"]),
+    unit: nullableText, ticket: nullableText, ref: nullableText, old: nullableText, new: nullableText,
+    tree: nullableText,
+  }),
   // One event marks the moment delivery finishes, carrying the ticket's validation summary (review finding 3).
   def("delivery.done", "state", "ticket", {
     unit: nullableText,
@@ -30,7 +36,8 @@ export const ticketEvents: readonly EventDef[] = [
   }),
   def("unit.ready", "state", "build", { unit }),
   def("unit.merge_waiting", "state", "build", { unit, until: z.string().datetime() }),
-  def("unit.delivered", "state", "build", { unit, how: z.enum(["merged", "pushed", "pr-opened"]) }),
+  // `none` (M5 C282): delivery.yaml changed a ready unit's completion to none; its commits stay on its branch.
+  def("unit.delivered", "state", "build", { unit, how: z.enum(["merged", "pushed", "pr-opened", "none"]) }),
   def("unit.failed", "state", "build", {
     unit, category: z.enum(["transient", "conflict", "auth", "rejected"]), message: z.string(),
   }),

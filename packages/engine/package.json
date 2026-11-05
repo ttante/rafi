@@ -46,6 +46,7 @@
   "dependencies": {
     "better-sqlite3": "^13.0.3",
     "rafi-spec": "workspace:*",
+    "special-agents": "workspace:*",
     "yaml": "^2.5.1",
     "zod": "4.4.3"
   },

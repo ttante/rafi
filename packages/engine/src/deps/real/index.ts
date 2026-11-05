@@ -10,6 +10,7 @@ import { realClock } from "./clock.js";
 import { openRealDb } from "./db.js";
 import { realLogChanged } from "./watch.js";
 import { realExec, realGit } from "./exec.js";
+import { realFetch } from "./fetch.js";
 import { realFs } from "./fs.js";
 import { realProcesses } from "./processes.js";
 import { realServe } from "./serve.js";
@@ -33,6 +34,7 @@ export function realDeps(): Deps {
     fs: realFs(random),
     git: realGit,
     exec: realExec,
+    fetch: realFetch,
     checks: realChecks(),
     serve: realServe,
     spawnBackground: backgroundSpawner(process.argv[1] ?? ""),

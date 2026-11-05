@@ -1,3 +1,4 @@
+// Milestone: M1
 // The invariant checker on synthetic exports (plan choice C20), and the script grammar and engine.
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -1,3 +1,4 @@
+// Milestone: M2
 // M2 plan 11.4 step 6: the Codex fake models real Codex 0.164's `on-request` approvals under a permission profile
 // (free probes, .rafi-build/threat30-options.md and M2 plan 10.8 e+): commands and edits inside the sandbox run
 // without asking; a write to a profile's `read` path fails with EPERM; only a write outside the root, any write

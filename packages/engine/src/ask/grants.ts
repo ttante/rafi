@@ -1,8 +1,23 @@
 // Grants → the OS sandbox prefix for test runs (C40, ARCH 6.9) and what's missing on a machine without one (the
-// test environment, with C41's cache variables, is build/env.ts). Pure: deps/real/checks.ts only spawns the prefix.
+// test environment, with C41's cache variables, is agents/env.ts). Pure: deps/real/checks.ts only spawns the prefix.
 import path from "node:path";
 import { parse, stringify } from "yaml";
-import type { Fs, Grants, SandboxFacts, SandboxInfo, SandboxTool } from "../deps/types.js";
+import type { Fs } from "../deps/types.js";
+
+/** A need a grant covers (Q-FLAG-2, ARCH 7.11). */
+export type Need = "internet" | "local-servers" | "installs" | "services";
+
+export interface Grants {
+  readonly needs: readonly Need[];
+}
+
+/** What the machine has for a test sandbox; ask/grants.ts turns it into a SandboxInfo. */
+export type SandboxFacts =
+  | { platform: "darwin"; sandboxExec: boolean }
+  | { platform: NodeJS.Platform; bwrap: string | null; bwrapWorks: boolean };
+
+export type SandboxTool = "sandbox-exec" | "bwrap";
+export type SandboxInfo = { available: true; tool: SandboxTool } | { available: false; missing: string };
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 

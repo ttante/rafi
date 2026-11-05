@@ -1,3 +1,4 @@
+// Milestone: M3
 // M3 plan section 4, the copy rows: QA's run_check in a copy runs there (cwd, sandbox worktree, restore); your
 // worktree's files, HEAD, refs, the real index and `git worktree list` are as they were; the full fingerprint stays
 // bounded on F-HUGE's ignored folder. Cleanup's symlink and path rules are in engine/test/build/isolation.test.ts.

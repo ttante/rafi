@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { missingReason, sandboxInfo, sandboxPrefix } from "../../src/ask/grants.js";
-import { testEnv } from "../../src/build/env.js";
+import { testEnv } from "../../src/agents/env.js";
 
 const W = "/work/proj";
 const C = "/work/proj/.rafi/cache";

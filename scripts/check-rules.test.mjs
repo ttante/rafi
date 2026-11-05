@@ -33,6 +33,7 @@ test("time, timers, process, fs, child_process and database opens outside deps/r
     ["const e = process.env.HOME;", "banned-global"], ["process.exit(1);", "banned-global"],
     ['import fs from "node:fs";', "banned-import"], ['import { spawn } from "child_process";', "banned-import"],
     ['import Database from "better-sqlite3";', "banned-import"],
+    ['const r = await fetch("https://x");', "banned-global"], ['await globalThis.fetch("https://x");', "banned-global"],
   ]) {
     assert.deepEqual(run(E, code), [rule], code);
     assert.deepEqual(run("packages/engine/src/deps/real/clock.ts", code), [], `${code} in deps/real`);
@@ -40,6 +41,7 @@ test("time, timers, process, fs, child_process and database opens outside deps/r
   assert.deepEqual(run("packages/rafi/src/next/commands/x.ts", "const t = Date.now();"), ["banned-global"]);
   assert.deepEqual(run("packages/rafi/src/next/deps.ts", 'import fs from "node:fs";'), []);
   assert.deepEqual(run(E, 'const d = new Date("2026-11-01");'), [], "new Date(x) is a parse, not a read");
+  assert.deepEqual(run(E, 'await deps.fetch("https://x", {});'), [], "the fetch seam is the way (P47)");
 });
 
 test("module-level mutable state", () => {

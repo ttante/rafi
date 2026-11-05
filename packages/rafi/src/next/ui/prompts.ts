@@ -66,3 +66,19 @@ export async function askText(deps: Deps, prompt: string, o: { required: boolean
     deps.terminal.write(`${o.refusal}\n> `);
   }
 }
+
+/** Several numbered choices typed as "1,3" (or one number); returns the chosen indexes, or null (cancelled). */
+export async function chooseMany(deps: Deps, text: string, choices: readonly string[]): Promise<number[] | null> {
+  deps.terminal.write(`${text}\n${choices.map((c, i) => `  ${i + 1}. ${c}`).join("\n")}\n` +
+    "(type one number, or several separated by commas)\n> ");
+  for (let tries = 0; tries < 3; tries += 1) {
+    const line = await readLine(deps);
+    if (line === null) return null;
+    const picked = line.split(",").map((part) => Number(part.trim()));
+    if (picked.length && picked.every((n) => Number.isInteger(n) && n >= 1 && n <= choices.length)) {
+      return [...new Set(picked.map((n) => n - 1))];
+    }
+    deps.terminal.write(`Type numbers from 1 to ${choices.length}, separated by commas.\n> `);
+  }
+  return null;
+}

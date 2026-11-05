@@ -10,7 +10,7 @@ import path from "node:path";
 import { realFs } from "../../src/deps/real/index.js";
 import { fullFingerprint } from "../../src/facts/fingerprint.js";
 import { snapshot } from "../../src/facts/snapshot.js";
-import { isolationFor, makeCopy, removeCopy } from "../../src/build/isolation.js";
+import { isolationFor, makeCopy, removeCopy } from "../../src/facts/isolation.js";
 import { tempDir, testGit } from "../helpers.js";
 
 const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t",

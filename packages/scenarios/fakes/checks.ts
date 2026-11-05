@@ -2,8 +2,10 @@
 // outcomes the scenario sets, on the fake clock, so hung and slow tests take no real time. Writes are real (the
 // worktree, the cache, the harness home); the network is denied unless the grants allow it or no sandbox is used.
 //   tests: { "t1.test": { outcomes: ["fail(2)", "pass"], writes: ["coverage/"], homeCache, edits, creates, network,
-//     related } }
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+//     related, failWhen } }
+// M5 (C215): a run with no test files is the whole suite (every `*.test` file in the worktree, as a runner with no
+// arguments runs everything); `failWhen` makes a test's outcome follow the tree it runs on (F-TESTS "per commit").
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CheckResult, CheckRun, Clock, SandboxFacts } from "@rafi-ai/engine";
 
@@ -20,6 +22,9 @@ export interface FakeTest {
   related?: string[];
   /** Extra text a failing run prints (for instruction-injection tests). */
   output?: string;
+  /** C215: fails (one case) when `file` exists in the tree run on, holding `contains`, and `unless` doesn't; else
+   * passes. Outcomes aren't consumed. */
+  failWhen?: { file: string; contains?: string; unless?: string };
   /** Prints variables from the run's environment in these forms on every run (S-SEC-2's hostile test). */
   prints?: readonly { env: string; forms: readonly ("raw" | "base64" | "base64url" | "hex" | "url")[] }[];
 }
@@ -63,6 +68,21 @@ interface Parsed {
   readonly files: string[];
   readonly json: string | null;
   readonly list: boolean;
+}
+
+/** Every `*.test` file in the worktree, as a runner run with no file arguments finds them (rafi's folders aside). */
+function suiteFiles(cwd: string, dir = ""): string[] {
+  return readdirSync(path.join(cwd, dir), { withFileTypes: true }).flatMap((e) => {
+    const rel = dir ? `${dir}/${e.name}` : e.name;
+    if (e.isDirectory()) return e.name.startsWith(".") || e.name === "node_modules" ? [] : suiteFiles(cwd, rel);
+    return e.name.endsWith(".test") ? [rel] : [];
+  }).sort();
+}
+
+function treeFails(cwd: string, w: NonNullable<FakeTest["failWhen"]>): boolean {
+  const file = path.join(cwd, w.file);
+  if (!existsSync(file) || (w.unless && existsSync(path.join(cwd, w.unless)))) return false;
+  return !w.contains || readFileSync(file, "utf8").includes(w.contains);
 }
 
 function parse(cmd: string, args: readonly string[]): Parsed | null {
@@ -142,7 +162,8 @@ export function scriptedChecks(o: ScriptedChecksOptions) {
   };
   const cases = (cwd: string, files: readonly string[], run: CheckRun): Case[] => files.flatMap((file): Case[] => {
     const failure = sideEffects(cwd, file, run);
-    const m = /^fail\((\d+)\)$/.exec(outcome(file));
+    const when = o.tests[file]?.failWhen;
+    const m = /^fail\((\d+)\)$/.exec(when ? (treeFails(cwd, when) ? "fail(1)" : "pass") : outcome(file));
     if (failure) return [{ file, name: "reaches the network", passed: false, error: failure }];
     if (!m) return [{ file, name: "works", passed: true, error: null }];
     return Array.from({ length: Number(m[1]) }, (_, i) => ({ file, name: `case ${i + 1}`, passed: false,
@@ -192,6 +213,7 @@ export function scriptedChecks(o: ScriptedChecksOptions) {
         const related = Object.entries(o.tests).filter(([, t]) => (t.related ?? []).some((f) => changed.includes(f)));
         return result(0, related.map(([file]) => path.join(run.cwd, file)).join("\n") + (related.length ? "\n" : ""));
       }
+      if (!parsed.files.length && !parsed.list) parsed.files.push(...suiteFiles(run.cwd));
       const how = await wait(parsed.files, run, started);
       if (how === "aborted") {
         for (const file of parsed.files) outcome(file);

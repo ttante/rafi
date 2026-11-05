@@ -137,6 +137,8 @@ export interface FakeTerminal extends Terminal {
   /** No more typed input. */
   end(): void;
   interrupt(): void;
+  /** A signal to rafi other than Ctrl+C's: SIGHUP (its terminal closed) or SIGTERM. */
+  signal(name: "SIGHUP" | "SIGTERM"): void;
   /** A killed process prints nothing more: later writes are dropped (C156). */
   freeze(): void;
   /** Called after each write, with all the output so far. */
@@ -150,10 +152,11 @@ export function fakeTerminal(o: { tty: boolean; columns?: number; rows?: number 
   let out = "";
   let err = "";
   let all = "";
-  const interrupts = new Set<() => void>();
+  const interrupts = new Map<() => void, readonly string[]>();
   const writes = new Set<() => void>();
   let frozen = false;
   const wrote = () => { for (const fn of [...writes]) fn(); };
+  const fire = (name: string) => { for (const [fn, on] of [...interrupts]) if (on.includes(name)) fn(); };
   return {
     screen,
     write(text) { if (frozen) return; out += text; all += text; screen?.write(text); wrote(); },
@@ -162,7 +165,7 @@ export function fakeTerminal(o: { tty: boolean; columns?: number; rows?: number 
     columns: o.columns ?? 120,
     rows: o.rows ?? 24,
     setTitle(title) { if (screen) screen.title = title; },
-    onInterrupt(fn): Cancel { interrupts.add(fn); return () => interrupts.delete(fn); },
+    onInterrupt(fn, signals = ["SIGINT"]): Cancel { interrupts.set(fn, signals); return () => interrupts.delete(fn); },
     onResize: () => () => undefined,
     input,
     out: () => out,
@@ -170,7 +173,8 @@ export function fakeTerminal(o: { tty: boolean; columns?: number; rows?: number 
     all: () => all,
     send(text) { input.write(text); },
     end() { input.end(); },
-    interrupt() { for (const fn of [...interrupts]) fn(); },
+    interrupt() { fire("SIGINT"); },
+    signal: fire,
     freeze() { frozen = true; },
     onWrite(fn): Cancel { writes.add(fn); return () => writes.delete(fn); },
   };

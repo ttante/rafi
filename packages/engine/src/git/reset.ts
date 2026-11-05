@@ -5,6 +5,7 @@
 // `--force`, `clean`, a branch deletion or a remote call; untracked files are never touched.
 import path from "node:path";
 import type { Env, ExecOptions, ExecResult } from "../deps/types.js";
+import { hooksOff } from "../facts/snapshot.js";
 
 export interface ResetGit {
   git(args: string[], o: ExecOptions): Promise<ExecResult>;
@@ -19,7 +20,7 @@ export type ResetOutcome = { ok: true; archive: string | null; lines: string[] }
 const IDENTITY: readonly string[] = Object.freeze(["-c", "user.name=rafi", "-c", "user.email=rafi@localhost"]);
 
 async function run(deps: ResetGit, cwd: string, args: string[], env: Env = deps.env): Promise<string> {
-  const r = await deps.git(args, { cwd, env });
+  const r = await deps.git(args, { cwd, env: hooksOff(env, cwd) });
   if (r.code !== 0) throw new Error(`git ${args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? ""} ` +
     `failed: ${r.stderr.trim().split("\n")[0]}`);
   return r.stdout.trim();
@@ -43,6 +44,43 @@ async function archive(deps: ResetGit, cwd: string, runId: string, index: string
     `rafi: unfinished work of build ${runId}, archived by rafi reset`]);
   await run(deps, cwd, ["update-ref", `refs/heads/${branch}`, commit, ""]);
   return branch;
+}
+
+/** The worktrees (other than your checkout) whose branch is one of `branches`, from `git worktree list`. */
+async function treesOf(deps: ResetGit, cwd: string, branches: readonly string[]): Promise<string[]> {
+  const out = await run(deps, cwd, ["worktree", "list", "--porcelain"]);
+  const main = path.resolve(cwd);
+  return out.split("\n\n").map((block) => ({ dir: /^worktree (.+)$/m.exec(block)?.[1] ?? "",
+    branch: /^branch refs\/heads\/(.+)$/m.exec(block)?.[1] ?? "" }))
+    .filter((t) => t.dir && path.resolve(t.dir) !== main && branches.includes(t.branch)).map((t) => t.dir);
+}
+
+/**
+ * C261: a build that worked in worktrees (per-ticket or batch branches) is reset where it worked: in each of its
+ * worktrees with changes to tracked files, never your checkout, so your own edits and untracked files there stay as
+ * they are. A build that worked in your checkout is reset there, as before. Archives are `rafi/archive/<run>`, then
+ * `-2`, `-3` for further worktrees.
+ */
+export async function resetTrees(deps: ResetGit, cwd: string, a: ResetAction, branches: readonly string[]):
+  Promise<ResetOutcome> {
+  let trees: string[];
+  try { trees = branches.length ? await treesOf(deps, cwd, branches) : []; } catch (error) {
+    return { ok: false, message: (error as Error).message };
+  }
+  if (!trees.length) return resetWorktree(deps, cwd, a);
+  const lines: string[] = [];
+  let archive: string | null = null;
+  let n = 0;
+  for (const dir of trees) {
+    if (!(await changedTracked(deps, dir).catch(() => false))) continue;
+    const named = { ...a, run: n++ ? `${a.run}-${n}` : a.run };
+    const done = await resetWorktree(deps, dir, named);
+    if (!done.ok) return done;
+    archive ??= done.archive;
+    lines.push(`In ${path.relative(cwd, dir)}: ${done.lines.join(" ")}`);
+  }
+  return { ok: true, archive, lines: lines.length ? [...lines, "Your checkout was left as it is."]
+    : ["The build's worktrees have no changes to tracked files; your checkout was left as it is."] };
 }
 
 export async function resetWorktree(deps: ResetGit, cwd: string, a: ResetAction, o: { index?: string } = {}):

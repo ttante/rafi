@@ -42,7 +42,9 @@ for (const runtime of ["codex", "claude"] as const) {
       const r = await live.done;
       assert.equal(r.code, 130, r.output.slice(-1500));
       assert.ok(cancelSeen(s.log, runtime), "the fake took rafi's cancel");
-      assert.ok(ops(s.log).some((o) => o.op === "sigint"), "the real SIGINT reached the provider's process group");
+      // M4 follow-up 2: each provider leads its own process group, so the terminal's SIGINT reaches only rafi, and
+      // the provider gets rafi's cancel alone (before, it was in the foreground group and saw the SIGINT too).
+      assert.ok(!ops(s.log).some((o) => o.op === "sigint"), "the terminal's SIGINT reached only rafi");
       const e = await exported(s.o);
       assert.deepEqual(e.events.filter((x) => x.type === "build.stopped").map((x) => x.data), [{ cause: "ctrl-c" }]);
       assert.ok(e.events.some((x) => x.type === "turn.cancelled" && (x.data as { confirmed: boolean }).confirmed));

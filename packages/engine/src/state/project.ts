@@ -73,6 +73,8 @@ function tickets(p: ProjectState, event: StateEvent, data: Data): ProjectState |
   const s = p.state;
   if ((s === "ticketing" || s === "draft") && event.type === "tickets.populated") return to(p, "ready");
   if (s === "draft" && event.type === "future_work.accepted") return to(p, "ready");
+  // ARCH 4.4 :603: in ready, complete or building it changes nothing itself (its ticket's tickets.changed does).
+  if (["ready", "complete", "building"].includes(s) && event.type === "future_work.accepted") return p;
   if (s === "draft" && event.type === "tickets.changed" && addsTicket(data)) return to(p, "ready");
   if (s === "complete" && event.type === "plan.changed") return to(p, "ready");
   if (s === "complete" && event.type === "tickets.changed" && addsTicket(data)) return to(p, "ready");

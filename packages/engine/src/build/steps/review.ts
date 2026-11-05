@@ -6,8 +6,10 @@ import { changedBetween, snapshot } from "../../facts/snapshot.js";
 import { escapeControl } from "../../log/redact.js";
 import { reviewMessage, type ReviewDelta } from "../../instructions/messages/review.js";
 import { allEvents, append, knownRuns, setting, ticketOf, ticketRuns, type BuildContext } from "../context.js";
-import { agentTurn, qaBroke, sessionUsed, type AgentOutcome } from "../../turns/agent.js";
-import { isolated } from "../isolation.js";
+import { agentTurn, closeSession, qaBroke, sessionUsed, type AgentOutcome } from "../../turns/agent.js";
+import { isolated, type DriftContext } from "../../facts/isolation.js";
+import { fixedTags } from "../../instructions/packs.js";
+import { addTags, changedByBuilder, tagPatterns } from "../../instructions/tags.js";
 import {
   affectedRequirements, digest, failStep, readRequirements, trustedOf, type Requirements,
 } from "./common.js";
@@ -119,9 +121,16 @@ export async function reviewStep(ctx: BuildContext, id: string, attempt: number,
   const { warning, affected } = fileWarning(reqs);
   if (warning) ctx.ui.line(`${id}: ${warning}; QA can't verify those requirements against it. The build goes on.`);
   const snap = await snapshot(ctx.deps, ctx.project, `${id}-review`, { heads: ctx.heads });
+  await addTags(ctx.engine, ctx.run, ticket, snap.ok ? await changedByBuilder(ctx.engine, id, snap) : [],
+    { patterns: tagPatterns(ctx.settings, await fixedTags(ctx.deps.fs)), why: "changed",
+      line: (text) => ctx.ui.line(text) });
   const review: Review = { id, attempt, redo, reqs, count, warning, files: snap.ok ? snap.files : [],
     optional: [...(reqs.written?.person_only ?? []), ...affected] };
-  const out = await isolated(ctx, ticket, review, snap.ok ? snap.tree : null, (root) => reviewTurn(ctx, review, root));
+  const drift: DriftContext = { deps: ctx.deps, project: ctx.project, line: (text) => ctx.ui.line(text),
+    record: (data) => append(ctx, id, { type: "qa.isolation", data }),
+    close: (root) => closeSession(ctx, id, "qa", "verdict", root) };
+  const out = await isolated(drift, ticket, review, snap.ok ? snap.tree : null,
+    (root): Promise<AgentOutcome> => reviewTurn(ctx, review, root));
   if (!out.ok) {
     ctx.ui.line(`${id}: QA broke (no verdict): ${out.reason.split("\n")[0]!.slice(0, 200)}`);
     return failStep(ctx, id, out);

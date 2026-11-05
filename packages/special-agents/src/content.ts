@@ -52,6 +52,8 @@ export interface PackIndexEntry {
   category: string;
   path: string;
   condition: string;
+  /** M5 (C221): the tags that pick the pack in the 1.0 engine; the old engine reads `condition`. */
+  tags?: string[];
   template: boolean;
   supersededByForeman?: boolean;
   order: number;

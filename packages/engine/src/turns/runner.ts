@@ -18,7 +18,8 @@ import { replySignature, turnCircling } from "./circling.js";
 import { acceptRepair, readReply, repairMessage } from "./repair.js";
 
 export interface TurnSpec {
-  readonly run: string;
+  /** Null for a turn outside a build (C231's risk-note repair). */
+  readonly run: string | null;
   readonly ticket: string | null;
   readonly meta: TurnMeta;
   readonly instructions?: string;
@@ -43,7 +44,7 @@ export interface TurnIO {
   decide?(request: PermissionRequest, repair: boolean): Decision;
   /** rafi's own rules on a schema-valid reply (references, scope); returns errors in plain words. */
   validate?(value: unknown): string[] | Promise<string[]>;
-  /** A fresh session after the provider exited or lost the session. */
+  /** A fresh session after the provider exited or lost the session, or after rafi ended it. */
   fresh?(): Promise<Agent>;
   /** The runtime question (C46) for auth and an unknown-reset quota; without one, the turn fails. */
   ask?(kind: "auth" | "quota", message: string): Promise<"retry" | "switch" | "cancel">;
@@ -76,6 +77,8 @@ interface Sent {
   ms: number;
   /** What the turn's tools did (`tool command`), for turn-level circling (C112). */
   touched: string[];
+  /** Rafi ended the provider (an unconfirmed cancel, or a kill): a retry needs a fresh agent (M4 follow-up 3). */
+  ended: boolean;
 }
 
 const CONFIRM_MS = 30_000;
@@ -93,21 +96,21 @@ async function consume(deps: Deps, agent: Agent, request: TurnRequest, spec: Tur
   const started = deps.clock.now().getTime();
   const controller = new AbortController();
   const sent: Sent = { terminal: null, timedOut: false, stopped: null,
-    usage: { input: 0, output: 0, cost: null, measured: false }, ms: 0, touched: [] };
+    usage: { input: 0, output: 0, cost: null, measured: false }, ms: 0, touched: [], ended: false };
   let forced: () => void = () => undefined;
   const ended = new Promise<"forced">((resolve) => { forced = () => resolve("forced"); });
   const cancels: (() => void)[] = [];
   let idle: () => void = () => undefined;
+  const end = () => { sent.ended = true; void agent.close(); forced(); };
   const arm = () => {
     idle();
     idle = deps.clock.timer(limits.idleMs, () => {
       sent.timedOut = true;
       controller.abort();
-      cancels.push(deps.clock.timer(CONFIRM_MS, () => { void agent.close(); forced(); }, "timeout"));
+      cancels.push(deps.clock.timer(CONFIRM_MS, end, "timeout"));
     }, "timeout");
   };
   arm();
-  const end = () => { void agent.close(); forced(); };
   const onStop = () => {
     if (sent.stopped || sent.timedOut) return;
     sent.stopped = io.stop?.reason === "ctrl-c" ? "ctrl-c" : "stop";
@@ -253,7 +256,8 @@ export async function runTurn(deps: Deps, first: Agent, spec: TurnSpec, io: Turn
       delay_ms: delay, reason })]);
     if (delay) await deps.clock.sleep(delay, "backoff");
     note = retryNote(judged.category, attempt, limits.retries, judged.errors);
-    if (judged.category === "provider" && sent.terminal?.kind !== "error" && io.fresh) {
+    // A provider that exited or lost its session, or one rafi ended, gets a fresh session (5.2).
+    if (((judged.category === "provider" && sent.terminal?.kind !== "error") || sent.ended) && io.fresh) {
       agent = await io.fresh();
       instructions = true;
     }

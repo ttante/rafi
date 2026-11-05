@@ -1,9 +1,11 @@
+// Milestone: M2
 // M2 plan 11.4 A7–A10 (threat 30, ARCH 7.11): the Codex builder runs under rafi's permission profile, never the
 // legacy sandbox; approvals go to rafi, not Codex's reviewer; an escalation and a permissions request are refused.
 // Against the Codex fake's on-request model (fidelity-codex-profile.test.ts). Red runs: .rafi-build/M2-red/add-<n>.log.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { codexAgent, type AgentEvent, type TurnRequest } from "@rafi-ai/engine/agents";
+import { realClock } from "@rafi-ai/engine/deps/real";
 import type { EventsExport } from "../checks/invariants.js";
 import { codexStream } from "../fakes/codex/stream.js";
 import { B, on } from "../fakes/script/behaviors.js";
@@ -11,6 +13,8 @@ import type { Behavior } from "../fakes/script/engine.js";
 import { configure, tempRoot } from "../fixtures/common.js";
 import { fTestsLocal } from "../fixtures/f-tests.js";
 import { newComputer, rafiRunner } from "../harness/rafi.js";
+
+const clock = realClock();
 
 type Msg = Record<string, unknown>;
 const schema = { name: "builder", json: { type: "object" } };
@@ -25,14 +29,16 @@ async function drain(turn: AsyncIterable<AgentEvent>) {
 function codex(o: Record<string, unknown> = {}, behaviors: Behavior[] = [{ reply: { kind: "done" } }]) {
   let i = 0;
   const fake = codexStream(() => behaviors[Math.min(i++, behaviors.length - 1)]!);
-  const agent = codexAgent({ deps: { agents: { codex: () => fake.stream, claudeQuery: unavailable } },
+  const agent = codexAgent({ deps: { clock, agents: { codex: () => fake.stream, claudeQuery: unavailable } },
     cwd: tempRoot(), executable: "codex", env: {}, ...o });
   const all = (method: string) => (fake.record.wire as Msg[]).filter((m) => m.method === method)
     .map((m) => m.params as Msg);
   return { agent, all, record: fake.record };
 }
 
-const ROOTS = { ".": "write", ".rafi": "read", ".rafi/cache": "write", ".tickets": "read", ".git": "read" };
+// P48 (M5): rafi-config.yaml joined the read-only entries.
+const ROOTS = { ".": "write", ".rafi": "read", ".rafi/cache": "write", ".tickets": "read", ".git": "read",
+  "rafi-config.yaml": "read" };
 
 test("A7: the builder's thread and every turn select rafi's profile; no legacy sandbox or sandboxPolicy is sent",
   async () => {

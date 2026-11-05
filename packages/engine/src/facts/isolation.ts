@@ -7,16 +7,25 @@
 import path from "node:path";
 import type { TicketV1 } from "rafi-spec/v1";
 import type { Clock, ExecOptions, ExecResult, Env, Fs } from "../deps/types.js";
-import { fullFingerprint } from "../facts/fingerprint.js";
-import { changedBetween, snapshot } from "../facts/snapshot.js";
+import { fullFingerprint } from "./fingerprint.js";
+import { changedBetween, hooksOff, snapshot, type SnapshotDeps } from "./snapshot.js";
 import { escapeControl } from "../log/redact.js";
-import { append, type BuildContext } from "./context.js";
-import { closeSession, type AgentOutcome } from "../turns/agent.js";
 
 export interface CopyDeps {
   git(args: string[], o: ExecOptions): Promise<ExecResult>;
   fs: Pick<Fs, "stat" | "realpath" | "remove">;
   env: Env;
+}
+
+/** What a review's drift check needs from the build (C180): narrow, so `facts/` doesn't depend on `build/`. */
+export interface DriftContext {
+  readonly deps: CopyDeps & SnapshotDeps & { clock: Clock };
+  readonly project: string;
+  line(text: string): void;
+  /** Records `qa.isolation` with this data. */
+  record(data: unknown): Promise<unknown>;
+  /** Closes QA's verdict session rooted at `root` (the project when omitted). */
+  close(root?: string): Promise<void>;
 }
 
 export const COPY_ROOT = path.join(".rafi", "cache", "qa-copy");
@@ -29,7 +38,7 @@ export function isolationFor(ticket: { risk: string; qa_isolation?: string }): {
 }
 
 async function git(deps: CopyDeps, cwd: string, args: string[]): Promise<string> {
-  const r = await deps.git(args, { cwd, env: deps.env });
+  const r = await deps.git(args, { cwd, env: hooksOff(deps.env, cwd) });
   if (r.code !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr.trim().split("\n")[0]}`);
   return r.stdout.trim();
 }
@@ -64,7 +73,7 @@ export async function makeCopy(deps: CopyDeps, project: string, tree: string, na
   const dir = await checkedCopy(deps, project, path.join(project, COPY_ROOT, name));
   // Threat 1 (10.8): a copy a crash left behind at this path is removed first, never reused.
   if (await deps.fs.stat(dir)) {
-    await deps.git(["worktree", "remove", "--force", dir], { cwd: project, env: deps.env });
+    await deps.git(["worktree", "remove", "--force", dir], { cwd: project, env: hooksOff(deps.env, project) });
     await deps.fs.remove(dir, { recursive: true });
   }
   await git(deps, project, ["worktree", "prune"]);
@@ -87,8 +96,8 @@ const ms = (deps: { clock: Clock }, since: number) => deps.clock.now().getTime()
  * in-place session closed and its reply discarded, the review redone in a new session rooted at a copy of the
  * builder's snapshot, that session closed, the copy removed (C119, C128). Records `qa.isolation` either way.
  */
-export async function isolated(ctx: BuildContext, ticket: TicketV1, r: { id: string; attempt: number },
-  before: string | null, review: (root: string) => Promise<AgentOutcome>): Promise<AgentOutcome> {
+export async function isolated<T>(ctx: DriftContext, ticket: TicketV1, r: { id: string; attempt: number },
+  before: string | null, review: (root: string) => Promise<T>): Promise<T> {
   const { deps } = ctx;
   const iso = isolationFor(ticket);
   const time = { copy: 0, hash: 0, verify: 0, cleanup: 0 };
@@ -103,28 +112,28 @@ export async function isolated(ctx: BuildContext, ticket: TicketV1, r: { id: str
   const drifted = before !== null && after.ok && (after.tree !== before || (full && fullAfter!.fp !== full.fp));
   const size = { files: full?.files ?? 0, bytes: full?.bytes ?? 0 };
   if (!drifted) {
-    await append(ctx, r.id, { type: "qa.isolation", data: { mode: "in-place", ...size, ms: time,
-      why: `${iso.why} unchanged during the review; no copy, because the builder never runs during a review` } });
+    await ctx.record({ mode: "in-place", ...size, ms: time,
+      why: `${iso.why} unchanged during the review; no copy, because the builder never runs during a review` });
     return out;
   }
   const files = after.ok ? await changedBetween(deps, ctx.project, before, after.tree) : [];
   const named = files.map((f) => escapeControl(f)).join(", ") || "your files";
-  ctx.ui.line(`${r.id}: source drift during QA's review (${named} changed); QA reviews again in full on a copy of ` +
+  ctx.line(`${r.id}: source drift during QA's review (${named} changed); QA reviews again in full on a copy of ` +
     "the builder's snapshot. Your changes stay as they are.");
-  await closeSession(ctx, r.id, "qa", "verdict");
+  await ctx.close();
   started = deps.clock.now().getTime();
   const copy = await makeCopy(deps, ctx.project, before, `${r.id}-${r.attempt}`);
   time.copy = ms(deps, started);
-  let redone: AgentOutcome;
+  let redone: T;
   try {
     redone = await review(copy);
   } finally {
-    await closeSession(ctx, r.id, "qa", "verdict", copy);
+    await ctx.close(copy);
     started = deps.clock.now().getTime();
     await removeCopy(deps, ctx.project, copy);
     time.cleanup = ms(deps, started);
   }
-  await append(ctx, r.id, { type: "qa.isolation", data: { mode: "copy", ...size, ms: time,
-    why: `source drift: ${named} changed during the in-place review (${iso.why}); redone on a copy` } });
+  await ctx.record({ mode: "copy", ...size, ms: time,
+    why: `source drift: ${named} changed during the in-place review (${iso.why}); redone on a copy` });
   return redone;
 }

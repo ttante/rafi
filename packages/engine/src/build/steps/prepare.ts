@@ -4,6 +4,8 @@ import path from "node:path";
 import type { RequirementsReply, TicketV1 } from "rafi-spec/v1";
 import { boundary } from "../../deps/hooks.js";
 import { prepareMessage } from "../../instructions/messages.js";
+import { fixedTags } from "../../instructions/packs.js";
+import { addQaTags, tagPatterns } from "../../instructions/tags.js";
 import { requirementCheckProblem } from "../../tools/session.js";
 import { append, rulesFor, ticketOf, type BuildContext } from "../context.js";
 import { agentTurn } from "../../turns/agent.js";
@@ -47,6 +49,8 @@ export async function prepareStep(ctx: BuildContext, id: string, attempt: number
     } });
   if (!out.ok) return failStep(ctx, id, out);
   const reply = out.value as RequirementsReply;
+  await addQaTags(ctx.engine, ctx.run, ticket, reply.add_tags, tagPatterns(ctx.settings, await fixedTags(ctx.deps.fs)),
+    (text) => ctx.ui.line(text));
   const markdown = render(ticket, reply, depth.depth);
   await boundary(ctx.deps.hooks, `7: writing the requirements file (${id})`);
   await ctx.deps.fs.writeAtomic(path.join(ctx.project, rel), markdown);

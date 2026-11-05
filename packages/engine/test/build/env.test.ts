@@ -3,7 +3,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { agentEnv, codexShellPolicy, declaredValues, MIN_DECLARED, testEnv } from "../../src/build/env.js";
+import { codexShellPolicy } from "../../src/agents/codex/profile.js";
+import { agentEnv, declaredValues, MIN_DECLARED, testEnv } from "../../src/agents/env.js";
 import { redactor } from "../../src/log/redact.js";
 
 const SHELL = Object.freeze({

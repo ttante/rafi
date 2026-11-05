@@ -1,3 +1,4 @@
+// Milestone: M1
 // D9 (ARCH 11.7): the installed Agent SDK drives the fake `claude` executable.
 import { test } from "node:test";
 import assert from "node:assert/strict";

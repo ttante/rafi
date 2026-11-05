@@ -1,7 +1,7 @@
 // Harness Deps (SCN 7.2): real fs, git, exec and db wrapped by the fence; the fake clock, notifier and
 // terminal; crash and pause hooks; a seeded random (plan choice C24); a per-"computer" state folder.
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ClaudeQuery, CodexSpawn, Db, DbStatement, Deps, Env, JsonRpcStream } from "@rafi-ai/engine";
@@ -12,6 +12,8 @@ import type { FakeTerminal } from "../fakes/terminal.js";
 import { scriptedChecks, type CheckLogEntry, type FakeTest } from "../fakes/checks.js";
 import { defaultAgents, type ScriptState } from "./agents.js";
 import type { MemoryServe } from "../fakes/serve.js";
+import { httpFetch, type FakeHttp } from "../fakes/http.js";
+import { runGh, type FakeGh } from "../fakes/gh.js";
 import { Fence } from "./fence.js";
 import { hookControl, type HookControl } from "./hooks.js";
 
@@ -31,6 +33,20 @@ export const GIT_BINARY = (() => {
     return "git";
   }
 })();
+
+/**
+ * M5 slice 0's profile (test code only): with RAFI_PROFILE set to a file, each git and exec call appends one JSON
+ * line `{job, kind, cmd, ms}`, so the fast suite's git cost per job can be counted. Unset, nothing is written.
+ */
+async function profiled<R>(kind: string, cmd: string, run: () => Promise<R>): Promise<R> {
+  const file = process.env.RAFI_PROFILE;
+  if (!file) return run();
+  const started = performance.now();
+  try { return await run(); } finally {
+    const job = path.basename(process.argv.find((a) => /\.(test|scenario)\.ts$/.test(a)) ?? "engine-tests");
+    appendFileSync(file, `${JSON.stringify({ job, kind, cmd, ms: performance.now() - started })}\n`);
+  }
+}
 
 /** Folders found missing (a fake HOME such as `/home/u` can't appear later); existing ones are looked at each time. */
 const MISSING = new Set<string>();
@@ -83,6 +99,10 @@ export interface Computer {
   readonly home: string;
   /** The fake agents' script rules (first match wins, else the role happy path) and their transcript. */
   readonly script: ScriptState;
+  /** P47: the scripted tracker sources (Linear, Jira, URLs) and every request rafi sent them. */
+  readonly http: FakeHttp;
+  /** M5 (C216): the fake `gh` and `glab`, which deps.exec routes to in-process. */
+  readonly gh: FakeGh;
   /** C139: who watches which database; a commit by one instance tells the others on the same file. */
   readonly bus: { instance: string; file: string; fn: () => void }[];
 }
@@ -92,6 +112,9 @@ export interface Computer {
 export interface StorageFaults {
   readonly tornWrite?: RegExp;
   readonly at?: number;
+  /** With tornWrite: the write is cut at its rename instead: its temp file, named as `deps/real/fs.ts` names it
+   * (`.<name>.<id>.tmp` beside the file), is written whole, then the instance dies before the rename. */
+  readonly atRename?: boolean;
   readonly busyMs?: number;
   readonly fullOnAppend?: number;
   /** C157 "refused large write": a blob over this many bytes fails with SQLITE_FULL (optional data that won't fit). */
@@ -99,6 +122,10 @@ export interface StorageFaults {
   /** The at-th BEGIN this instance runs is refused once as busy, so its write waits on a `backoff` timer before it
    * retries (a race test's interleaving point: another command writes in that wait, as a held lock would allow). */
   readonly busyAt?: number;
+  /** C229: a git call this instance makes fails as git would (exit 128 with this stderr) when the predicate picks
+   * it; lifted for the next instance (`rafi resume` runs without it). */
+  readonly git?: (args: readonly string[], cwd: string,
+    env: Readonly<Record<string, string | undefined>> | undefined) => string | null;
 }
 
 function faulty(real: Db, f: StorageFaults, now: () => number): Db {
@@ -157,7 +184,8 @@ function recordedAgents(computer: Computer): Deps["agents"] {
       computer.agentEnvs.push({ kind: "codex", env: o.env });
       const stream = codex(o);
       return { ...stream, write: (message, meta) => { sent(message); stream.write(message, meta); },
-        onMessage: (fn) => stream.onMessage(fn), onClose: (fn) => stream.onClose(fn), close: () => stream.close() };
+        onMessage: (fn) => stream.onMessage(fn), onClose: (fn) => stream.onClose(fn), close: () => stream.close(),
+        kill: () => stream.kill() };
     } : unavailable("codex"),
     claudeQuery: query ? (params) => {
       computer.childEnvs.push((params.options.env as Env | undefined) ?? computer.env);
@@ -173,9 +201,25 @@ function recordedAgents(computer: Computer): Deps["agents"] {
   };
 }
 
+/** deps.git: the fence, the race hook, the env record, C229's fault, then the real git by its path. */
+function harnessGit(computer: Computer, fence: Fence, o: { onGit?: (args: readonly string[]) => Promise<void> | void;
+  faults?: StorageFaults }): Deps["git"] {
+  return (args, opts) => computer.clock.track(async () => {
+    fence.check(`git ${args[0]}`);
+    await o.onGit?.(args);
+    computer.childEnvs.push(opts.env ?? computer.env);
+    const refused = o.faults?.git?.(args, opts.cwd, opts.env);
+    if (refused) return { code: 128, stdout: "", stderr: refused };
+    const env = opts.env && noGlobalConfig(opts.env) ? { ...opts.env, GIT_CONFIG_GLOBAL: os.devNull } : opts.env;
+    return profiled("git", args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "",
+      () => realExec(GIT_BINARY, args, { ...opts, env }));
+  });
+}
+
 export function harnessDeps(computer: Computer, terminal: FakeTerminal,
   o: { cwd: string; instance: string; env?: Record<string, string>; faults?: StorageFaults;
-    onGit?: (args: readonly string[]) => Promise<void> | void }) {
+    onGit?: (args: readonly string[]) => Promise<void> | void;
+    onRead?: (file: string) => Promise<void> | void }) {
   const fence = new Fence();
   const clock = computer.clock;
   const id = o.instance;
@@ -206,6 +250,10 @@ export function harnessDeps(computer: Computer, terminal: FakeTerminal,
   const torn = o.faults?.tornWrite;
   const fs = fence.fs(torn ? { ...real, writeAtomic: async (p, d) => {
     if (torn.test(p) && ++writes === (o.faults?.at ?? 1)) {
+      if (o.faults?.atRename) {
+        await real.writeAtomic(path.join(path.dirname(p), `.${path.basename(p)}.${random.id()}.tmp`), d);
+        hooks.crashNow(`write of ${path.basename(p)} torn at its rename (${writes})`);
+      }
       const bytes = typeof d === "string" ? Buffer.from(d) : Buffer.from(d);
       await real.writeAtomic(p, bytes.subarray(0, Math.floor(bytes.length / 2)));
       hooks.crashNow(`torn write of ${path.basename(p)} (${writes})`);
@@ -220,21 +268,19 @@ export function harnessDeps(computer: Computer, terminal: FakeTerminal,
     notifier: computer.notifier,
     terminal,
     fs: {
-      read: tracked(fs.read), readBytes: tracked(fs.readBytes), writeAtomic: tracked(fs.writeAtomic),
+      read: tracked(async (file) => { await o.onRead?.(file); return fs.read(file); }),
+      readBytes: tracked(fs.readBytes), writeAtomic: tracked(fs.writeAtomic),
       append: tracked(fs.append), rename: tracked(fs.rename), remove: tracked(fs.remove), mkdir: tracked(fs.mkdir),
       stat: tracked(fs.stat), realpath: tracked(fs.realpath), list: tracked(fs.list),
     },
-    git: (args, opts) => clock.track(async () => {
-      fence.check(`git ${args[0]}`);
-      await o.onGit?.(args);
-      computer.childEnvs.push(opts.env ?? computer.env);
-      const env = opts.env && noGlobalConfig(opts.env) ? { ...opts.env, GIT_CONFIG_GLOBAL: os.devNull } : opts.env;
-      return realExec(GIT_BINARY, args, { ...opts, env });
-    }),
+    git: harnessGit(computer, fence, o),
     exec: (cmd, args, opts) => clock.track(() => {
       computer.childEnvs.push(opts.env ?? computer.env);
-      return realExec(cmd, args, opts);
+      const name = path.basename(cmd).replace(/\.exe$/i, "");
+      if (name === "gh" || name === "glab") return runGh(computer.gh, name, args, opts);
+      return profiled("exec", path.basename(cmd), () => realExec(cmd, args, opts));
     }),
+    fetch: (url, opts) => clock.track(() => httpFetch(computer.http)(url, opts)),
     checks: scriptedChecks({ clock: clock.forInstance(id), home: computer.home, log: computer.checks.log,
       get tests() { return computer.checks.tests; }, get sandbox() { return computer.checks.sandbox; },
       get listing() { return computer.checks.listing; } }),

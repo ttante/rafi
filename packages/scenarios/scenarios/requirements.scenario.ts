@@ -7,7 +7,8 @@ import type { TranscriptEntry } from "../checks/transcript.js";
 import { B, on } from "../fakes/script/behaviors.js";
 import { happyPath } from "../fakes/script/roles.mjs";
 import type { Behavior, MetaLike, TurnContext } from "../fakes/script/engine.js";
-import { setTickets } from "../fixtures/common.js";
+import { git, setTickets } from "../fixtures/common.js";
+import { fBranch } from "../fixtures/f-branch.js";
 import { scenario, type ScenarioContext } from "../harness/scenario.js";
 import { exported, of, ticketJson } from "./m3-helpers.js";
 
@@ -151,6 +152,12 @@ scenario({
       assert.equal(warnings(output).length, 0);
     });
     await changedFiles(ctx);
-    await pending("on F-BRANCH the file is in the same commit as the ticket's work (P21)", "M5");
+    await step("1: on F-BRANCH the file is in the same commit as the ticket's work (P21)", async () => {
+      const dir = fBranch(path.join(ctx.root, "qa5-branch"), { qa: true });
+      const r = await rafi("start . --steps 1 --branch-per-ticket", { cwd: dir });
+      assert.equal(r.code, 0, r.output);
+      const files = git(dir, ["log", "-1", "--name-only", "--format=", "feature/T1-add-the-parser"]).split("\n");
+      assert.ok(files.includes("docs/requirements/T1.md") && files.includes("src/T1.txt"), files.join(", "));
+    });
   },
 });

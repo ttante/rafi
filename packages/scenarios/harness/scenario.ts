@@ -6,18 +6,20 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { registry } from "../checks/registry.js";
 import { fChain } from "../fixtures/f-chain.js";
+import { fBranch } from "../fixtures/f-branch.js";
 import { fHuge } from "../fixtures/f-huge.js";
 import { fTestsLocal } from "../fixtures/f-tests.js";
 import { fOne, fOneLegacy } from "../fixtures/f-one.js";
 import { copyLegacy } from "../fixtures/legacy.js";
 import { git, tempRoot } from "../fixtures/common.js";
 import { afterEachChecks } from "./after-each.js";
+import { relinkCopy } from "./fork.js";
 import { newComputer, rafiRunner, type Rafi, type RafiResult } from "./rafi.js";
 import type { Computer } from "./deps.js";
 
 export type Mode = "next" | "next-process";
 export type FixtureName = "F-ONE" | "F-ONE-0.10" | "F-CHAIN" | "F-LEGACY" | "F-LEGACY-RUNNING" | "F-TESTS-LOCAL"
-  | "F-TESTS-JEST" | "F-HUGE-NO-COMMIT" | "F-HUGE-IGNORED" | "none";
+  | "F-TESTS-JEST" | "F-HUGE-NO-COMMIT" | "F-HUGE-IGNORED" | "F-BRANCH" | "none";
 
 export interface ScenarioContext {
   readonly rafi: Rafi;
@@ -49,6 +51,7 @@ function build(name: FixtureName, root: string): string {
     case "F-ONE": return fOne(root);
     case "F-ONE-0.10": return fOneLegacy(root);
     case "F-CHAIN": return fChain(root);
+    case "F-BRANCH": return fBranch(root);
     case "F-TESTS-LOCAL": return fTestsLocal(root);
     case "F-TESTS-JEST": return fTestsLocal(root, {}, "npx jest");
     case "F-HUGE-NO-COMMIT": return fHuge(root, "no-commit");
@@ -111,5 +114,6 @@ export function copyProject(dir: string): string {
   while (existsSync(`${dir}-copy-${n}`)) n += 1;
   const copy = `${dir}-copy-${n}`;
   cpSync(dir, copy, { recursive: true, verbatimSymlinks: true });
+  relinkCopy(dir, copy);
   return copy;
 }

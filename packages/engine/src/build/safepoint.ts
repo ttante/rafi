@@ -1,14 +1,15 @@
 // ARCH 4.6's safe point, moved out of the loop (M4): boundary 4, the questions a blocked ticket asks, the progress
 // file; the terminal's "What next?" questions, which close when answered elsewhere (C146) or when a stop or pause
 // arrives; "Pause at this checkpoint" (C149); and the build's own stop and pause records (C137, C140).
-import { askWhatNext, openWhatNext } from "../ask/blocked.js";
+import { openWhatNext } from "../ask/blocked.js";
+import { ASKED_IN_TERMINAL, askOpen } from "../ask/delivery.js";
 import { openQuestions } from "../ask/questions.js";
 import { boundary } from "../deps/hooks.js";
 import path from "node:path";
 import { readProgress } from "../progress/read.js";
 import { PROGRESS, writeProgress } from "../progress/write.js";
 import type { BuildState, Folded, TicketDefinition } from "../state/types.js";
-import { append, type BuildContext } from "./context.js";
+import { append, setting, type BuildContext } from "./context.js";
 import { closeSessions } from "../turns/agent.js";
 
 const ACTIVE: ReadonlySet<string> = new Set(["building", "reviewing", "fixing"]);
@@ -61,7 +62,7 @@ export async function askInTerminal(ctx: BuildContext, defs: readonly TicketDefi
   const ask = ctx.ui.question;
   if (!ask) return "none";
   const view = ctx.engine.fold(defs);
-  const open = openQuestions(view).filter((q) => q.kind === "what-next");
+  const open = openQuestions(view).filter((q) => ASKED_IN_TERMINAL.has(q.kind));
   if (!open.length) return "none";
   const ids = open.map((q) => q.id);
   if (view.builds[ctx.run]?.state !== "waiting") {
@@ -73,8 +74,8 @@ export async function askInTerminal(ctx: BuildContext, defs: readonly TicketDefi
     const controller = new AbortController();
     p.current = { question: q.id, controller };
     p.closed = null;
-    const asked = await askWhatNext(ctx.engine, ctx.deps, ctx.run, q, (u) => ask.call(ctx.ui, u, controller.signal),
-      fixes);
+    const asked = await askOpen(ctx.engine, ctx.deps, ctx.run, q, (u) => ask.call(ctx.ui, u, controller.signal),
+      fixes, setting<number | null>(ctx, "tickets.build.auto_merge_timeout_minutes") ?? 60);
     p.current = null;
     if (asked === "pause") {
       await ctx.engine.append([{ type: "build.pause_requested", run_id: ctx.run, actor: "user", source: "terminal",

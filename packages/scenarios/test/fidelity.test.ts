@@ -1,3 +1,4 @@
+// Milestone: M1
 // Fidelity (ARCH 14 M1 "Also"): each fake's wire output is parsed by the real adapters. The in-process Codex
 // stream and the Codex executable (through the real transport), and the in-process Claude query and the
 // `claude` executable (through the real SDK query), each give the same AgentEvent sequence for one turn with a
@@ -6,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { claudeAgent, codexAgent, type AgentEvent, type TurnRequest } from "@rafi-ai/engine/agents";
-import { realCodex } from "@rafi-ai/engine/deps/real";
+import { realClock, realCodex } from "@rafi-ai/engine/deps/real";
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudeQuery } from "@rafi-ai/engine";
 import { claudeQuery } from "../fakes/claude/query.js";
@@ -14,6 +15,8 @@ import { codexStream } from "../fakes/codex/stream.js";
 import { scriptEngine, type Behavior } from "../fakes/script/engine.js";
 import { writeShims } from "../fakes/shims.js";
 import { tempRoot } from "../fixtures/common.js";
+
+const clock = realClock();
 
 const schema = { name: "builder", json: { type: "object", properties: { kind: { type: "string" },
   summary: { type: "string" } }, required: ["kind", "summary"], additionalProperties: false } };
@@ -63,10 +66,10 @@ test("Codex: the in-process stream and the executable give the same events under
     const engine = scriptEngine(turns.map((behavior, i) => ({ selector: { role: "builder", attempt: i + 1 },
       behavior })));
     const fake = codexStream((meta) => engine.next(meta));
-    const inProcess = codexAgent({ deps: { agents: { codex: () => fake.stream, claudeQuery: unavailable } },
+    const inProcess = codexAgent({ deps: { clock, agents: { codex: () => fake.stream, claudeQuery: unavailable } },
       cwd: dir, executable: "codex", env: {} });
     const shims = writeShims(dir, { codex: turns, claude: turns });
-    const exe = codexAgent({ deps: { agents: { codex: realCodex, claudeQuery: unavailable } }, cwd: dir,
+    const exe = codexAgent({ deps: { clock, agents: { codex: realCodex, claudeQuery: unavailable } }, cwd: dir,
       executable: shims.codex, env: { PATH: process.env.PATH } });
     const a = await collect(inProcess, 1);
     const b = await collect(exe, 1);
@@ -91,10 +94,11 @@ test("Claude: the in-process query and the claude executable give the same event
     const engine = scriptEngine(turns.map((behavior, i) => ({ selector: { role: "builder", attempt: i + 1 },
       behavior })));
     const record = { metas: [] as unknown[], wire: [] as unknown[] };
-    const inProcess = claudeAgent({ deps: { agents: { codex: unavailable,
+    const inProcess = claudeAgent({ deps: { clock, agents: { codex: unavailable,
       claudeQuery: claudeQuery((meta) => engine.next(meta), record) } }, cwd: dir });
     const shims = writeShims(dir, { codex: turns, claude: turns });
-    const exe = claudeAgent({ deps: { agents: { codex: unavailable, claudeQuery: sdkQuery as unknown as ClaudeQuery } },
+    const exe = claudeAgent({ deps: { clock,
+      agents: { codex: unavailable, claudeQuery: sdkQuery as unknown as ClaudeQuery } },
       cwd: dir, executable: shims.claudeEntry });
     const a = await collect(inProcess, 1);
     const b = await collect(exe, 1);

@@ -6,7 +6,7 @@
 import path from "node:path";
 import type { Engine } from "../api/engine.js";
 import { splitCommand } from "../agents/shellForms.js";
-import type { Deps, Grants, SandboxTool } from "../deps/types.js";
+import type { Deps, Grants } from "../deps/types.js";
 import { boundary } from "../deps/hooks.js";
 import { throwIfStopped, type StopControl } from "./stop.js";
 import { changedBetween, restoreTree, snapshot } from "../facts/snapshot.js";
@@ -14,9 +14,9 @@ import { quoted } from "../instructions/assemble.js";
 import { escapeControl } from "../log/redact.js";
 import { requirementCheckProblem, type CheckRules } from "../tools/session.js";
 import { nextRun, runsOf, type RunRecord } from "../facts/runs.js";
-import { testEnv } from "./env.js";
+import { testEnv } from "../agents/env.js";
 import { optionalBlob } from "../log/blobs.js";
-import { sandboxPrefix } from "../ask/grants.js";
+import { sandboxPrefix, type SandboxTool } from "../ask/grants.js";
 
 export interface CheckEnv {
   readonly deps: Deps;
@@ -145,9 +145,10 @@ export function untrusted(text: string, redact: (t: string) => string): string {
   return quoted(escapeControl(redact(text)));
 }
 
-/** Runs one accepted command, records `check.run`, and returns the record and the text the agent gets. */
+/** Runs one accepted command, records `check.run` (`defer`: the caller appends it, as a CI point does once it knows
+ * the fix ticket the run belongs to, M5 C271), and returns the record and the text the agent gets. */
 export async function executeCheck(env: CheckEnv, argv: string[], askedBy: "builder" | "qa" | "rafi",
-  known?: string): Promise<Executed> {
+  known?: string, defer = false): Promise<Executed> {
   const { deps, engine } = env;
   // M4 slice 0: the check step passes the tree it just took (nothing ran since), saving one snapshot per run.
   const before = known ? { ok: true as const, tree: known } : await snapshot(deps, env.project, "before",
@@ -185,7 +186,8 @@ export async function executeCheck(env: CheckEnv, argv: string[], askedBy: "buil
       key: `${env.ticket}:check:run-${run}`, run: env.run, ticket: env.ticket }),
     changed_tracked: askedBy === "qa" ? [] : changed, restored, refused: null,
     sandbox: env.sandbox ? "os" as const : "none" as const, env_missing: environment(env).missing };
-  await engine.append([{ type: "check.run", run_id: env.run, ticket_id: env.ticket, actor: "engine", data: record }]);
+  const event = { type: "check.run", run_id: env.run, ticket_id: env.ticket, actor: "engine", data: record };
+  if (!defer) await engine.append([event]);
   await boundary(deps.hooks, `10: after test run ${run} (${env.ticket})`);
   return { record: { ...record, tests }, text: summary(record, tests, result.output, (t) => engine.redact(t)),
     after: after.ok ? after.tree : null };

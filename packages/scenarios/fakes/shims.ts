@@ -42,6 +42,8 @@ export type Make = { kind: "happy" | "reject" | "slow"; notes?: Record<number, s
   kill?: "before-reply" | "after-reply";
   /** The fake doesn't take rafi's cancel during this turn (only a second Ctrl+C, which ends it, stops it). */
   ignoreCancel?: boolean;
+  /** From this turn on the fake ignores SIGTERM and stdin's end, with a helper child in its group (deaf.mjs). */
+  ignoreTerm?: boolean;
   /** An activity line at the start of the turn. */
   say?: string };
 

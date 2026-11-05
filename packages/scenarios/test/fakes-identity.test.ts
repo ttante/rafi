@@ -1,3 +1,4 @@
+// Milestone: M4
 // P8 option C in the fake executables (M4 plan Q1, slice 11): a process-mode script's rules match the turn's
 // identity from rafi's log, as the in-process engine matches `meta`: first unused fitting rule, else the role's happy
 // path; used rules are shared through a file beside the script, so a later process (or a rafi resumed after a kill)

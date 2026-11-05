@@ -29,13 +29,15 @@ test("settingsOf gives each M2 key its value and source: project when set, else 
   assert.deepEqual(s["harness.targets"], { value: ["codex"], source: "project" });
 });
 
-test("a wrong type for an M2 key exits 1 naming the key; unknown keys still pass (M5)", () => {
+test("a wrong type for an M2 key exits 1 naming the key; an unknown key exits 1 naming it (M5, C182)", () => {
   const bad = checkConfigV1({ format_version: 1, checks: { run_without_sandbox: "yes" } });
   assert.equal(bad.ok, false);
   assert.match(bad.ok ? "" : bad.message, /checks\.run_without_sandbox/);
   const bad2 = checkConfigV1({ format_version: 1, retries: { turn: -1 } });
   assert.match(bad2.ok ? "" : bad2.message, /retries\.turn/);
-  assert.equal(checkConfigV1({ format_version: 1, some_later_key: { x: 1 } }).ok, true);
+  const unknown = checkConfigV1({ format_version: 1, some_later_key: { x: 1 } });
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.ok ? "" : unknown.message, /unknown key some_later_key/);
   assert.equal(checkConfigV1({ format_version: 1, workflows: [] }).ok, false);
 });
 
@@ -60,10 +62,23 @@ test("the 1.0 tickets file: a valid ticket reads; a bad field is named with its 
   assert.equal(minimal.ok && minimal.tickets[0]!.likely_files.length, 0);
 });
 
-test("the delivery file: units with tickets; a missing tickets list is named", () => {
-  assert.equal(checkDeliveryFile({ delivery_units: [{ id: "U-T1", tickets: ["T1"], completion: "none" }] }).ok, true);
-  const bad = checkDeliveryFile({ delivery_units: [{ id: "U-T1" }] });
+test("the delivery file (FMT-D1, FMT-D2): version, plan, units[] with their fields; a bad unit is named", () => {
+  const unit = { id: "U1", tickets: ["T1", "T2"], branch_mode: "per-ticket", completion: "pr", provider: "github",
+    merge_method: "squash", cleanup: true, depends_on: [], dependency_mode: "combine", branch: "release/x" };
+  const ok = checkDeliveryFile({ version: 1, plan: { plan_id: "pln_1", revision: 2 }, units: [unit] });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.ok && ok.units[0]!.branch_mode, "per-ticket");
+  assert.equal(checkDeliveryFile({ units: [{ id: "U-T1", tickets: ["T1"], completion: "none" }] }).ok, true);
+  const bad = checkDeliveryFile({ units: [{ id: "U-T1" }] });
   assert.match(bad.ok ? "" : bad.message, /U-T1/);
+  for (const [field, value] of [["branch_mode", "solo"], ["dependency_mode", "x"], ["completion", "merge"],
+    ["pr_ready", true], ["provider", "bitbucket"]] as const) {
+    const r = checkDeliveryFile({ units: [{ id: "U9", tickets: ["T1"], [field]: value }] });
+    assert.equal(r.ok, false, field);
+    assert.match(r.ok ? "" : r.message, new RegExp(`U9.*${field}`), field);
+  }
+  const old = checkDeliveryFile({ delivery_units: [{ id: "U-T1", tickets: ["T1"] }] });
+  assert.match(old.ok ? "" : old.message, /delivery_units.*units/);
 });
 
 test("the progress file shape of ARCH 3.7", () => {

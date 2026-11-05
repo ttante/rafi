@@ -3,7 +3,7 @@
 import path from "node:path";
 import type { Settings } from "rafi-spec/v1";
 import type { Engine } from "../api/engine.js";
-import { agentEnv } from "../build/env.js";
+import { agentEnv } from "./env.js";
 import type { RoleAgent } from "../build/context.js";
 import { checkModel } from "./capabilities.js";
 import { claudeAgent } from "./claude/adapter.js";
@@ -22,6 +22,8 @@ export async function roleAgents(settings: Settings, deps: Engine["deps"]): Prom
     const pick = <T>(key: string, flag: string, fallback: T): { value: T; source: string } => {
       const f = settings[flag];
       if (f) return { value: f.value as T, source: "flag" };
+      const exact = settings[`agent_defaults.roles.${role}.${key}`];
+      if (exact) return { value: exact.value as T, source: exact.source };
       if (own[key] !== undefined) return { value: own[key] as T, source: "project" };
       return { value: fallback, source: "default" };
     };

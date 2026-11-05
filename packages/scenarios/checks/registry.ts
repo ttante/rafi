@@ -3,6 +3,8 @@
 export interface Registered {
   readonly id: string;
   readonly milestone: string | null;
+  /** The milestones whose ARCH 14 Partial list names this scenario (some of its steps active then). */
+  readonly partial?: readonly string[];
   readonly title: string;
   readonly covers: readonly string[];
 }
@@ -14,25 +16,30 @@ export const registry: readonly Registered[] = Object.freeze([
   { id: "S-START-2", milestone: "M5", title: "Interactive start with no stopping point", covers: [
     "FLAG-ST-R4", "PRM-70", "FLAG-ST-3", "FLAG-ST-47", "OUT-41"] },
   { id: "S-START-3", milestone: "M8", title: "Unchanged scope starts without asking; a material change ...", covers: [
-    "NEW-KEEP-1", "FLAG-ST-R7", "PRM-71", "PRM-G5", "FLAG-ST-49"] },
+    "NEW-KEEP-1", "FLAG-ST-R7", "PRM-71", "PRM-G5", "FLAG-ST-49"],
+    partial: ["M5"] },
   { id: "S-START-4", milestone: "M2", title: "Agent choice and a fresh agent per ticket", covers: [
     "FLAG-ST-4", "FLAG-ST-5", "FLAG-ST-6", "FLAG-ST-7", "FLAG-ST-R5", "FLAG-AG-3", "FMT-C7", "NEW-TAG-5",
     "GUI-R20", "NEW-WF-2"] },
   { id: "S-START-5", milestone: "M7", title: "No QA, detach, one ticket, skip", covers: [
-    "FLAG-ST-8", "FLAG-ST-9", "FLAG-ST-15", "FLAG-ST-16", "FLAG-ST-48", "OUT-42"] },
+    "FLAG-ST-8", "FLAG-ST-9", "FLAG-ST-15", "FLAG-ST-16", "FLAG-ST-48", "OUT-42"],
+    partial: ["M4", "M5"] },
   { id: "S-QA-1", milestone: "M3", title: "QA fails, the builder fixes, QA passes", covers: [
     "NEW-REQ-3", "NEW-REQ-7", "NEW-QAM-7", "FMT-C10", "NEW-ENG-4"] },
   { id: "S-QA-2", milestone: "M8", title: "The fix allowance runs out: \"what next?\"", covers: [
-    "PRM-81", "PRM-82", "PRM-83", "FMT-C10", "NEW-QAM-1", "FLAG-MG-8", "NEW-WF-3"] },
+    "PRM-81", "PRM-82", "PRM-83", "FMT-C10", "NEW-QAM-1", "FLAG-MG-8", "NEW-WF-3"],
+    partial: ["M3"] },
   { id: "S-QA-3", milestone: "M3", title: "Going in circles stops early", covers: [
     "NEW-ENG-5", "NEW-RTY-1"] },
   { id: "S-QA-4", milestone: "M4", title: "Resume after QA: rejected versus broke", covers: [
     "NEW-QAM-3", "NEW-QAM-4", "NEW-QAM-7", "PRM-G4", "NEW-ENG-3"] },
   { id: "S-QA-5", milestone: "M5", title: "One requirements file per ticket", covers: [
     "NEW-REQ-1", "NEW-REQ-2", "NEW-REQ-5", "NEW-REQ-6", "FILE-60", "FMT-T11", "NEW-KEEP-3", "NEW-CAU-5",
-    "NEW-CAU-3"] },
+    "NEW-CAU-3"],
+    partial: ["M3"] },
   { id: "S-QA-6", milestone: "M9", title: "Checks only a person can do", covers: [
-    "NEW-QAM-1", "FMT-T19", "FMT-T20", "FMT-C16", "NEW-INS-9", "OUT-18", "NEW-ASK-2"] },
+    "NEW-QAM-1", "FMT-T19", "FMT-T20", "FMT-C16", "NEW-INS-9", "OUT-18", "NEW-ASK-2"],
+    partial: ["M6"] },
   { id: "S-QA-7", milestone: "M3", title: "Copy and fingerprint only when needed", covers: [
     "NEW-COPY-1", "NEW-COPY-2", "NEW-CAU-4", "NEW-CAU-5"] },
   { id: "S-BLK-1", milestone: "M6", title: "Block, keep building, answer mid-build, retry", covers: [
@@ -47,11 +54,14 @@ export const registry: readonly Registered[] = Object.freeze([
   { id: "S-MAL-1", milestone: "M2", title: "A malformed builder reply is repaired once", covers: [
     "NEW-MAL-2", "NEW-SO-1", "NEW-SO-4", "NEW-ADP-5", "NEW-ENG-4"] },
   { id: "S-MAL-2", milestone: "M6", title: "A repair that changes the content is caught", covers: [
-    "NEW-SO-2", "NEW-SO-3", "NEW-SO-5", "NEW-MAL-3", "OUT-6", "NEW-MAL-2", "NEW-ENG-5"] },
+    "NEW-SO-2", "NEW-SO-3", "NEW-SO-5", "NEW-MAL-3", "OUT-6", "NEW-MAL-2", "NEW-ENG-5"],
+    partial: ["M2", "M3"] },
   { id: "S-MAL-3", milestone: "M9", title: "Every structured reply uses the same repair", covers: [
-    "NEW-MAL-2", "NEW-SO-1", "PRM-41"] },
+    "NEW-MAL-2", "NEW-SO-1", "PRM-41"],
+    partial: ["M3"] },
   { id: "S-MAL-4", milestone: "M9", title: "Content errors retry; nothing invalid is applied", covers: [
-    "NEW-SO-5", "NEW-MAL-7", "FLAG-PL-12", "NEW-ENG-4", "NEW-SO-1"] },
+    "NEW-SO-5", "NEW-MAL-7", "FLAG-PL-12", "NEW-ENG-4", "NEW-SO-1"],
+    partial: ["M2"] },
   { id: "S-MAL-5", milestone: "M2", title: "Short references; rafi's record wins", covers: [
     "NEW-REF-1", "NEW-REF-3", "NEW-FACT-1", "NEW-FACT-2", "NEW-FACT-3", "FMT-T10"] },
   { id: "S-TIME-1", milestone: "M2", title: "A hung turn times out and is retried", covers: [
@@ -61,14 +71,16 @@ export const registry: readonly Registered[] = Object.freeze([
   { id: "S-CRASH-1", milestone: "M4", title: "Crash at every step, then resume", covers: [
     "NEW-ENG-3", "NEW-ENG-9", "CMD-8", "FLAG-RS-1", "PRM-G4", "NEW-ENG-1", "NEW-CAU-1"] },
   { id: "S-CRASH-2", milestone: "M5", title: "Crashes and faults while writing", covers: [
-    "NEW-STATS-3", "NEW-PORT-1", "NEW-ENG-7"] },
+    "NEW-STATS-3", "NEW-PORT-1", "NEW-ENG-7"],
+    partial: ["M4"] },
   { id: "S-CRASH-3", milestone: "M4", title: "Stop, Ctrl+C, crash and pause are different outcomes", covers: [
     "CMD-11", "CMD-31", "FLAG-SP-1", "OUT-14", "SCN-8", "GUI-R4", "GUI-R5"] },
   { id: "S-CRASH-4", milestone: "M4", title: "Resume attaches, picks and narrows", covers: [
     "FLAG-RS-1", "FLAG-RS-2", "FLAG-RS-4", "FLAG-RS-11", "FLAG-RS-12", "PRM-90", "PRM-92", "CMD-9", "CMD-12",
     "GUI-R1", "FLAG-RS-7"] },
   { id: "S-CRASH-5", milestone: "M8", title: "Paused at every safe point, then resumed", covers: [
-    "NEW-QAM-5", "NEW-PUA-8", "NEW-GUI-3", "FLAG-MG-6"] },
+    "NEW-QAM-5", "NEW-PUA-8", "NEW-GUI-3", "FLAG-MG-6"],
+    partial: ["M4"] },
   { id: "S-BATCH-1", milestone: "M5", title: "A seven-ticket batch", covers: [
     "FLAG-ST-2", "OUT-7", "FMT-T2", "FMT-T7", "FILE-22", "FILE-28", "NEW-INS-4"] },
   { id: "S-BATCH-2", milestone: "M5", title: "Branches, completion modes and stacks", covers: [
@@ -93,7 +105,8 @@ export const registry: readonly Registered[] = Object.freeze([
     "CMD-37", "NEW-ENG-10", "FMT-C9", "FMT-D2", "FMT-P4", "FMT-C10", "FILE-2", "FILE-26", "FMT-S2", "FILE-27",
     "NEW-INS-7", "FILE-31"] },
   { id: "S-MIG-2", milestone: "M9", title: "Unmigrated and unsupported projects", covers: [
-    "NEW-ENG-10", "CMD-37", "FLAG-CO-4", "PRM-38", "OUT-6"] },
+    "NEW-ENG-10", "CMD-37", "FLAG-CO-4", "PRM-38", "OUT-6"],
+    partial: ["M1"] },
   { id: "S-PORT-1", milestone: "M9", title: "Clone on another computer and `rafi resume`", covers: [
     "NEW-PORT-1", "FILE-40", "FMT-C21", "FILE-41", "CMD-17", "FLAG-RS-1", "FILE-10", "PRM-13"] },
   { id: "S-PORT-2", milestone: "M5", title: "A conflict in the progress file", covers: [
@@ -167,7 +180,8 @@ export const registry: readonly Registered[] = Object.freeze([
   { id: "S-BLK-8", milestone: "M6", title: "Answer from a notification", covers: [
     "NEW-BLK-8", "NEW-NOT-1", "NEW-GUI-5", "GUI-R17", "NEW-NOT-7"] },
   { id: "S-BLK-9", milestone: "M8", title: "Options fit the reason", covers: [
-    "NEW-BLK-2", "NEW-BLK-3"] },
+    "NEW-BLK-2", "NEW-BLK-3"],
+    partial: ["M6"] },
   { id: "S-BLK-10", milestone: "M6", title: "A build-wide problem stops the work it affects", covers: [
     "NEW-BLK-7", "NEW-KEEP-2"] },
   { id: "S-NOT-1", milestone: "M7", title: "On by default, from the engine", covers: [
@@ -196,7 +210,8 @@ export const registry: readonly Registered[] = Object.freeze([
   { id: "S-CHK-2", milestone: "M3", title: "Stale results are rerun; a failing check skips QA", covers: [
     "NEW-CHK-3"] },
   { id: "S-CHK-3", milestone: "M8", title: "Only relevant tests run; every test goes through the record", covers: [
-    "NEW-CHK-4", "NEW-CHK-5"] },
+    "NEW-CHK-4", "NEW-CHK-5"],
+    partial: ["M3"] },
   { id: "S-CHK-4", milestone: "M7", title: "Hung, slow and code-changing tests", covers: [
     "NEW-CHK-6", "NEW-CHK-7", "FMT-C24"] },
   { id: "S-CHK-5", milestone: "M7", title: "The CI step passes, and is confirmed up front", covers: [
@@ -206,7 +221,8 @@ export const registry: readonly Registered[] = Object.freeze([
   { id: "S-CHK-7", milestone: "M7", title: "The fix doesn't work: merge anyway, or push only", covers: [
     "NEW-CHK-10", "FMT-C23"] },
   { id: "S-CHK-8", milestone: "M10", title: "You manage git: no suite, and no CI settings shown", covers: [
-    "NEW-CHK-8", "NEW-CHK-12", "GUI-R26", "FMT-C25"] },
+    "NEW-CHK-8", "NEW-CHK-12", "GUI-R26", "FMT-C25"],
+    partial: ["M5"] },
   { id: "S-CHK-9", milestone: "M2", title: "`run_check` runs only tests, inside the build's grants", covers: [
     "NEW-CHK-14", "NEW-CHK-18"] },
   { id: "S-CHK-10", milestone: "M2", title: "QA off, and what the builder gets after a failure", covers: [
@@ -214,7 +230,8 @@ export const registry: readonly Registered[] = Object.freeze([
   { id: "S-CHK-11", milestone: "M2", title: "No sandbox on this machine", covers: [
     "NEW-SEC-4"] },
   { id: "S-SEC-1", milestone: "M7", title: "Agents never see a secret", covers: [
-    "NEW-SEC-5", "NEW-SEC-10", "FMT-C30", "FMT-C31"] },
+    "NEW-SEC-5", "NEW-SEC-10", "FMT-C30", "FMT-C31"],
+    partial: ["M2"] },
   { id: "S-SEC-2", milestone: "M2", title: "Tests get only what they declared", covers: [
     "NEW-SEC-6", "NEW-SEC-8", "FMT-C28"] },
   { id: "S-SEC-3", milestone: "M7", title: "`rafi secrets`", covers: [
@@ -235,14 +252,16 @@ export const registry: readonly Registered[] = Object.freeze([
     "FLAG-RS-10", "PRM-80", "PRM-84", "PRM-93", "PRM-94", "PRM-95", "PRM-96", "PRM-97", "PRM-98", "PRM-99",
     "PRM-101", "FILE-44", "FILE-45", "FILE-47", "FILE-48", "ENV-5"] },
   { id: "S-CLI-3", milestone: "M10", title: "Flags are one-off overrides", covers: [
-    "FLAG-ST-R1", "FLAG-ST-R2", "FLAG-ST-51", "FLAG-RS-8", "GUI-R21"] },
+    "FLAG-ST-R1", "FLAG-ST-R2", "FLAG-ST-51", "FLAG-RS-8", "GUI-R21"],
+    partial: ["M5"] },
   { id: "S-CLI-4", milestone: "M9", title: "`rafi tickets`", covers: [
     "CMD-6", "FLAG-TK-1", "FLAG-TK-2", "FLAG-TK-3", "FLAG-TK-4", "FLAG-TK-5", "FLAG-TK-6", "FLAG-TK-7",
     "FLAG-TK-8", "FLAG-TK-9", "FLAG-TK-10", "FLAG-TK-11", "FLAG-TK-12", "FLAG-TK-13", "FLAG-TK-14", "FLAG-TK-15",
     "FLAG-TK-16", "FLAG-TK-18", "FLAG-TK-19", "FLAG-TK-20", "FLAG-TK-22", "FLAG-TK-25", "PRM-50", "PRM-51",
     "PRM-52", "PRM-53", "PRM-54", "PRM-55", "PRM-56", "PRM-57", "PRM-58", "PRM-59", "OUT-4", "OUT-30", "OUT-31",
     "FMT-S5", "FMT-K1", "FMT-T12", "FMT-T13", "FMT-T14", "FMT-T15", "FILE-24", "FILE-25", "FILE-29", "FILE-32",
-    "FMT-C8"] },
+    "FMT-C8"],
+    partial: ["M5"] },
   { id: "S-CLI-5", milestone: "M9", title: "`rafi plan` and `rafi tickets plan`", covers: [
     "CMD-4", "FLAG-PL-1", "FLAG-PL-2", "FLAG-PL-3", "FLAG-PL-4", "FLAG-PL-5", "FLAG-PL-6", "FLAG-PL-7",
     "FLAG-PL-8", "FLAG-PL-9", "PRM-30", "PRM-31", "PRM-32", "PRM-33", "PRM-35", "PRM-37", "PRM-39", "PRM-40",
@@ -267,12 +286,15 @@ export const registry: readonly Registered[] = Object.freeze([
     "OUT-32"] },
   { id: "S-CLI-12", milestone: "M10", title: "Output conventions, colors, exit codes", covers: [
     "ENV-1", "ENV-2", "OUT-9", "OUT-10", "OUT-11", "OUT-40", "OUT-41", "OUT-42", "NEW-KEEP-6", "FLAG-MG-10",
-    "GUI-R24"] },
+    "GUI-R24"],
+    partial: ["M2"] },
   { id: "S-CLI-13", milestone: "M10", title: "Resume picks saved interviews; old ones are pruned", covers: [
-    "FLAG-RS-3", "FLAG-CR-2", "FLAG-PL-5", "FILE-31", "PRM-90"] },
+    "FLAG-RS-3", "FLAG-CR-2", "FLAG-PL-5", "FILE-31", "PRM-90"],
+    partial: ["M4"] },
   { id: "S-CLI-14", milestone: "M8", title: "`rafi reset`", covers: [
     "CMD-13", "CMD-14", "CMD-32", "FLAG-RE-1", "FLAG-RE-2", "FLAG-RE-3", "PRM-100", "GUI-R7", "GUI-R10",
-    "FLAG-TK-9"] },
+    "FLAG-TK-9"],
+    partial: ["M5"] },
   { id: "S-CLI-15", milestone: "M6", title: "`rafi status` and `rafi tickets queue` say it plainly", covers: [
     "CMD-23", "OUT-1", "OUT-2", "OUT-3", "OUT-6", "NEW-MAL-4"] },
   { id: "S-CLI-16", milestone: "M7", title: "`rafi answer`", covers: [
@@ -285,7 +307,8 @@ export const registry: readonly Registered[] = Object.freeze([
     "OUT-34", "GUI-R14", "GUI-R18"] },
   { id: "S-CLI-19", milestone: "M10", title: "Settings in `rafi-config.yaml`", covers: [
     "FILE-1", "FILE-2", "FMT-C8", "FMT-C11", "ENV-4", "GUI-R20", "FLAG-ST-43", "FLAG-ST-44", "NEW-WF-5",
-    "FMT-C26", "FMT-T21"] },
+    "FMT-C26", "FMT-T21"],
+    partial: ["M5"] },
   { id: "S-ENG-1", milestone: "M9", title: "Every turn measured; the end-of-build summary", covers: [
     "NEW-MEAS-1", "NEW-MEAS-2", "NEW-MEAS-3", "OUT-12", "OUT-13", "OUT-18", "GUI-R12", "GUI-R23"] },
   { id: "S-ENG-2", milestone: "M10", title: "The event log as a stream", covers: [
@@ -295,9 +318,11 @@ export const registry: readonly Registered[] = Object.freeze([
   { id: "S-ENG-4", milestone: "M2", title: "Fallback when a model lacks a feature", covers: [
     "NEW-CAP-1", "NEW-REF-2", "NEW-ADP-4", "GUI-R22"] },
   { id: "S-ENG-5", milestone: "M2", title: "The engine switch and one process", covers: [
-    "ENV-6", "NEW-ENG-10", "NEW-ENG-6", "ENV-5"] },
+    "ENV-6", "NEW-ENG-10", "NEW-ENG-6", "ENV-5"],
+    partial: ["M1"] },
   { id: "S-ENG-6", milestone: "M10", title: "Two builds at once", covers: [
     "NEW-GUI-4", "GUI-R25"] },
   { id: "S-ENG-7", milestone: "M10", title: "Hostile environment", covers: [
-    "FILE-11", "NEW-TOOL-6", "GUI-R24", "FLAG-DR-4"] },
+    "FILE-11", "NEW-TOOL-6", "GUI-R24", "FLAG-DR-4"],
+    partial: ["M4"] },
 ]);

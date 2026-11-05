@@ -1,3 +1,4 @@
+// Milestone: M4
 // Item 26 (M4 plan 3.3) and C149: "Pause at this checkpoint" in What next?, the picker's prompts, and Ctrl+C in an
 // attached view (Q2).
 import { test } from "node:test";

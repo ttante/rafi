@@ -1,3 +1,4 @@
+// Milestone: M2
 // M2 plan section 4 rows not covered by the unit tests: the session token never leaks; instructions hidden in test
 // output reach the builder only fenced, escaped and redacted; agent-written checks are refused at prepare (C43).
 import { test } from "node:test";

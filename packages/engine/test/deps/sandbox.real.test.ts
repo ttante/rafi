@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import path from "node:path";
 import { sandboxInfo, sandboxPrefix } from "../../src/ask/grants.js";
-import { testEnv } from "../../src/build/env.js";
+import { testEnv } from "../../src/agents/env.js";
 import { realChecks } from "../../src/deps/real/checks.js";
 import type { CheckResult, Need } from "../../src/deps/types.js";
 import { tempDir } from "../helpers.js";

@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { assertFreshBuild, LAUNCHER } from "./process.js";
+import { shellEnv } from "./shell-env.mjs";
 import { madeTemp } from "./temp.js";
 
 export interface Live {
@@ -17,18 +18,27 @@ export interface Live {
   readonly done: Promise<{ code: number | null; signal: NodeJS.Signals | null; output: string }>;
   /** PTY only: bytes to the terminal (`"\u0003"` is Ctrl+C). */
   type(text: string): void;
+  /** PTY only: the terminal closes (its master end), so the kernel sends rafi, its session leader, SIGHUP. */
+  hangup(): void;
 }
 
-export type LaunchOptions = { cwd: string; pathFirst?: string; env?: Record<string, string>; pty?: boolean };
+/**
+ * The shell's environment always loses shell-env.mjs's credentials (C342, the default since part 4d); `unset`: more
+ * names taken out; `env` is added last, so a variable passed on purpose still arrives.
+ */
+export type LaunchOptions = { cwd: string; pathFirst?: string; env?: Record<string, string>; pty?: boolean;
+  unset?: RegExp };
 
-function envFor(o: LaunchOptions): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env, TZ: "UTC", RAFI_ENGINE: "next", ...o.env };
+export function envFor(o: LaunchOptions): Record<string, string | undefined> {
+  const shell = Object.fromEntries(Object.entries(shellEnv()).filter(([k]) => !o.unset?.test(k)));
+  const env: Record<string, string | undefined> = { ...shell, TZ: "UTC", RAFI_ENGINE: "next", ...o.env };
   if (o.pathFirst) env.PATH = `${o.pathFirst}${path.delimiter}${env.PATH ?? ""}`;
   return env;
 }
 
 // A PTY around one command: its output to stdout, JSON lines on stdin as `{"write": "..."}` (os.write to the master,
-// so "\u0003" is the terminal's Ctrl+C); exits with the command's exit code (128+n for a signal).
+// so "\u0003" is the terminal's Ctrl+C) or `{"hangup": true}` (the master closes: a closed terminal); exits with the
+// command's exit code (128+n for a signal).
 const DRIVER = String.raw`
 import json, os, pty, select, struct, sys, fcntl, termios
 pid, fd = pty.fork()
@@ -56,7 +66,12 @@ while True:
         while b"\n" in pending:
             line, pending = pending.split(b"\n", 1)
             if line.strip() and open_:
-                os.write(fd, json.loads(line)["write"].encode())
+                msg = json.loads(line)
+                if msg.get("hangup"):
+                    os.close(fd)
+                    open_ = False
+                else:
+                    os.write(fd, msg["write"].encode())
     if status is None:
         ended, st = os.waitpid(pid, os.WNOHANG)
         if ended:
@@ -92,7 +107,8 @@ export function launch(args: readonly string[], o: LaunchOptions): Live {
     child.on("close", (code, signal) => resolve({ code, signal, output: out }));
   });
   return { child, pid: child.pid!, output: () => out, done,
-    type: (text) => { child.stdin?.write(`${JSON.stringify({ write: text })}\n`); } };
+    type: (text) => { child.stdin?.write(`${JSON.stringify({ write: text })}\n`); },
+    hangup: () => { child.stdin?.write(`${JSON.stringify({ hangup: true })}\n`); } };
 }
 
 /** The same, waiting for the exit (no PTY). */

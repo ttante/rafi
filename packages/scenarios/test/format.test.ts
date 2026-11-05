@@ -1,3 +1,4 @@
+// Milestone: M1
 // M1 security: damaged or hostile config and ticket files are validated on read; every refusal exits 1 with
 // one line and writes nothing, in the project or in machine.stateDir.
 import { test } from "node:test";

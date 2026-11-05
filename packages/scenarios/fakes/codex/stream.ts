@@ -49,6 +49,7 @@ export function codexStream(next: (meta: MetaLike, ctx: { cwd: string; message: 
     onMessage(fn): Cancel { messageFns.add(fn); return () => messageFns.delete(fn); },
     onClose(fn): Cancel { closeFns.add(fn); return () => closeFns.delete(fn); },
     async close() { for (const fn of closeFns) fn({ code: 0 }); },
+    kill() { for (const fn of closeFns) fn({ code: null }); },
   };
   return { stream, record };
 }

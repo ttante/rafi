@@ -5,11 +5,13 @@ import { stringify } from "yaml";
 import type { Engine } from "../api/engine.js";
 import { boundary } from "../deps/hooks.js";
 import type { Folded, TicketState } from "../state/types.js";
+import { writeProgressDoc } from "../tickets/render.js";
 
 export const PROGRESS = path.join(".rafi", "progress.yaml");
-const HEADER = "# Written by rafi from its database at every safe point. Commit it; don't edit it.\n";
+export const UNTOUCHED = new Date(0).toISOString();
+export const HEADER = "# Written by rafi from its database at every safe point. Commit it; don't edit it.\n";
 
-function status(t: TicketState): string {
+export function status(t: TicketState): string {
   if (t.state === "done") return "done";
   if (t.state === "blocked") return "blocked";
   if (t.state === "dropped") return t.dropped === "obsolete" ? "obsolete" : "canceled";
@@ -40,10 +42,15 @@ export async function writeProgress(engine: Engine, view: Folded): Promise<void>
   }
   const tickets: Record<string, Record<string, unknown>> = {};
   for (const t of Object.values(view.tickets)) {
-    const at = last[t.id] ?? engine.deps.clock.now().toISOString();
+    // C300: a ticket this database never changed says so with the epoch, so a clone's merge (newer `at` wins, C225)
+    // never prefers "planned here" over a real change made on the other computer.
+    const at = last[t.id] ?? UNTOUCHED;
     const entry: Record<string, unknown> = { status: status(t), at };
     if (t.block) entry.reason = t.block.reason;
     if (entry.status === "in_progress") Object.assign(entry, { step: t.node ?? "", fixes: t.fixesUsed });
+    // P49: a rafi-owned ticket isn't in tickets.yaml, so its entry carries what its ticket.added recorded.
+    if (t.rafiOwned && t.owned) entry.owned = { source: t.owned.source, requirements: [...t.owned.requirements],
+      hint: t.owned.hint, unit: t.owned.unit };
     tickets[t.id] = entry;
   }
   const questions: Record<string, unknown> = {};
@@ -55,4 +62,6 @@ export async function writeProgress(engine: Engine, view: Folded): Promise<void>
     answers: sorted(answers) }, { sortMapEntries: true });
   await boundary(engine.deps.hooks, "5: during the progress-file write");
   await engine.deps.fs.writeAtomic(path.join(engine.projectDir, PROGRESS), HEADER + body);
+  const docs = view.run ? view.builds[view.run]?.settings["docs.root"]?.value : undefined;
+  await writeProgressDoc(engine, view, { docsRoot: typeof docs === "string" ? docs : "docs" });
 }

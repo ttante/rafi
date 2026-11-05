@@ -18,7 +18,7 @@ export type PolicyAnswer = { decision: Decision; reason: string };
 const FILE_TOOLS: ReadonlySet<string> = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit", "file-change"]);
 const SHELL_TOOLS: ReadonlySet<string> = new Set(["Bash", "shell"]);
 const NETWORK_TOOLS: ReadonlySet<string> = new Set(["WebFetch", "WebSearch"]);
-const RAFI_FILES = /^(\.rafi|\.tickets|\.git)(\/|$)/;
+const RAFI_FILES = /^(\.rafi|\.tickets|\.git)(\/|$)|^rafi-config\.yaml$/;
 const deny = (reason: string): PolicyAnswer => ({ decision: "deny", reason });
 const allow = (reason: string): PolicyAnswer => ({ decision: "allow", reason });
 

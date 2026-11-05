@@ -17,6 +17,8 @@ export interface ClaudeOptions {
   readonly writable?: boolean;
   /** rafi's in-process tools for this session, from deps.agents.claudeTools (C38). */
   readonly tools?: unknown;
+  /** The ticket's MCP tools (C222), as stdio servers beside rafi's own. */
+  readonly external?: Readonly<Record<string, { command: string; args: string[] }>>;
   readonly env?: Env;
   /** false: no outputFormat; the reply format is in the instructions (C52's text fallback). */
   readonly structured?: boolean;
@@ -34,7 +36,8 @@ function sandbox(o: ClaudeOptions, grants: readonly string[]) {
   // QA: Claude Code gives sandboxed Bash its own TMPDIR (/tmp/claude-<uid>), which beats one rafi passes, and a
   // folder inside the worktree can't be written under denyWrite (M2 plan 10.8 f), so rafi adds none.
   const filesystem = o.writable === false ? { allowWrite: [], denyWrite: [o.cwd] }
-    : { allowWrite: [o.cwd], denyWrite: [".git", ".rafi", ".tickets"].map((d) => path.join(o.cwd, d)) };
+    : { allowWrite: [o.cwd],
+      denyWrite: [".git", ".rafi", ".tickets", "rafi-config.yaml"].map((d) => path.join(o.cwd, d)) };
   return { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
     network, filesystem };
 }
@@ -55,7 +58,9 @@ export function queryOptions(o: ClaudeOptions, first: TurnRequest, extra: Record
     settingSources: readOnly ? ["user"] : ["user", "project", "local"],
     sandbox: sandbox(o, first.grants),
     ...(o.env ? { env: o.env } : {}),
-    ...(o.tools ? { mcpServers: { rafi: o.tools } } : {}),
+    ...(o.tools || o.external ? { mcpServers: { ...Object.fromEntries(Object.entries(o.external ?? {})
+      .map(([name, t]) => [name, { type: "stdio", command: t.command, args: t.args }])),
+    ...(o.tools ? { rafi: o.tools } : {}) } } : {}),
     ...extra,
   };
 }

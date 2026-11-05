@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { shellEnv } from "./shell-env.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dir = path.join(here, "..", "process");
@@ -15,6 +16,6 @@ const files = [
 ];
 const started = performance.now();
 const result = spawnSync(process.execPath, ["--conditions=source", "--import", "tsx", "--test", ...files],
-  { stdio: "inherit", env: { ...process.env, TZ: "UTC" } });
+  { stdio: "inherit", env: { ...shellEnv(), TZ: "UTC" } });
 console.log(`process set: ${files.length} files, ${((performance.now() - started) / 1000).toFixed(1)}s`);
 process.exitCode = result.status ?? 1;

@@ -59,6 +59,7 @@ function addOptions(command: Command, spec: CommandSpec): void {
   for (const option of spec.options ?? []) {
     const built = new Option(option.flags, option.description);
     if (option.defaultValue !== undefined) built.default(option.defaultValue);
+    if (option.repeat) built.argParser((value: string, previous?: string[]) => [...(previous ?? []), value]);
     command.addOption(built);
   }
 }

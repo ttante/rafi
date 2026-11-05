@@ -1,10 +1,11 @@
+// Milestone: M2
 // Item 26 (M2 plan 3.3): the complete adapters over the fakes. Grants per role, model, effort and fast, the MCP
 // attachment, usage (latest and total), provider error codes, two final messages, permission routing,
 // AskUserQuestion answered at once, and the S-SCN-14 tool shapes; run_check over real HTTP from the Codex executable.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { claudeAgent, codexAgent, type AgentEvent, type TurnRequest } from "@rafi-ai/engine/agents";
-import { realCodex, realServe } from "@rafi-ai/engine/deps/real";
+import { realClock, realCodex, realServe } from "@rafi-ai/engine/deps/real";
 import { mcpHandler, RAFI_TOOLS } from "@rafi-ai/engine/tools";
 import { claudeQuery } from "../fakes/claude/query.js";
 import { codexStream } from "../fakes/codex/stream.js";
@@ -13,6 +14,8 @@ import { writeShims } from "../fakes/shims.js";
 import { tempRoot } from "../fixtures/common.js";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+const clock = realClock();
 
 const schema = { name: "builder", json: { type: "object", properties: { kind: { type: "string" } }, required: ["kind"],
   additionalProperties: false } };
@@ -36,7 +39,7 @@ async function collect(turn: AsyncIterable<AgentEvent>, decide: "allow" | "deny"
 function codex(behaviors: Behavior[], o: Record<string, unknown> = {}) {
   let i = 0;
   const fake = codexStream(() => behaviors[Math.min(i++, behaviors.length - 1)]!);
-  const agent = codexAgent({ deps: { agents: { codex: () => fake.stream, claudeQuery: unavailable } },
+  const agent = codexAgent({ deps: { clock, agents: { codex: () => fake.stream, claudeQuery: unavailable } },
     cwd: tempRoot(), executable: "codex", env: {}, ...o });
   return { agent, wire: fake.record.wire as Record<string, unknown>[] };
 }
@@ -111,7 +114,7 @@ test("Codex compaction (ARCH 11.2): the threshold set at spawn, the window repor
   async () => {
     const spawned: string[][] = [];
     const fake = codexStream(() => ({ steps: [{ compact: true }], reply: { kind: "done" }, contextWindow: 200_000 }));
-    const deps = { agents: { codex: (o: { args: readonly string[] }) => { spawned.push([...o.args]);
+    const deps = { clock, agents: { codex: (o: { args: readonly string[] }) => { spawned.push([...o.args]);
       return fake.stream; }, claudeQuery: unavailable } };
     const agent = codexAgent({ deps, cwd: tempRoot(), executable: "codex", env: {},
       compaction: { thresholdPercent: 65, contextWindow: 200_000 } });
@@ -129,7 +132,7 @@ test("Codex compaction (ARCH 11.2): the threshold set at spawn, the window repor
 test("Codex compaction: without a threshold the app-server keeps its own default", async () => {
   const spawned: string[][] = [];
   const fake = codexStream(() => ({ reply: { kind: "done" } }));
-  const agent = codexAgent({ deps: { agents: { codex: (o) => { spawned.push([...o.args]); return fake.stream; },
+  const agent = codexAgent({ deps: { clock, agents: { codex: (o) => { spawned.push([...o.args]); return fake.stream; },
     claudeQuery: unavailable } }, cwd: tempRoot(), executable: "codex", env: {} });
   await collect(agent.turn(req(), new AbortController().signal));
   assert.deepEqual(spawned[0], ["app-server", "--listen", "stdio://"]);
@@ -140,7 +143,7 @@ test("threat 22: the session token reaches Codex only in the thread config over 
     const spawned: { args: readonly string[]; env?: unknown }[] = [];
     const fake = codexStream(() => ({ reply: { kind: "done" } }));
     const token = "t0k".repeat(20);
-    const agent = codexAgent({ deps: { agents: { codex: (o) => { spawned.push(o); return fake.stream; },
+    const agent = codexAgent({ deps: { clock, agents: { codex: (o) => { spawned.push(o); return fake.stream; },
       claudeQuery: unavailable } }, cwd: tempRoot(), executable: "codex", env: { PATH: "/usr/bin" },
     mcp: { url: "http://127.0.0.1:40001/mcp", token } });
     await collect(agent.turn(req(), new AbortController().signal));
@@ -154,7 +157,7 @@ function claude(behaviors: Behavior[], o: Record<string, unknown> = {}) {
   let i = 0;
   const options: Record<string, unknown>[] = [];
   const query = claudeQuery(() => behaviors[Math.min(i++, behaviors.length - 1)]!);
-  const agent = claudeAgent({ deps: { agents: { codex: unavailable, claudeQuery: (p) => {
+  const agent = claudeAgent({ deps: { clock, agents: { codex: unavailable, claudeQuery: (p) => {
     options.push(p.options);
     return query(p);
   } } }, cwd: tempRoot(), ...o });
@@ -227,7 +230,7 @@ test("the Codex executable calls run_check over real HTTP with the token from it
       } }) });
     const shims = writeShims(dir, { codex: [{ steps: [{ runCheck: "npm test" }], reply: { kind: "done" } }],
       claude: [] });
-    const agent = codexAgent({ deps: { agents: { codex: realCodex, claudeQuery: unavailable } }, cwd: dir,
+    const agent = codexAgent({ deps: { clock, agents: { codex: realCodex, claudeQuery: unavailable } }, cwd: dir,
       executable: shims.codex, env: { PATH: process.env.PATH }, mcp: { url: served.url, token } });
     const events = await collect(agent.turn(req(), new AbortController().signal));
     assert.deepEqual(calls, [{ name: "run_check", args: { command: "npm test" } }]);
@@ -245,7 +248,9 @@ test("threat 28: Claude's sandboxed Bash still asks rafi's policy, stays in the 
     assert.equal(sandbox.autoAllowBashIfSandboxed, false, "Claude Code's default (true) skips canUseTool");
     assert.equal(sandbox.allowUnsandboxedCommands, false, "dangerouslyDisableSandbox would run outside it");
     const cwd = String(options[0]!.cwd);
-    assert.deepEqual(sandbox.filesystem.denyWrite, [".git", ".rafi", ".tickets"].map((d) => path.join(cwd, d)));
+    // M5 (P48): rafi-config.yaml joins the builder's read-only list.
+    assert.deepEqual(sandbox.filesystem.denyWrite, [".git", ".rafi", ".tickets", "rafi-config.yaml"]
+      .map((d) => path.join(cwd, d)));
     const asked = events.filter((e) => e.kind === "permission")
       .map((e) => e.request as { tool: string; command: string });
     assert.deepEqual(asked.map((r) => [r.tool, r.command]), [["Bash", "rafi answer 1 1"]], "the policy saw it");

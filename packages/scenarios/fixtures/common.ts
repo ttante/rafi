@@ -68,10 +68,11 @@ export function ticketsYaml(tickets: readonly FixtureTicket[]): string {
 /** 1.0 project files: config with the marker, tickets, one current-branch delivery unit per ticket. */
 export function projectFiles(tickets: readonly FixtureTicket[], extra: Record<string, unknown> = {}) {
   const config = {
-    format_version: 1, app_name: "fixture", plan_updates: "change-then-tell",
+    format_version: 1, appName: "fixture", plan_updates: "change-then-tell",
     tickets: { build: { branch_strategy: "current", completion: "none" } }, ...extra,
   };
-  const delivery = { delivery_units: tickets.map((t) => ({ id: `U-${t.id}`, tickets: [t.id], completion: "none" })) };
+  const delivery = { version: 1,
+    units: tickets.map((t) => ({ id: `U-${t.id}`, tickets: [t.id], completion: "none" })) };
   return {
     "rafi-config.yaml": stringify(config),
     ".tickets/tickets.yaml": ticketsYaml(tickets),

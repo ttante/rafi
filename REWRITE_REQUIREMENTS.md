@@ -228,7 +228,7 @@ All 45 of today's flags, from `help: rafi start`. The decisions are all from `RW
 | FLAG-ST-48 | *(new)* `--skip <id>` | **new** (renamed FLAG-ST-16) | |
 | FLAG-ST-49 | *(new)* `--auto-approve`, `-y` | **new**. The opt-in auto-approve feature (principle 14) | |
 | FLAG-ST-50 | *(new)* `--allow internet,local-servers,…` | **new**. Covers the builder and QA (`RW:82`); full value list is Q-FLAG-2 | |
-| FLAG-ST-51 | *(new)* `--set key=value` | **new**. Override any config setting for one build, for example `--set qa.model=…` (`RW:85`) | |
+| FLAG-ST-51 | *(new)* `--set key=value` | **new**. Override any config setting for one build, for example `--set agent_defaults.roles.qa.model=…` (`RW:85`) | |
 
 Rules that apply to the kept flags:
 
@@ -239,7 +239,7 @@ Rules that apply to the kept flags:
 | FLAG-ST-R3 | `--steps` and `--to-ticket` both set where the build stops, so only one can be used | **keep** (decided) | `RW:397` |
 | FLAG-ST-R4 | With neither `--steps` nor `--stacks` in a terminal, ask "Build tickets or complete delivery stacks?" then "How many tickets?" / "How many complete stacks?". Non-interactive and auto-approve runs must give one | **keep** (proposed). Add `--to-ticket` to the choice (follows FLAG-ST-47) | `ai-foreman/src/cli/start.ts:630-639` |
 | FLAG-ST-R5 | When `--agent` is omitted, `start`, `plan` and `tickets populate` use the single `harness.targets` value; with no config or both targets, Claude | **keep** (proposed) | `cli.md:34` |
-| FLAG-ST-R6 | Automatic ticket branches are named `feature/<ticket-id>-<title>`. Explicit prefixes and delivery branch names stay exact. The default size policy shares compatible XS/S tickets in one invocation and isolates M/L/XL | **keep** (proposed) | `cli.md:45` |
+| FLAG-ST-R6 | Automatic ticket branches are named `feature/<ticket-id>-<title>`. Explicit prefixes and delivery branch names stay exact. The default size policy puts compatible XS/S tickets selected in one run on one shared branch with one review, and gives M/L/XL tickets their own; each ticket still gets a fresh session (NEW-TAG-5) | **keep** (proposed) | `cli.md:45` |
 | FLAG-ST-R7 | `start . --steps 10` reuses the approval of the selected plan and tickets, and only asks about material changes | **keep** (decided) | `RW:201`; `old/docs/build-stall-repair-plan.md:11` |
 
 ### 2.6 `rafi resume`, `rafi answer`, `rafi stop`, `rafi reset`
@@ -650,7 +650,7 @@ The format and compile output are **kept** (decided `RW:57`). Required keys toda
 | OUT-11 | Prefixes | Messages use `rafi:`, `foreman:`, `ai-foreman:` and `foreman tickets:` | **change → `rafi:` only** (proposed; follows CMD-36 and `AIR` contradiction 3, "`foreman` isn't a command") | `run: rafi status .`; `run: rafi tickets validate`; `ai-foreman/src/cli/start.ts:714` |
 | OUT-12 | Session cost | Builder/QA cost or cumulative tokens when `display_session_cost` is on | **keep**; label measured numbers as measured and estimates as estimates (GUI-DASH-3) | `help: rafi agents`; `schemas.ts:341` |
 | OUT-13 | Compaction notice | Distinguishes the requested threshold from the verified provider setting; doesn't mean compaction happened | **keep** (proposed). The Claude threshold mismatch is open (Q-ADP-1) | `cli.md:53` |
-| OUT-14 | Ctrl+C | Preserves interrupted work and waits for the provider to shut down before releasing the build | **keep**; cancel, pause and crash are recorded as different outcomes (scenario test `RW:192`) | `cli.md:51` |
+| OUT-14 | Ctrl+C | Preserves interrupted work and waits for the provider to shut down before releasing the build | **keep**; cancel, pause and crash are recorded as different outcomes (scenario test `RW:192`). The wait is bounded: a provider that ignores SIGTERM is SIGKILLed with its process group after 5 s (user, 2026-11-04; ARCH 8.5) | `cli.md:51` |
 | OUT-15 | Plan docs | `rafi plan` writes the JSON/Markdown pair and history (FILE-20, FILE-21) | **keep** | `structuredPlan.ts:391-400` |
 | OUT-16 | *(new)* Pinned prompt | Blocked-ticket question pinned at the bottom of the terminal while other output scrolls above; several are stacked oldest first | **new** (decided `RW:366,394`) | `RW:362-394` |
 | OUT-17 | *(new)* Terminal title and status line | "Waiting on you since 14:05 (T2)" | **new** (decided `RW:351`) | `RW:351` |
@@ -693,7 +693,7 @@ The GUI is built after the rewrite (`RW §What the GUI needs from the engine`). 
 | GUI-R6 | GUI-RUN-4: network and approvals are explicit and scoped, "never implied by 'yes to all'" | `--allow` stays separate from `--auto-approve`. Auto-approve can grant a permission, but internet access, installs and live services always get an explicit warning in the upfront check first, so they're never granted silently (decided, Q-APR-1) | **change**: the warning is the explicit, scoped step GUI-RUN-4 asks for (follows `RW:81-82`; `PUA §4`; Q-APR-1) | GUI-RUN-4 |
 | GUI-R7 | GUI-RUN-5: recovery flows show detected state, options and consequences before acting | `rafi reset` previews what it will do (FLAG-RE-1) | **keep** (follows `cli.md:47` preview-first) | GUI-RUN-5 |
 | GUI-R8 | GUI-INS-6, GUI-PLN-8: approval mode (manual or auto-approve, visibly flagged and auditable), build mode (don't build / N steps / everything), ticket sourcing, ticket size policy | These are settings the engine accepts per project and per instance | **new** (decided principle 14 for approval mode) | GUI-INS-6, GUI-PLN-8; `RW:312` |
-| GUI-R9 | GUI-INS-7: one lifecycle vocabulary (Draft → Planning → Awaiting plan approval → Ticketing → Ready → Building → QA → Awaiting you → Paused → Failed/Recovering → Complete → Archived), mapped to engine states | Engine states must be derivable from the event log and mappable to this list. Every GUI label maps from the ticket, build and project states in NEW-ENG-2; the exact mapping is set in the architecture plan (guide step 7) | **new** (Q-LIFE-1) | GUI-INS-7 |
+| GUI-R9 | GUI-INS-7: one lifecycle vocabulary (Draft → Planning → Awaiting plan approval → Ticketing → Ready → Building → QA → Awaiting you → Paused → Failed/Crashed/Recovering → Complete → Archived), mapped to engine states | Engine states must be derivable from the event log and mappable to this list. Every GUI label maps from the ticket, build and project states in NEW-ENG-2; the exact mapping is set in the architecture plan (guide step 7) | **new** (Q-LIFE-1) | GUI-INS-7 |
 | GUI-R10 | GUI-INS-8: reset tickets, plan or both, with preview | `rafi reset` covers "this build" and "everything"; plan reset is Q-CMD-3 | **change** (follows CMD-32) | GUI-INS-8 |
 | GUI-R11 | GUI-VIS-2: liveness honesty: working, active but quiet, waiting on tool or provider (retry/backoff), waiting on you, stalled | Events record last signal and last real progress per agent, and retries with their backoff | **new** | GUI-VIS-2 |
 | GUI-R12 | GUI-VIS-4: agent detail: activity stream, ticket and acceptance criteria, files touched, commands and results, tokens and cost, timing, session ID, runtime, error and retry history | Each of these is in the event log (NEW-MEAS-1) | **new** | GUI-VIS-4 |

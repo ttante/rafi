@@ -1,3 +1,4 @@
+// Milestone: M3
 // Item 20 (M3 plan, C128, C108): session roots. After drift, QA's review runs in a new session rooted at the copy:
 // its agent cwd, its run_check's check cwd and sandbox worktree are the copy; the in-place session closes before the
 // copy's opens and the copy's closes before cleanup; the next review after a copy review opens a new session and

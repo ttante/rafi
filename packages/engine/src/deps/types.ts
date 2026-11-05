@@ -1,4 +1,11 @@
-// The seams of ARCH 8.2. The engine reaches time, files, processes, SQLite and agents only through these.
+// The seams of ARCH 8.2. The engine reaches time, files, processes, SQLite and agents only through these. The MCP
+// endpoint's request types live in tools/mcp-types.ts and the grant and sandbox facts in ask/grants.ts (M5: room
+// for the fetch seam); they're re-exported here.
+import type { Grants, SandboxFacts } from "../ask/grants.js";
+import type { InProcessTool, McpHandler } from "../tools/mcp-types.js";
+
+export type { Grants, Need, SandboxFacts } from "../ask/grants.js";
+export type { InProcessTool, McpHandler, McpRequest, McpResponse } from "../tools/mcp-types.js";
 
 export type Env = Readonly<Record<string, string | undefined>>;
 export type Cancel = () => void;
@@ -76,12 +83,17 @@ export interface JsonRpcStream {
   write(message: unknown, meta?: unknown): void;
   onMessage(fn: (message: unknown) => void): Cancel;
   onClose(fn: (info: { code: number | null; error?: string }) => void): Cancel;
+  /** Stdin's end and SIGTERM to its process group; kill(): SIGKILL to it (ARCH 8.5; Windows: deps/real/agents.ts). */
   close(): Promise<void>;
+  kill(): void;
 }
 
-/** The Agent SDK's query(), as the Claude adapter calls it. */
+/** A provider as rafi ends it (ARCH 8.5): terminate asks, kill forces; onGone: at once if it exited or never ran. */
+export interface ProviderProcess { terminate(): void; kill(): void; onGone(fn: () => void): void }
+
+/** The Agent SDK's query(), as the Claude adapter calls it; `process` is the `claude` it spawned. */
 export type ClaudeQuery = (params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) =>
-  AsyncIterable<unknown> & { interrupt(): Promise<void> };
+  AsyncIterable<unknown> & { interrupt(): Promise<void>; readonly process?: ProviderProcess };
 
 export interface Terminal {
   write(text: string): void;
@@ -90,7 +102,8 @@ export interface Terminal {
   readonly columns: number;
   readonly rows: number;
   setTitle(title: string): void;
-  onInterrupt(fn: () => void): Cancel;
+  /** Ctrl+C's SIGINT, or the signals given (SIGHUP and SIGTERM for a build's owner, C183). */
+  onInterrupt(fn: () => void, signals?: readonly NodeJS.Signals[]): Cancel;
   onResize(fn: () => void): Cancel;
   readonly input: NodeJS.ReadableStream | null;
 }
@@ -135,13 +148,6 @@ export interface CodexSpawn {
   env: Env;
 }
 
-/** A need a grant covers (Q-FLAG-2, ARCH 7.11). */
-export type Need = "internet" | "local-servers" | "installs" | "services";
-
-export interface Grants {
-  readonly needs: readonly Need[];
-}
-
 export interface CheckRun {
   cwd: string;
   env: Env;
@@ -162,39 +168,14 @@ export interface CheckResult {
   readonly output: string;
 }
 
-export type SandboxTool = "sandbox-exec" | "bwrap";
-export type SandboxInfo = { available: true; tool: SandboxTool } | { available: false; missing: string };
-/** What the machine has for a test sandbox; ask/grants.ts turns it into a SandboxInfo. */
-export type SandboxFacts =
-  | { platform: "darwin"; sandboxExec: boolean }
-  | { platform: NodeJS.Platform; bwrap: string | null; bwrapWorks: boolean };
-
-/** One HTTP request to rafi's local MCP endpoint, as deps.serve hands it to the handler (C37). */
-export interface McpRequest {
-  readonly method: string;
-  readonly path: string;
-  readonly headers: Readonly<Record<string, string | undefined>>;
-  readonly body: string;
-  /** The peer's address, as the socket reports it. */
-  readonly remote: string;
-  /** The port the server listens on (for the Host check). */
-  readonly port: number;
+/** The `fetch` seam (ARCH 8.2, P47): never follows a redirect; a 3xx comes back with its Location. */
+export interface FetchOptions {
+  method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal;
+  /** For URL sources: every address the host resolves to must pass, else nothing is sent (today's public check). */
+  allowAddress?: (address: string) => boolean;
 }
-
-export interface McpResponse {
-  readonly status: number;
-  readonly headers: Readonly<Record<string, string>>;
-  readonly body: string;
-}
-
-export type McpHandler = (request: McpRequest) => Promise<McpResponse>;
-
-/** One of rafi's tools for an in-process Claude session (C38). */
-export interface InProcessTool {
-  readonly name: string;
-  readonly description: string;
-  readonly inputSchema: Record<string, unknown>;
-  call(args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
+export interface FetchResponse {
+  readonly status: number; readonly headers: Record<string, string>; text(): Promise<string>;
 }
 
 export interface Deps {
@@ -210,6 +191,7 @@ export interface Deps {
   fs: Fs;
   git(args: string[], o: ExecOptions): Promise<ExecResult>;
   exec(cmd: string, args: string[], o: ExecOptions): Promise<ExecResult>;
+  fetch(url: string, o: FetchOptions): Promise<FetchResponse>;
   checks: {
     run(cmd: string, args: string[], o: CheckRun): Promise<CheckResult>;
     /** What this machine has for a test sandbox (6.9); ask/grants.ts decides if it's usable. */

@@ -1,0 +1,39 @@
+# Rafi's fixed tag list (ARCH 10.1). A ticket's tags pick the rule packs, skills and tools its agents get; projects
+# add their own under `tags:` in rafi-config.yaml. `always` (not a ticket tag) marks the small core every agent gets.
+tags:
+  - name: ui
+    description: User interface, styling and front-end components.
+    patterns: ["**/*.tsx", "**/*.jsx", "**/*.css", "**/*.vue"]
+  - name: backend
+    description: Server-side code and services.
+    patterns: []
+  - name: api
+    description: APIs and their contracts.
+    patterns: []
+  - name: database
+    description: Schemas, migrations and data access.
+    patterns: []
+  - name: ai
+    description: Features that use language models or other AI.
+    patterns: []
+  - name: mobile
+    description: Mobile apps.
+    patterns: []
+  - name: push
+    description: Push notifications.
+    patterns: []
+  - name: auth
+    description: Sign-in, sessions and access control.
+    patterns: []
+  - name: security
+    description: Security, privacy and compliance work.
+    patterns: []
+  - name: infra
+    description: Infrastructure, deployment and CI.
+    patterns: []
+  - name: docs
+    description: Project documents.
+    patterns: []
+  - name: testing
+    description: Test suites and test tooling.
+    patterns: []

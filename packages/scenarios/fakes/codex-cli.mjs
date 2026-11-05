@@ -2,12 +2,13 @@
 // it reads a script file (baked into its PATH shim, plan choice C12) instead of RAFI_E2E_FAULT, keeps an
 // operation log, and records its environment for the ENV-5 check. A script with `match: "identity"` matches rules by
 // the turn's identity from rafi's log (P8 option C, script/match.mjs); an order-only script refuses selectors.
-// `kill` behaviors SIGKILL rafi (C162), and a SIGINT (Ctrl+C in rafi's terminal reaches the whole foreground
-// group) is logged and ignored: the fake takes rafi's cancel instead, as plan 9 item 2 scripts it.
+// `kill` behaviors SIGKILL rafi (C162), and a SIGINT is logged and ignored: the fake takes rafi's cancel instead, as
+// plan 9 item 2 scripts it (since M4 follow-up 2 a provider leads its own group, so the terminal's Ctrl+C skips it).
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { createCodexFake } from "./codex/protocol.mjs";
+import { deafness } from "./script/deaf.mjs";
 import { pickBehavior } from "./script/match.mjs";
 
 function rafiEnv() {
@@ -53,6 +54,8 @@ export function main(scriptPath, argv = process.argv.slice(2)) {
     const picked = pickBehavior(script, scriptPath, ctx, () => nextIndex(scriptPath));
     if (script.ps) log({ op: "ps", ancestry: ancestry() });
     log({ op: "pick", identity: picked.identity, rule: picked.rule ?? null, kill: picked.behavior.kill ?? null });
+    // Until then SIGTERM keeps its default action; from then it's only logged.
+    if (picked.behavior.ignoreTerm && !deaf.on) { deaf.start(); process.on("SIGTERM", () => deaf.term()); }
     return picked.behavior;
   };
   const killHost = () => {
@@ -60,6 +63,7 @@ export function main(scriptPath, argv = process.argv.slice(2)) {
     process.kill(process.ppid, "SIGKILL");
   };
   process.on("SIGINT", () => log({ op: "sigint" }));
+  const deaf = deafness(log);
   log({ op: "start", argv, env: rafiEnv(), pid: process.pid, ppid: process.ppid });
   const callMcp = async (url, headers, body) => {
     const response = await fetch(url, { method: "POST", body: JSON.stringify(body), headers: { ...headers,
@@ -72,5 +76,5 @@ export function main(scriptPath, argv = process.argv.slice(2)) {
   });
   createInterface({ input: process.stdin }).on("line", (line) => {
     if (line.trim()) fake.onMessage(JSON.parse(line));
-  }).on("close", () => process.exit(0));
+  }).on("close", () => { if (!deaf.on) process.exit(0); });
 }

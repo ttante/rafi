@@ -86,5 +86,7 @@ export interface Agent {
   turn(request: TurnRequest, signal: AbortSignal): AsyncIterable<AgentEvent>;
   /** The provider's model list (C52), or null when it gives none. */
   models?(): Promise<string[] | null>;
+  /** Asks the provider to compact the session's context now (C223, the reuse override); Codex only. */
+  compact?(): Promise<void>;
   close(): Promise<void>;
 }

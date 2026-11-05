@@ -1,7 +1,11 @@
 // @rafi-ai/engine public surface.
 export { openEngine, STATE_DB, type Engine } from "./api/engine.js";
 export type * from "./deps/types.js";
+export type { SandboxInfo, SandboxTool } from "./ask/grants.js";
 export { loadConfig, CONFIG_FILE, TICKETS_FILE } from "./config/load.js";
+export {
+  COMPACTING_ROLES, ROLE_NAMES, roleSettingsOf, saveAgentSettings, type RoleSettings,
+} from "./config/agents.js";
 export { unfinishedLegacyBuild, type LegacyRun } from "./migrate/legacyRuns.js";
 export { redactor, escapeControl } from "./log/redact.js";
 export { openLog, StorageError, type Log } from "./log/db.js";
@@ -12,8 +16,25 @@ export { standard } from "./workflow/standard.js";
 export { roles } from "./workflow/roles.js";
 export { checkWorkflow } from "./workflow/checks.js";
 export { startBuild, ENGINE_VERSION, type StartOptions, type StartUI } from "./api/start.js";
+export { scopeKey } from "./plan/approval.js";
+export type { ScopeChoice } from "./build/scope.js";
 export { eventsExport } from "./stats/export.js";
 export { ticketsView } from "./tickets/show.js";
+export { ACTORS, cancelTicket, setTicketStatus, type StatusChange, type TicketWrite } from "./tickets/status.js";
+export { reorderTicket } from "./tickets/edit.js";
+export { queueRows, validateTickets, VALIDATION_PASSED } from "./tickets/validate.js";
+export { initTracker } from "./tickets/init.js";
+export { writeProgressDoc } from "./tickets/render.js";
+export { loadTickets } from "./tickets/load.js";
+export { adoptProject } from "./tickets/adopt.js";
+export { acceptFutureWork, discover, futureWork, recommendations, review } from "./tickets/inbox.js";
+export { groups, repairGroups, ungrouped } from "./tickets/groups.js";
+export { applyReset, previewReset, RESET_SCOPES, type ResetPreview, type ResetTarget } from "./tickets/reset.js";
+export { applyRollbacks, proposeRollbacks, riskGaps, waiveRiskNotes } from "./tickets/risk.js";
+export { archiveDone } from "./tickets/archive.js";
+export { refreshPrs } from "./git/refresh.js";
+export { managedByMe, setupTickets, type SetupAnswers } from "./tickets/setup.js";
+export { isPublicAddress, type Source } from "./tickets/sources.js";
 export type { BuildUI } from "./build/context.js";
 export type { UiAnswer, UiOption, UiQuestion } from "./ask/blocked.js";
 export type { AgentEvent, ToolRun } from "./agents/types.js";

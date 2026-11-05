@@ -2,12 +2,16 @@
 import { z } from "zod";
 import { def, digest, nullableText, ticketId, type EventDef } from "./envelope.js";
 import { trackerStatus } from "./project.js";
+import { ownedEntry } from "../progress.js";
 
 export const progressEntry = z.object({
   kind: z.enum(["ticket", "question", "answer"]),
   key: z.string().min(1),
   status: trackerStatus.nullable(),
   at: z.string().datetime(),
+  /** P49: an in-progress ticket's fix count (ARCH 3.7), and a rafi-owned ticket's identity. */
+  fixes: z.number().int().nonnegative().optional(),
+  owned: ownedEntry.optional(),
 }).strict();
 
 export const historyEvents: readonly EventDef[] = [

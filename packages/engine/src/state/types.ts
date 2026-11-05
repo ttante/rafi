@@ -24,6 +24,8 @@ export interface TicketState {
   readonly fixesUsed: number;
   readonly fixesGranted: number;
   readonly rafiOwned: boolean;
+  /** A rafi-owned ticket's identity, from its `ticket.added` (C237, P49). */
+  readonly owned?: { source: string; unit: string | null; requirements: readonly string[]; hint: string | null };
   /** A requirements file exists for the current definition (plan choice C6). */
   readonly requirementsCurrent: boolean;
   readonly personOnly: number;
@@ -104,6 +106,8 @@ export interface Question {
 export interface TicketDefinition {
   readonly id: string;
   readonly dependsOn: readonly string[];
+  /** M5: delivery units that must be delivered before this ticket starts (`wait` or `stack`, 4.3.2). */
+  readonly after?: readonly string[];
 }
 
 export interface Violation {
@@ -126,6 +130,8 @@ export interface Folded {
   readonly answers: Readonly<Record<string, { choice: string | null; text: string | null }>>;
   readonly grants: readonly { need: string; scope: string; allowed: boolean; tickets: readonly string[] }[];
   readonly units: Readonly<Record<string, string>>;
+  /** CI points by `<run>|<key>` (state/ci.ts): a failing suite's fix ticket, and whether `ci.result` closed it. */
+  readonly ci: Readonly<Record<string, { fix: string | null; closed: boolean }>>;
   readonly violations: readonly Violation[];
 }
 
@@ -143,6 +149,7 @@ export type Action =
   | { kind: "hold"; why: string }
   | { kind: "step"; ticket: string; node: string; redo: boolean }
   | { kind: "deliver-unit"; unit: string }
+  | { kind: "ci"; key: string; units: string[]; tests: "full" | "light" }
   | { kind: "start-ticket"; ticket: string; resumeNode: string | null }
   | { kind: "wait"; questions: string[] }
   | { kind: "finish"; complete: boolean; done: string[]; left: string[] };

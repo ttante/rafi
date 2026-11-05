@@ -6,7 +6,11 @@ import { splitCommand } from "../../agents/shellForms.js";
 import type { ToolRun } from "../../agents/types.js";
 import { snapshot } from "../../facts/snapshot.js";
 import { mismatches, runsOf } from "../../facts/runs.js";
-import { buildMessage, checksFixMessage, qaFixMessage, type FailedRun } from "../../instructions/messages.js";
+import { fixedTags } from "../../instructions/packs.js";
+import { addTags, tagPatterns } from "../../instructions/tags.js";
+import {
+  buildMessage, checksFixMessage, dependencyLine, qaFixMessage, type FailedRun,
+} from "../../instructions/messages.js";
 import { allEvents, append, knownRuns, setting, ticketOf, type BuildContext } from "../context.js";
 import { agentTurn } from "../../turns/agent.js";
 import { failStep, readRequirements, trustedOf } from "./common.js";
@@ -99,7 +103,12 @@ export async function workStep(ctx: BuildContext, id: string, step: "build" | "f
   const ticket = ticketOf(ctx, id);
   await append(ctx, id, { type: "step.started", data: { step, attempt } });
   const reqs = await readRequirements(ctx, id);
-  const message = step === "build" ? buildMessage(ticket, reqs.path, redo) : await fixFor(ctx, id, reqs.path);
+  const view = ctx.engine.fold(ctx.tickets.map((t) => ({ id: t.id, dependsOn: t.depends_on })));
+  const deps = ticket.depends_on.map((d) => dependencyLine(d, ctx.tickets.find((t) => t.id === d)?.title ?? "",
+    view.tickets[d]?.state === "done" ? "done" : view.tickets[d]?.state ?? "not started"));
+  if (step === "build") await addTags(ctx.engine, ctx.run, ticket, ticket.likely_files, { why: "likely",
+    patterns: tagPatterns(ctx.settings, await fixedTags(ctx.deps.fs)), line: (text) => ctx.ui.line(text) });
+  const message = step === "build" ? buildMessage(ticket, reqs.path, redo, deps) : await fixFor(ctx, id, reqs.path);
   const out = await agentTurn(ctx, { ticket: id, step, role: "builder", reply: "builder", attempt, redo, message,
     requirementChecks: trustedOf(reqs).map((c) => c.command),
     validate: (value) => duplicates((value as BuilderReply).runs) });

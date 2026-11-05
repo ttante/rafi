@@ -82,6 +82,9 @@ importers:
       rafi-spec:
         specifier: workspace:*
         version: link:../spec
+      special-agents:
+        specifier: workspace:*
+        version: link:../special-agents
       yaml:
         specifier: ^2.5.1
         version: 2.9.0

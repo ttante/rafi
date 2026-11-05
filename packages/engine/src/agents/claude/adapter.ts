@@ -3,6 +3,7 @@
 // can't serialize (plan choice C11). Completed in M2.
 import type { ClaudeQuery, Deps } from "../../deps/types.js";
 import { claudeCapabilities } from "../capabilities.js";
+import { endProvider } from "../ending.js";
 import { EventQueue } from "../queue.js";
 import type { Agent, AgentEvent, Decision, TurnRequest } from "../types.js";
 import { mapMessage, newClaudeState, type ClaudeTurnState } from "./events.js";
@@ -30,9 +31,11 @@ interface Session {
   readonly abort: AbortController;
 }
 
-export function claudeAgent(o: ClaudeOptions & { deps: Pick<Deps, "agents"> }): Agent & { sessionId(): string | null } {
+export function claudeAgent(o: ClaudeOptions & { deps: Pick<Deps, "agents" | "clock"> }):
+  Agent & { sessionId(): string | null } {
   const state: ClaudeTurnState = newClaudeState(o.resume ?? null);
   let session: Session | null = null;
+  let closing: Promise<void> | null = null;
   let current: EventQueue<AgentEvent> | null = null;
   let repair = false;
   /**
@@ -117,10 +120,13 @@ export function claudeAgent(o: ClaudeOptions & { deps: Pick<Deps, "agents"> }): 
         input.end();
       }
     },
-    async close() {
+    /** The SDK's input ends and its query aborts, then the `claude` it spawned is ended (ending.ts). */
+    close() {
       session?.input.end();
       session?.abort.abort();
+      if (session?.query.process) closing = endProvider(o.deps.clock, session.query.process);
       session = null;
+      return closing ?? Promise.resolve();
     },
   };
 }

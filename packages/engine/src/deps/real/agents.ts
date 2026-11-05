@@ -1,11 +1,27 @@
-// Real agent transports: `codex app-server` over stdio, and the Agent SDK's query() loaded on first use.
-import { spawn } from "node:child_process";
+// Real agent transports: `codex app-server` over stdio, and the Agent SDK's query() loaded on first use. Each
+// provider leads its own process group (POSIX), so rafi's SIGTERM and SIGKILL reach its children (M4 follow-up 2).
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { ClaudeQuery, CodexSpawn, InProcessTool, JsonRpcStream } from "../types.js";
 
+const GROUP = process.platform !== "win32";
+const realSys = Object.freeze({ platform: process.platform, kill: (pid: number, s: NodeJS.Signals) =>
+  process.kill(pid, s), taskkill: (pid: number) => spawnSync("taskkill", ["/PID", `${pid}`, "/T", "/F"],
+  { stdio: "ignore", windowsHide: true }) });
+
+/** POSIX: to the provider's whole group, strays too once it has exited. Windows has no groups and no polite signal
+ * (kill() is TerminateProcess, stranding children): the ask is stdin's end alone, the force `taskkill /T /F`. */
+export function signalGroup(child: { pid?: number; exitCode: number | null }, how: "term" | "kill",
+  sys: { platform: string; kill(pid: number, s: NodeJS.Signals): void; taskkill(pid: number): void } = realSys) {
+  try {
+    if (child.pid && sys.platform !== "win32") sys.kill(-child.pid, how === "term" ? "SIGTERM" : "SIGKILL");
+    else if (child.pid && how === "kill" && child.exitCode === null) sys.taskkill(child.pid);
+  } catch { /* the group is gone */ }
+}
+
 export function realCodex(o: CodexSpawn): JsonRpcStream {
   const child = spawn(o.executable, o.args, { cwd: o.cwd, env: { ...o.env }, shell: false, windowsHide: true,
-    stdio: ["pipe", "pipe", "pipe"] });
+    detached: GROUP, stdio: ["pipe", "pipe", "pipe"] });
   const messageFns = new Set<(m: unknown) => void>();
   const closeFns = new Set<(info: { code: number | null; error?: string }) => void>();
   const lines = createInterface({ input: child.stdout });
@@ -25,22 +41,31 @@ export function realCodex(o: CodexSpawn): JsonRpcStream {
     onClose(fn) { closeFns.add(fn); return () => closeFns.delete(fn); },
     async close() {
       child.stdin.end();
-      if (child.exitCode === null) child.kill("SIGTERM");
+      signalGroup(child, "term");
     },
+    kill: () => signalGroup(child, "kill"),
   };
 }
 
+type SdkSpawn = { command: string; args: string[]; cwd?: string; env: NodeJS.ProcessEnv; signal: AbortSignal };
 export const realClaudeQuery: ClaudeQuery = (params) => {
   type Inner = AsyncIterable<unknown> & { interrupt(): Promise<void> };
   let inner: Inner | undefined;
+  let child: ChildProcess | undefined;
+  // The SDK's own spawn (stdin and stdout piped, stderr ignored) in its own group; its kill() reaches the group.
+  const spawnClaudeCodeProcess = (s: SdkSpawn) => (child = Object.assign(spawn(s.command, s.args, { cwd: s.cwd,
+    env: s.env, signal: s.signal, windowsHide: true, detached: GROUP, stdio: ["pipe", "pipe", "ignore"] }),
+  { kill: (signal?: NodeJS.Signals | number) => (signalGroup(child!, signal === "SIGKILL" ? "kill" : "term"), true) }));
   const load = async () => {
-    if (!inner) {
-      const sdk = await import("@anthropic-ai/claude-agent-sdk");
-      inner = sdk.query(params as Parameters<typeof sdk.query>[0]) as unknown as Inner;
-    }
-    return inner;
+    if (inner) return inner;
+    const sdk = await import("@anthropic-ai/claude-agent-sdk");
+    return (inner = sdk.query({ ...params, options: { ...params.options, spawnClaudeCodeProcess } } as
+      Parameters<typeof sdk.query>[0]) as unknown as Inner);
   };
+  const running = () => child && child.exitCode === null && child.signalCode === null ? child : null;
   return {
+    process: { terminate: () => child && signalGroup(child, "term"), kill: () => child && signalGroup(child, "kill"),
+      onGone: (fn) => void (running()?.once("exit", () => fn()) ?? fn()) },
     async *[Symbol.asyncIterator]() {
       yield* await load();
     },

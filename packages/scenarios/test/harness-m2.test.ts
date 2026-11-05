@@ -1,3 +1,4 @@
+// Milestone: M2
 // Item 27 (M2 plan 3.3): the clock fix and whenTimer (C49), rafi.start, the scripted checks runner (fake-test),
 // the in-memory endpoint, the F-TESTS-LOCAL and F-HUGE fixtures, and the role happy paths (SCN 2.2).
 import { test } from "node:test";
@@ -186,7 +187,7 @@ test("P19: a 1.0 config with no tickets on disk isn't adopted; start says so and
   const root = tempRoot();
   const project = fOne(root);
   writeFileSync(path.join(project, ".tickets", "tickets.yaml"), "tickets: []\n");
-  writeFileSync(path.join(project, ".tickets", "delivery.yaml"), "delivery_units: []\n");
+  writeFileSync(path.join(project, ".tickets", "delivery.yaml"), "units: []\n");
   git(project, ["commit", "-qam", "no tickets"]);
   const rafi = rafiRunner(newComputer(root), project);
   const r = await rafi("start . --steps 1");

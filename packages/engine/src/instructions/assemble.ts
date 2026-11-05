@@ -1,6 +1,7 @@
 // Standing instructions, sent once per session (ARCH 10.2, C53): the role's core (`.rafi/compiled/<role>/system.md`
-// when present, else a short built-in core), the runtime contract (network, what's writable, report blocked or
-// needs-input), the tools, and the reply format, described once. Untrusted text never goes here.
+// when present, else a short built-in core), the rule packs, skills and tools the ticket's tags pick (M5, C221,
+// C222; packs.ts, tools/registry.ts), the runtime contract (network, what's writable, report blocked or
+// needs-input), rafi's own tools, and the reply format, described once. Untrusted text never goes here.
 import path from "node:path";
 import type { Fs } from "../deps/types.js";
 
@@ -30,12 +31,31 @@ export interface Contract {
   readonly writable: boolean;
   /** The JSON Schema, given in text when the model has no structured replies (C52's fallback). */
   readonly textSchema?: Record<string, unknown> | null;
+  /** M5: the ticket's rule packs' texts, its skills and its tools' lines (sections 2–4 of ARCH 10.2). */
+  readonly context?: TicketContext;
+}
+
+export interface TicketContext {
+  readonly packs: readonly string[];
+  readonly skills: readonly { name: string; description: string; path: string }[];
+  readonly tools: readonly string[];
+}
+
+/** Sections 2–4: packs, skills by name and description (and where to open one), the ticket's tools. */
+export function contextSections(c: TicketContext): string[] {
+  const out = [...c.packs];
+  if (c.skills.length) {
+    out.push(`Skills (open one's file only when you need it):\n${c.skills.map((s) => `- ${s.name}: ${s.description} ` +
+      `(${s.path})`).join("\n")}`);
+  }
+  if (c.tools.length) out.push(`Tools for this ticket: ${c.tools.join("; ")}`);
+  return out;
 }
 
 export async function standingInstructions(fs: Fs, project: string, c: Contract): Promise<string> {
   const compiled = path.join(project, ".rafi", "compiled", c.role, "system.md");
   const core = (await fs.stat(compiled)) ? await fs.read(compiled) : CORE[c.role]!;
-  const parts = [core.trim(),
+  const parts = [core.trim(), ...(c.context ? contextSections(c.context) : []),
     `The network is ${c.network ? "on" : "off"} for this session. ${c.writable ? "You may change files in this " +
       "worktree." : "This session is read-only."} If something you need is missing, report blocked; don't swap in a ` +
       "different stack or tool than the ticket names. If you need a decision, reply needs-input; don't ask the user.",

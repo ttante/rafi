@@ -40,6 +40,9 @@ export function happyPath(meta, ctx) {
     return { steps, reply: { kind: "done", summary: `Built ${meta.ticket ?? "the ticket"}.`, runs: RUNS, block: null,
       question: null } };
   }
+  if (meta.role === "ticket-maker" && meta.step === "risk-notes") {
+    return { steps: [], reply: { rollback: `Revert ${meta.ticket}'s commit; nothing else depends on it.` } };
+  }
   return { steps: [], reply: {} };
 }
 

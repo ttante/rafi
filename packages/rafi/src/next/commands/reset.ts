@@ -17,7 +17,7 @@ async function pick<T extends string>(deps: Deps, flag: string, value: unknown, 
   }
   if (!deps.terminal.isTTY) return { refusal: `Say ${flag} (${values.join(", ")}); there's no terminal to ask in.` };
   const i = await choose(deps, question, labels);
-  return i === null ? null : values[i]!;
+  return i === null || i >= values.length ? null : values[i]!;
 }
 
 async function options(ctx: ActionContext): Promise<ResetOptions | { refusal: string } | null> {
@@ -36,7 +36,7 @@ async function options(ctx: ActionContext): Promise<ResetOptions | { refusal: st
   if (scope === "everything") return { scope, run };
   const action = await pick(deps, "--action", opts.action, ACTIONS, "How should Rafi restart this build?",
     ["Restart current: keep the branch and redo the unfinished tickets from your files",
-      "Archive and restart: move the unfinished work to an archive branch, then restart from the base"]);
+      "Archive and restart: move the unfinished work to an archive branch, then restart from the base", "Cancel"]);
   if (action === null || typeof action === "object") return action;
   if (action === "archive-restart") return { scope, run, action };
   const cleanup = await pick(deps, "--cleanup", opts.cleanup, CLEANUPS, "What about your uncommitted changes?",

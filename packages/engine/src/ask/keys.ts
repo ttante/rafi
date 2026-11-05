@@ -15,9 +15,10 @@ export const whatNextKey = (ticket: string, verdictEvent: string, digest: string
 export const waiverKey = (ticket: string, findings: readonly string[], digest: string) =>
   `waiver|${ticket}|${[...findings].sort().join(",")}|${digest}`;
 
-async function lsTree(deps: KeyDeps, cwd: string, tree: string, files: readonly string[]): Promise<string> {
+async function lsTree(deps: KeyDeps, cwd: string, tree: string, files: readonly string[], z = false):
+  Promise<string> {
   if (!files.length) return "";
-  const r = await deps.git(["ls-tree", "-r", tree, "--", ...files], { cwd, env: deps.env });
+  const r = await deps.git(["ls-tree", "-r", ...(z ? ["-z"] : []), tree, "--", ...files], { cwd, env: deps.env });
   if (r.code !== 0) throw new Error(`git ls-tree failed: ${r.stderr.trim().split("\n")[0]}`);
   return r.stdout;
 }
@@ -27,9 +28,11 @@ export async function coveredDigest(deps: KeyDeps, cwd: string, tree: string, fi
   return `sha256:${createHash("sha256").update(await lsTree(deps, cwd, tree, files)).digest("hex")}`;
 }
 
+/** Part 6: from a `-z` listing, so each path is git's own bytes (a plain one C-quotes `src/Café.txt`). The digest
+ * above keeps the plain listing, so answers saved before part 6 still match. */
 function blobs(listing: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const line of listing.split("\n").filter(Boolean)) {
+  for (const line of listing.split("\0").filter(Boolean)) {
     const tab = line.indexOf("\t");
     out.set(line.slice(tab + 1), line.slice(0, tab).split(" ")[2] ?? "");
   }
@@ -39,7 +42,7 @@ function blobs(listing: string): Map<string, string> {
 /** The covered files whose content differs between two trees (a removed file counts). */
 export async function changedCovered(deps: KeyDeps, cwd: string, from: string, to: string,
   files: readonly string[]): Promise<string[]> {
-  const a = blobs(await lsTree(deps, cwd, from, files));
-  const b = blobs(await lsTree(deps, cwd, to, files));
+  const a = blobs(await lsTree(deps, cwd, from, files, true));
+  const b = blobs(await lsTree(deps, cwd, to, files, true));
   return files.filter((f) => a.get(f) !== b.get(f)).sort();
 }

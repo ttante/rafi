@@ -4,6 +4,7 @@ import type { Workflow } from "../workflow/types.js";
 import { initialBuild, nextBuild } from "./build.js";
 import { initialProject, nextProject } from "./project.js";
 import { initialTicket, nextTicket } from "./ticket.js";
+import { nextUnit, unitTarget, type UnitState } from "./units.js";
 import type {
   BuildState, Folded, ProjectState, Question, StateEvent, TicketDefinition, TicketRules, TicketState, Violation,
 } from "./types.js";
@@ -28,6 +29,7 @@ interface Acc {
   answers: Record<string, { choice: string | null; text: string | null }>;
   grants: { need: string; scope: string; allowed: boolean; tickets: string[] }[];
   units: Record<string, string>;
+  ci: Record<string, { fix: string | null; closed: boolean }>;
   violations: Violation[];
 }
 
@@ -53,7 +55,9 @@ function rulesFor(acc: Acc, event: FoldEvent, ctx: FoldContext, rafiOwned: boole
 
 function ticketTargets(event: FoldEvent): string[] {
   const data = (event.data ?? {}) as Data;
-  if (event.type === "tickets.changed") return ((data.items as { ticket: string }[]) ?? []).map((i) => i.ticket);
+  if (event.type === "tickets.changed") {
+    return ((data.items as { ticket?: string }[]) ?? []).flatMap((i) => (i.ticket ? [i.ticket] : []));
+  }
   // P31: build.reset reaches each ticket it puts back, as tickets.changed's items do.
   if (event.type === "build.reset") return (data.tickets as string[] | undefined) ?? [];
   if (event.type === "progress.imported") {
@@ -90,11 +94,25 @@ export function isTicketEvent(type: string): boolean {
   return TICKET_TYPES.has(type);
 }
 
+const WORKING: ReadonlySet<string> = new Set(["building", "reviewing", "fixing"]);
+const LIVE: ReadonlySet<string> = new Set(["running", "waiting", "paused", "stopping"]);
+
+/** ARCH 4.2 (M5 R1, C209): `rafi tickets update/complete/block/unblock` can't change the ticket a live build is
+ * working on; the check runs in the append's own transaction, so a build and the command never both win. */
+function workedOn(acc: Acc, event: FoldEvent, id: string): string | null {
+  if (event.type !== "ticket.status_set" || !WORKING.has(acc.tickets[id]?.state ?? "")) return null;
+  const run = acc.run;
+  if (!run || !LIVE.has(acc.builds[run]?.state ?? "")) return null;
+  return `${id} is being worked on by build ${run}; let that step finish, or stop the build (rafi stop), first`;
+}
+
 function applyTickets(acc: Acc, event: FoldEvent, ctx: FoldContext): void {
   if (!TICKET_TYPES.has(event.type)) return;
   const ids = [...new Set(ticketTargets(event))];
   for (const id of ids) {
     const before = acc.tickets[id] ?? null;
+    const busy = workedOn(acc, event, id);
+    if (busy) { violation(acc, event, busy); continue; }
     const rules = rulesFor(acc, event, ctx, before?.rafiOwned ?? false);
     if (typeof rules === "string") return void violation(acc, event, rules);
     try {
@@ -148,8 +166,30 @@ function applyRecords(acc: Acc, event: FoldEvent): void {
   } else if (event.type === "grant.recorded") {
     acc.grants.push({ need: String(data.need), scope: String(data.scope), allowed: Boolean(data.allowed),
       tickets: data.tickets as string[] });
-  } else if (event.type.startsWith("unit.")) {
-    acc.units[String(data.unit)] = event.type.slice("unit.".length);
+  }
+}
+
+/** 4.3.2's unit machine (units.ts): an illegal pair keeps the state and is a violation. */
+function applyUnits(acc: Acc, event: FoldEvent): void {
+  const data = (event.data ?? {}) as Data;
+  const unit = unitTarget(event.type, data);
+  if (!unit) return;
+  try {
+    acc.units[unit] = nextUnit((acc.units[unit] ?? "building") as UnitState, event.type, data);
+  } catch (error) {
+    violation(acc, event, (error as Error).message);
+  }
+}
+
+/** CI points (state/ci.ts): a failing suite.run opens one, the CI fix ticket joins it, ci.result closes it. */
+function applyCi(acc: Acc, event: FoldEvent): void {
+  const data = (event.data ?? {}) as Data;
+  const key = `${event.run_id}|${String(data.unit)}`;
+  if (event.type === "suite.run") acc.ci[key] ??= { fix: null, closed: false };
+  else if (event.type === "ci.result") acc.ci[key] = { fix: acc.ci[key]?.fix ?? null, closed: true };
+  else if (event.type === "ticket.added" && data.source === "ci") {
+    const open = Object.keys(acc.ci).filter((k) => k.startsWith(`${event.run_id}|`) && !acc.ci[k]!.closed).at(-1);
+    if (open && !acc.ci[open]!.fix) acc.ci[open] = { fix: String(data.ticket), closed: false };
   }
 }
 
@@ -161,13 +201,14 @@ export function emptyAcc(ctx: FoldContext): Acc {
   const tickets: Record<string, TicketState> = {};
   for (const def of ctx.definitions ?? []) tickets[def.id] = initialTicket(def.id);
   return { project: initialProject, builds: {}, run: null, tickets, doneInRun: {}, questions: {}, answers: {},
-    grants: [], units: {}, violations: [] };
+    grants: [], units: {}, ci: {}, violations: [] };
 }
 
 /** A copy the transition check can apply trial events to (state values are immutable; containers are copied). */
 export function cloneAcc(a: Acc): Acc {
   return { ...a, builds: { ...a.builds }, tickets: { ...a.tickets }, questions: { ...a.questions },
-    answers: { ...a.answers }, grants: [...a.grants], units: { ...a.units }, violations: [...a.violations],
+    answers: { ...a.answers }, grants: [...a.grants], units: { ...a.units }, ci: { ...a.ci },
+    violations: [...a.violations],
     doneInRun: Object.fromEntries(Object.entries(a.doneInRun).map(([k, v]) => [k, [...v]])) };
 }
 
@@ -180,6 +221,8 @@ export function applyEvent(acc: Acc, event: FoldEvent, ctx: FoldContext): Violat
   endRecovering(acc, event);
   applyProject(acc, event);
   applyRecords(acc, event);
+  applyUnits(acc, event);
+  applyCi(acc, event);
   return acc.violations.slice(before);
 }
 

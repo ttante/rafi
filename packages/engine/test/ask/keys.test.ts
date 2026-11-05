@@ -57,3 +57,15 @@ test("threat 2: the covered files leave out exactly the requirements file rafi w
   ];
   assert.deepEqual(coveredFiles(events, "T1").files, ["docs/requirements/T1.md", "src/a.ts"]);
 });
+
+test("part 6: changedCovered names a non-ASCII (or control-character) covered file by its real name", async () => {
+  const dir = repo();
+  const deps = { git: testGit, env: process.env };
+  const names = ["src/Café.txt", ...(process.platform === "win32" ? [] : ["src/\u0001ctl.txt"])];
+  for (const f of names) writeFileSync(path.join(dir, f), "a\n");
+  const t0 = treeOf(dir);
+  for (const f of names) writeFileSync(path.join(dir, f), "b\n");
+  const t1 = treeOf(dir);
+  assert.deepEqual(await changedCovered(deps, dir, t0, t1, names), [...names].sort());
+  assert.deepEqual(await changedCovered(deps, dir, t0, t0, names), []);
+});

@@ -1,3 +1,4 @@
+// Milestone: M3
 // Item 17 (M3 plan 3.2): the new fake behaviors on both in-process fakes (C123), the `outside` step (the user, not
 // the agent), Codex `read` as a `cat` command, the transcript's cwd, the checks log's cwd, fixture overrides and
 // copyProject (C127).

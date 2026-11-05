@@ -1,0 +1,21 @@
+# Skills by tag (ARCH 10.1, C221): the 1.0 engine lists a skill to an agent (by name and description only) when
+# the role's manifest names it and one of these tags is among the ticket's; `always` is for every ticket.
+skills:
+  - name: better-sqlite3-rebuild
+    tags: [database, backend]
+  - name: grill-me
+    tags: [docs]
+  - name: handoff
+    tags: [always]
+  - name: implementor
+    tags: [always]
+  - name: improve-codebase-architecture
+    tags: [backend]
+  - name: prd-to-issues
+    tags: [docs]
+  - name: rafi-graph
+    tags: [always]
+  - name: tdd
+    tags: [always]
+  - name: write-a-prd
+    tags: [docs]

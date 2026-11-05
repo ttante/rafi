@@ -45,7 +45,7 @@ export function isDiskFull(error: unknown): boolean {
 
 type BlobWriter = {
   blob(text: string): Promise<string>;
-  append(events: readonly { type: string; run_id: string; ticket_id: string | null; actor: string;
+  append(events: readonly { type: string; run_id: string | null; ticket_id: string | null; actor: string;
     data: unknown }[]): Promise<unknown>;
 };
 
@@ -55,7 +55,7 @@ type BlobWriter = {
  * cite it records null. Any other error still stops the build.
  */
 export async function optionalBlob(engine: BlobWriter, text: string,
-  o: { what: string; key: string; run: string; ticket: string | null }): Promise<string | null> {
+  o: { what: string; key: string; run: string | null; ticket: string | null }): Promise<string | null> {
   try {
     return await engine.blob(text);
   } catch (error) {

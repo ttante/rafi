@@ -75,7 +75,9 @@ function bannedGlobal(node, add) {
   }
   if (ts.isCallExpression(node)) {
     const callee = node.expression.getText();
-    if (callee === "Date.now" || callee === "setTimeout" || callee === "setInterval") add("banned-global", node, callee);
+    if (["Date.now", "setTimeout", "setInterval", "fetch", "globalThis.fetch"].includes(callee)) {
+      add("banned-global", node, callee);
+    }
   }
   if (ts.isNewExpression(node) && node.expression.getText() === "Date" && !(node.arguments?.length)) {
     add("banned-global", node, "new Date()");

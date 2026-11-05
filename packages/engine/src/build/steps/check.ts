@@ -10,6 +10,7 @@ import {
 } from "../context.js";
 import { circlingNow, type LogEvent } from "./history.js";
 import { readRequirements, trustedOf } from "./common.js";
+import { withMarkers } from "../../git/conflict.js";
 
 async function relatedChecks(env: CheckEnv, files: readonly string[]): Promise<string[]> {
   return ((await relatedTests(env, files)) ?? []).map((f) => `${env.runner!.join(" ")} ${f}`);
@@ -45,7 +46,8 @@ export async function checkNode(ctx: BuildContext, id: string, attempt: number):
   const trusted = qa ? trustedOf(reqs) : [];
   const first = trusted.length ? Math.max(...trusted.map((c) => c.req), reqs.written?.count ?? 0) : 0;
   const checks = dedupe([...trusted, ...own.commands.map((command, i) => ({ req: first + i + 1, command }))]);
-  const result = await checkStep(env, checks, rulesFor(ctx, []), own.tree);
+  const step = await checkStep(env, checks, rulesFor(ctx, []), own.tree);
+  const result = await withMarkers(ctx, id, checks.length + 1, step);
   if (result.outcome === "passed") {
     await append(ctx, id, { type: "checks.passed", data: { runs: result.runs, reused: result.reused } });
   } else if (result.outcome === "failed") {

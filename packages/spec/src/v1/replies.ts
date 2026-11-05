@@ -35,13 +35,17 @@ export const verdictReply = z.object({
   summary: z.string(),
 }).strict();
 
+/** C231: the Ticket Maker's rollback-only risk-note repair, one ticket per turn (6.1: no ids rafi already has). */
+export const riskReply = z.object({ rollback: z.string().trim().min(1) }).strict();
+
 export type BuilderReply = z.infer<typeof builderReply>;
 export type RequirementsReply = z.infer<typeof requirementsReply>;
 export type VerdictReply = z.infer<typeof verdictReply>;
-export type ReplyName = "builder" | "requirements" | "verdict";
+export type RiskReply = z.infer<typeof riskReply>;
+export type ReplyName = "builder" | "requirements" | "verdict" | "risk";
 
 const ZOD: Readonly<Record<ReplyName, z.ZodType>> = Object.freeze({
-  builder: builderReply, requirements: requirementsReply, verdict: verdictReply,
+  builder: builderReply, requirements: requirementsReply, verdict: verdictReply, risk: riskReply,
 });
 
 type Json = Record<string, unknown>;
@@ -81,7 +85,7 @@ function spec(name: ReplyName): ReplySpec {
 }
 
 export const replySchemas: Readonly<Record<ReplyName, ReplySpec>> = Object.freeze({
-  builder: spec("builder"), requirements: spec("requirements"), verdict: spec("verdict"),
+  builder: spec("builder"), requirements: spec("requirements"), verdict: spec("verdict"), risk: spec("risk"),
 });
 
 /** The builder's kind rules, which a flat schema can't say (ARCH 6.2). */

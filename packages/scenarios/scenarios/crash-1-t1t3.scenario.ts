@@ -1,3 +1,4 @@
+// Crash enumeration (SCN 7.7): full tier only (SCN 7.10, plan 10.12).
 // S-CRASH-1 (SCN 3.7), shard t1t3 (C160): T1's first and last step boundary, T3's step boundaries, and a literal
 // sample of 3 points in T2. Each point is a snapshot of the clean run
 // (P33), resumed until the build finishes; checkCrashRun and the files check hold at every one.

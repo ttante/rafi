@@ -12,7 +12,7 @@ import { builderProfile, builderProfiles } from "./profile.js";
 import { CodexTransport } from "./transport.js";
 
 export interface CodexOptions {
-  readonly deps: Pick<Deps, "agents">;
+  readonly deps: Pick<Deps, "agents" | "clock">;
   readonly cwd: string;
   readonly executable: string;
   readonly env: Env;
@@ -23,6 +23,8 @@ export interface CodexOptions {
   readonly sandbox?: "read-only" | "workspace-write";
   /** rafi's local MCP endpoint for this session (C36); the token travels in the thread config, never argv. */
   readonly mcp?: { readonly url: string; readonly token: string };
+  /** The ticket's MCP tools (C222), in the thread config's `mcp_servers` beside rafi's endpoint. */
+  readonly external?: Readonly<Record<string, { command: string; args: string[] }>>;
   /** false: no outputSchema; the reply format is in the instructions (C52's text fallback). */
   readonly structured?: boolean;
   /**
@@ -64,8 +66,9 @@ function sandboxFields(o: CodexOptions, grants: readonly string[], on: "thread" 
 function threadConfig(o: CodexOptions): Record<string, unknown> {
   const config: Record<string, unknown> = readOnly(o) ? { sandbox_workspace_write: { network_access: false } }
     : { permissions: builderProfiles() };
-  if (o.mcp) {
-    config.mcp_servers = { rafi: { url: o.mcp.url, http_headers: { Authorization: `Bearer ${o.mcp.token}` } } };
+  if (o.mcp || o.external) {
+    config.mcp_servers = { ...(o.external ?? {}), ...(o.mcp ? { rafi: { url: o.mcp.url,
+      http_headers: { Authorization: `Bearer ${o.mcp.token}` } } } : {}) };
   }
   if (o.shellEnvironment) config.shell_environment_policy = o.shellEnvironment;
   return config;
@@ -76,6 +79,7 @@ export function codexAgent(o: CodexOptions): Agent & { threadId(): string | null
     args: appServerArgs(o), env: o.env }));
   let thread: string | null = o.threadId ?? null;
   let opened = false;
+  let closing: Promise<void> | null = null;
   /** The handshake real app-servers require before any other request (live check, M2 plan 10.8). */
   let handshake: Promise<void> | null = null;
   const ready = () => handshake ??= transport.request("initialize", { clientInfo: { name: "rafi", title: "rafi",
@@ -153,6 +157,9 @@ export function codexAgent(o: CodexOptions): Agent & { threadId(): string | null
       const list = (r.data ?? []).map((m) => m.model ?? m.id ?? "").filter(Boolean);
       return list.length ? list : null;
     },
-    close: () => transport.close(),
+    async compact() {
+      if (thread) await transport.request("thread/compact/start", { threadId: thread });
+    },
+    close: () => (closing ??= transport.close(o.deps.clock)),
   };
 }

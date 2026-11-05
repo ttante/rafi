@@ -1,7 +1,7 @@
 // Every top-level command, its arguments, options and help text (REQ 2.1–2.8 as amended by 9.0; ARCH 8.9, 13).
 import { ticketsCommand } from "./tickets.js";
 import {
-  agentOverrides, allowOption, autoApprove, grillMe, o, projectOption, type CommandSpec,
+  agentOverrides, allowOption, autoApprove, grillMe, many, o, projectOption, type CommandSpec,
 } from "./spec.js";
 
 const planCommand: Readonly<CommandSpec> = {
@@ -50,8 +50,8 @@ const startCommand: Readonly<CommandSpec> = {
     o("--branch-per-ticket", "one branch per ticket"), o("--no-branch-per-ticket", "share branches"),
     o("--completion <mode>", "pr, pr-ready, auto-merge, direct-merge or none"), o("--base <ref>", "base branch"),
     o("--dirty-work <mode>", "uncommitted work: preserve or include"), o("--ticket <id>", "build only this ticket"),
-    o("--skip <id>", "skip this ticket or delivery unit"), ...autoApprove, allowOption,
-    o("--set <key=value>", "override a rafi-config.yaml setting for this build"),
+    many("--skip <id>", "skip this ticket or delivery unit (repeatable)"), ...autoApprove, allowOption,
+    many("--set <key=value>", "override a rafi-config.yaml setting for this build (repeatable)"),
   ],
 };
 

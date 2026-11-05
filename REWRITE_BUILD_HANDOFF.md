@@ -30,7 +30,7 @@ A new engine for rafi 1.0, built beside today's one and switched on with `RAFI_E
 - **Validate before you tell.** Before you report anything as fact (what code does, a count, a status, that a test passes), check it in this session against the code, files or command output. If you couldn't check something, say so and say what would confirm it.
 - **Test-first.** For each milestone: write its scenarios, see them fail, build, see them pass. No baseline against 0.10.2.
 - **One milestone at a time,** in order. Every earlier milestone's scenarios keep passing.
-- **The gate is the fast suite:** every active scenario, the transition tests, the log tests and `scripts/check-rules.mjs`, in under 60 seconds on 4 workers.
+- **The gate has two tiers:** the fast suite (the current and previous milestone's scenarios (their crash enumerations run in the full suite), the transition tests, the log tests and `scripts/check-rules.mjs`) in under 60 seconds on 4 workers, run on every change; and the full suite (every active scenario, including the crash enumerations), which must pass, with its time reported, at the end of every session and every milestone.
 - **Code rules** (`REWRITE_ARCHITECTURE.md` 2.4, enforced by `scripts/check-rules.mjs`):
   - files under 500 lines, functions under 100 lines, lines under 120 characters;
   - no `Date.now`, timers, `process.*`, `node:fs` or `node:child_process` outside `deps/real/`;

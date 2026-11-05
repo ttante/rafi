@@ -114,9 +114,14 @@ function unblocked(t: TicketState, data: Data, rules: TicketRules): TicketState 
   return queued;
 }
 
+/** The fields of a ticket that change what it requires (ARCH 7.10's material fields, without `order`: a new queue
+ * position changes what's built when, not what a ticket requires); a title or summary is rewording. */
+export const MATERIAL_FIELDS: ReadonlySet<string> = new Set(["acceptance", "person_only", "locked",
+  "required_tests", "depends_on", "likely_files", "tags", "added"]);
+
 function namesTicket(t: TicketState, data: Data): boolean {
-  const items = (data.items as { ticket: string }[]) ?? [];
-  return Boolean(data.material) && items.some((item) => item.ticket === t.id);
+  const items = (data.items as { ticket?: string; field: string }[]) ?? [];
+  return Boolean(data.material) && items.some((item) => item.ticket === t.id && MATERIAL_FIELDS.has(item.field));
 }
 
 function inactive(t: TicketState, event: StateEvent, rules: TicketRules): TicketState {
@@ -195,7 +200,10 @@ export function nextTicket(ticket: TicketState | null, event: StateEvent, rules:
   const id = event.ticket_id ?? ticket?.id ?? "?";
   if (event.type === "ticket.added") {
     if (ticket) throw new InvalidTransition(label(ticket), event.type, "the ticket already exists");
-    return { ...initialTicket(id), rafiOwned: true };
+    const d = (event.data ?? {}) as Data;
+    const owned = typeof d.source === "string" ? { source: d.source, unit: (d.unit as string | null) ?? null,
+      requirements: (d.requirements as string[]) ?? [], hint: (d.hint as string | null) ?? null } : undefined;
+    return { ...initialTicket(id), rafiOwned: true, ...(owned ? { owned } : {}) };
   }
   const t = ticket ?? initialTicket(id);
   const data = (event.data ?? {}) as Data;
@@ -208,8 +216,9 @@ export function nextTicket(ticket: TicketState | null, event: StateEvent, rules:
   if (event.type === "fix.granted") return { ...t, fixesGranted: t.fixesGranted + 1 };
   if (event.type === "ticket.status_set") return setStatus(t, String(data.status));
   if (event.type === "progress.imported") {
-    const entry = data.entry as { status: string | null };
-    return entry.status ? setStatus(t, entry.status) : t;
+    const entry = data.entry as { status: string | null; fixes?: number };
+    const s = entry.status ? setStatus(t, entry.status) : t;
+    return entry.fixes === undefined ? s : { ...s, fixesUsed: entry.fixes };
   }
   if (t.state === "building" || t.state === "reviewing" || t.state === "fixing") return active(t, event, rules);
   return inactive(t, event, rules);

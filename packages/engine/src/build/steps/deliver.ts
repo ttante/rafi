@@ -1,6 +1,8 @@
 // The deliver step with completion `none` on the current branch (C45): no git state; `delivery.done` carries the
 // validation summary: the runs the ticket passed on, and any requirement QA couldn't verify. A waiver after the last
 // verdict sets the result (C105): "I verified it myself" is user-verified; "Explicitly waive QA" is failed.
+// M5: where rafi manages git, the ticket's commit comes first (git/commit.ts); a held commit blocks the ticket.
+import { deliverCommit } from "../../git/unit.js";
 import { allEvents, append, ticketRuns, type BuildContext } from "../context.js";
 
 export async function deliverStep(ctx: BuildContext, id: string, attempt: number): Promise<void> {
@@ -17,6 +19,8 @@ export async function deliverStep(ctx: BuildContext, id: string, attempt: number
   const waiver = mine.filter((e) => e.type === "waiver.recorded" && e.seq > lastVerdict).at(-1)?.data as
     { kind: string } | undefined;
   const result = !waiver ? "passed" : waiver.kind === "verified-myself" ? "user-verified" : "failed";
+  const after = await deliverCommit(ctx, id);
+  if (!after) return;
   await append(ctx, id, { type: "delivery.done", data: { unit, validation: { result, runs,
-    unverified: (verdict?.unverified ?? []).map((u) => u.req) } } });
+    unverified: (verdict?.unverified ?? []).map((u) => u.req) } } }, ...after);
 }

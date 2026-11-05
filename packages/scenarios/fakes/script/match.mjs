@@ -34,7 +34,8 @@ export function behaviorOf(rule, id, ctx) {
   }
   // `say`: an activity line first (a canary a secret-redaction check looks for in rafi's outputs).
   if (make?.say) b = { ...b, steps: [{ activity: make.say }, ...(b.steps ?? [])] };
-  return { ...b, ...(make?.kill ? { kill: make.kill } : {}), ...(make?.ignoreCancel ? { ignoreCancel: true } : {}) };
+  return { ...b, ...(make?.kill ? { kill: make.kill } : {}), ...(make?.ignoreCancel ? { ignoreCancel: true } : {}),
+    ...(make?.ignoreTerm ? { ignoreTerm: true } : {}) };
 }
 
 function usedOf(file) {

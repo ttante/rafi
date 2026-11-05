@@ -87,12 +87,10 @@ export function agentEnv(env: Env, runtime: "codex" | "claude", agentsEnv: reado
   return Object.freeze(out);
 }
 
-/**
- * Codex's shells (C79): what the app-server got, minus Codex's API key, set in the thread config. Free probe
- * S0.2 (codex-cli 0.164.0): the app-server honors it, and a project `.codex/config.toml` can't widen it.
- */
-export function codexShellPolicy(): Record<string, unknown> {
-  return { inherit: "all", exclude: ["OPENAI_*"] };
+/** C199: `gh` and `glab` get the base set plus their own login and host variables, as set; nothing else. */
+export function providerEnv(env: Env, platform: string): Env {
+  return Object.freeze(pick(env, [BASE, { names: ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_ENTERPRISE_TOKEN",
+    "GITLAB_TOKEN", "GITLAB_HOST"], prefixes: ["GLAB_"] }], platform));
 }
 
 /** The shortest declared value under a plain name that redaction learns (NEW-SEC-8; shorter ones are words). */

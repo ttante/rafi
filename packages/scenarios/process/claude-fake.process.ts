@@ -43,7 +43,8 @@ test("D9: the built Claude adapter drives the fake `claude` executable as a real
     const shims = writeShims(dir, { codex: [], claude: [
       { activity: "working on T1", bash: "npm test", reply: { kind: "done", summary: "ok" } }, { hang: true },
     ] });
-    const agent = claudeAgent({ deps: { agents: realDeps().agents }, cwd: dir, executable: shims.claude });
+    const real = realDeps();
+    const agent = claudeAgent({ deps: { agents: real.agents, clock: real.clock }, cwd: dir, executable: shims.claude });
     let first: Agents.AgentEvent[];
     let second: Agents.AgentEvent[];
     try {

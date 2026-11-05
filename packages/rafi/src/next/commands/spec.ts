@@ -5,6 +5,8 @@ export interface OptionSpec {
   readonly flags: string;
   readonly description: string;
   readonly defaultValue?: string;
+  /** The option may be given more than once; its value is the list (`--set`). */
+  readonly repeat?: boolean;
 }
 
 export interface CommandSpec {
@@ -24,6 +26,7 @@ export interface CommandSpec {
 
 const o = (flags: string, description: string, defaultValue?: string): OptionSpec =>
   Object.freeze({ flags, description, defaultValue });
+const many = (flags: string, description: string): OptionSpec => Object.freeze({ flags, description, repeat: true });
 
 export const projectOption = o("-p, --project <path>", "project folder (default: the nearest rafi-config.yaml)");
 export const autoApprove: readonly OptionSpec[] = [
@@ -43,4 +46,4 @@ export const grillMe: readonly OptionSpec[] = [
 export const allowOption = o("--allow <needs>",
   "grant for this build, for builder and QA: internet, local-servers, installs, services");
 
-export { o };
+export { many, o };

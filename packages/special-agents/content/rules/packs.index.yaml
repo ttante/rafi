@@ -4,30 +4,35 @@ packs:
     category: base
     path: base/core.md
     condition: always
+    tags: [always]
     template: false
     order: 1000
   - name: git-safety
     category: base
     path: base/git-safety.md
     condition: always
+    tags: [always]
     template: false
     order: 2000
   - name: stack
     category: templated
     path: templated/stack.md
     condition: always
+    tags: [always]
     template: true
     order: 3000
   - name: project-docs
     category: process
     path: process/project-docs.md
     condition: always
+    tags: [docs]
     template: true
     order: 4000
   - name: tickets
     category: process
     path: process/tickets.md
     condition: always
+    tags: [docs]
     template: true
     supersededByForeman: true
     order: 5000
@@ -35,149 +40,174 @@ packs:
     category: process
     path: process/tdd.md
     condition: always
+    tags: [always]
     template: false
     order: 6000
   - name: testing
     category: process
     path: process/testing.md
     condition: always
+    tags: [always]
     template: false
     order: 7000
   - name: ci
     category: process
     path: process/ci.md
     condition: always
+    tags: [infra, testing]
     template: false
     order: 8000
   - name: dependencies
     category: process
     path: process/dependencies.md
     condition: always
+    tags: [security, backend]
     template: false
     order: 9000
   - name: code-quality
     category: base
     path: base/code-quality.md
     condition: always
+    tags: [always]
     template: false
     order: 10000
   - name: api-docs
     category: process
     path: process/api-docs.md
     condition: always
+    tags: [api]
     template: false
     order: 11000
   - name: scalability
     category: domain
     path: domain/scalability.md
     condition: always
+    tags: [backend, infra]
     template: true
     order: 12000
   - name: infra
     category: templated
     path: templated/infra.md
     condition: cloud
+    tags: [infra]
     template: true
     order: 13000
   - name: database
     category: templated
     path: templated/database.md
     condition: always
+    tags: [database]
     template: true
     order: 14000
   - name: data-governance
     category: domain
     path: domain/data-governance.md
     condition: always
+    tags: [database, security]
     template: true
     order: 15000
   - name: security
     category: domain
     path: domain/security.md
     condition: always
+    tags: [security, auth]
     template: false
     order: 16000
   - name: ai-safety
     category: domain
     path: domain/ai-safety.md
     condition: ai
+    tags: [ai]
     template: true
     order: 17000
   - name: ai-governance
     category: domain
     path: domain/ai-governance.md
     condition: ai
+    tags: [ai]
     template: true
     order: 18000
   - name: robustness
     category: domain
     path: domain/robustness.md
     condition: always
+    tags: [backend, infra]
     template: false
     order: 19000
   - name: ai-evals
     category: domain
     path: domain/ai-evals.md
     condition: ai
+    tags: [ai]
     template: true
     order: 20000
   - name: ai-reproducibility
     category: domain
     path: domain/ai-reproducibility.md
     condition: ai
+    tags: [ai]
     template: false
     order: 21000
   - name: ai-cost
     category: domain
     path: domain/ai-cost.md
     condition: ai
+    tags: [ai]
     template: true
     order: 22000
   - name: ai-batch-testing
     category: domain
     path: domain/ai-batch-testing.md
     condition: ai
+    tags: [ai]
     template: false
     order: 23000
   - name: release
     category: process
     path: process/release.md
     condition: always
+    tags: [docs]
     template: true
     order: 24000
   - name: accessibility
     category: domain
     path: domain/accessibility.md
     condition: frontend
+    tags: [ui, mobile]
     template: false
     order: 25000
   - name: observability
     category: domain
     path: domain/observability.md
     condition: always
+    tags: [backend, infra]
     template: true
     order: 26000
   - name: business-docs
     category: process
     path: process/business-docs.md
     condition: always
+    tags: [docs]
     template: true
     order: 27000
   - name: architecture
     category: process
     path: process/architecture.md
     condition: always
+    tags: [docs, backend]
     template: true
     order: 28000
   - name: definition-of-done
     category: base
     path: base/definition-of-done.md
     condition: always
+    tags: [always]
     template: false
     order: 29000
   - name: response-expectations
     category: base
     path: base/response-expectations.md
     condition: always
+    tags: [always]
     template: false
     order: 30000
